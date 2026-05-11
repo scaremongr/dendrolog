@@ -106,10 +106,7 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     case Qt::BackgroundRole: // Handle background color
         return getLogLevelColor(entry->level);
     case Qt::DisplayRole:
-        return QString("%1 [%2] %3")
-            .arg(entry->timestamp.toString("yyyy-MM-dd HH:mm:ss,zzz")) // Use ->
-            .arg(LevelToStr(entry->level)) // Use LevelToStr for display
-            .arg(entry->message); // Use ->
+        return entry->message;
     default:
         return QVariant();
     }

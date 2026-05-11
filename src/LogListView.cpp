@@ -111,12 +111,71 @@ void LogListView::setModel(QAbstractItemModel *model) {
     invalidateRowState();
     if (model) {
         // Полная инвалидация при сбросе модели (фильтрация, setEntries и т.п.)
+        // Запоминаем выделение ДО сброса модели.
+        // ВАЖНО: используем m_selRow, а не selectionModel()->currentIndex() —
+        // QItemSelectionModel подключён к modelAboutToBeReset раньше нас и к моменту
+        // вызова нашего слота уже очищает currentIndex. m_selRow не зависит от selectionModel.
+        connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
+            m_pendingSelectionId = -1;
+            if (m_selRow < 0) return;
+            auto* logModel = qobject_cast<LogModel*>(this->model());
+            if (!logModel) return;
+            const auto& entries = logModel->filteredEntries();
+            if (m_selRow < entries.size())
+                m_pendingSelectionId = entries[m_selRow]->logicalEntryId;
+        });
+
         connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
-            invalidateRowState();   // сбрасывает rowState, pixmap и textLengths
+            invalidateRowState();
             rebuildHeightCache();
-            updateScrollbar();
-            viewport()->update();
+
+            // Восстанавливаем выделение по logicalEntryId.
+            int restoreRow = -1;
+            if (m_pendingSelectionId >= 0) {
+                auto* logModel = qobject_cast<LogModel*>(this->model());
+                if (logModel) {
+                    const auto& entries = logModel->filteredEntries();
+                    for (int i = 0; i < entries.size(); ++i) {
+                        if (entries[i]->logicalEntryId == m_pendingSelectionId) {
+                            restoreRow = i;
+                            break;
+                        }
+                    }
+                }
+                m_pendingSelectionId = -1;
+            }
+
+            if (restoreRow >= 0 && selectionModel() && this->model()) {
+                // setCurrentIndex эмитит currentChanged → QAbstractItemView::scrollTo() →
+                // перезаписывает scrollbar. Поэтому updateScrollbar и прокрутку делаем
+                // отложенно — они сработают после всех Qt-внутренних синхронных операций.
+                selectionModel()->setCurrentIndex(
+                    this->model()->index(restoreRow, 0),
+                    QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                m_selRow = restoreRow;
+            }
+
+            // Откладываем updateScrollbar чтобы перекрыть QListView::scrollTo,
+            // который вызывается синхронно из currentChanged выше.
+            QTimer::singleShot(0, this, [this, restoreRow]() {
+                updateScrollbar();
+
+                if (restoreRow >= 0 && this->model() && restoreRow < this->model()->rowCount()) {
+                    int rowY = rowYOffset(restoreRow);
+                    int rowH = getRowHeight(restoreRow);
+                    int vpH  = viewport()->height();
+                    int curScrollY = verticalScrollBar()->value();
+                    if (rowY < curScrollY || rowY + rowH > curScrollY + vpH) {
+                        int target = qBound(0, rowY - (vpH - rowH) / 2, verticalScrollBar()->maximum());
+                        verticalScrollBar()->setValue(target);
+                    }
+                } else {
+                    verticalScrollBar()->setValue(0);
+                }
+
+                viewport()->update();
+            });
         });
 
         // Инвалидация при вставке/удалении строк
@@ -216,17 +275,16 @@ RowState LogListView::computeRowState(int row) const {
     m_rowTextLengths[row] = state.text.length();  // кэшируем длину — пережнвает resize
     state.multiLine = isRowMultiLine(row);
     
-    // Шаг 1: Предварительно оцениваем ширину плашек (без HiddenToggle для однострочного)
-    // Для этого собираем только Info плашки
-    int estimatedBadgesWidth = 0;
-    QVariant fileVar = model()->data(model()->index(row, 0), Qt::UserRole + 1);
-    if (fileVar.isValid()) {
-        QFontMetrics fm(font());
-        estimatedBadgesWidth += fm.horizontalAdvance(fileVar.toString()) + 10 + 4; // width + padding + gap
-    }
-    // Для HiddenToggle или "-" добавляем примерную ширину
+    // Шаг 1: Оцениваем ширину плашек для расчёта доступной ширины текста.
+    // FileBadge: берём реальное имя файла (разное для каждой строки!) — это ключевое
+    // для корректного вычисления visibleChars. HiddenToggle оцениваем по максимуму.
     QFontMetrics fm(font());
-    int toggleBadgeWidth = fm.horizontalAdvance("+9999") + 10 + 4; // максимальная оценка
+    int estimatedBadgesWidth = 0;
+    QVariant fileBadgeVar = model()->data(model()->index(row, 0), LogModel::FileBadgeRole);
+    if (fileBadgeVar.isValid()) {
+        estimatedBadgesWidth += fm.horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + 10 + 4;
+    }
+    int toggleBadgeWidth = fm.horizontalAdvance("+9999") + 10 + 4; // максимальная оценка для HiddenToggle
     estimatedBadgesWidth += toggleBadgeWidth;
     
     int textBadgeGap = 8;

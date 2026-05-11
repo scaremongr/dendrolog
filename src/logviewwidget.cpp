@@ -101,13 +101,14 @@ void LogViewWidget::handleEntriesParsed(const QVector<std::shared_ptr<LogEntry>>
     // entriesBatch (от одного файла) также внутренне отсортирован (по времени/строке). 
     // Если новый файл имеет времена, пересекающиеся с существующими, std::merge - правильный путь.
     
-    // Копируем batch, чтобы его можно было отсортировать, если это необходимо для гарантии.
-    // Однако, т.к. LogEntry::operator< есть, и он используется для сортировки, 
-    // и batch приходит последовательно из файла, он уже будет совместим для std::merge
-    // с глобально отсортированным currentEntries.
+    // Batch может быть отсортирован по номеру строки в файле, но не по compareLogEntries
+    // (например, если метки времени в файле не монотонны). std::merge требует оба диапазона
+    // отсортированными по одному и тому же компаратору - поэтому сортируем копию batch.
+    QVector<std::shared_ptr<LogEntry>> sortedBatch(entriesBatch.begin(), entriesBatch.end());
+    std::sort(sortedBatch.begin(), sortedBatch.end(), compareLogEntries);
 
     std::merge(currentEntries.begin(), currentEntries.end(),
-               entriesBatch.constBegin(), entriesBatch.constEnd(), // Используем constBegin/End для const& batch
+               sortedBatch.constBegin(), sortedBatch.constEnd(),
                std::back_inserter(newMergedEntries),
                compareLogEntries);
     

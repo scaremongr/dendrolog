@@ -487,7 +487,7 @@ void MainWindow::on_actionOpen_triggered()
 
         if (fileCount == 1 && !view->loadedFiles().isEmpty())
         {
-            const auto &logFile = view->loadedFiles().first();
+            const auto logFile = view->loadedFiles().first(); // не ссылка — loadedFiles() возвращает временный список
             tabText = logFile->shortName();
             tabToolTip = logFile->filePath;
         }

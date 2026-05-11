@@ -147,6 +147,10 @@ private:
     int m_anchorRow = -1;           // Строка-якорь для сохранения позиции при resize
     int m_anchorOffsetInViewport = 0; // Смещение якорной строки относительно viewport
 
+    // ========== Сохранение выделения при фильтрации ==========
+    // Перед modelReset запоминаем logicalEntryId выделенной строки, после — восстанавливаем.
+    int m_pendingSelectionId = -1;
+
     // Получить кэшированное состояние строки (вычисляет если нужно)
     // Возвращает по значению, чтобы избежать dangling reference при инвалидации кэша
     RowState getRowState(int row) const;
