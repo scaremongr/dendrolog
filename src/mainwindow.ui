@@ -1,0 +1,477 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1200</width>
+    <height>800</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Log Viewer</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="verticalLayout_2">
+    <item>
+     <widget class="QTabWidget" name="tabWidget">
+      <property name="tabsClosable">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1200</width>
+     <height>17</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuFile">
+    <property name="title">
+     <string>&amp;File</string>
+    </property>
+    <addaction name="actionOpen"/>
+   </widget>
+   <widget class="QMenu" name="menuView">
+    <property name="title">
+     <string>&amp;View</string>
+    </property>
+    <addaction name="actionToggle_Text_Filters_Panel"/>
+    <addaction name="actionToggle_Directory_Scanner_Panel"/>
+    <addaction name="actionToggle_Time_Filter_Panel"/>
+   </widget>
+   <widget class="QMenu" name="menuFilters">
+    <property name="title">
+     <string>Fi&amp;lters</string>
+    </property>
+    <widget class="QMenu" name="menuLog_Level">
+     <property name="title">
+      <string>Log Level</string>
+     </property>
+     <addaction name="actionTrace"/>
+     <addaction name="actionDebug"/>
+     <addaction name="actionInfo"/>
+     <addaction name="actionWarn"/>
+     <addaction name="actionError"/>
+     <addaction name="actionFatal"/>
+    </widget>
+    <addaction name="menuLog_Level"/>
+   </widget>
+   <addaction name="menuFile"/>
+   <addaction name="menuView"/>
+   <addaction name="menuFilters"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+  <widget class="QToolBar" name="toolBar">
+   <property name="windowTitle">
+    <string>Log Level Toolbar</string>
+   </property>
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+   <addaction name="actionFatal"/>
+   <addaction name="actionError"/>
+   <addaction name="actionWarn"/>
+   <addaction name="actionInfo"/>
+   <addaction name="actionDebug"/>
+   <addaction name="actionTrace"/>
+  </widget>
+  <widget class="QToolBar" name="searchToolBar">
+   <property name="windowTitle">
+    <string>Search Toolbar</string>
+   </property>
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+   <widget class="QLineEdit" name="searchLineEdit">
+    <property name="placeholderText">
+     <string>Search...</string>
+    </property>
+    <property name="maximumWidth">
+     <number>300</number>
+    </property>
+   </widget>
+   <addaction name="actionSearchPrevious"/>
+   <addaction name="actionSearchNext"/>
+  </widget>
+  <widget class="QDockWidget" name="textFilterDockWidget">
+   <property name="windowTitle">
+    <string>Text Filters</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="textFilterContentsWidget"/>
+  </widget>
+  <widget class="QDockWidget" name="timeFilterDockWidget">
+   <property name="windowTitle">
+    <string>Time Range Filter</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="timeFilterContentsWidget"/>
+  </widget>
+  <widget class="QDockWidget" name="directoryScannerDockWidget">
+   <property name="windowTitle">
+    <string>Directory Scanner</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="directoryScannerContentsWidget">
+    <layout class="QVBoxLayout" name="verticalLayout_ds">
+     <item>
+      <layout class="QHBoxLayout" name="horizontalLayout_ds_buttons">
+       <item>
+        <widget class="QPushButton" name="scanDirectoryButton">
+         <property name="text">
+          <string>Scan Directory...</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="configureScanExtensionsButton">
+         <property name="toolTip">
+          <string>Configure scan file extensions (e.g. log,txt)</string>
+         </property>
+         <property name="text">
+          <string>Exts...</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="horizontalSpacer_ds_buttons">
+         <property name="orientation">
+          <enum>Qt::Orientation::Horizontal</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>40</width>
+           <height>20</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <widget class="QLabel" name="selectedDirectoryPathLabel">
+       <property name="text">
+        <string>Selected directory: None</string>
+       </property>
+       <property name="wordWrap">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QTreeWidget" name="directoryScanResultsTree">
+       <column>
+        <property name="text">
+         <string notr="true">1</string>
+        </property>
+       </column>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+  </widget>
+  <action name="actionFatal">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Fatal</string>
+   </property>
+  </action>
+  <action name="actionError">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Error</string>
+   </property>
+  </action>
+  <action name="actionWarn">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Warn</string>
+   </property>
+  </action>
+  <action name="actionInfo">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Info</string>
+   </property>
+  </action>
+  <action name="actionDebug">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Debug</string>
+   </property>
+  </action>
+  <action name="actionTrace">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Trace</string>
+   </property>
+  </action>
+  <action name="actionToggle_Text_Filters_Panel">
+   <property name="text">
+    <string>Text Filters Panel</string>
+   </property>
+  </action>
+  <action name="actionToggle_Directory_Scanner_Panel">
+   <property name="text">
+    <string>Directory Scanner Panel</string>
+   </property>
+  </action>
+  <action name="actionToggle_Time_Filter_Panel">
+   <property name="text">
+    <string>Time Filter Panel</string>
+   </property>
+  </action>
+  <action name="actionOpen">
+   <property name="text">
+    <string>&amp;Open Log File(s)...</string>
+   </property>
+  </action>
+  <action name="actionSearchPrevious">
+   <property name="iconText">
+    <string>Previous</string>
+   </property>
+   <property name="text">
+    <string>Search Previous</string>
+   </property>
+   <property name="toolTip">
+    <string>Search previous occurrence</string>
+   </property>
+  </action>
+  <action name="actionSearchNext">
+   <property name="iconText">
+    <string>Next</string>
+   </property>
+   <property name="text">
+    <string>Search Next</string>
+   </property>
+   <property name="toolTip">
+    <string>Search next occurrence</string>
+   </property>
+  </action>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>actionFatal</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionFatal_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionError</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionError_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionWarn</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionWarn_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionInfo</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionInfo_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionDebug</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionDebug_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionTrace</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>MainWindow</receiver>
+   <slot>on_actionTrace_toggled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionToggle_Text_Filters_Panel</sender>
+   <signal>triggered()</signal>
+   <receiver>MainWindow</receiver>
+   <slot>toggleTextFilterDock()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionToggle_Directory_Scanner_Panel</sender>
+   <signal>triggered()</signal>
+   <receiver>MainWindow</receiver>
+   <slot>toggleDirectoryScannerDock()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>actionToggle_Time_Filter_Panel</sender>
+   <signal>triggered()</signal>
+   <receiver>MainWindow</receiver>
+   <slot>toggleTimeFilterDock()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>scanDirectoryButton</sender>
+   <signal>clicked()</signal>
+   <receiver>MainWindow</receiver>
+   <slot>onScanDirectoryClicked()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>configureScanExtensionsButton</sender>
+   <signal>clicked()</signal>
+   <receiver>MainWindow</receiver>
+   <slot>onConfigureScanExtensionsClicked()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>20</x>
+     <y>20</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+ <slots>
+  <slot>on_actionOpen_triggered()</slot>
+  <slot>on_actionFatal_toggled(bool)</slot>
+  <slot>on_actionError_toggled(bool)</slot>
+  <slot>on_actionWarn_toggled(bool)</slot>
+  <slot>on_actionInfo_toggled(bool)</slot>
+  <slot>on_actionDebug_toggled(bool)</slot>
+  <slot>on_actionTrace_toggled(bool)</slot>
+  <slot>toggleTextFilterDock()</slot>
+  <slot>toggleDirectoryScannerDock()</slot>
+  <slot>toggleTimeFilterDock()</slot>
+  <slot>onScanDirectoryClicked()</slot>
+  <slot>onConfigureScanExtensionsClicked()</slot>
+ </slots>
+</ui>
