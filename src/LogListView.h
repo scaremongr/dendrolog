@@ -53,7 +53,8 @@ struct RowState {
     int viewportWidth = 0;
     
     // Вычисленные значения
-    bool multiLine = false;     // Многострочный режим
+    bool multiLine = false;     // Текст реально переносится на несколько визуальных строк
+    bool showCollapseBadge = false; // Нужно ли рисовать бейдж "-" для сворачивания строки
     int height = 0;             // Высота строки в пикселях
     int hiddenChars = 0;        // Количество скрытых символов (для однострочного)
     int visibleChars = 0;       // Количество видимых символов (для ограничения выделения)
@@ -90,7 +91,9 @@ public:
     explicit LogListView(QWidget *parent = nullptr);
     ~LogListView() override;
     void setWordWrap(bool enabled);
+    bool isWordWrap() const { return m_wordWrapEnabled; }
     void setModel(QAbstractItemModel *model) override;
+    void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override;
 
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
@@ -109,6 +112,8 @@ protected:
     void enterEvent(QEnterEvent *event) override;
     void leaveEvent(QEvent *event) override;
     bool viewportEvent(QEvent *event) override;
+    void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
+    void updateGeometries() override;
 
 private:
     QSet<int> m_toggledRows; // строки, состояние которых инвертировано относительно m_wordWrapEnabled
@@ -119,6 +124,7 @@ private:
     int m_selStartFragment = -1;  // Индекс фрагмента, где начали выделение
     int m_selEndFragment = -1;    // Индекс текущего фрагмента
     bool m_wordWrapEnabled = false; // состояние по умолчанию для всех строк
+    bool m_inUpdateGeometries = false; // предотвращение рекурсии
 
     // ========== Кэш метрик моноширинного шрифта ==========
     qreal m_charWidth = 8.0; // Ширина одного символа (дробная для точного позиционирования)
@@ -141,6 +147,9 @@ private:
     void rebuildPrefixSums();        // пересчитать prefix-суммы из m_rowHeights
     int rowYOffset(int row) const;   // O(1) Y-позиция начала строки
     int rowAtY(int contentY) const;  // O(log N) индекс строки по Y-позиции
+    int targetScrollValueForRow(int row, ScrollHint hint) const;
+    int targetScrollValueForRowOffset(int row, int viewportOffset) const;
+    bool captureVisibleRowOffset(int row, int& viewportOffset) const;
 
     // ========== Debounce для resize ==========
     QTimer* m_resizeDebounceTimer = nullptr;
@@ -148,8 +157,13 @@ private:
     int m_anchorOffsetInViewport = 0; // Смещение якорной строки относительно viewport
 
     // ========== Сохранение выделения при фильтрации ==========
-    // Перед modelReset запоминаем logicalEntryId выделенной строки, после — восстанавливаем.
-    int m_pendingSelectionId = -1;
+    struct SelectionId {
+        int logicalEntryId = -1;
+        void* sourceFile = nullptr; // Используем void* чтобы не тащить зависимость от LogFilePtr в заголовочный файл QListView, либо можем подключить <memory> и объявить
+        bool isValid() const { return logicalEntryId >= 0; }
+        void clear() { logicalEntryId = -1; sourceFile = nullptr; }
+    };
+    SelectionId m_pendingSelection;
 
     // Получить кэшированное состояние строки (вычисляет если нужно)
     // Возвращает по значению, чтобы избежать dangling reference при инвалидации кэша
@@ -187,13 +201,14 @@ private:
     // Вспомогательные методы для вычисления состояния строки
     QList<TextFragment> splitTextIntoLines(const QString& text, const QRect& rect) const;
     int computeRowHeight(const QString& text, bool multiLine, int availableWidth = 0) const;
-    QList<BadgeSpec> collectBadgeSpecs(int row, const QString& text, int availableWidth, bool multiLine, int& hiddenCount) const;
+    QList<BadgeSpec> collectBadgeSpecs(int row, const QString& text, int availableWidth, bool multiLine, bool showCollapseBadge, int& hiddenCount) const;
     QList<BadgeLayout> layoutBadges(const QList<BadgeSpec>& specs, int rowHeight) const;
     
     // Отрисовка
     void drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state);
     void drawSelectionHighlight(QPainter& painter, const QRect& rect, const QString& text, int selStart, int selEnd, const RowState& state);
     void drawHighlightedText(QPainter& painter, int x, int y, const QString& text, const QList<QPair<int, int>>& highlights, const QColor& highlightColor, const QColor& defaultColor);
+    int estimateTotalHeightForDirtyCache(int rows) const;
     void updateScrollbar();
     
     // Кэширование растров строк
@@ -202,7 +217,7 @@ private:
     // Hit-testing
     bool hitTestBadge(const QList<BadgeLayout>& layouts, const QPoint& pos, int& badgeIndex) const;
     
-    // Определяет, многострочная ли строка (m_wordWrapEnabled XOR toggled)
+    // Определяет, развернута ли строка относительно глобального WordWrap (m_wordWrapEnabled XOR toggled)
     bool isRowMultiLine(int row) const { 
         return m_wordWrapEnabled != m_toggledRows.contains(row); 
     }

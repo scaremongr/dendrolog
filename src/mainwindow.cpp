@@ -24,6 +24,9 @@
 #include <QApplication>
 #include <QToolTip>
 #include <QFormLayout>
+#include <QSettings>
+#include <QCloseEvent>
+#include <QMessageBox>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr), m_statParser(nullptr)
@@ -41,6 +44,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->searchLineEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchEnterPressed);
     connect(ui->actionSearchNext, &QAction::triggered, this, &MainWindow::onSearchNextTriggered);
     connect(ui->actionSearchPrevious, &QAction::triggered, this, &MainWindow::onSearchPreviousTriggered);
+
+    // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
+    // so checkmarks automatically reflect actual dock visibility
+    {
+        auto setupDockToggle = [](QMenu* menu, QAction* staticAction, QDockWidget* dock, const QString& text) {
+            QAction* a = dock->toggleViewAction();
+            a->setText(text);
+            menu->insertAction(staticAction, a);
+            menu->removeAction(staticAction);
+        };
+        setupDockToggle(ui->menuView, ui->actionToggle_Text_Filters_Panel,
+                        ui->textFilterDockWidget, tr("Text Filters Panel"));
+        setupDockToggle(ui->menuView, ui->actionToggle_Directory_Scanner_Panel,
+                        ui->directoryScannerDockWidget, tr("Directory Scanner Panel"));
+        setupDockToggle(ui->menuView, ui->actionToggle_Time_Filter_Panel,
+                        ui->timeFilterDockWidget, tr("Time Filter Panel"));
+    }
 
     m_statParser = new LogParser(this);
     connect(&m_fileStatWatcher, &QFutureWatcher<QPair<LogParser::FileStats, QString>>::finished,
@@ -74,11 +94,87 @@ MainWindow::MainWindow(QWidget *parent)
         updateLogLevelFilterButtons();
         updateFilterInputsFromModel();
     }
+
+    loadSettings();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    saveSettings();
+    QMainWindow::closeEvent(event);
+}
+
+static QString settingsFilePath()
+{
+    return QApplication::applicationDirPath() + "/LogViewer.ini";
+}
+
+void MainWindow::saveSettings()
+{
+    QSettings s(settingsFilePath(), QSettings::IniFormat);
+
+    s.beginGroup("Window");
+    s.setValue("geometry", saveGeometry());
+    s.setValue("state",    saveState());
+    s.endGroup();
+
+    s.beginGroup("Files");
+    s.setValue("lastOpenDir", m_lastOpenDir);
+    s.setValue("lastScanDir", m_lastScanDir);
+    s.endGroup();
+
+    s.beginGroup("Scanner");
+    s.setValue("extensions", m_scanFileExtensions);
+    s.endGroup();
+
+    s.beginGroup("View");
+    s.setValue("wordWrap", ui->actionWordWrap->isChecked());
+    s.endGroup();
+
+    s.beginGroup("RecentFiles");
+    s.setValue("files", m_recentFiles);
+    s.endGroup();
+}
+
+void MainWindow::loadSettings()
+{
+    QSettings s(settingsFilePath(), QSettings::IniFormat);
+
+    s.beginGroup("Window");
+    QByteArray geometry = s.value("geometry").toByteArray();
+    QByteArray state    = s.value("state").toByteArray();
+    s.endGroup();
+
+    if (!geometry.isEmpty())
+        restoreGeometry(geometry);
+    if (!state.isEmpty())
+        restoreState(state);
+
+    s.beginGroup("Files");
+    m_lastOpenDir = s.value("lastOpenDir").toString();
+    m_lastScanDir = s.value("lastScanDir").toString();
+    s.endGroup();
+
+    s.beginGroup("Scanner");
+    QStringList exts = s.value("extensions").toStringList();
+    if (!exts.isEmpty())
+        m_scanFileExtensions = exts;
+    s.endGroup();
+
+    s.beginGroup("View");
+    ui->actionWordWrap->setChecked(s.value("wordWrap", true).toBool());
+    s.endGroup();
+
+    s.beginGroup("RecentFiles");
+    m_recentFiles = s.value("files").toStringList();
+    s.endGroup();
+
+    updateRecentFilesMenu();
 }
 
 void MainWindow::setupStatusBar()
@@ -374,6 +470,9 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     }
     m_activeLogView = logView;
 
+    // Apply current global word wrap setting to the newly active view
+    logView->view()->setWordWrap(ui->actionWordWrap->isChecked());
+
     connect(logView, &LogViewWidget::fileParsingStarted, this, &MainWindow::handleFileParsingStarted);
     connect(logView, &LogViewWidget::fileParsingProgress, this, &MainWindow::handleFileParsingProgress);
     connect(logView, &LogViewWidget::fileParsingFinished, this, &MainWindow::handleFileParsingFinished);
@@ -438,11 +537,16 @@ void MainWindow::on_actionOpen_triggered()
     auto files = QFileDialog::getOpenFileNames(
         this,
         tr("Open log files"),
-        QString(),
+        m_lastOpenDir,
         tr("Log files (*.log *.txt);;All files (*)"));
 
     if (files.isEmpty())
         return;
+
+    m_lastOpenDir = QFileInfo(files.first()).absolutePath();
+
+    for (const QString& f : files)
+        addToRecentFiles(f);
 
     LogViewWidget *view = nullptr;
     int tabIndex = -1;
@@ -648,6 +752,15 @@ void MainWindow::on_actionDebug_toggled(bool checked)
 void MainWindow::on_actionTrace_toggled(bool checked)
 {
     setFilterLogLvl(LogLevel::Trace, checked);
+}
+
+void MainWindow::on_actionWordWrap_toggled(bool checked)
+{
+    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+        auto *v = qobject_cast<LogViewWidget *>(ui->tabWidget->widget(i));
+        if (v)
+            v->view()->setWordWrap(checked);
+    }
 }
 
 void MainWindow::updateLogLevelFilterButtons()
@@ -870,11 +983,12 @@ void MainWindow::onAddTextFilterInputClicked()
 void MainWindow::onScanDirectoryClicked()
 {
     QString dirPath = QFileDialog::getExistingDirectory(this, tr("Select Directory to Scan"),
-                                                        QDir::homePath(),
+                                                        m_lastScanDir.isEmpty() ? QDir::homePath() : m_lastScanDir,
                                                         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
 
     if (!dirPath.isEmpty())
     {
+        m_lastScanDir = dirPath;
         ui->selectedDirectoryPathLabel->setText(tr("Selected directory: %1").arg(dirPath));
         populateDirectoryScanResults(dirPath);
     }
@@ -1304,6 +1418,82 @@ void MainWindow::toggleTimeFilterDock()
     {
         ui->timeFilterDockWidget->setVisible(!ui->timeFilterDockWidget->isVisible());
     }
+}
+
+static const int MaxRecentFiles = 5;
+
+void MainWindow::addToRecentFiles(const QString& filePath)
+{
+    m_recentFiles.removeAll(filePath);
+    m_recentFiles.prepend(filePath);
+    while (m_recentFiles.size() > MaxRecentFiles)
+        m_recentFiles.removeLast();
+    updateRecentFilesMenu();
+}
+
+void MainWindow::updateRecentFilesMenu()
+{
+    ui->menuRecentFiles->clear();
+    if (m_recentFiles.isEmpty()) {
+        QAction* empty = ui->menuRecentFiles->addAction(tr("(No recent files)"));
+        empty->setEnabled(false);
+        return;
+    }
+    for (int i = 0; i < m_recentFiles.size(); ++i) {
+        const QString filePath = m_recentFiles.at(i);
+        QString label = QStringLiteral("&%1  %2").arg(i + 1).arg(QFileInfo(filePath).fileName());
+        QAction* a = ui->menuRecentFiles->addAction(label);
+        a->setToolTip(filePath);
+        connect(a, &QAction::triggered, this, [this, filePath]() {
+            openRecentFile(filePath);
+        });
+    }
+}
+
+void MainWindow::openRecentFile(const QString& filePath)
+{
+    if (!QFileInfo::exists(filePath)) {
+        QMessageBox::warning(this, tr("File Not Found"),
+            tr("The file '%1' no longer exists.").arg(filePath));
+        m_recentFiles.removeAll(filePath);
+        updateRecentFilesMenu();
+        return;
+    }
+
+    LogViewWidget* view = nullptr;
+    if (ui->tabWidget->count() == 0 ||
+        ((view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
+    {
+        view = new LogViewWidget(this);
+        int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
+        ui->tabWidget->setCurrentIndex(tabIndex);
+    }
+    else
+    {
+        view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
+        if (!view) {
+            view = new LogViewWidget(this);
+            int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
+            ui->tabWidget->setCurrentIndex(tabIndex);
+        } else if (m_activeLogView != view) {
+            connectToLogView(view);
+        }
+    }
+
+    if (!view)
+        return;
+
+    view->addLogFile(filePath);
+
+    int currentTabIndex = ui->tabWidget->indexOf(view);
+    if (currentTabIndex == -1)
+        currentTabIndex = ui->tabWidget->currentIndex();
+
+    ui->tabWidget->setTabText(currentTabIndex, QFileInfo(filePath).fileName());
+    ui->tabWidget->setTabToolTip(currentTabIndex, filePath);
+
+    m_lastOpenDir = QFileInfo(filePath).absolutePath();
+    addToRecentFiles(filePath);
 }
 
 // Search slot implementations

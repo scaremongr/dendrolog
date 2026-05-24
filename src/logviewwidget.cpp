@@ -18,6 +18,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_view->setModel(m_model);
     m_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_view->setMinimumSize(0, 0);
+    m_view->setWordWrap(true);
     layout->addWidget(m_view);
 
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);

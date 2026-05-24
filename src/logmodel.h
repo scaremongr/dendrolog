@@ -104,6 +104,9 @@ protected:
 
 private:
     void applyFilter();
+    bool passesFilters(const std::shared_ptr<LogEntry>& entry) const;
+    void rebuildFilteredEntries();
+    void clearRowDependentCaches();
 
     QVector<std::shared_ptr<LogEntry>> m_allEntries;
     QVector<std::shared_ptr<LogEntry>> m_filteredEntries;
