@@ -63,12 +63,10 @@ void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
         }
     }
 
-    // Clear caches that are row-dependent on the old model structure
-    m_expandedRows.clear();
-    m_elideCache.clear();
-    m_expandedRowHeightCache.clear();
-    applyFilter(); // Apply current filter (or no filter if m_activeLogLevels is empty)
-    // endResetModel() will be called by applyFilter
+    clearRowDependentCaches();
+    rebuildFilteredEntries();
+    endResetModel();
+    emit modelFiltered(m_filteredEntries.size());
 }
 
 int LogModel::rowCount(const QModelIndex&) const
@@ -231,47 +229,61 @@ void LogModel::setMessageFilterRules(const QVector<MessageFilterRule>& rules)
     applyFilter();
 }
 
-void LogModel::applyFilter()
+bool LogModel::passesFilters(const std::shared_ptr<LogEntry>& entry) const
 {
-    beginResetModel();
+    if (!entry) {
+        return false;
+    }
+
+    if (!m_activeLogLevels.isEmpty() && !m_activeLogLevels.contains(entry->level)) {
+        return false;
+    }
+
+    if (m_filterStartTime.isValid() && entry->timestamp < m_filterStartTime) {
+        return false;
+    }
+    if (m_filterEndTime.isValid() && entry->timestamp > m_filterEndTime) {
+        return false;
+    }
+
+    if (!m_messageFilterRules.isEmpty()) {
+        for (const auto& rule : m_messageFilterRules) {
+            if (entry->message.contains(rule.substring, rule.caseSensitivity)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    return true;
+}
+
+void LogModel::rebuildFilteredEntries()
+{
     m_filteredEntries.clear();
+    m_filteredEntries.reserve(m_allEntries.size());
 
     for (const auto& entry : m_allEntries) {
-        // Log Level Filter Check
-        if (!m_activeLogLevels.isEmpty() && !m_activeLogLevels.contains(entry->level)) {
-            continue;
+        if (passesFilters(entry)) {
+            m_filteredEntries.push_back(entry);
         }
-
-        // Time Range Filter Check
-        if (m_filterStartTime.isValid() && entry->timestamp < m_filterStartTime) {
-            continue;
-        }
-        if (m_filterEndTime.isValid() && entry->timestamp > m_filterEndTime) {
-            continue;
-        }
-
-        // Message Substring Filter Check
-        if (!m_messageFilterRules.isEmpty()) {
-            bool matchOneRule = false;
-            for (const auto& rule : m_messageFilterRules) {
-                if (entry->message.contains(rule.substring, rule.caseSensitivity)) {
-                    matchOneRule = true;
-                    break;
-                }
-            }
-            if (!matchOneRule) {
-                continue; // Skip if no message rule matched
-            }
-        }
-        
-        m_filteredEntries.push_back(entry);
     }
-    
-    // Caches related to row indices need to be cleared as the mapping of rows will change.
+}
+
+void LogModel::clearRowDependentCaches()
+{
+    // Эти кэши индексируются по row в текущем filtered view.
+    // После любого reset соответствие row -> entry меняется полностью.
     m_expandedRows.clear();
     m_elideCache.clear();
     m_expandedRowHeightCache.clear();
-    
+}
+
+void LogModel::applyFilter()
+{
+    beginResetModel();
+    rebuildFilteredEntries();
+    clearRowDependentCaches();
     endResetModel();
     emit modelFiltered(m_filteredEntries.size());
 }

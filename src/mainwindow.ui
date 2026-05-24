@@ -37,7 +37,14 @@
     <property name="title">
      <string>&amp;File</string>
     </property>
+    <widget class="QMenu" name="menuRecentFiles">
+     <property name="title">
+      <string>Recent Files</string>
+     </property>
+    </widget>
     <addaction name="actionOpen"/>
+    <addaction name="separator"/>
+    <addaction name="menuRecentFiles"/>
    </widget>
    <widget class="QMenu" name="menuView">
     <property name="title">
@@ -46,6 +53,8 @@
     <addaction name="actionToggle_Text_Filters_Panel"/>
     <addaction name="actionToggle_Directory_Scanner_Panel"/>
     <addaction name="actionToggle_Time_Filter_Panel"/>
+    <addaction name="separator"/>
+    <addaction name="actionWordWrap"/>
    </widget>
    <widget class="QMenu" name="menuFilters">
     <property name="title">
@@ -251,6 +260,17 @@
   <action name="actionToggle_Time_Filter_Panel">
    <property name="text">
     <string>Time Filter Panel</string>
+   </property>
+  </action>
+  <action name="actionWordWrap">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Word Wrap</string>
    </property>
   </action>
   <action name="actionOpen">
@@ -473,5 +493,6 @@
   <slot>toggleTimeFilterDock()</slot>
   <slot>onScanDirectoryClicked()</slot>
   <slot>onConfigureScanExtensionsClicked()</slot>
+  <slot>on_actionWordWrap_toggled(bool)</slot>
  </slots>
 </ui>

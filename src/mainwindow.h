@@ -7,6 +7,7 @@
 #include "logfile.h"
 #include <QFutureWatcher>
 #include <QPair>
+#include <QSettings>
 #include "logparser.h"
 
 // Forward declarations for Qt classes used in members or method signatures
@@ -24,6 +25,7 @@ class QTreeWidgetItem;
 class QDir;
 class QMenu;
 class QInputDialog; // For scan extensions
+class QCloseEvent;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -37,6 +39,9 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private slots:
     // Slots connected by objectName in .ui file (or via connectSlotsByName)
     void on_actionOpen_triggered();
@@ -46,6 +51,7 @@ private slots:
     void on_actionInfo_toggled(bool checked);
     void on_actionDebug_toggled(bool checked);
     void on_actionTrace_toggled(bool checked);
+    void on_actionWordWrap_toggled(bool checked);
     void onScanDirectoryClicked(); // Connected from ui->scanDirectoryButton
     void onConfigureScanExtensionsClicked(); // Connected from ui->configureScanExtensionsButton
     void toggleTextFilterDock(); // Connected from ui->actionToggle_Text_Filters_Panel
@@ -72,6 +78,7 @@ private slots:
     void onDirectoryTreeItemDoubleClicked(QTreeWidgetItem* item, int column);
     void onDirectoryTreeContextMenuRequested(const QPoint& pos);
     void onOpenSelectedDirectoryFiles(const QStringList& filePaths);
+    void openRecentFile(const QString& filePath);
 
     // Search related slots
     void onSearchNextTriggered();
@@ -103,6 +110,9 @@ private:
 
     // Directory Scanner related members
     QStringList m_scanFileExtensions; // To store configured extensions (e.g. {"log", "txt"})
+    QString m_lastOpenDir;
+    QString m_lastScanDir;
+    QStringList m_recentFiles;
 
     // Other members
     LogViewWidget* m_activeLogView;
@@ -110,6 +120,12 @@ private:
     QFutureWatcher<QPair<LogParser::FileStats, QString>> m_fileStatWatcher;
     QList<QString> m_filesToStatQueue;
     QMap<QString, QTreeWidgetItem*> m_filePathToTreeItemMap;
+
+    // Settings persistence
+    void saveSettings();
+    void loadSettings();
+    void addToRecentFiles(const QString& filePath);
+    void updateRecentFilesMenu();
 
     // Setup methods
     void setupStatusBar();
