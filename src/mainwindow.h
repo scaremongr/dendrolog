@@ -9,6 +9,8 @@
 #include <QPair>
 #include <QSettings>
 #include "logparser.h"
+#include "logfield.h"
+#include <array>
 
 // Forward declarations for Qt classes used in members or method signatures
 class QProgressBar;
@@ -24,7 +26,9 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QDir;
 class QMenu;
+class QComboBox;
 class QInputDialog; // For scan extensions
+class ConversionPatternDialog;
 class QCloseEvent;
 
 QT_BEGIN_NAMESPACE
@@ -85,6 +89,12 @@ private slots:
     void onSearchPreviousTriggered();
     void onSearchEnterPressed();
 
+    // Field-visibility dock slots
+    void onFieldVisibilityChanged();
+    void onConversionPatternApply();
+    void onPatternComboChanged(int index);
+    void onManagePatterns();
+
 private:
     Ui::MainWindow *ui; // Pointer to the UI class generated from mainwindow.ui
 
@@ -121,6 +131,14 @@ private:
     QList<QString> m_filesToStatQueue;
     QMap<QString, QTreeWidgetItem*> m_filePathToTreeItemMap;
 
+    // Field-visibility dock widgets
+    std::array<QCheckBox*, LogFieldCount> m_fieldCheckBoxes{};
+    QCheckBox* m_allFieldsCheckBox    = nullptr;
+    QComboBox* m_conversionPatternCombo = nullptr;
+    QString    m_conversionPattern;             // Global pattern (for next file opens)
+    using PatternEntry = QPair<QString, QString>; // (display name, pattern string)
+    QList<PatternEntry> m_patternList;
+
     // Settings persistence
     void saveSettings();
     void loadSettings();
@@ -132,6 +150,7 @@ private:
     void setupTimeFilterDockContents(); // New method to set up the new dock
     void setupTextFilterDockContents(); 
     void setupDirectoryScanner();     
+    void setupFieldVisibilityDock();    // New: Log Fields panel
     void addNewTextFilterInput(const QString& initialText = QString());
     void clearTextFilterInputs();
 
@@ -143,6 +162,13 @@ private:
     void setFilterLogLvl(LogLevel level, bool add);
     void scanDirectoryRecursive(QDir& currentDir, QTreeWidgetItem* parentItem, qint64& totalSizeAccumulator);
     void populateDirectoryScanResults(const QString& directoryPath);
+
+    // Factory: creates a LogViewWidget with current global settings pre-applied
+    LogViewWidget* createLogViewWidget();
+    // Apply current field-visibility mask to every open LogViewWidget's model
+    void applyFieldVisibilityToAllViews();
+    // Apply current pattern to every open LogViewWidget's parser
+    void applyPatternToAllViews();
 
 };
 

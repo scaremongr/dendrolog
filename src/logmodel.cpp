@@ -86,7 +86,9 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     case LevelRole:
         return static_cast<int>(entry->level); // Use ->
     case MessageRole:
-        return entry->message; // Use ->
+        return entry->message; // Raw, unfiltered — use for search / copy
+    case DisplayMessageRole:
+        return formatDisplayMessage(*entry);
     case SourceFileRole:
         return QVariant::fromValue<LogFilePtr>(entry->sourceFile); // Use ->
     case IsExpandedRole:
@@ -104,7 +106,7 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     case Qt::BackgroundRole: // Handle background color
         return getLogLevelColor(entry->level);
     case Qt::DisplayRole:
-        return entry->message;
+        return formatDisplayMessage(*entry);
     default:
         return QVariant();
     }
@@ -113,12 +115,13 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
 QHash<int, QByteArray> LogModel::roleNames() const
 {
     return {
-        {TimestampRole, "timestamp"},
-        {LevelRole, "level"},
-        {MessageRole, "message"},
-        {SourceFileRole, "sourceFile"},
-        {IsExpandedRole, "isExpanded"},
-        {FileBadgeRole, "fileBadge"}
+        {TimestampRole,      "timestamp"},
+        {LevelRole,          "level"},
+        {MessageRole,        "message"},
+        {DisplayMessageRole, "displayMessage"},
+        {SourceFileRole,     "sourceFile"},
+        {IsExpandedRole,     "isExpanded"},
+        {FileBadgeRole,      "fileBadge"}
     };
 }
 
@@ -308,6 +311,68 @@ QColor LogModel::defaultColorForLevel(LogLevel level) {
         case LogLevel::Trace:   return QColor(Qt::lightGray).darker(110);
         default:                return Qt::black; // Fallback
     }
+}
+
+// ---------------------------------------------------------------------------
+// setVisibleFields — controls which structured fields appear in the display.
+// ---------------------------------------------------------------------------
+
+void LogModel::setVisibleFields(FieldVisibilityMask mask)
+{
+    if (m_visibleFields == mask)
+        return;
+
+    m_visibleFields = mask;
+    clearElideCache(); // Elide cache stores text derived from the display message
+
+    // Notify the view that display data has changed for every visible row.
+    if (!m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0),
+                         index(m_filteredEntries.size() - 1, 0),
+                         {Qt::DisplayRole, DisplayMessageRole});
+    }
+}
+
+void LogModel::refreshDisplay()
+{
+    clearElideCache();
+    if (!m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0),
+                         index(m_filteredEntries.size() - 1, 0),
+                         {Qt::DisplayRole, DisplayMessageRole});
+    }
+}
+
+// ---------------------------------------------------------------------------
+// formatDisplayMessage — returns the text to show for a single entry row.
+//
+// Fast path: if all fields are visible (default) or the entry has no
+// structured fields (continuation line or no pattern set), the raw
+// entry.message is returned directly with no allocation.
+//
+// Slow path: builds a space-joined string from only the visible fields.
+// Called for every painted row, so it must stay cheap.
+// ---------------------------------------------------------------------------
+
+QString LogModel::formatDisplayMessage(const LogEntry& entry) const
+{
+    // Fast path: all fields visible or no structured data extracted
+    if (m_visibleFields == LogFieldAllMask || entry.fields.isEmpty())
+        return entry.message;
+
+    QStringList parts;
+    parts.reserve(LogFieldCount);
+    for (int i = 0; i < LogFieldCount; ++i) {
+        if (!(m_visibleFields & (static_cast<FieldVisibilityMask>(1) << i)))
+            continue;
+        const QStringView sv = entry.fields.get(static_cast<LogField>(i), entry.message);
+        if (!sv.isEmpty())
+            parts << sv.toString();
+    }
+
+    // Fallback: if the mask matched nothing (e.g. fields not present in this
+    // entry), show the full raw line so the row is never blank.
+    return parts.isEmpty() ? entry.message : parts.join(QLatin1Char(' '));
 }
 
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround)

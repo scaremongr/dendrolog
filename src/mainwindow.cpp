@@ -1,6 +1,7 @@
-#include "mainwindow.h"
+﻿#include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
+#include "conversionpatterndialog.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -27,6 +28,7 @@
 #include <QSettings>
 #include <QCloseEvent>
 #include <QMessageBox>
+#include <QComboBox>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr), m_statParser(nullptr)
@@ -39,6 +41,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupTimeFilterDockContents();
     setupTextFilterDockContents();
     setupDirectoryScanner();
+    setupFieldVisibilityDock();
 
     // Connect search actions
     connect(ui->searchLineEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchEnterPressed);
@@ -60,6 +63,8 @@ MainWindow::MainWindow(QWidget *parent)
                         ui->directoryScannerDockWidget, tr("Directory Scanner Panel"));
         setupDockToggle(ui->menuView, ui->actionToggle_Time_Filter_Panel,
                         ui->timeFilterDockWidget, tr("Time Filter Panel"));
+        setupDockToggle(ui->menuView, ui->actionToggle_Field_Visibility_Panel,
+                        ui->fieldVisibilityDockWidget, tr("Log Fields Panel"));
     }
 
     m_statParser = new LogParser(this);
@@ -134,6 +139,23 @@ void MainWindow::saveSettings()
 
     s.beginGroup("View");
     s.setValue("wordWrap", ui->actionWordWrap->isChecked());
+    {
+        uint8_t mask = 0;
+        for (int i = 0; i < LogFieldCount; ++i)
+            if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
+                mask |= static_cast<uint8_t>(1u << i);
+        s.setValue("fieldVisibilityMask", static_cast<int>(mask));
+    }
+    s.setValue("conversionPattern", m_conversionPattern);
+    {
+        QStringList names, values;
+        for (const auto& e : m_patternList) {
+            names  << e.first;
+            values << e.second;
+        }
+        s.setValue("patternNames",  names);
+        s.setValue("patternValues", values);
+    }
     s.endGroup();
 
     s.beginGroup("RecentFiles");
@@ -168,6 +190,55 @@ void MainWindow::loadSettings()
 
     s.beginGroup("View");
     ui->actionWordWrap->setChecked(s.value("wordWrap", true).toBool());
+    {
+        const int savedMask = s.value("fieldVisibilityMask", static_cast<int>(LogFieldAllMask)).toInt();
+        const uint8_t mask  = static_cast<uint8_t>(savedMask);
+        for (int i = 0; i < LogFieldCount; ++i)
+            if (m_fieldCheckBoxes[i])
+                m_fieldCheckBoxes[i]->setChecked((mask >> i) & 1u);
+        // Sync master toggle state after restoring individual checkboxes
+        if (m_allFieldsCheckBox) {
+            int cnt = 0;
+            for (int i = 0; i < LogFieldCount; ++i)
+                cnt += (mask >> i) & 1u;
+            m_allFieldsCheckBox->blockSignals(true);
+            if (cnt == 0)                  m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
+            else if (cnt == LogFieldCount) m_allFieldsCheckBox->setCheckState(Qt::Checked);
+            else                           m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
+            m_allFieldsCheckBox->blockSignals(false);
+        }
+    }
+    m_conversionPattern = s.value("conversionPattern").toString();
+    {
+        const QStringList names  = s.value("patternNames").toStringList();
+        const QStringList values = s.value("patternValues").toStringList();
+        m_patternList.clear();
+        const int cnt = qMin(names.size(), values.size());
+        m_patternList.reserve(cnt);
+        for (int i = 0; i < cnt; ++i)
+            m_patternList.append({names[i], values[i]});
+        // Backwards compatibility: migrate old single-string list
+        if (m_patternList.isEmpty()) {
+            const QStringList old = s.value("conversionPatternList").toStringList();
+            for (const auto& p : old)
+                if (!p.trimmed().isEmpty())
+                    m_patternList.append({p.trimmed(), p.trimmed()});
+        }
+        if (m_conversionPatternCombo) {
+            m_conversionPatternCombo->blockSignals(true);
+            m_conversionPatternCombo->clear();
+            for (const auto& e : m_patternList)
+                m_conversionPatternCombo->addItem(e.first);
+            // Restore the active selection
+            for (int i = 0; i < m_patternList.size(); ++i) {
+                if (m_patternList[i].second == m_conversionPattern) {
+                    m_conversionPatternCombo->setCurrentIndex(i);
+                    break;
+                }
+            }
+            m_conversionPatternCombo->blockSignals(false);
+        }
+    }
     s.endGroup();
 
     s.beginGroup("RecentFiles");
@@ -175,6 +246,232 @@ void MainWindow::loadSettings()
     s.endGroup();
 
     updateRecentFilesMenu();
+}
+
+// =============================================================================
+// Field-visibility dock
+// =============================================================================
+
+static const char* fieldDisplayName(int i)
+{
+    switch (static_cast<LogField>(i)) {
+    case LogField::Timestamp:  return "Timestamp  (%d)";
+    case LogField::ThreadId:   return "Thread ID  (%t)";
+    case LogField::LoggerName: return "Logger Name  (%c)";
+    case LogField::Level:      return "Level  (%p)";
+    case LogField::Message:    return "Message  (%m)";
+    case LogField::Ndc:        return "Context / NDC  (%x)";
+    case LogField::SourceFile: return "Source File  (%F)";
+    case LogField::SourceLine: return "Source Line  (%L)";
+    default:                   return "Unknown";
+    }
+}
+
+void MainWindow::setupFieldVisibilityDock()
+{
+    QWidget* contents = ui->fieldVisibilityContentsWidget;
+    if (!contents) return;
+
+    auto* rootLayout = new QVBoxLayout(contents);
+    rootLayout->setContentsMargins(4, 4, 4, 4);
+    rootLayout->setSpacing(2);
+
+    // ---- Section: visible fields ----
+    auto* fieldsLabel = new QLabel(tr("<b>Show fields:</b>"), contents);
+    rootLayout->addWidget(fieldsLabel);
+
+    // "All fields" tri-state master toggle
+    m_allFieldsCheckBox = new QCheckBox(tr("(all fields)"), contents);
+    m_allFieldsCheckBox->setTristate(true);
+    m_allFieldsCheckBox->setCheckState(Qt::Checked);
+    connect(m_allFieldsCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
+        if (static_cast<Qt::CheckState>(state) == Qt::PartiallyChecked) return;
+        const bool checkAll = (state == Qt::Checked);
+        for (int i = 0; i < LogFieldCount; ++i) {
+            if (m_fieldCheckBoxes[i]) {
+                m_fieldCheckBoxes[i]->blockSignals(true);
+                m_fieldCheckBoxes[i]->setChecked(checkAll);
+                m_fieldCheckBoxes[i]->blockSignals(false);
+            }
+        }
+        applyFieldVisibilityToAllViews();
+    });
+    rootLayout->addWidget(m_allFieldsCheckBox);
+
+    for (int i = 0; i < LogFieldCount; ++i) {
+        auto* cb = new QCheckBox(tr(fieldDisplayName(i)), contents);
+        cb->setChecked(true); // default: all visible
+        m_fieldCheckBoxes[i] = cb;
+        connect(cb, &QCheckBox::toggled, this, &MainWindow::onFieldVisibilityChanged);
+        rootLayout->addWidget(cb);
+    }
+
+    rootLayout->addSpacing(4);
+
+    // ---- Section: conversion pattern ----
+    auto* patternLabel = new QLabel(tr("<b>Conversion pattern:</b>"), contents);
+    patternLabel->setToolTip(tr(
+        "Log4cxx / Log4j ConversionPattern - e.g.:\n"
+        "> %d [%-10t] %-20c  %-8p %m ~~ %x {%F:%L}%n\n\n"
+        "Use 'Manage...' to add, edit and delete named patterns.\n"
+        "'Apply to all tabs' re-extracts fields in every open tab."));
+    rootLayout->addWidget(patternLabel);
+
+    // Non-editable combo: shows pattern display names from m_patternList
+    m_conversionPatternCombo = new QComboBox(contents);
+    m_conversionPatternCombo->setEditable(false);
+    m_conversionPatternCombo->setToolTip(patternLabel->toolTip());
+    connect(m_conversionPatternCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onPatternComboChanged);
+    rootLayout->addWidget(m_conversionPatternCombo);
+
+    auto* btnRow = new QHBoxLayout();
+    btnRow->setSpacing(4);
+    auto* applyPatternBtn = new QPushButton(tr("Apply to all tabs"), contents);
+    applyPatternBtn->setToolTip(tr(
+        "Re-apply field extraction to all already-loaded entries."));
+    connect(applyPatternBtn, &QPushButton::clicked,
+            this, &MainWindow::onConversionPatternApply);
+    auto* manageBtn = new QPushButton(tr("Manage..."), contents);
+    manageBtn->setToolTip(tr("Add, edit and delete named conversion patterns."));
+    connect(manageBtn, &QPushButton::clicked,
+            this, &MainWindow::onManagePatterns);
+    btnRow->addWidget(applyPatternBtn, 1);
+    btnRow->addWidget(manageBtn);
+    rootLayout->addLayout(btnRow);
+
+    rootLayout->addStretch();
+
+    contents->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+    ui->fieldVisibilityDockWidget->setSizePolicy(QSizePolicy::Preferred,
+                                                  QSizePolicy::MinimumExpanding);
+}
+
+// Compute the current mask from checkbox states
+static LogModel::FieldVisibilityMask computeVisibilityMask(
+    const std::array<QCheckBox*, LogFieldCount>& boxes)
+{
+    LogModel::FieldVisibilityMask mask = 0;
+    for (int i = 0; i < LogFieldCount; ++i)
+        if (boxes[i] && boxes[i]->isChecked())
+            mask |= static_cast<LogModel::FieldVisibilityMask>(1u << i);
+    return mask;
+}
+
+void MainWindow::onFieldVisibilityChanged()
+{
+    // Keep the master "all fields" checkbox in sync with the individual boxes
+    if (m_allFieldsCheckBox) {
+        int checkedCount = 0;
+        for (int i = 0; i < LogFieldCount; ++i)
+            if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
+                ++checkedCount;
+        m_allFieldsCheckBox->blockSignals(true);
+        if (checkedCount == 0)
+            m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
+        else if (checkedCount == LogFieldCount)
+            m_allFieldsCheckBox->setCheckState(Qt::Checked);
+        else
+            m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
+        m_allFieldsCheckBox->blockSignals(false);
+    }
+    applyFieldVisibilityToAllViews();
+}
+
+void MainWindow::applyFieldVisibilityToAllViews()
+{
+    const auto mask = computeVisibilityMask(m_fieldCheckBoxes);
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->setVisibleFields(mask);
+    }
+}
+
+void MainWindow::onConversionPatternApply()
+{
+    applyPatternToAllViews();
+}
+
+void MainWindow::onPatternComboChanged(int index)
+{
+    if (index >= 0 && index < m_patternList.size())
+        m_conversionPattern = m_patternList[index].second;
+    else
+        m_conversionPattern.clear();
+}
+
+void MainWindow::onManagePatterns()
+{
+    ConversionPatternDialog dlg(m_patternList, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    m_patternList = dlg.resultPatterns();
+
+    // Rebuild combo names.  Set index to -1 first so any subsequent
+    // setCurrentIndex() always triggers currentIndexChanged, even for index 0.
+    m_conversionPatternCombo->blockSignals(true);
+    m_conversionPatternCombo->clear();
+    for (const auto& e : m_patternList)
+        m_conversionPatternCombo->addItem(e.first);
+    m_conversionPatternCombo->setCurrentIndex(-1);
+    m_conversionPatternCombo->blockSignals(false);
+
+    const QString chosen    = dlg.chosenPattern();
+    const int     chosenIdx = dlg.chosenResultIndex();
+    if (!chosen.isEmpty()) {
+        m_conversionPattern = chosen;
+        // Directly select by result index — no string comparison needed.
+        if (chosenIdx >= 0 && chosenIdx < m_conversionPatternCombo->count())
+            m_conversionPatternCombo->setCurrentIndex(chosenIdx);
+        applyPatternToAllViews();
+    } else {
+        // Dialog closed without "Use Selected" — restore previous active pattern
+        // in the combo, or leave unselected if it's no longer in the list.
+        for (int i = 0; i < m_patternList.size(); ++i) {
+            if (m_patternList[i].second == m_conversionPattern) {
+                m_conversionPatternCombo->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+}
+
+
+void MainWindow::applyPatternToAllViews()
+{
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (!lv) continue;
+        lv->setParserPattern(m_conversionPattern);
+
+        // Re-extract fields for all already-loaded entries so the display
+        // updates immediately without requiring a file re-open.
+        if (lv->model()) {
+            const LogPattern pat(m_conversionPattern);
+            if (pat.isValid()) {
+                const auto& entries = lv->model()->allEntries();
+                for (const auto& entry : entries) {
+                    if (entry)
+                        entry->fields = pat.extractFields(entry->message);
+                }
+            }
+            // Notify the view to repaint with updated field data.
+            // refreshDisplay() always emits dataChanged (unlike setVisibleFields which
+            // returns early when the mask hasn't changed).
+            lv->model()->refreshDisplay();
+        }
+    }
+}
+
+LogViewWidget* MainWindow::createLogViewWidget()
+{
+    auto* view = new LogViewWidget(this);
+    view->setParserPattern(m_conversionPattern);
+    if (view->model())
+        view->model()->setVisibleFields(computeVisibilityMask(m_fieldCheckBoxes));
+    return view;
 }
 
 void MainWindow::setupStatusBar()
@@ -553,7 +850,7 @@ void MainWindow::on_actionOpen_triggered()
     if (ui->tabWidget->count() == 0 ||
         ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
     {
-        view = new LogViewWidget(this);
+        view = createLogViewWidget();
         tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
         ui->tabWidget->setCurrentIndex(tabIndex);
     }
@@ -562,7 +859,7 @@ void MainWindow::on_actionOpen_triggered()
         view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
         if (!view)
         {
-            view = new LogViewWidget(this);
+            view = createLogViewWidget();
             tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
             ui->tabWidget->setCurrentIndex(tabIndex);
         }
@@ -591,7 +888,7 @@ void MainWindow::on_actionOpen_triggered()
 
         if (fileCount == 1 && !view->loadedFiles().isEmpty())
         {
-            const auto logFile = view->loadedFiles().first(); // не ссылка — loadedFiles() возвращает временный список
+            const auto logFile = view->loadedFiles().first(); // РЅРµ СЃСЃС‹Р»РєР° вЂ” loadedFiles() РІРѕР·РІСЂР°С‰Р°РµС‚ РІСЂРµРјРµРЅРЅС‹Р№ СЃРїРёСЃРѕРє
             tabText = logFile->shortName();
             tabToolTip = logFile->filePath;
         }
@@ -1224,7 +1521,7 @@ void MainWindow::onDirectoryTreeItemDoubleClicked(QTreeWidgetItem *item, int col
         if (ui->tabWidget->count() == 0 ||
             ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
         {
-            view = new LogViewWidget(this);
+            view = createLogViewWidget();
             tabIndex = ui->tabWidget->addTab(view, QFileInfo(filePath).fileName());
             ui->tabWidget->setCurrentIndex(tabIndex);
         }
@@ -1233,7 +1530,7 @@ void MainWindow::onDirectoryTreeItemDoubleClicked(QTreeWidgetItem *item, int col
             view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
             if (!view)
             {
-                view = new LogViewWidget(this);
+                view = createLogViewWidget();
                 tabIndex = ui->tabWidget->addTab(view, QFileInfo(filePath).fileName());
                 ui->tabWidget->setCurrentIndex(tabIndex);
             }
@@ -1305,7 +1602,7 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
     if (ui->tabWidget->count() == 0 ||
         ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
     {
-        view = new LogViewWidget(this);
+        view = createLogViewWidget();
         tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
         ui->tabWidget->setCurrentIndex(tabIndex);
     }
@@ -1314,7 +1611,7 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
         view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
         if (!view)
         {
-            view = new LogViewWidget(this);
+            view = createLogViewWidget();
             tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
             ui->tabWidget->setCurrentIndex(tabIndex);
         }
@@ -1464,7 +1761,7 @@ void MainWindow::openRecentFile(const QString& filePath)
     if (ui->tabWidget->count() == 0 ||
         ((view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
     {
-        view = new LogViewWidget(this);
+        view = createLogViewWidget();
         int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
         ui->tabWidget->setCurrentIndex(tabIndex);
     }
@@ -1472,7 +1769,7 @@ void MainWindow::openRecentFile(const QString& filePath)
     {
         view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
         if (!view) {
-            view = new LogViewWidget(this);
+            view = createLogViewWidget();
             int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
             ui->tabWidget->setCurrentIndex(tabIndex);
         } else if (m_activeLogView != view) {

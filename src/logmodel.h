@@ -2,6 +2,7 @@
 #define LOGMODEL_H
 
 #include "logentry.h"
+#include "logpattern.h"
 #include <QAbstractListModel>
 #include <QFontMetrics>
 #include <QSet>
@@ -41,8 +42,26 @@ public:
         // Возвращает QVariantMap{"text": QString, "color": QColor} для Info-плашки.
         // Возвращает QVariant() (invalid) если загружен только один файл.
         // Вся логика "показывать/не показывать" и цвет хранятся здесь — в модели.
-        FileBadgeRole
+        FileBadgeRole,
+        // Returns the display-formatted message text respecting the current
+        // field-visibility mask.  Identical to Qt::DisplayRole but exposed
+        // as a named role for QML / delegate convenience.
+        DisplayMessageRole
     };
+
+    // ---- Field-visibility control -------------------------------------------
+    // Bitmask where bit N corresponds to LogField(N).
+    // LogFieldAllMask (from logfield.h) means "show all fields" (default).
+    using FieldVisibilityMask = uint8_t;
+
+    /// Set which structured fields are shown in the display message.
+    /// Has no visible effect when no LogPattern is configured on the parser.
+    void setVisibleFields(FieldVisibilityMask mask);
+    FieldVisibilityMask visibleFields() const noexcept { return m_visibleFields; }
+    /// Force a display refresh without changing the mask — call after re-extracting
+    /// structured fields on already-loaded entries (e.g. after pattern change).
+    void refreshDisplay();
+    // -------------------------------------------------------------------------
 
     // кеш сокращенных строк
     struct ElideCacheEntry {
@@ -108,6 +127,10 @@ private:
     void rebuildFilteredEntries();
     void clearRowDependentCaches();
 
+    // Returns the message text to display for entry, applying m_visibleFields.
+    // Returns entry.message directly (no allocation) when no filtering needed.
+    QString formatDisplayMessage(const LogEntry& entry) const;
+
     QVector<std::shared_ptr<LogEntry>> m_allEntries;
     QVector<std::shared_ptr<LogEntry>> m_filteredEntries;
     QSet<LogLevel> m_activeLogLevels;
@@ -124,6 +147,8 @@ private:
     mutable int m_cachedUniqueSourceFileCount = -1;   // Кэш для количества уникальных файлов
 
     QMap<LogLevel, QColor> m_logLevelColors; // For background colors
+
+    FieldVisibilityMask m_visibleFields = LogFieldAllMask; // Default: show all fields
 };
 
 #endif // LOGMODEL_H

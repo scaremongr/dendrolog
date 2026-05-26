@@ -4,6 +4,7 @@
 #include <QString>
 #include <QDateTime>
 #include "logfile.h"
+#include "logfield.h"
 
 enum class LogLevel {
     Unknown,
@@ -22,6 +23,10 @@ struct LogEntry {
     LogLevel level;         // Уровень логирования (первой строки логической записи)
     QString message;        // Текст этой конкретной строки
     LogFilePtr sourceFile;  // Источник (файл)
+
+    // Structured fields extracted from message by LogPattern::extractFields().
+    // Offsets are into `message`; isEmpty() == true for continuation lines.
+    LogEntryFields fields;
 
     LogEntry(int lId, int lineNum, const QDateTime &ts, LogLevel lvl, const QString &msg, LogFilePtr sFile)
         : logicalEntryId(lId)
