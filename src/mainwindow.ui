@@ -53,6 +53,7 @@
     <addaction name="actionToggle_Text_Filters_Panel"/>
     <addaction name="actionToggle_Directory_Scanner_Panel"/>
     <addaction name="actionToggle_Time_Filter_Panel"/>
+    <addaction name="actionToggle_Field_Visibility_Panel"/>
     <addaction name="separator"/>
     <addaction name="actionWordWrap"/>
    </widget>
@@ -245,6 +246,20 @@
    </property>
    <property name="text">
     <string>Trace</string>
+   </property>
+  </action>
+  <widget class="QDockWidget" name="fieldVisibilityDockWidget">
+   <property name="windowTitle">
+    <string>Log Fields</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="fieldVisibilityContentsWidget"/>
+  </widget>
+  <action name="actionToggle_Field_Visibility_Panel">
+   <property name="text">
+    <string>Log Fields Panel</string>
    </property>
   </action>
   <action name="actionToggle_Text_Filters_Panel">

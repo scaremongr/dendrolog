@@ -28,6 +28,10 @@ public:
     // Возвращает количество загруженных файлов
     int fileCount() const { return m_loadedFiles.size(); }
 
+    // Задаёт ConversionPattern для парсера (применяется к следующим загружаемым файлам).
+    void setParserPattern(const QString& pattern);
+    QString parserPattern() const;
+
     // Search methods
     void searchTextNext(const QString& term, bool caseSensitive);
     void searchTextPrevious(const QString& term, bool caseSensitive);

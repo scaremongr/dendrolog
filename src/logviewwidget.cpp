@@ -50,6 +50,16 @@ LogViewWidget::~LogViewWidget()
     // Если бы он не был дочерним QObject, нужно было бы delete m_logParser;
 }
 
+void LogViewWidget::setParserPattern(const QString& pattern)
+{
+    m_logParser->setPattern(pattern);
+}
+
+QString LogViewWidget::parserPattern() const
+{
+    return m_logParser->pattern().patternString();
+}
+
 void LogViewWidget::addLogFile(const QString &filePath)
 {
     for (const auto &file : m_loadedFiles) {

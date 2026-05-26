@@ -194,6 +194,36 @@ void LogListView::setModel(QAbstractItemModel *model) {
         connect(model, &QAbstractItemModel::rowsInserted, this, onRowsChanged);
         connect(model, &QAbstractItemModel::rowsRemoved,  this, onRowsChanged);
 
+        // Инвалидация кэша строк при изменении данных (например, смена видимых полей /
+        // применение нового ConversionPattern). Без этого getRowState() возвращает
+        // устаревший текст из кэша даже после того, как модель уже прислала dataChanged.
+        connect(model, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex& topLeft, const QModelIndex& bottomRight, const QList<int>&) {
+                const int total = this->model() ? this->model()->rowCount() : 0;
+                const int count = bottomRight.row() - topLeft.row() + 1;
+                const bool isBulk = (count >= total / 4 || count > 500);
+                if (isBulk) {
+                    // Большой диапазон — инвалидируем всё за один раз
+                    invalidateRowState(-1, /*preserveTextLengths=*/false);
+                    rebuildHeightCache();
+                } else {
+                    for (int row = topLeft.row(); row <= bottomRight.row(); ++row)
+                        invalidateRowState(row, /*preserveTextLengths=*/false);
+                    m_heightsDirty = true;
+                }
+                viewport()->update();
+                // После массового изменения высот строк прокручиваем к выделенному
+                // элементу — универсально работает при смене видимых полей, паттерна
+                // и любых других модификаторов, меняющих компоновку.
+                if (isBulk) {
+                    QTimer::singleShot(0, this, [this]() {
+                        const QModelIndex cur = currentIndex();
+                        if (cur.isValid())
+                            scrollTo(cur, QAbstractItemView::EnsureVisible);
+                    });
+                }
+            });
+
         // Откладываем до получения реальных размеров viewport
         QTimer::singleShot(0, this, [this]() {
             rebuildHeightCache();

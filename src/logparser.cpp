@@ -160,6 +160,11 @@ void LogParser::startParsing(const LogFilePtr& logFile)
     });
 }
 
+void LogParser::setPattern(const QString& conversionPattern)
+{
+    m_pattern.setPattern(conversionPattern);
+}
+
 void LogParser::doParse(const LogFilePtr& logFile)
 {
     emit parsingStarted(logFile); // Испускаем сигнал о начале парсинга
@@ -209,6 +214,9 @@ void LogParser::doParse(const LogFilePtr& logFile)
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber, currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            // Extract structured fields if a pattern is configured
+            if (m_pattern.isValid())
+                currentEntry->fields = m_pattern.extractFields(currentEntry->message);
         } else {
             if (currentLogicalEntryId == -1) { 
                 currentLogicalEntryId = logicalEntryIdCounter++;

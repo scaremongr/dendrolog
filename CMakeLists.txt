@@ -24,13 +24,18 @@ set(PROJECT_SOURCES
     src/logviewwidget.cpp
     
     src/logentry.h
+    src/logfield.h
     src/logfile.h
     src/logfile.cpp
     src/logmodel.h
     src/logmodel.cpp
     src/logparser.h
     src/logparser.cpp
+    src/logpattern.h
+    src/logpattern.cpp
 
+    src/conversionpatterndialog.h
+    src/conversionpatterndialog.cpp
 
     src/LogListView.h
     src/LogListView.cpp
