@@ -37,6 +37,9 @@ set(PROJECT_SOURCES
     src/conversionpatterndialog.h
     src/conversionpatterndialog.cpp
 
+    src/directoryscanner.h
+    src/directoryscanner.cpp
+
     src/LogListView.h
     src/LogListView.cpp
     resources/resources.qrc
