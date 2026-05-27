@@ -104,6 +104,14 @@ void LogListView::setWordWrap(bool enabled) {
     rebuildHeightCache();
     updateScrollbar();
     viewport()->update();
+
+    // Высоты строк изменились — прокручиваем к выделенному элементу,
+    // чтобы он не уплыл за пределы видимой области.
+    QTimer::singleShot(0, this, [this]() {
+        const QModelIndex cur = currentIndex();
+        if (cur.isValid())
+            scrollTo(cur, QAbstractItemView::EnsureVisible);
+    });
 }
 
 void LogListView::setModel(QAbstractItemModel *model) {

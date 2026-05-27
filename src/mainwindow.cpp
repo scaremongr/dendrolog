@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
 #include "conversionpatterndialog.h"
+#include "directoryscanner.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -31,7 +32,7 @@
 #include <QComboBox>
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr), m_statParser(nullptr)
+    : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr)
 {
     ui->setupUi(this);
 
@@ -66,10 +67,6 @@ MainWindow::MainWindow(QWidget *parent)
         setupDockToggle(ui->menuView, ui->actionToggle_Field_Visibility_Panel,
                         ui->fieldVisibilityDockWidget, tr("Log Fields Panel"));
     }
-
-    m_statParser = new LogParser(this);
-    connect(&m_fileStatWatcher, &QFutureWatcher<QPair<LogParser::FileStats, QString>>::finished,
-            this, &MainWindow::handleFileStatProcessed);
 
     if (ui->tabWidget)
     {
@@ -588,31 +585,15 @@ void MainWindow::setupTextFilterDockContents()
 
 void MainWindow::setupDirectoryScanner()
 {
-    QStringList headers;
-    headers << tr("Name") << tr("Total Entries") << tr("From") << tr("To")
-            << tr("Warns") << tr("Errors") << tr("Fatals") << tr("Size (Bytes)");
-    ui->directoryScanResultsTree->setHeaderLabels(headers);
-    ui->directoryScanResultsTree->setColumnCount(headers.size());
-
-    ui->directoryScanResultsTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-    ui->directoryScanResultsTree->header()->resizeSection(0, 180);
-
-    ui->directoryScanResultsTree->header()->setStretchLastSection(false);
-    for (int i = 1; i < headers.size(); ++i)
-    {
-        ui->directoryScanResultsTree->header()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
-    }
-
-    ui->directoryScanResultsTree->setIndentation(15);
-    ui->directoryScanResultsTree->setItemsExpandable(true);
-
-    ui->directoryScanResultsTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    ui->directoryScanResultsTree->setContextMenuPolicy(Qt::CustomContextMenu);
-
-    connect(ui->directoryScanResultsTree, &QTreeWidget::itemDoubleClicked,
-            this, &MainWindow::onDirectoryTreeItemDoubleClicked);
-    connect(ui->directoryScanResultsTree, &QTreeWidget::customContextMenuRequested,
-            this, &MainWindow::onDirectoryTreeContextMenuRequested);
+    m_dirScanner = new DirectoryScanner(ui->directoryScanResultsTree, this);
+    m_dirScanner->setFileExtensions(m_scanFileExtensions);
+    m_dirScanner->setConversionPattern(m_conversionPattern);
+    connect(m_dirScanner, &DirectoryScanner::fileActivated,
+            this, [this](const QString& path) {
+        onOpenSelectedDirectoryFiles({path});
+    });
+    connect(m_dirScanner, &DirectoryScanner::filesActivated,
+            this, &MainWindow::onOpenSelectedDirectoryFiles);
 }
 
 void MainWindow::addNewTextFilterInput(const QString &initialText)
@@ -946,6 +927,27 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
         return;
     m_statusLabel->setText(tr("Finished parsing: %1 (%2 entries)").arg(logFile->shortName()).arg(totalEntries));
     m_progressBar->hide();
+    
+    // Update tab text to reflect the loaded file
+    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+        auto *view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
+        if (view && view->loadedFiles().contains(logFile)) {
+            int count = view->fileCount();
+            if (count == 1) {
+                ui->tabWidget->setTabText(i, logFile->shortName());
+                ui->tabWidget->setTabToolTip(i, logFile->filePath);
+            } else if (count > 1) {
+                ui->tabWidget->setTabText(i, tr("Logs (%1)").arg(count));
+                QStringList paths;
+                for (const auto &lf : view->loadedFiles()) {
+                    paths << lf->filePath;
+                }
+                ui->tabWidget->setTabToolTip(i, paths.join("\n"));
+            }
+            break;
+        }
+    }
+
     QTimer::singleShot(3000, this, [this]()
                        {
         if (m_progressBar->isHidden()) {
@@ -1280,315 +1282,15 @@ void MainWindow::onAddTextFilterInputClicked()
 void MainWindow::onScanDirectoryClicked()
 {
     QString dirPath = QFileDialog::getExistingDirectory(this, tr("Select Directory to Scan"),
-                                                        m_lastScanDir.isEmpty() ? QDir::homePath() : m_lastScanDir,
-                                                        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-
-    if (!dirPath.isEmpty())
-    {
+        m_lastScanDir.isEmpty() ? QDir::homePath() : m_lastScanDir,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (!dirPath.isEmpty()) {
         m_lastScanDir = dirPath;
-        ui->selectedDirectoryPathLabel->setText(tr("Selected directory: %1").arg(dirPath));
-        populateDirectoryScanResults(dirPath);
+        ui->selectedDirectoryPathLabel->setText(tr("Directory: %1").arg(dirPath));
+        m_dirScanner->setFileExtensions(m_scanFileExtensions);
+        m_dirScanner->setConversionPattern(m_conversionPattern);
+        m_dirScanner->scan(dirPath);
     }
-}
-
-void MainWindow::populateDirectoryScanResults(const QString &directoryPath)
-{
-    ui->directoryScanResultsTree->clear();
-    m_filePathToTreeItemMap.clear();
-    m_filesToStatQueue.clear();
-
-    QDir rootDir(directoryPath);
-    if (!rootDir.exists())
-    {
-        ui->selectedDirectoryPathLabel->setText(tr("Selected directory: %1 (Does not exist)").arg(directoryPath));
-        return;
-    }
-    ui->selectedDirectoryPathLabel->setText(tr("Scanning: %1").arg(directoryPath));
-
-    qint64 dummySizeAccumulator = 0;
-    scanDirectoryRecursive(rootDir, ui->directoryScanResultsTree->invisibleRootItem(), dummySizeAccumulator);
-
-    ui->directoryScanResultsTree->expandAll();
-
-    startNextFileStatScan();
-}
-
-void MainWindow::scanDirectoryRecursive(QDir &currentDir, QTreeWidgetItem *parentItem, qint64 &totalSizeAccumulator)
-{
-    currentDir.setFilter(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
-    currentDir.setSorting(QDir::Name | QDir::DirsFirst);
-
-    QFileInfoList entries = currentDir.entryInfoList();
-
-    for (const QFileInfo &entryInfo : entries)
-    {
-        if (entryInfo.isDir())
-        {
-            QTreeWidgetItem *dirItem = new QTreeWidgetItem(parentItem);
-            dirItem->setText(0, entryInfo.fileName());
-            dirItem->setToolTip(0, entryInfo.filePath()); // Tooltip for directory
-            for (int i = 1; i <= 6; ++i)
-            {
-                dirItem->setText(i, "N/A");
-            }
-            qint64 directorySize = 0;
-            auto subdir = QDir(entryInfo.filePath());
-            scanDirectoryRecursive(subdir, dirItem, directorySize);
-            dirItem->setText(7, QLocale().toString(directorySize));
-            totalSizeAccumulator += directorySize;
-        }
-        else if (entryInfo.isFile())
-        {
-            QString suffixLower = entryInfo.suffix().toLower();
-            bool extensionMatch = false;
-            if (m_scanFileExtensions.isEmpty())
-            {
-                extensionMatch = (suffixLower == "log" || suffixLower == "txt");
-            }
-            else
-            {
-                for (const QString &configuredExt : m_scanFileExtensions)
-                {
-                    if (suffixLower == configuredExt)
-                    {
-                        extensionMatch = true;
-                        break;
-                    }
-                }
-            }
-
-            if (extensionMatch)
-            {
-                QTreeWidgetItem *fileItem = new QTreeWidgetItem(parentItem);
-                fileItem->setText(0, entryInfo.fileName());
-                // Initial tooltip: just the file path. Will be enhanced later.
-                fileItem->setToolTip(0, entryInfo.filePath());
-                fileItem->setData(0, Qt::UserRole, entryInfo.filePath());
-
-                qint64 fileSize = entryInfo.size();
-                fileItem->setText(7, QLocale().toString(fileSize));
-                totalSizeAccumulator += fileSize;
-
-                m_filePathToTreeItemMap.insert(entryInfo.filePath(), fileItem);
-                m_filesToStatQueue.append(entryInfo.filePath());
-
-                fileItem->setText(1, tr("Queued..."));
-                for (int i = 2; i <= 6; ++i)
-                    fileItem->setText(i, "-");
-            }
-        }
-    }
-}
-
-void MainWindow::startNextFileStatScan()
-{
-    if (m_fileStatWatcher.isRunning() || m_filesToStatQueue.isEmpty())
-    {
-        return;
-    }
-
-    QString filePathToProcess = m_filesToStatQueue.takeFirst();
-    QTreeWidgetItem *item = m_filePathToTreeItemMap.value(filePathToProcess);
-    if (item)
-    {
-        for (int i = 1; i <= 6; ++i)
-        {
-            item->setText(i, tr("Scanning..."));
-        }
-    }
-
-    QFuture<QPair<LogParser::FileStats, QString>> future = QtConcurrent::run([this, filePathToProcess]()
-                                                                             {
-        LogParser::FileStats stats = m_statParser->analyzeFileForStats(filePathToProcess);
-        return qMakePair(stats, filePathToProcess); });
-    m_fileStatWatcher.setFuture(future);
-}
-
-void MainWindow::handleFileStatProcessed()
-{
-    if (!m_fileStatWatcher.future().isValid())
-    {
-        qWarning() << "Future is not valid in handleFileStatProcessed";
-        startNextFileStatScan();
-        return;
-    }
-
-    QPair<LogParser::FileStats, QString> resultPair = m_fileStatWatcher.result();
-    const LogParser::FileStats &stats = resultPair.first;
-    const QString &filePath = resultPair.second;
-
-    QTreeWidgetItem *item = m_filePathToTreeItemMap.value(filePath);
-    if (item)
-    {
-        QString generalStyle = "style='font-size: 9pt;'";
-        QString boldStyle = "style='font-size: 9pt; font-weight: bold;'";
-
-        // Determine if the tooltip background is likely light or dark.
-        // Tooltips typically follow the application style. Assume light background for now if not certain.
-        // QToolTip::palette().color(QPalette::ToolTipBase) // This is more accurate for tooltip bg
-        // QToolTip::palette().color(QPalette::ToolTipText) // This is more accurate for tooltip text
-        // For simplicity, let's assume tooltip text color is similar to general app text color for this heuristic.
-        bool tooltipTextIsLight = QToolTip::palette().color(QPalette::ToolTipText).lightnessF() > 0.5;
-
-        QColor fatalColorBase = LogModel::defaultColorForLevel(LogLevel::Fatal);
-        QColor errorColorBase = LogModel::defaultColorForLevel(LogLevel::Error);
-        QColor warnColorBase = LogModel::defaultColorForLevel(LogLevel::Warn);
-
-        LogModel *currentModel = nullptr;
-        if (m_activeLogView)
-            currentModel = m_activeLogView->model();
-        if (currentModel)
-        {
-            fatalColorBase = currentModel->getLogLevelColor(LogLevel::Fatal);
-            errorColorBase = currentModel->getLogLevelColor(LogLevel::Error);
-            warnColorBase = currentModel->getLogLevelColor(LogLevel::Warn);
-        }
-
-        // Adapt color for text based on tooltip's text color (light on dark, dark on light)
-        auto adaptColorForText = [&](const QColor &base)
-        {
-            if (tooltipTextIsLight)
-            {                             // Light text on dark tooltip background
-                return base.lighter(120); // Make color lighter to show on dark bg
-            }
-            else
-            {                            // Dark text on light tooltip background
-                return base.darker(150); // Make color darker to show on light bg
-            }
-        };
-
-        QString fatalColorText = adaptColorForText(fatalColorBase).name();
-        QString errorColorText = adaptColorForText(errorColorBase).name();
-        QString warnColorText = adaptColorForText(warnColorBase).name();
-
-        QString tooltipText = QString("<table %1>").arg(generalStyle);
-        tooltipText += QString("<tr><td %1>File:</td><td>%2</td></tr>").arg(boldStyle).arg(QFileInfo(filePath).fileName());
-        tooltipText += QString("<tr><td %1>Path:</td><td>%2</td></tr>").arg(boldStyle).arg(filePath);
-
-        if (stats.parseSuccess)
-        {
-            item->setText(1, QString::number(stats.totalEntries));
-            item->setText(2, stats.firstEntryTimestamp.isValid() ? stats.firstEntryTimestamp.toString("yyyy-MM-dd HH:mm:ss") : "N/A");
-            item->setText(3, stats.lastEntryTimestamp.isValid() ? stats.lastEntryTimestamp.toString("yyyy-MM-dd HH:mm:ss") : "N/A");
-            item->setText(4, QString::number(stats.warnCount));
-            item->setText(5, QString::number(stats.errorCount));
-            item->setText(6, QString::number(stats.fatalCount));
-
-            tooltipText += QString("<tr><td %1>Total Entries:</td><td>%2</td></tr>").arg(boldStyle).arg(stats.totalEntries);
-            tooltipText += QString("<tr><td %1>First Entry:</td><td>%2</td></tr>").arg(boldStyle).arg(stats.firstEntryTimestamp.isValid() ? stats.firstEntryTimestamp.toString("yyyy-MM-dd HH:mm:ss") : "N/A");
-            tooltipText += QString("<tr><td %1>Last Entry:</td><td>%2</td></tr>").arg(boldStyle).arg(stats.lastEntryTimestamp.isValid() ? stats.lastEntryTimestamp.toString("yyyy-MM-dd HH:mm:ss") : "N/A");
-            tooltipText += QString("<tr><td %1 style='color: %2;'>Warnings:</td><td style='color: %2;'>%3</td></tr>").arg(boldStyle).arg(warnColorText).arg(stats.warnCount);
-            tooltipText += QString("<tr><td %1 style='color: %2;'>Errors:</td><td style='color: %2;'>%3</td></tr>").arg(boldStyle).arg(errorColorText).arg(stats.errorCount);
-            tooltipText += QString("<tr><td %1 style='color: %2;'>Fatals:</td><td style='color: %2;'>%3</td></tr>").arg(boldStyle).arg(fatalColorText).arg(stats.fatalCount);
-        }
-        else
-        {
-            for (int i = 1; i <= 6; ++i)
-            {
-                item->setText(i, tr("Parse Failed"));
-            }
-            tooltipText += QString("<tr><td %1 colspan='2'>Parse Failed</td></tr>").arg(boldStyle);
-        }
-        tooltipText += QString("<tr><td %1>Size:</td><td>%2 Bytes</td></tr>").arg(boldStyle).arg(QLocale().toString(QFileInfo(filePath).size()));
-        tooltipText += "</table>";
-        item->setToolTip(0, tooltipText);
-    }
-    else
-    {
-        qWarning() << "Could not find tree item for path:" << filePath;
-    }
-
-    startNextFileStatScan();
-}
-
-void MainWindow::onDirectoryTreeItemDoubleClicked(QTreeWidgetItem *item, int column)
-{
-    Q_UNUSED(column);
-    if (!item || item->childCount() > 0)
-        return;
-
-    QString filePath = item->data(0, Qt::UserRole).toString();
-    if (filePath.isEmpty())
-    {
-        filePath = item->toolTip(0);
-    }
-
-    if (!filePath.isEmpty() && QFile::exists(filePath))
-    {
-        LogViewWidget *view = nullptr;
-        int tabIndex = -1;
-
-        if (ui->tabWidget->count() == 0 ||
-            ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
-        {
-            view = createLogViewWidget();
-            tabIndex = ui->tabWidget->addTab(view, QFileInfo(filePath).fileName());
-            ui->tabWidget->setCurrentIndex(tabIndex);
-        }
-        else
-        {
-            view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
-            if (!view)
-            {
-                view = createLogViewWidget();
-                tabIndex = ui->tabWidget->addTab(view, QFileInfo(filePath).fileName());
-                ui->tabWidget->setCurrentIndex(tabIndex);
-            }
-            else
-            {
-                if (m_activeLogView != view)
-                    connectToLogView(view);
-            }
-        }
-
-        if (view)
-        {
-            view->addLogFile(filePath);
-            int currentTabIndex = ui->tabWidget->indexOf(view);
-            if (currentTabIndex != -1)
-            {
-                ui->tabWidget->setTabText(currentTabIndex, QFileInfo(filePath).fileName());
-                ui->tabWidget->setTabToolTip(currentTabIndex, filePath);
-            }
-        }
-    }
-}
-
-void MainWindow::onDirectoryTreeContextMenuRequested(const QPoint &pos)
-{
-    QList<QTreeWidgetItem *> selectedItems = ui->directoryScanResultsTree->selectedItems();
-    if (selectedItems.isEmpty())
-    {
-        return;
-    }
-
-    QStringList filesToOpen;
-    for (QTreeWidgetItem *item : selectedItems)
-    {
-        if (item && item->childCount() == 0)
-        {
-            QString filePath = item->data(0, Qt::UserRole).toString();
-            if (filePath.isEmpty())
-                filePath = item->toolTip(0);
-            if (!filePath.isEmpty() && QFile::exists(filePath))
-            {
-                filesToOpen.append(filePath);
-            }
-        }
-    }
-
-    if (filesToOpen.isEmpty())
-    {
-        return;
-    }
-
-    QMenu contextMenu(this);
-    QAction *openAction = contextMenu.addAction(tr("Open Selected Files (%1)").arg(filesToOpen.count()));
-
-    connect(openAction, &QAction::triggered, this, [this, filesToOpen]()
-            { this->onOpenSelectedDirectoryFiles(filesToOpen); });
-
-    contextMenu.exec(ui->directoryScanResultsTree->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
@@ -1638,11 +1340,13 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
     QString tabText;
     QString tabToolTip;
 
-    if (fileCountInView == 1 && !view->loadedFiles().isEmpty())
+    if (fileCountInView == 1)
     {
-        const auto &logFile = view->loadedFiles().first();
-        tabText = logFile->shortName();
-        tabToolTip = logFile->filePath;
+        // Use the path from filePaths instead of loadedFiles().first() to avoid
+        // crashing if the async load hasn't populated the model yet.
+        QString loadedPath = filePaths.first();
+        tabText = QFileInfo(loadedPath).fileName();
+        tabToolTip = loadedPath;
     }
     else if (fileCountInView > 1)
     {

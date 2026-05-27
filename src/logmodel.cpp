@@ -301,16 +301,10 @@ QColor LogModel::getLogLevelColor(LogLevel level) const
     return m_logLevelColors.value(level, DEFAULT_BACKGROUND_COLOR);
 }
 
+#include "logcolors.h"
+
 QColor LogModel::defaultColorForLevel(LogLevel level) {
-    switch (level) {
-        case LogLevel::Fatal:   return QColor(Qt::darkRed).darker(120); // Even darker red for fatal
-        case LogLevel::Error:   return Qt::red;
-        case LogLevel::Warn:    return QColor(Qt::yellow).darker(150); // Darker yellow for better visibility
-        case LogLevel::Info:    return Qt::blue;
-        case LogLevel::Debug:   return Qt::gray;
-        case LogLevel::Trace:   return QColor(Qt::lightGray).darker(110);
-        default:                return Qt::black; // Fallback
-    }
+    return LogColors::forLevel(level);
 }
 
 // ---------------------------------------------------------------------------
