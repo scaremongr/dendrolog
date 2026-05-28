@@ -12,7 +12,7 @@
 #include <QPainter>
 #include <QApplication>
 #include <algorithm>
-#include "logcolors.h"
+#include "apptheme.h"
 
 class ScannerDelegate : public QStyledItemDelegate {
 public:
@@ -54,10 +54,11 @@ public:
 
         // Colored badge rectangles — always the same colors regardless of selection,
         // so text is always readable on any background.
-        static const QColor warnBadge(175, 125,   0);  // dark amber
-        static const QColor errBadge (175,  45,  45);  // medium red
-        static const QColor fatBadge (110,   0,   0);  // dark crimson
-        const QColor sepCol = QColor(130, 130, 130);
+        const AppTheme& theme     = AppTheme::instance();
+        const QColor& warnBadge   = theme.treeBadgeWarn;
+        const QColor& errBadge    = theme.treeBadgeError;
+        const QColor& fatBadge    = theme.treeBadgeFatal;
+        const QColor& sepCol      = theme.treeBadgeSep;
 
         const QFontMetrics fm = painter->fontMetrics();
         const int hPad   = 2;   // horizontal padding inside badge

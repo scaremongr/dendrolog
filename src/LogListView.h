@@ -126,6 +126,26 @@ private:
     bool m_wordWrapEnabled = false; // состояние по умолчанию для всех строк
     bool m_inUpdateGeometries = false; // предотвращение рекурсии
 
+    // ========== Левый отступ для маркера начала элемента ==========
+    static constexpr int kLeftMarginWidth = 12; // Ширина полоски слева, где рисуется "›"
+
+    // ========== Константы геометрии и отрисовки ==========
+    // Именование устраняет magic numbers и делает связи между функциями явными.
+    static constexpr int kLineVerticalPadding = 2; // вертикальный зазор строки сверху+снизу (добавляется к m_lineHeight)
+    static constexpr int kTextPaddingX        = 4; // отступ текстового контента от левого (и правого) края text rect
+    static constexpr int kTextBadgeGap        = 8; // зазор между правым краем текста и ближайшей плашкой
+    static constexpr int kBadgeHPadding       = 10; // суммарный горизонтальный внутренний отступ плашки (5px слева + 5px справа)
+    static constexpr int kBadgeGap            = 4;  // зазор между соседними плашками (и от края viewport до последней)
+
+    // ========== Geometry helpers — единственная точка правды о геометрии столбцов viewport ==========
+    // Все, кто хочет знать «где начинается текст» или «как мышь→символ», идут сюда.
+    // Добавить второй желобок = изменить textAreaLeft() и paintGutter(). Ничего больше.
+    int textAreaLeft() const;                                          // X начала текстовой области
+    int viewportToTextX(int viewportX) const;                          // viewport-X → text-local-X
+    QRect textAreaScreenRect(int y, int height, int badgesWidth) const; // экранный rect текстовой области
+    void paintGutter(QPainter& painter, int row, QRect gutterRect);    // отрисовка всего содержимого желобка
+    int singleRowHeight() const;                                       // m_lineHeight + kLineVerticalPadding
+
     // ========== Кэш метрик моноширинного шрифта ==========
     qreal m_charWidth = 8.0; // Ширина одного символа (дробная для точного позиционирования)
     int m_lineHeight = 16;   // Высота строки
