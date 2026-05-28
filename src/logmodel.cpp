@@ -301,10 +301,10 @@ QColor LogModel::getLogLevelColor(LogLevel level) const
     return m_logLevelColors.value(level, DEFAULT_BACKGROUND_COLOR);
 }
 
-#include "logcolors.h"
+#include "apptheme.h"
 
 QColor LogModel::defaultColorForLevel(LogLevel level) {
-    return LogColors::forLevel(level);
+    return AppTheme::instance().forLevel(level);
 }
 
 // ---------------------------------------------------------------------------

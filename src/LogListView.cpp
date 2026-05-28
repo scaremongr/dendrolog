@@ -1,5 +1,6 @@
 #include "LogListView.h"
 #include "logmodel.h"
+#include "apptheme.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -256,7 +257,7 @@ void LogListView::updateFontMetricsCache() {
 
 // Фиксированная высота строки для QListView — предотвращает O(N) вычисления внутри базового класса
 int LogListView::sizeHintForRow(int) const {
-    return m_lineHeight + 2;
+    return singleRowHeight();
 }
 
 // ============================================================================
@@ -303,7 +304,7 @@ RowState LogListView::getRowState(int row) const {
 // O(1) при заполненном кэше высот, оиначе fallback на полный RowState
 int LogListView::getRowHeight(int row) const {
     if (m_uniformHeights) {
-        return m_lineHeight + 2;  // O(1) — однострочный режим
+        return singleRowHeight();  // O(1) — однострочный режим
     }
     if (!m_heightsDirty && row >= 0 && row < m_rowHeights.size() && m_rowHeights[row] > 0) {
         return m_rowHeights[row];
@@ -311,10 +312,55 @@ int LogListView::getRowHeight(int row) const {
     return getRowState(row).height;
 }
 
+// ============================================================================
+// Geometry helpers — единственная точка правды о геометрии столбцов viewport
+// ============================================================================
+
+// Суммарная ширина всех левых желобков. Чтобы добавить второй желобок —
+// достаточно изменить это значение и добавить отрисовку в paintGutter().
+int LogListView::textAreaLeft() const {
+    return kLeftMarginWidth;
+}
+
+// Высота одной строки в пикселях (единственный источник — используется вместо повсеместного m_lineHeight + 2)
+int LogListView::singleRowHeight() const {
+    return m_lineHeight + kLineVerticalPadding;
+}
+
+// Явное пересечение границы систем координат: viewport-X → text-local-X.
+// Все функции hit-test/mouse используют только это преобразование.
+int LogListView::viewportToTextX(int viewportX) const {
+    return viewportX - textAreaLeft();
+}
+
+// Единственный источник экранного прямоугольника текстовой области строки.
+// badgesWidth — суммарная ширина плашек справа (из state.badgesWidth).
+QRect LogListView::textAreaScreenRect(int y, int height, int badgesWidth) const {
+    const int x = textAreaLeft();
+    return QRect(x, y, qMax(0, viewport()->width() - x - badgesWidth - kTextBadgeGap), height);
+}
+
+// Отрисовка всего содержимого желобка для строки row.
+// gutterRect — прямоугольник желобка в координатах viewport (x=0 .. textAreaLeft()).
+// Добавить второй маркер или номер строки — только здесь.
+void LogListView::paintGutter(QPainter& painter, int row, QRect gutterRect) {
+    Q_UNUSED(row)
+    painter.save();
+    painter.setPen(AppTheme::instance().gutterMarker);
+    // Маркер начала записи "›", выровненный по первой строке элемента
+    QRect markerRect(gutterRect.left(), gutterRect.top(),
+                     gutterRect.width() - 1, singleRowHeight());
+    painter.drawText(markerRect, Qt::AlignVCenter | Qt::AlignHCenter,
+                     QStringLiteral("\u203A"));
+    painter.restore();
+}
+
 RowState LogListView::computeRowState(int row) const {
     RowState state;
     state.row = row;
     state.viewportWidth = viewport()->width();
+    // Текстовая область начинается после всех левых желобков
+    const int effectiveVpWidth = state.viewportWidth - textAreaLeft();
     state.text = model()->data(model()->index(row, 0)).toString();
     m_rowTextLengths[row] = state.text.length();  // кэшируем длину — пережнвает resize
     const bool expandedRow = isRowMultiLine(row);
@@ -327,12 +373,11 @@ RowState LogListView::computeRowState(int row) const {
     int fileBadgeWidth = 0;
     QVariant fileBadgeVar = model()->data(model()->index(row, 0), LogModel::FileBadgeRole);
     if (fileBadgeVar.isValid()) {
-        fileBadgeWidth = fm.horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + 10 + 4;
+        fileBadgeWidth = fm.horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + kBadgeHPadding + kBadgeGap;
     }
-    int textBadgeGap = 8;
-    const int collapseBadgeWidth = fm.horizontalAdvance(QStringLiteral("-")) + 10 + 4;
-    const int hiddenToggleBadgeWidth = fm.horizontalAdvance("+9999") + 10 + 4; // максимальная оценка для HiddenToggle
-    const int baseAvailableTextWidth = state.viewportWidth - fileBadgeWidth - textBadgeGap;
+    const int collapseBadgeWidth = fm.horizontalAdvance(QStringLiteral("-")) + kBadgeHPadding + kBadgeGap;
+    const int hiddenToggleBadgeWidth = fm.horizontalAdvance("+9999") + kBadgeHPadding + kBadgeGap; // максимальная оценка для HiddenToggle
+    const int baseAvailableTextWidth = effectiveVpWidth - fileBadgeWidth - kTextBadgeGap;
     const int fullTextWidth = calculateWidth(QStringView(state.text));
 
     state.showCollapseBadge = expandedRow && (forceCollapseBadge ||
@@ -345,7 +390,7 @@ RowState LogListView::computeRowState(int row) const {
         estimatedBadgesWidth += hiddenToggleBadgeWidth;
     }
 
-    int availableTextWidth = state.viewportWidth - estimatedBadgesWidth - textBadgeGap;
+    int availableTextWidth = effectiveVpWidth - estimatedBadgesWidth - kTextBadgeGap;
     state.multiLine = expandedRow && availableTextWidth > 0 && fullTextWidth > availableTextWidth;
     
     // Шаг 2: Вычисляем высоту с учётом реальной доступной ширины
@@ -363,7 +408,7 @@ RowState LogListView::computeRowState(int row) const {
     }
     
     // Шаг 5: Область для текста (с зазором перед плашками)
-    state.textRect = QRect(0, 0, state.viewportWidth - state.badgesWidth - textBadgeGap, state.height);
+    state.textRect = QRect(0, 0, effectiveVpWidth - state.badgesWidth - kTextBadgeGap, state.height);
     
     // Шаг 6: Вычисляем видимые символы для однострочного режима
     if (!state.multiLine) {
@@ -389,18 +434,18 @@ RowState LogListView::computeRowState(int row) const {
 
 int LogListView::computeRowHeight(const QString& text, bool multiLine, int availableWidth) const {
     if (!multiLine) {
-        return m_lineHeight + 2;
+        return singleRowHeight();
     }
     
     // Для моноширинного шрифта — простая арифметика O(1)
-    int lineWidth = (availableWidth > 0) ? availableWidth - 8 : viewport()->width() - 8;
+    int lineWidth = (availableWidth > 0) ? availableWidth - 2 * kTextPaddingX : viewport()->width() - textAreaLeft() - 2 * kTextPaddingX;
     if (lineWidth <= 0) lineWidth = 100;  // fallback
     
     int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
     int lineCount = (text.length() + charsPerLine - 1) / charsPerLine;
     if (lineCount < 1) lineCount = 1;
     
-    return lineCount * m_lineHeight + 2;
+    return lineCount * m_lineHeight + kLineVerticalPadding;
 }
 
 // ============================================================================
@@ -429,7 +474,7 @@ void LogListView::rebuildHeightCache() {
         return;
     }
 
-    const int singleRowH = m_lineHeight + 2;
+    const int singleRowH = singleRowHeight();
 
     // БЫСТРЫЙ ПУТЬ: При выключенном WordWrap (и если нет локально развернутых строк)
     // общая высота - это просто (количество строк * высоту 1 строки). 
@@ -446,9 +491,8 @@ void LogListView::rebuildHeightCache() {
     m_uniformHeights = false;
     m_rowHeights.resize(rows);
 
-    const int textBadgeGap = 8;
     const int vpWidth = viewport()->width();
-    const int toggleDashW = QFontMetrics(font()).horizontalAdvance(QChar('-')) + 10 + 4;
+    const int toggleDashW = QFontMetrics(font()).horizontalAdvance(QChar('-')) + kBadgeHPadding + kBadgeGap;
     const bool vpCacheValid = (m_cachedViewportWidth == vpWidth);
 
     // Забираем кэш длины строк напрямик (минуя тормозящий model()->data()),
@@ -462,7 +506,7 @@ void LogListView::rebuildHeightCache() {
     }
 
     // Вычисляем сколько символов МОНОШИРИННОГО шрифта помещается в одну строку на экране
-    int lineWidth = vpWidth - toggleDashW - textBadgeGap - 8;
+    int lineWidth = vpWidth - textAreaLeft() - toggleDashW - kTextBadgeGap - 2 * kTextPaddingX;
     if (lineWidth <= 0) lineWidth = 100;
     const int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
 
@@ -476,7 +520,7 @@ void LogListView::rebuildHeightCache() {
         } else if (m_rowTextLengths.contains(i)) {
             // Быстрый математический расчет высоты при переносе (длина / вместимость ширины)
             const int lineCount = qMax(1, (m_rowTextLengths[i] + charsPerLine - 1) / charsPerLine);
-            m_rowHeights[i] = lineCount * m_lineHeight + 2;
+            m_rowHeights[i] = lineCount * m_lineHeight + kLineVerticalPadding;
         } else {
             // Заглушка, если кэш оборвался (практически не вызывается)
             m_rowHeights[i] = singleRowH * 3;
@@ -501,7 +545,7 @@ void LogListView::rebuildPrefixSums() {
 // O(1): Y-позиция начала строки row
 int LogListView::rowYOffset(int row) const {
     if (m_uniformHeights) {
-        return row * (m_lineHeight + 2);  // O(1) — однострочный режим
+        return row * singleRowHeight();  // O(1) — однострочный режим
     }
     if (!m_heightsDirty && row >= 0 && row < m_rowPrefixY.size()) {
         return m_rowPrefixY[row];
@@ -521,7 +565,7 @@ int LogListView::rowAtY(int contentY) const {
     if (rows == 0) return 0;
 
     if (m_uniformHeights) {
-        const int h = m_lineHeight + 2;
+        const int h = singleRowHeight();
         return qBound(0, contentY / h, rows - 1);  // O(1) — однострочный режим
     }
 
@@ -632,6 +676,7 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
     
     QList<BadgeSpec> specs;
     hiddenCount = 0;
+    const AppTheme& theme = AppTheme::instance();
 
     // Информационная плашка файла.
     // Модель возвращает QVariant() если файл один — показывать нечего.
@@ -643,7 +688,7 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
         b.type = BadgeType::Info;
         b.text  = map["text"].toString();
         b.bg    = map["color"].value<QColor>();
-        b.fg    = Qt::white;
+        b.fg    = theme.badgeFg;
         specs.append(b);
     }
 
@@ -652,8 +697,8 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
         BadgeSpec b;
         b.type = BadgeType::HiddenToggle;
         b.text = QStringLiteral("-");
-        b.bg = QColor(0, 120, 215);
-        b.fg = QColor(Qt::white);
+        b.bg = theme.badgeBg;
+        b.fg = theme.badgeFg;
         specs.prepend(b);
     } else if (!multiLine) {
         // Для моноширинного шрифта — точный расчёт O(1)
@@ -668,8 +713,8 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
                 BadgeSpec b;
                 b.type = BadgeType::HiddenToggle;
                 b.text = QStringLiteral("+") + QString::number(hiddenCount);
-                b.bg = QColor(0, 120, 215);
-                b.fg = QColor(Qt::white);
+                b.bg = theme.badgeBg;
+                b.fg = theme.badgeFg;
                 specs.prepend(b);
             }
         }
@@ -683,16 +728,15 @@ QList<BadgeLayout> LogListView::layoutBadges(const QList<BadgeSpec>& specs, int 
     if (specs.isEmpty()) return layouts;
 
     QFontMetrics fm(font());
-    int gap = 4;
     int vpWidth = viewport()->width();
-    int x = vpWidth - gap;
+    int x = vpWidth - kBadgeGap;
     
     for (int i = specs.size() - 1; i >= 0; --i) {
         const auto& spec = specs[i];
-        int w = fm.horizontalAdvance(spec.text) + 10;
+        int w = fm.horizontalAdvance(spec.text) + kBadgeHPadding;
         int h = fm.height() - 2;
         QRect r(x - w + 1, rowHeight / 2 - h / 2, w, h);
-        x = r.left() - gap;
+        x = r.left() - kBadgeGap;
         layouts.prepend({spec, r});
     }
     return layouts;
@@ -738,7 +782,7 @@ QList<TextFragment> LogListView::splitTextIntoLines(const QString& text, const Q
     // Для моноширинного шрифта — простое разбиение по количеству символов
     QList<TextFragment> fragments;
     
-    int lineWidth = rect.width() - 8;
+    int lineWidth = rect.width() - 2 * kTextPaddingX;
     if (lineWidth <= 0) lineWidth = 100;
     
     int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
@@ -753,7 +797,7 @@ QList<TextFragment> LogListView::splitTextIntoLines(const QString& text, const Q
         fragment.startPos = pos;
         fragment.length = lineLen;
         fragment.text = QStringView(text).sliced(pos, lineLen);
-        fragment.rect = QRect(rect.left() + 4, y, lineWidth, m_lineHeight);
+        fragment.rect = QRect(rect.left() + kTextPaddingX, y, lineWidth, m_lineHeight);
         fragments.append(fragment);
         
         pos += lineLen;
@@ -766,7 +810,7 @@ QList<TextFragment> LogListView::splitTextIntoLines(const QString& text, const Q
         fragment.startPos = 0;
         fragment.length = 0;
         fragment.text = QStringView();
-        fragment.rect = QRect(rect.left() + 4, rect.top() + 1, lineWidth, m_lineHeight);
+        fragment.rect = QRect(rect.left() + kTextPaddingX, rect.top() + 1, lineWidth, m_lineHeight);
         fragments.append(fragment);
     }
     
@@ -795,7 +839,8 @@ int LogListView::getTextPositionFromMouse(const QPoint& mousePos, const RowState
         for (const auto& fragment : fragments) {
             QRect fragRect = fragment.rect;
             if (mousePos.y() >= fragRect.top() && mousePos.y() <= fragRect.bottom()) {
-                int x = mousePos.x() - fragRect.left();
+                // Переходим из viewport-X в text-local-X через viewportToTextX()
+                int x = viewportToTextX(mousePos.x()) - fragRect.left();
                 int closest = getCharIndexAt(fragment.text, x);
                 return fragment.startPos + closest;
             }
@@ -804,7 +849,8 @@ int LogListView::getTextPositionFromMouse(const QPoint& mousePos, const RowState
         return state.text.length();
     } else {
         // Однострочный режим — ограничиваем выделение видимыми символами
-        int x = mousePos.x() - 4;
+        // Переходим из viewport-X в text-local-X, затем вычитаем 4px внутренний отступ текста
+        int x = viewportToTextX(mousePos.x()) - kTextPaddingX;
         int pos = getCharIndexAt(QStringView(state.text), x);
         // Ограничиваем позицию количеством видимых символов
         return qMin(pos, state.visibleChars);
@@ -818,14 +864,15 @@ void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QStrin
     
     if (state.multiLine) {
         for (const auto& fragment : state.fragments) {
-            // Корректируем Y координаты относительно rect
-            int x = fragment.rect.left();
+            // Корректируем X: фрагменты хранятся в локальных координатах пикселя (0-based),
+            // rect.left() добавляет смещение до текстовой области (kLeftMarginWidth или 0 в пикселе)
+            int x = rect.left() + fragment.rect.left();
             int baseY = rect.top() + fragment.rect.top() + fontMetrics().height() - fontMetrics().descent();
             drawTextWithHighlights(painter, x, baseY, fragment.text, fragment.startPos, tokens);
         }
     } else {
         // Однострочный режим — рисуем только видимые символы
-        int x = rect.left() + 4;
+        int x = rect.left() + kTextPaddingX;
         int baseY = rect.bottom() - fontMetrics().descent() - 1;
         QStringView visibleText = QStringView(text).left(state.visibleChars);
         drawTextWithHighlights(painter, x, baseY, visibleText, 0, tokens);
@@ -845,10 +892,10 @@ void LogListView::drawSelectionHighlight(QPainter& painter, const QRect& rect, c
         if (selBegin == selFinish) return;
         
         QStringView textView(text);
-        int x1 = textWidthUntil(textView, selBegin) + 4;
-        int x2 = textWidthUntil(textView, selFinish) + 4;
+        int x1 = textWidthUntil(textView, selBegin) + kTextPaddingX;
+        int x2 = textWidthUntil(textView, selFinish) + kTextPaddingX;
         QRect selRect(rect.left() + x1, rect.top() + 1, x2 - x1, rect.height() - 2);
-        painter.fillRect(selRect, QColor(0, 120, 215, 120));
+        painter.fillRect(selRect, AppTheme::instance().selectionFill);
         return;
     }
 
@@ -878,12 +925,13 @@ void LogListView::drawSelectionHighlight(QPainter& painter, const QRect& rect, c
         fragSelEnd = std::min(fragment.length, fragSelEnd);
 
         if (fragSelEnd > fragSelStart) {
-            // Корректируем Y координаты относительно rect
-            int x1 = textWidthUntil(fragment.text, fragSelStart) + fragment.rect.left();
-            int x2 = textWidthUntil(fragment.text, fragSelEnd) + fragment.rect.left();
+            // rect.left() = kLeftMarginWidth (смещение текстовой области от края viewport),
+            // fragment.rect.left() = 4 (отступ текста внутри пикселя).
+            int x1 = rect.left() + textWidthUntil(fragment.text, fragSelStart) + fragment.rect.left();
+            int x2 = rect.left() + textWidthUntil(fragment.text, fragSelEnd) + fragment.rect.left();
             int fragY = rect.top() + fragment.rect.top();
             QRect selRect(x1, fragY, x2 - x1, fragment.rect.height());
-            painter.fillRect(selRect, QColor(0, 120, 215, 120));
+            painter.fillRect(selRect, AppTheme::instance().selectionFill);
         }
     }
 }
@@ -1009,13 +1057,15 @@ void LogListView::paintEvent(QPaintEvent *event) {
         if (rect.intersects(visibleRect)) {
             QModelIndex idx = model()->index(row, 0);
 
-            // Область текста (относительно экрана)
-            QRect textRect = rect.adjusted(0, 0, -state.badgesWidth - 8, 0);
+            QRect textRect = textAreaScreenRect(currentY, rowHeight, state.badgesWidth);
 
-            // Фон выделенной строки
+            // Фон выделенной строки (на всю ширину, включая левый желобок)
             if (selectionModel() && selectionModel()->isSelected(idx)) {
-                painter.fillRect(rect, QColor(0, 120, 215, 60));
+                painter.fillRect(rect, AppTheme::instance().selectionRowBg);
             }
+
+            // Левый желобок: маркер начала записи и любые будущие индикаторы
+            paintGutter(painter, row, QRect(0, currentY, textAreaLeft(), rowHeight));
 
             // Кэшированный растр ИЛИ прямая отрисовка — клипаем к textRect, чтобы текст не залезал на плашки
             QPixmap rowPixmap = getRowPixmap(row, state);
@@ -1046,7 +1096,7 @@ void LogListView::paintEvent(QPaintEvent *event) {
                 painter.setBrush(bl.spec.bg);
                 painter.drawRect(badgeRect);
                 painter.setPen(bl.spec.fg);
-                painter.drawText(badgeRect.adjusted(5, 0, -5, 0), Qt::AlignVCenter | Qt::AlignLeft, bl.spec.text);
+                painter.drawText(badgeRect.adjusted(kBadgeHPadding/2, 0, -kBadgeHPadding/2, 0), Qt::AlignVCenter | Qt::AlignLeft, bl.spec.text);
                 painter.restore();
             }
         }
@@ -1084,7 +1134,7 @@ void LogListView::leaveEvent(QEvent *event) {
 }
 
 int LogListView::estimateTotalHeightForDirtyCache(int rows) const {
-    const int singleRowH = m_lineHeight + 2;
+    const int singleRowH = singleRowHeight();
     if (rows <= 0) {
         return 0;
     }
@@ -1132,7 +1182,7 @@ void LogListView::updateScrollbar() {
 
     verticalScrollBar()->setRange(0, maxScroll);
     verticalScrollBar()->setPageStep(viewport()->height());
-    verticalScrollBar()->setSingleStep(m_lineHeight + 2);
+    verticalScrollBar()->setSingleStep(singleRowHeight());
 }
 
 // Обработка нажатия мыши для выделения текста
@@ -1400,6 +1450,7 @@ bool LogListView::viewportEvent(QEvent *event)
 
 QList<HighlightToken> LogListView::findHighlightTokens(const QString& text) const {
     QList<HighlightToken> tokens;
+    const AppTheme& theme = AppTheme::instance();
 
     // static: регулярное выражение компилируется один раз
     static const QRegularExpression re(R"((['"])(?:(?!\1|\\).|\\.)*\1|(?<![\w])(0x[0-9a-fA-F]+|\d+(?:[^\w\s]\d+)*))");
@@ -1413,9 +1464,9 @@ QList<HighlightToken> LogListView::findHighlightTokens(const QString& text) cons
         
         QString matchedText = match.captured();
         if (matchedText.startsWith('\'') || matchedText.startsWith('"')) {
-            token.color = QColor(200, 180, 0); // Желтый для строк
+            token.color = theme.syntaxString;
         } else {
-            token.color = Qt::darkGreen; // Зеленый для чисел
+            token.color = theme.syntaxNumber;
         }
         
         tokens.append(token);
