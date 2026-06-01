@@ -1,18 +1,19 @@
 #include "LogListView.h"
 #include "logmodel.h"
 #include "apptheme.h"
+#include "appsettings.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QApplication>
-#include <QRegularExpression>
 #include <QScrollBar>
 #include <QTextLayout>
 #include <QFontDatabase>
 #include <QTimer>
 #include <algorithm>
 #include <limits>
+#include "texttoken.h"
 
 // Кастомный виджет для отображения логов с подсветкой синтаксиса и поддержкой выделения текста
 LogListView::LogListView(QWidget *parent)
@@ -26,31 +27,13 @@ LogListView::LogListView(QWidget *parent)
     // Предотвращаем O(N) обход всех строк внутри QListView при resize/layout
     setUniformItemSizes(true);
     
-    // Устанавливаем моноширинный шрифт (обязателен для оптимизации)
-    // Выбираем шрифт с приоритетом: Cascadia Mono → Consolas → системный моноширинный
-    // Оба хорошо читаются, имеют нормальный вес и плотный кернинг
-    static const QStringList candidates = {
-        QStringLiteral("Cascadia Mono"),
-        QStringLiteral("Cascadia Code"),
-        QStringLiteral("Consolas"),
-    };
-    const QStringList available = QFontDatabase::families();
-    QFont monoFont;
-    bool found = false;
-    for (const QString& name : candidates) {
-        if (available.contains(name, Qt::CaseInsensitive)) {
-            monoFont = QFont(name);
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    }
-    monoFont.setPointSize(10);
-    monoFont.setWeight(QFont::Medium);  // чуть жирнее стандартного — лучше читаемость
+    // Применяем шрифт из настроек приложения (AppSettings::load() вызывается
+    // в MainWindow до создания виджетов, поэтому значение уже корректное).
+    QFont monoFont(AppSettings::instance().fontFamily());
+    monoFont.setPointSize(AppSettings::instance().fontSize());
+    monoFont.setWeight(QFont::Medium);
     setFont(monoFont);
-    updateFontMetricsCache();
+    // updateFontMetricsCache() вызовется через changeEvent(FontChange)
     
     // Подключаем сигнал скроллбара для плавной прокрутки
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
@@ -121,18 +104,18 @@ void LogListView::setModel(QAbstractItemModel *model) {
     if (model) {
         // Полная инвалидация при сбросе модели (фильтрация, setEntries и т.п.)
         // Запоминаем выделение ДО сброса модели.
-        // ВАЖНО: используем m_selRow, а не selectionModel()->currentIndex() —
+        // ВАЖНО: используем m_selection.anchorRow, а не selectionModel()->currentIndex() —
         // QItemSelectionModel подключён к modelAboutToBeReset раньше нас и к моменту
-        // вызова нашего слота уже очищает currentIndex. m_selRow не зависит от selectionModel.
+        // вызова нашего слота уже очищает currentIndex. anchorRow не зависит от selectionModel.
         connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
             m_pendingSelection.clear();
-            if (m_selRow < 0) return;
+            if (m_selection.anchorRow < 0) return;
             auto* logModel = qobject_cast<LogModel*>(this->model());
             if (!logModel) return;
             const auto& entries = logModel->filteredEntries();
-            if (m_selRow < entries.size()) {
-                m_pendingSelection.logicalEntryId = entries[m_selRow]->logicalEntryId;
-                m_pendingSelection.sourceFile = entries[m_selRow]->sourceFile.get();
+            if (m_selection.anchorRow < entries.size()) {
+                m_pendingSelection.logicalEntryId = entries[m_selection.anchorRow]->logicalEntryId;
+                m_pendingSelection.sourceFile = entries[m_selection.anchorRow]->sourceFile.get();
             }
         });
 
@@ -169,8 +152,8 @@ void LogListView::setModel(QAbstractItemModel *model) {
                 selectionModel()->setCurrentIndex(
                     this->model()->index(restoreRow, 0),
                     QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-                m_selRow = restoreRow;
-                
+                m_selection.anchorRow = m_selection.activeRow = restoreRow;
+
                 QTimer::singleShot(0, this, [this, restoreRow]() {
                     if (!this->model() || restoreRow >= this->model()->rowCount()) return;
                     
@@ -253,6 +236,25 @@ void LogListView::updateFontMetricsCache() {
     
     // Инвалидируем кэши при смене шрифта
     invalidateRowState(-1, /*preserveTextLengths=*/true);
+}
+
+// ---------------------------------------------------------------------------
+// changeEvent — реагирует на смену шрифта (например, при смене настроек).
+// updateFontMetricsCache() вызывается всегда; деferred-пересчёт высот —
+// только когда таймер уже создан (в конструкторе таймер создаётся после
+// setFont, поэтому при первичной установке шрифта пересчёт не нужен —
+// модели ещё нет).
+void LogListView::changeEvent(QEvent* event)
+{
+    QListView::changeEvent(event);
+    if (event->type() == QEvent::FontChange) {
+        updateFontMetricsCache();
+        if (m_heightUpdateTimer) {  // null during constructor — timer not yet created
+            invalidateRowState(-1, /*preserveTextLengths=*/true);
+            m_heightUpdateTimer->start(0);
+            viewport()->update();
+        }
+    }
 }
 
 // Фиксированная высота строки для QListView — предотвращает O(N) вычисления внутри базового класса
@@ -344,9 +346,9 @@ QRect LogListView::textAreaScreenRect(int y, int height, int badgesWidth) const 
 // gutterRect — прямоугольник желобка в координатах viewport (x=0 .. textAreaLeft()).
 // Добавить второй маркер или номер строки — только здесь.
 void LogListView::paintGutter(QPainter& painter, int row, QRect gutterRect) {
-    Q_UNUSED(row)
     painter.save();
-    painter.setPen(AppTheme::instance().gutterMarker);
+    const bool isNew = model()->data(model()->index(row, 0), LogModel::IsNewRole).toBool();
+    painter.setPen(isNew ? AppTheme::instance().gutterNewEntry : AppTheme::instance().gutterMarker);
     // Маркер начала записи "›", выровненный по первой строке элемента
     QRect markerRect(gutterRect.left(), gutterRect.top(),
                      gutterRect.width() - 1, singleRowHeight());
@@ -860,7 +862,7 @@ int LogListView::getTextPositionFromMouse(const QPoint& mousePos, const RowState
 // Основная отрисовка строки лога с подсветкой чисел и строк
 // Использует кэшированные фрагменты из RowState
 void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state) {
-    QList<HighlightToken> tokens = findHighlightTokens(text);
+    QList<HighlightToken> tokens = SyntaxHighlighter::tokenize(text);
     
     if (state.multiLine) {
         for (const auto& fragment : state.fragments) {
@@ -932,6 +934,104 @@ void LogListView::drawSelectionHighlight(QPainter& painter, const QRect& rect, c
             int fragY = rect.top() + fragment.rect.top();
             QRect selRect(x1, fragY, x2 - x1, fragment.rect.height());
             painter.fillRect(selRect, AppTheme::instance().selectionFill);
+        }
+    }
+}
+
+// Подсветка найденной парной скобки (рисуется поверх кэшированного растра строки)
+void LogListView::drawBracketHighlight(QPainter& painter, const QRect& textRect, const RowState& state) const
+{
+    const int pos = m_bracketMatch.pos;
+    const QColor& color = AppTheme::instance().bracketMatch;
+
+    if (!state.multiLine) {
+        if (pos >= state.visibleChars) return;
+        const QStringView text(state.text);
+        const int x1 = textRect.left() + kTextPaddingX + textWidthUntil(text, pos);
+        const int x2 = textRect.left() + kTextPaddingX + textWidthUntil(text, pos + 1);
+        painter.fillRect(x1, textRect.top() + 1, x2 - x1, textRect.height() - 2, color);
+    } else {
+        for (const auto& fragment : state.fragments) {
+            if (pos < fragment.startPos || pos >= fragment.startPos + fragment.length)
+                continue;
+            const int relPos = pos - fragment.startPos;
+            const int x1 = textRect.left() + fragment.rect.left() + textWidthUntil(fragment.text, relPos);
+            const int x2 = textRect.left() + fragment.rect.left() + textWidthUntil(fragment.text, relPos + 1);
+            const int y  = textRect.top()  + fragment.rect.top();
+            painter.fillRect(x1, y, x2 - x1, fragment.rect.height(), color);
+            break;
+        }
+    }
+}
+
+// Пересчитывает m_bracketMatch по текущему выделению.
+// Если выделена открывающая скобка — ищет парную закрывающую вперёд.
+// Если выделена закрывающая скобка — ищет парную открывающую назад.
+void LogListView::updateBracketMatch()
+{
+    m_bracketMatch.clear();
+
+    // Нас интересует ровно один символ, выделенный на одной строке
+    if (!m_selection.isValid() || m_selection.isEmpty() || m_selection.isMultiRow())
+        return;
+    if (std::abs(m_selection.anchorPos - m_selection.activePos) != 1)
+        return;
+    if (!model()) return;
+
+    const int selRow = m_selection.anchorRow;
+    const int selPos = m_selection.firstPos();
+    const QString rowText = model()->data(model()->index(selRow, 0)).toString();
+    if (selPos >= rowText.length()) return;
+
+    const QChar selChar = rowText[selPos];
+
+    // Определяем пару и направление поиска
+    QChar openChar, closeChar;
+    bool searchForward;
+    switch (selChar.unicode()) {
+        case '(': openChar = '('; closeChar = ')'; searchForward = true;  break;
+        case '{': openChar = '{'; closeChar = '}'; searchForward = true;  break;
+        case '<': openChar = '<'; closeChar = '>'; searchForward = true;  break;
+        case '[': openChar = '['; closeChar = ']'; searchForward = true;  break;
+        case ')': openChar = '('; closeChar = ')'; searchForward = false; break;
+        case '}': openChar = '{'; closeChar = '}'; searchForward = false; break;
+        case '>': openChar = '<'; closeChar = '>'; searchForward = false; break;
+        case ']': openChar = '['; closeChar = ']'; searchForward = false; break;
+        default: return;
+    }
+
+    constexpr int kMaxSearchRows = 2000;
+    int depth = 1;
+
+    if (searchForward) {
+        // Поиск вперёд: найти парную закрывающую скобку
+        for (int r = selRow; r <= selRow + kMaxSearchRows; ++r) {
+            if (r >= model()->rowCount()) break;
+            const QString text = (r == selRow) ? rowText
+                                               : model()->data(model()->index(r, 0)).toString();
+            const int startPos = (r == selRow) ? selPos + 1 : 0;
+            for (int p = startPos; p < text.length(); ++p) {
+                const QChar c = text[p];
+                if      (c == openChar)  { ++depth; }
+                else if (c == closeChar) {
+                    if (--depth == 0) { m_bracketMatch.row = r; m_bracketMatch.pos = p; return; }
+                }
+            }
+        }
+    } else {
+        // Поиск назад: найти парную открывающую скобку
+        for (int r = selRow; r >= selRow - kMaxSearchRows; --r) {
+            if (r < 0) break;
+            const QString text = (r == selRow) ? rowText
+                                               : model()->data(model()->index(r, 0)).toString();
+            const int endPos = (r == selRow) ? selPos - 1 : text.length() - 1;
+            for (int p = endPos; p >= 0; --p) {
+                const QChar c = text[p];
+                if      (c == closeChar) { ++depth; }
+                else if (c == openChar)  {
+                    if (--depth == 0) { m_bracketMatch.row = r; m_bracketMatch.pos = p; return; }
+                }
+            }
         }
     }
 }
@@ -1083,9 +1183,16 @@ void LogListView::paintEvent(QPaintEvent *event) {
             }
             
             // Если есть выделение текста - рисуем его поверх
-            if (row == m_selRow && m_selStart >= 0 && m_selEnd >= 0 && m_selStart != m_selEnd) {
-                drawSelectionHighlight(painter, textRect, state.text, m_selStart, m_selEnd, state);
+            if (m_selection.containsRow(row) && !m_selection.isEmpty()) {
+                int selStart = 0, selEnd = 0;
+                m_selection.rangeForRow(row, state.text.length(), selStart, selEnd);
+                if (selStart != selEnd)
+                    drawSelectionHighlight(painter, textRect, state.text, selStart, selEnd, state);
             }
+
+            // Подсветка найденной парной скобки
+            if (m_bracketMatch.isValid() && m_bracketMatch.row == row)
+                drawBracketHighlight(painter, textRect, state);
 
             // Рисуем плашки поверх (корректируем Y координаты относительно currentY)
             for (const auto& bl : state.badges) {
@@ -1232,25 +1339,14 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
         return false;
     };
 
-    // Начало выделения текста
+    // Начало выделения текста: устанавливаем якорь ДО вызова setCurrentIndex,
+    // чтобы currentChanged не сбросил только что созданное выделение.
     auto startTextSelection = [this](int row, const QPoint& localPos) {
-        const auto& state = getRowState(row);
+        const RowState& state = getRowState(row);
+        const int pos = getTextPositionFromMouse(localPos, state);
 
-        m_selRow = row;
-        m_selStart = getTextPositionFromMouse(localPos, state);
-        m_selEnd = m_selStart;
-
-        // Обновляем фрагменты для многострочного режима
-        if (state.multiLine) {
-            int fragIndex = getFragmentIndexForPosition(m_selStart, state.fragments);
-            m_selStartFragment = fragIndex;
-            m_selEndFragment = fragIndex;
-        } else {
-            m_selStartFragment = -1;
-            m_selEndFragment = -1;
-        }
-
-        m_selecting = true;
+        m_selection.start(row, pos);
+        m_bracketMatch.clear();
         if (selectionModel()) {
             selectionModel()->setCurrentIndex(model()->index(row, 0),
                 QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
@@ -1261,7 +1357,7 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
     // === Основная логика mousePressEvent ===
 
     // 1. Игнорируем если уже идёт выделение
-    if (m_selecting) return;
+    if (m_selection.isDragging) return;
 
     // 2. Определяем строку под курсором
     RowHitInfo hitInfo = getRowHitInfoFromMouse(event->pos());
@@ -1279,129 +1375,111 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
     startTextSelection(hitInfo.row, hitInfo.localPos);
 }
 
-// Обработка движения мыши для выделения текста (только в рамках одной строки)
-void LogListView::mouseMoveEvent(QMouseEvent *event) {
-    if (!m_selecting || m_selRow < 0) {
-        // Полностью игнорируем обычное движение мыши
-        return;
-    }
-
-    int oldSelEnd = m_selEnd;
-    
-    // Быстрый путь: используем кэшированные данные без полного getRowState
-    int scrollY = verticalScrollBar()->value();
-    int contentY = event->pos().y() + scrollY;
-
-    // Находим верхнюю координату текущей строки
-    int rowTop = 0;
-    int row = -1;
-    if (!getRowAtContentY(contentY, row, rowTop) || row != m_selRow) {
-        // Курсор вышел за пределы строки — O(1) по кэшу
-        rowTop = rowYOffset(m_selRow);
-    }
-
-    // Получаем состояние строки (из кэша, т.к. уже был вызван в mousePressEvent)
-    RowState state = getRowState(m_selRow);
-    
-    QPoint localPos(event->pos().x(), contentY - rowTop);
-    m_selEnd = getTextPositionFromMouse(localPos, state);
-
-    // Обновляем фрагмент для многострочного режима
-    if (state.multiLine) {
-        m_selEndFragment = getFragmentIndexForPosition(m_selEnd, state.fragments);
-    }
-
-    // Обновляем только если выделение действительно изменилось
-    if (m_selEnd != oldSelEnd) {
-        int rowY = rowTop - scrollY;
-        viewport()->update(QRect(0, rowY, viewport()->width(), state.height));
-    }
+// Обновляет только изменившийся диапазон строк в viewport.
+void LogListView::invalidateSelectionRange(int topRow, int bottomRow) {
+    const int scrollY = verticalScrollBar()->value();
+    const int topY    = rowYOffset(topRow) - scrollY;
+    const int botY    = rowYOffset(bottomRow) + getRowHeight(bottomRow) - scrollY;
+    viewport()->update(QRect(0, topY, viewport()->width(), botY - topY));
 }
 
-// Сброс состояния выделения при отпускании кнопки мыши
+// Обработка движения мыши — расширяет выделение на несколько строк.
+void LogListView::mouseMoveEvent(QMouseEvent *event) {
+    if (!m_selection.isDragging) return;
+
+    const int scrollY  = verticalScrollBar()->value();
+    const int contentY = event->pos().y() + scrollY;
+    const int rowCount = model() ? model()->rowCount() : 0;
+    if (rowCount == 0) return;
+
+    // Определяем строку под курсором с зажимом на границах контента
+    int newRow = -1, rowTop = 0;
+    if (contentY < 0) {
+        newRow = 0;
+        rowTop = 0;
+    } else if (!getRowAtContentY(contentY, newRow, rowTop)) {
+        newRow = rowCount - 1;
+        rowTop = rowYOffset(newRow);
+    }
+
+    const RowState& state   = getRowState(newRow);
+    const QPoint    localPos(event->pos().x(), contentY - rowTop);
+    const int       newPos  = getTextPositionFromMouse(localPos, state);
+
+    if (newRow == m_selection.activeRow && newPos == m_selection.activePos) return;
+
+    // Сохраняем старые границы для точечной перерисовки
+    const int oldTopRow    = m_selection.topRow();
+    const int oldBottomRow = m_selection.bottomRow();
+
+    m_selection.moveTo(newRow, newPos);
+
+    // Перерисовываем только строки, затронутые изменением
+    const int dirtyTop    = std::min(oldTopRow,    m_selection.topRow());
+    const int dirtyBottom = std::max(oldBottomRow, m_selection.bottomRow());
+    invalidateSelectionRange(dirtyTop, dirtyBottom);
+}
+
+// Завершение выделения при отпускании кнопки мыши
 void LogListView::mouseReleaseEvent(QMouseEvent *event) {
-    if (m_selecting) {
-        m_selecting = false;
-        // Полная перерисовка с подсветкой синтаксиса после завершения выделения
+    if (m_selection.isDragging) {
+        m_selection.finish();
+        updateBracketMatch();
         viewport()->update();
     }
     QListView::mouseReleaseEvent(event);
 }
 
-// Двойной клик мыши — выделение слова под курсором
-void LogListView::mouseDoubleClickEvent(QMouseEvent *event) {
+
+// Двойной клик мыши — умное выделение токена под курсором
+void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
+{
     if (event->button() != Qt::LeftButton) {
         QListView::mouseDoubleClickEvent(event);
         return;
     }
 
-    int scrollY = verticalScrollBar()->value();
+    int scrollY  = verticalScrollBar()->value();
     int contentY = event->pos().y() + scrollY;
-    int row = -1;
-    int rowTop = 0;
-
+    int row = -1, rowTop = 0;
     if (!getRowAtContentY(contentY, row, rowTop)) {
         QListView::mouseDoubleClickEvent(event);
         return;
     }
 
-    m_selRow = row;
-    const auto& state = getRowState(row);
-    const QString& text = state.text;
+    const RowState& state    = getRowState(row);
+    const QPoint    localPos = QPoint(event->pos().x(), contentY - rowTop);
+    const int       clickPos = getTextPositionFromMouse(localPos, state);
 
-    QPoint localPos(event->pos().x(), contentY - rowTop);
-    int clickPos = getTextPositionFromMouse(localPos, state);
-
-    // Находим границы слова
-    int wordStart = clickPos;
-    int wordEnd = clickPos;
-
-    while (wordStart > 0 && !text[wordStart - 1].isSpace() && text[wordStart - 1] != '\t') {
-        wordStart--;
-    }
-    while (wordEnd < text.length() && !text[wordEnd].isSpace() && text[wordEnd] != '\t') {
-        wordEnd++;
-    }
-
-    // Если клик по пробелу — выберем ближайшее слово справа
+    const auto [wordStart, wordEnd] = TextToken::findDoubleClickToken(state.text, clickPos);
     if (wordStart == wordEnd) {
-        while (wordEnd < text.length() && (text[wordEnd].isSpace() || text[wordEnd] == '\t')) {
-            wordEnd++;
-        }
-        wordStart = wordEnd;
-        while (wordEnd < text.length() && !text[wordEnd].isSpace() && text[wordEnd] != '\t') {
-            wordEnd++;
-        }
+        QListView::mouseDoubleClickEvent(event);
+        return;
     }
 
-    m_selStart = wordStart;
-    m_selEnd = wordEnd;
+    m_selection.start(row, wordStart);
+    m_selection.moveTo(row, wordEnd);
+    m_selection.finish();
+    updateBracketMatch();
 
-    // Обновляем фрагменты для многострочного режима
-    if (state.multiLine) {
-        m_selStartFragment = getFragmentIndexForPosition(m_selStart, state.fragments);
-        m_selEndFragment = getFragmentIndexForPosition(m_selEnd, state.fragments);
-    } else {
-        m_selStartFragment = -1;
-        m_selEndFragment = -1;
-    }
-
-    m_selecting = false; // Двойной клик завершает выделение сразу
-    
     if (selectionModel()) {
-        selectionModel()->setCurrentIndex(model()->index(row, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        selectionModel()->setCurrentIndex(model()->index(row, 0),
+            QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
     }
     viewport()->update();
-    // НЕ вызываем QListView::mouseDoubleClickEvent - мы полностью обработали событие
 }
 
 // Обработка нажатия клавиш (копирование выделенного текста)
 void LogListView::keyPressEvent(QKeyEvent *event) {
-    if (event->matches(QKeySequence::Copy) && m_selRow >= 0 && m_selStart != m_selEnd) {
-        int start = std::min(m_selStart, m_selEnd);
-        int len = std::abs(m_selEnd - m_selStart);
-        QString text = model()->data(model()->index(m_selRow, 0)).toString().mid(start, len);
-        QApplication::clipboard()->setText(text);
+    if (event->matches(QKeySequence::Copy) && !m_selection.isEmpty()) {
+        QStringList lines;
+        for (int row = m_selection.topRow(); row <= m_selection.bottomRow(); ++row) {
+            const QString rowText = model()->data(model()->index(row, 0)).toString();
+            int selStart = 0, selEnd = 0;
+            m_selection.rangeForRow(row, rowText.length(), selStart, selEnd);
+            lines.append(rowText.mid(selStart, selEnd - selStart));
+        }
+        QApplication::clipboard()->setText(lines.join('\n'));
     } else {
         QListView::keyPressEvent(event);
     }
@@ -1409,10 +1487,13 @@ void LogListView::keyPressEvent(QKeyEvent *event) {
 
 void LogListView::currentChanged(const QModelIndex &current, const QModelIndex &previous) {
     QListView::currentChanged(current, previous);
-    if (current.isValid() && current.row() != m_selRow) {
-        m_selRow = current.row();
-        m_selStart = -1;
-        m_selEnd = -1;
+    // Во время drag-выделения anchorRow задан вручную — не сбрасывать.
+    // При обычной навигации (клавиши, внешний setCurrentIndex) — сбрасываем текстовое выделение.
+    if (!m_selection.isDragging && current.isValid() && current.row() != m_selection.anchorRow) {
+        m_selection.clear();
+        m_selection.anchorRow = current.row();
+        m_selection.activeRow = current.row();
+        updateBracketMatch();
         viewport()->update();
     }
 }
@@ -1448,33 +1529,6 @@ bool LogListView::viewportEvent(QEvent *event)
 
 // --- Private Helper Functions ---
 
-QList<HighlightToken> LogListView::findHighlightTokens(const QString& text) const {
-    QList<HighlightToken> tokens;
-    const AppTheme& theme = AppTheme::instance();
-
-    // static: регулярное выражение компилируется один раз
-    static const QRegularExpression re(R"((['"])(?:(?!\1|\\).|\\.)*\1|(?<![\w])(0x[0-9a-fA-F]+|\d+(?:[^\w\s]\d+)*))");
-
-    QRegularExpressionMatchIterator it = re.globalMatch(text);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        HighlightToken token;
-        token.start = match.capturedStart();
-        token.end = match.capturedEnd();
-        
-        QString matchedText = match.captured();
-        if (matchedText.startsWith('\'') || matchedText.startsWith('"')) {
-            token.color = theme.syntaxString;
-        } else {
-            token.color = theme.syntaxNumber;
-        }
-        
-        tokens.append(token);
-    }
-    
-    return tokens;
-}
-
 void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens) const {
     QColor defaultColor = palette().color(QPalette::Text);
     
@@ -1506,9 +1560,16 @@ void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const 
         
         // Отрисовываем токен
         if (tokenEndInFragment > tokenStartInFragment) {
+            const int tx = baseX + qRound(tokenStartInFragment * m_charWidth);
+            const int tw = qRound((tokenEndInFragment - tokenStartInFragment) * m_charWidth);
+            // Заливка фона (поиск с подсветкой и пр.)
+            if (token.bgColor.isValid()) {
+                const QFontMetrics fm = painter.fontMetrics();
+                painter.fillRect(tx, y - fm.ascent(), tw, fm.height(), token.bgColor);
+            }
             QStringView tokenView = text.sliced(tokenStartInFragment, tokenEndInFragment - tokenStartInFragment);
-            painter.setPen(token.color);
-            painter.drawText(baseX + qRound(tokenStartInFragment * m_charWidth), y, tokenView.toString());
+            painter.setPen(token.color.isValid() ? token.color : defaultColor);
+            painter.drawText(tx, y, tokenView.toString());
         }
         
         last = tokenEndInFragment;

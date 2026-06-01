@@ -3,6 +3,8 @@
 #include "logviewwidget.h"
 #include "conversionpatterndialog.h"
 #include "directoryscanner.h"
+#include "appsettings.h"
+#include "settingsdialog.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -30,13 +32,17 @@
 #include <QCloseEvent>
 #include <QMessageBox>
 #include <QComboBox>
+#include <QToolButton>
+#include <QMouseEvent>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr)
 {
     ui->setupUi(this);
 
-    m_scanFileExtensions << "log" << "txt";
+    // Load persistent application preferences before anything else so that
+    // setup methods (e.g. setupDirectoryScanner) can read correct values.
+    AppSettings::instance().load();
 
     setupStatusBar();
     setupTimeFilterDockContents();
@@ -44,8 +50,72 @@ MainWindow::MainWindow(QWidget *parent)
     setupDirectoryScanner();
     setupFieldVisibilityDock();
 
+    // Propagate settings changes that originate from the Settings dialog
+    // (e.g. word-wrap toggled there) back into the UI without requiring a restart.
+    connect(&AppSettings::instance(), &AppSettings::settingsChanged,
+            this, [this]() {
+        ui->actionWordWrap->setChecked(AppSettings::instance().wordWrap());
+
+        // Apply font to all open log views. setFont() triggers changeEvent(FontChange)
+        // inside LogListView which rebuilds the metrics and height cache.
+        QFont f(AppSettings::instance().fontFamily());
+        f.setPointSize(AppSettings::instance().fontSize());
+        f.setWeight(QFont::Medium);
+        for (int t = 0; t < ui->tabWidget->count(); ++t) {
+            auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+            if (!lvw)
+                continue;
+            LogListView* lv = lvw->view();
+            if (!lv)
+                continue;
+            // setFont() is a no-op (no changeEvent) when the font didn't change,
+            // so we always call viewport()->update() to repaint for colour changes.
+            lv->setFont(f);
+            lv->viewport()->update();
+        }
+
+        // Re-apply auto-reload timer whenever settings change.
+        applyAutoReloadSettings();
+    });
+
+    // Auto-reload timer – ticks for every tab that has per-tab auto-reload on
+    m_autoReloadTimer = new QTimer(this);
+    m_autoReloadTimer->setSingleShot(false);
+    connect(m_autoReloadTimer, &QTimer::timeout, this, &MainWindow::onAutoReloadTimerTick);
+
+    // --- Reload toolbar button (icon + checkable) ---
+    // actionReloadFile keeps the F5 shortcut and menu entry; the toolbar shows a
+    // custom QToolButton so we can distinguish left-click (manual) from right-click
+    // (toggle per-tab auto-reload). The action text is kept for the menu only.
+    ui->actionReloadFile->setIcon(QIcon(QStringLiteral(":/icons/reload.svg")));
+    // Replace the plain action widget in the toolbar with a proper QToolButton
+    if (QToolButton* btn = qobject_cast<QToolButton*>(ui->toolBar->widgetForAction(ui->actionReloadFile))) {
+        m_reloadButton = btn;
+        m_reloadButton->setCheckable(true);
+        m_reloadButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        m_reloadButton->setFixedSize(26, 26);
+        m_reloadButton->setToolTip(tr("Reload file (F5)\nRight-click to toggle auto-reload for this tab"));
+        m_reloadButton->installEventFilter(this);
+    }
+
+    // Connect the manual reload action (F5 / menu) – does NOT toggle auto-reload
+    connect(ui->actionReloadFile, &QAction::triggered, this, &MainWindow::onReloadFileTriggered);
+
+    // "Tools" menu with Settings action.
+    QMenu* menuTools = menuBar()->addMenu(tr("&Tools"));
+    QAction* settingsAction = menuTools->addAction(tr("Settings..."));
+    settingsAction->setShortcut(QKeySequence::Preferences);
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::onSettingsTriggered);
+
+    // Search input is created in code because the .ui currently defines only actions.
+    m_searchLineEdit = new QLineEdit(ui->searchToolBar);
+    m_searchLineEdit->setObjectName("searchLineEdit");
+    m_searchLineEdit->setMaximumWidth(300);
+    m_searchLineEdit->setPlaceholderText(tr("Search..."));
+    ui->searchToolBar->insertWidget(ui->actionSearchPrevious, m_searchLineEdit);
+
     // Connect search actions
-    connect(ui->searchLineEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchEnterPressed);
+    connect(m_searchLineEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchEnterPressed);
     connect(ui->actionSearchNext, &QAction::triggered, this, &MainWindow::onSearchNextTriggered);
     connect(ui->actionSearchPrevious, &QAction::triggered, this, &MainWindow::onSearchPreviousTriggered);
 
@@ -79,9 +149,11 @@ MainWindow::MainWindow(QWidget *parent)
             }
             ui->tabWidget->removeTab(index);
             delete page;
-            if (ui->tabWidget->count() == 0) {
-                 updateStatusBarDefaultText();
-            } });
+            // The closed tab may have had auto-reload on; update the timer.
+            updateAutoReloadTimer();
+            if (ui->tabWidget->count() == 0)
+                updateStatusBarDefaultText();
+            syncReloadButton(); });
         connect(ui->tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onCurrentTabChanged);
 
         if (ui->tabWidget->count() > 0)
@@ -98,6 +170,7 @@ MainWindow::MainWindow(QWidget *parent)
     }
 
     loadSettings();
+    applyAutoReloadSettings();
 }
 
 MainWindow::~MainWindow()
@@ -130,18 +203,11 @@ void MainWindow::saveSettings()
     s.setValue("lastScanDir", m_lastScanDir);
     s.endGroup();
 
-    s.beginGroup("Scanner");
-    s.setValue("extensions", m_scanFileExtensions);
-    s.endGroup();
-
     s.beginGroup("View");
-    s.setValue("wordWrap", ui->actionWordWrap->isChecked());
     {
-        uint8_t mask = 0;
-        for (int i = 0; i < LogFieldCount; ++i)
-            if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
-                mask |= static_cast<uint8_t>(1u << i);
-        s.setValue("fieldVisibilityMask", static_cast<int>(mask));
+        s.setValue("fieldFilterEnabled",
+                   m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked());
+        s.setValue("fieldVisibleNames", selectedVisibleFieldNames());
     }
     s.setValue("conversionPattern", m_conversionPattern);
     {
@@ -158,6 +224,11 @@ void MainWindow::saveSettings()
     s.beginGroup("RecentFiles");
     s.setValue("files", m_recentFiles);
     s.endGroup();
+
+    // Sync the current word-wrap toggle state back to AppSettings and persist
+    // all app-level preferences (scan extensions, word wrap, etc.) in one call.
+    AppSettings::instance().setWordWrap(ui->actionWordWrap->isChecked());
+    AppSettings::instance().save();
 }
 
 void MainWindow::loadSettings()
@@ -179,32 +250,15 @@ void MainWindow::loadSettings()
     m_lastScanDir = s.value("lastScanDir").toString();
     s.endGroup();
 
-    s.beginGroup("Scanner");
-    QStringList exts = s.value("extensions").toStringList();
-    if (!exts.isEmpty())
-        m_scanFileExtensions = exts;
-    s.endGroup();
+    // Word wrap is owned by AppSettings (already loaded in the constructor
+    // before this method is called).
+    ui->actionWordWrap->setChecked(AppSettings::instance().wordWrap());
 
     s.beginGroup("View");
-    ui->actionWordWrap->setChecked(s.value("wordWrap", true).toBool());
-    {
-        const int savedMask = s.value("fieldVisibilityMask", static_cast<int>(LogFieldAllMask)).toInt();
-        const uint8_t mask  = static_cast<uint8_t>(savedMask);
-        for (int i = 0; i < LogFieldCount; ++i)
-            if (m_fieldCheckBoxes[i])
-                m_fieldCheckBoxes[i]->setChecked((mask >> i) & 1u);
-        // Sync master toggle state after restoring individual checkboxes
-        if (m_allFieldsCheckBox) {
-            int cnt = 0;
-            for (int i = 0; i < LogFieldCount; ++i)
-                cnt += (mask >> i) & 1u;
-            m_allFieldsCheckBox->blockSignals(true);
-            if (cnt == 0)                  m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
-            else if (cnt == LogFieldCount) m_allFieldsCheckBox->setCheckState(Qt::Checked);
-            else                           m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
-            m_allFieldsCheckBox->blockSignals(false);
-        }
-    }
+    const bool filterEnabled = s.value("fieldFilterEnabled", false).toBool();
+    m_savedVisibleFieldNames = s.value("fieldVisibleNames").toStringList();
+    const int legacyMask = s.value("fieldVisibilityMask", -1).toInt();
+
     m_conversionPattern = s.value("conversionPattern").toString();
     {
         const QStringList names  = s.value("patternNames").toStringList();
@@ -236,6 +290,21 @@ void MainWindow::loadSettings()
             m_conversionPatternCombo->blockSignals(false);
         }
     }
+
+    if (m_savedVisibleFieldNames.isEmpty() && legacyMask >= 0) {
+        const QStringList legacyFieldNames = LogPattern(m_conversionPattern).fieldNames();
+        for (int i = 0; i < legacyFieldNames.size() && i < 31; ++i) {
+            if (legacyMask & (1 << i))
+                m_savedVisibleFieldNames.append(legacyFieldNames[i]);
+        }
+    }
+
+    if (m_fieldFilterEnabledCheckBox) {
+        m_fieldFilterEnabledCheckBox->blockSignals(true);
+        m_fieldFilterEnabledCheckBox->setChecked(filterEnabled);
+        m_fieldFilterEnabledCheckBox->blockSignals(false);
+    }
+    rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
     s.endGroup();
 
     s.beginGroup("RecentFiles");
@@ -249,21 +318,6 @@ void MainWindow::loadSettings()
 // Field-visibility dock
 // =============================================================================
 
-static const char* fieldDisplayName(int i)
-{
-    switch (static_cast<LogField>(i)) {
-    case LogField::Timestamp:  return "Timestamp  (%d)";
-    case LogField::ThreadId:   return "Thread ID  (%t)";
-    case LogField::LoggerName: return "Logger Name  (%c)";
-    case LogField::Level:      return "Level  (%p)";
-    case LogField::Message:    return "Message  (%m)";
-    case LogField::Ndc:        return "Context / NDC  (%x)";
-    case LogField::SourceFile: return "Source File  (%F)";
-    case LogField::SourceLine: return "Source Line  (%L)";
-    default:                   return "Unknown";
-    }
-}
-
 void MainWindow::setupFieldVisibilityDock()
 {
     QWidget* contents = ui->fieldVisibilityContentsWidget;
@@ -273,48 +327,78 @@ void MainWindow::setupFieldVisibilityDock()
     rootLayout->setContentsMargins(4, 4, 4, 4);
     rootLayout->setSpacing(2);
 
-    // ---- Section: visible fields ----
-    auto* fieldsLabel = new QLabel(tr("<b>Show fields:</b>"), contents);
-    rootLayout->addWidget(fieldsLabel);
+    // ---- Master enable/disable toggle ----
+    m_fieldFilterEnabledCheckBox = new QCheckBox(tr("Filter blocks"), contents);
+    m_fieldFilterEnabledCheckBox->setChecked(false); // default: no filtering
+    m_fieldFilterEnabledCheckBox->setToolTip(tr(
+        "When checked, only the selected blocks below are shown.\n"
+        "Uncheck to display the original line regardless of block selection."));
+    {
+        QFont f = m_fieldFilterEnabledCheckBox->font();
+        f.setBold(true);
+        m_fieldFilterEnabledCheckBox->setFont(f);
+    }
+    rootLayout->addWidget(m_fieldFilterEnabledCheckBox);
 
-    // "All fields" tri-state master toggle
-    m_allFieldsCheckBox = new QCheckBox(tr("(all fields)"), contents);
+    // Container for the per-field controls — enabled/disabled together.
+    m_fieldFilterControlsWidget = new QWidget(contents);
+    auto* filterControlsLayout = new QVBoxLayout(m_fieldFilterControlsWidget);
+    filterControlsLayout->setContentsMargins(16, 0, 0, 0);
+    filterControlsLayout->setSpacing(2);
+    filterControlsLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
+    auto* fieldsLabel = new QLabel(tr("<b>Visible blocks:</b>"), m_fieldFilterControlsWidget);
+    filterControlsLayout->addWidget(fieldsLabel);
+
+    // "All blocks" tri-state master toggle
+    m_allFieldsCheckBox = new QCheckBox(tr("(all blocks)"), m_fieldFilterControlsWidget);
     m_allFieldsCheckBox->setTristate(true);
     m_allFieldsCheckBox->setCheckState(Qt::Checked);
     connect(m_allFieldsCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
         if (static_cast<Qt::CheckState>(state) == Qt::PartiallyChecked) return;
         const bool checkAll = (state == Qt::Checked);
-        for (int i = 0; i < LogFieldCount; ++i) {
-            if (m_fieldCheckBoxes[i]) {
-                m_fieldCheckBoxes[i]->blockSignals(true);
-                m_fieldCheckBoxes[i]->setChecked(checkAll);
-                m_fieldCheckBoxes[i]->blockSignals(false);
-            }
+        for (QCheckBox* cb : m_fieldCheckBoxes) {
+            if (!cb)
+                continue;
+            cb->blockSignals(true);
+            cb->setChecked(checkAll);
+            cb->blockSignals(false);
+        }
+        onFieldVisibilityChanged();
+    });
+    filterControlsLayout->addWidget(m_allFieldsCheckBox);
+
+    m_fieldCheckboxLayout = new QVBoxLayout();
+    m_fieldCheckboxLayout->setContentsMargins(0, 0, 0, 0);
+    m_fieldCheckboxLayout->setSpacing(2);
+    filterControlsLayout->addLayout(m_fieldCheckboxLayout);
+
+    rootLayout->addWidget(m_fieldFilterControlsWidget);
+
+    connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (m_fieldFilterControlsWidget)
+            m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
+        // Enable/disable schema-based field extraction in all parsers
+        for (int t = 0; t < ui->tabWidget->count(); ++t) {
+            auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+            if (lv) lv->setExtractionEnabled(enabled);
         }
         applyFieldVisibilityToAllViews();
     });
-    rootLayout->addWidget(m_allFieldsCheckBox);
-
-    for (int i = 0; i < LogFieldCount; ++i) {
-        auto* cb = new QCheckBox(tr(fieldDisplayName(i)), contents);
-        cb->setChecked(true); // default: all visible
-        m_fieldCheckBoxes[i] = cb;
-        connect(cb, &QCheckBox::toggled, this, &MainWindow::onFieldVisibilityChanged);
-        rootLayout->addWidget(cb);
-    }
+    if (m_fieldFilterControlsWidget)
+        m_fieldFilterControlsWidget->setEnabled(false);
 
     rootLayout->addSpacing(4);
 
-    // ---- Section: conversion pattern ----
-    auto* patternLabel = new QLabel(tr("<b>Conversion pattern:</b>"), contents);
+    // ---- Section: field schema ----
+    auto* patternLabel = new QLabel(tr("<b>Field schema:</b>"), contents);
     patternLabel->setToolTip(tr(
-        "Log4cxx / Log4j ConversionPattern - e.g.:\n"
-        "> %d [%-10t] %-20c  %-8p %m ~~ %x {%F:%L}%n\n\n"
-        "Use 'Manage...' to add, edit and delete named patterns.\n"
-        "'Apply to all tabs' re-extracts fields in every open tab."));
+        "A schema is an ordered list of blocks.\n"
+        "Each block has a name and a match rule: timestamp, level, integer, text until separator,\n"
+        "greedy text, custom regex, or remainder of line.\n\n"
+        "Use 'Manage...' to build and edit schemas."));
     rootLayout->addWidget(patternLabel);
 
-    // Non-editable combo: shows pattern display names from m_patternList
     m_conversionPatternCombo = new QComboBox(contents);
     m_conversionPatternCombo->setEditable(false);
     m_conversionPatternCombo->setToolTip(patternLabel->toolTip());
@@ -323,51 +407,104 @@ void MainWindow::setupFieldVisibilityDock()
             this, &MainWindow::onPatternComboChanged);
     rootLayout->addWidget(m_conversionPatternCombo);
 
-    auto* btnRow = new QHBoxLayout();
-    btnRow->setSpacing(4);
-    auto* applyPatternBtn = new QPushButton(tr("Apply to all tabs"), contents);
-    applyPatternBtn->setToolTip(tr(
-        "Re-apply field extraction to all already-loaded entries."));
-    connect(applyPatternBtn, &QPushButton::clicked,
-            this, &MainWindow::onConversionPatternApply);
     auto* manageBtn = new QPushButton(tr("Manage..."), contents);
-    manageBtn->setToolTip(tr("Add, edit and delete named conversion patterns."));
+    manageBtn->setToolTip(tr("Create, edit and delete named field schemas."));
     connect(manageBtn, &QPushButton::clicked,
             this, &MainWindow::onManagePatterns);
-    btnRow->addWidget(applyPatternBtn, 1);
-    btnRow->addWidget(manageBtn);
-    rootLayout->addLayout(btnRow);
+    rootLayout->addWidget(manageBtn);
 
-    rootLayout->addStretch();
+        // Keep controls packed at the top of the dock.
+        rootLayout->addStretch();
 
-    contents->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+    m_fieldFilterControlsWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+
+    contents->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     ui->fieldVisibilityDockWidget->setSizePolicy(QSizePolicy::Preferred,
-                                                  QSizePolicy::MinimumExpanding);
+                                                  QSizePolicy::Preferred);
+
+    rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
 }
 
-// Compute the current mask from checkbox states
-static LogModel::FieldVisibilityMask computeVisibilityMask(
-    const std::array<QCheckBox*, LogFieldCount>& boxes)
+void MainWindow::rebuildFieldVisibilityControls(const QStringList& fieldNames)
 {
-    LogModel::FieldVisibilityMask mask = 0;
-    for (int i = 0; i < LogFieldCount; ++i)
-        if (boxes[i] && boxes[i]->isChecked())
-            mask |= static_cast<LogModel::FieldVisibilityMask>(1u << i);
-    return mask;
+    if (!m_fieldCheckboxLayout)
+        return;
+
+    while (QLayoutItem* item = m_fieldCheckboxLayout->takeAt(0)) {
+        if (QWidget* widget = item->widget())
+            delete widget;
+        delete item;
+    }
+    m_fieldCheckBoxes.clear();
+
+    bool anySavedMatch = false;
+    for (const QString& fieldName : fieldNames) {
+        auto* cb = new QCheckBox(fieldName, m_fieldFilterControlsWidget);
+        const bool shouldCheck = m_savedVisibleFieldNames.isEmpty()
+            || m_savedVisibleFieldNames.contains(fieldName);
+        anySavedMatch = anySavedMatch || (!m_savedVisibleFieldNames.isEmpty() && shouldCheck);
+        cb->setChecked(shouldCheck);
+        connect(cb, &QCheckBox::toggled, this, &MainWindow::onFieldVisibilityChanged);
+        m_fieldCheckBoxes.push_back(cb);
+        m_fieldCheckboxLayout->addWidget(cb);
+    }
+
+    if (!fieldNames.isEmpty() && !m_savedVisibleFieldNames.isEmpty() && !anySavedMatch) {
+        for (QCheckBox* cb : m_fieldCheckBoxes)
+            cb->setChecked(true);
+    }
+
+    if (fieldNames.isEmpty()) {
+        auto* placeholder = new QLabel(
+            tr("No active schema. Build one in 'Manage...' and apply it to the open tabs."),
+            m_fieldFilterControlsWidget);
+        placeholder->setWordWrap(true);
+        m_fieldCheckboxLayout->addWidget(placeholder);
+    }
+
+    if (m_allFieldsCheckBox)
+        m_allFieldsCheckBox->setEnabled(!m_fieldCheckBoxes.isEmpty());
+    if (m_fieldFilterControlsWidget && m_fieldFilterEnabledCheckBox)
+        m_fieldFilterControlsWidget->setEnabled(m_fieldFilterEnabledCheckBox->isChecked() && !m_fieldCheckBoxes.isEmpty());
+
+    onFieldVisibilityChanged();
+}
+
+QVector<int> MainWindow::selectedVisibleFieldIndexes() const
+{
+    QVector<int> indexes;
+    indexes.reserve(m_fieldCheckBoxes.size());
+    for (int i = 0; i < m_fieldCheckBoxes.size(); ++i) {
+        if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
+            indexes.push_back(i);
+    }
+    return indexes;
+}
+
+QStringList MainWindow::selectedVisibleFieldNames() const
+{
+    QStringList names;
+    names.reserve(m_fieldCheckBoxes.size());
+    for (QCheckBox* cb : m_fieldCheckBoxes) {
+        if (cb && cb->isChecked())
+            names.push_back(cb->text());
+    }
+    return names;
 }
 
 void MainWindow::onFieldVisibilityChanged()
 {
-    // Keep the master "all fields" checkbox in sync with the individual boxes
+    m_savedVisibleFieldNames = selectedVisibleFieldNames();
+
     if (m_allFieldsCheckBox) {
         int checkedCount = 0;
-        for (int i = 0; i < LogFieldCount; ++i)
-            if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
+        for (QCheckBox* cb : m_fieldCheckBoxes)
+            if (cb && cb->isChecked())
                 ++checkedCount;
         m_allFieldsCheckBox->blockSignals(true);
-        if (checkedCount == 0)
+        if (m_fieldCheckBoxes.isEmpty() || checkedCount == 0)
             m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
-        else if (checkedCount == LogFieldCount)
+        else if (checkedCount == m_fieldCheckBoxes.size())
             m_allFieldsCheckBox->setCheckState(Qt::Checked);
         else
             m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
@@ -378,11 +515,16 @@ void MainWindow::onFieldVisibilityChanged()
 
 void MainWindow::applyFieldVisibilityToAllViews()
 {
-    const auto mask = computeVisibilityMask(m_fieldCheckBoxes);
+    const bool filterEnabled = m_fieldFilterEnabledCheckBox
+        && m_fieldFilterEnabledCheckBox->isChecked()
+        && !m_fieldCheckBoxes.isEmpty();
+    const QVector<int> visibleIndexes = filterEnabled ? selectedVisibleFieldIndexes()
+                                                      : QVector<int>();
+
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
         if (lv && lv->model())
-            lv->model()->setVisibleFields(mask);
+            lv->model()->setFieldDisplaySelection(filterEnabled, visibleIndexes);
     }
 }
 
@@ -397,6 +539,9 @@ void MainWindow::onPatternComboChanged(int index)
         m_conversionPattern = m_patternList[index].second;
     else
         m_conversionPattern.clear();
+
+    // Combo selection change must immediately rebind parser schema and field list.
+    applyPatternToAllViews();
 }
 
 void MainWindow::onManagePatterns()
@@ -438,36 +583,49 @@ void MainWindow::onManagePatterns()
 
 void MainWindow::applyPatternToAllViews()
 {
+    const LogPattern pattern(m_conversionPattern);
+    rebuildFieldVisibilityControls(pattern.fieldNames());
+
+    const bool filterEnabled = m_fieldFilterEnabledCheckBox
+        && m_fieldFilterEnabledCheckBox->isChecked()
+        && !m_fieldCheckBoxes.isEmpty();
+
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (!lv) continue;
-        lv->setParserPattern(m_conversionPattern);
+        if (!lv)
+            continue;
 
-        // Re-extract fields for all already-loaded entries so the display
-        // updates immediately without requiring a file re-open.
+        lv->setParserPattern(m_conversionPattern);
+        lv->setExtractionEnabled(filterEnabled);
+
         if (lv->model()) {
-            const LogPattern pat(m_conversionPattern);
-            if (pat.isValid()) {
-                const auto& entries = lv->model()->allEntries();
-                for (const auto& entry : entries) {
-                    if (entry)
-                        entry->fields = pat.extractFields(entry->message);
-                }
+            const auto& entries = lv->model()->allEntries();
+            for (const auto& entry : entries) {
+                if (!entry)
+                    continue;
+                entry->fields = (filterEnabled && pattern.isValid())
+                    ? pattern.extractFields(entry->message)
+                    : LogEntryFields();
             }
-            // Notify the view to repaint with updated field data.
-            // refreshDisplay() always emits dataChanged (unlike setVisibleFields which
-            // returns early when the mask hasn't changed).
             lv->model()->refreshDisplay();
         }
     }
+
+    applyFieldVisibilityToAllViews();
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
     view->setParserPattern(m_conversionPattern);
+    const bool filterEnabled = m_fieldFilterEnabledCheckBox
+        && m_fieldFilterEnabledCheckBox->isChecked()
+        && !m_fieldCheckBoxes.isEmpty();
+    view->setExtractionEnabled(filterEnabled);
     if (view->model())
-        view->model()->setVisibleFields(computeVisibilityMask(m_fieldCheckBoxes));
+        view->model()->setFieldDisplaySelection(filterEnabled, selectedVisibleFieldIndexes());
+    // Start the timer if this new tab has auto-reload enabled by default.
+    updateAutoReloadTimer();
     return view;
 }
 
@@ -586,7 +744,7 @@ void MainWindow::setupTextFilterDockContents()
 void MainWindow::setupDirectoryScanner()
 {
     m_dirScanner = new DirectoryScanner(ui->directoryScanResultsTree, this);
-    m_dirScanner->setFileExtensions(m_scanFileExtensions);
+    m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
     m_dirScanner->setConversionPattern(m_conversionPattern);
     connect(m_dirScanner, &DirectoryScanner::fileActivated,
             this, [this](const QString& path) {
@@ -767,6 +925,7 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
         int currentRow = currentModelIndex.isValid() ? currentModelIndex.row() : -1;
         updateLineInfoLabel(currentRow, totalRows);
     }
+    syncReloadButton();
     updateFilterInputsFromModel();
 }
 
@@ -1287,7 +1446,7 @@ void MainWindow::onScanDirectoryClicked()
     if (!dirPath.isEmpty()) {
         m_lastScanDir = dirPath;
         ui->selectedDirectoryPathLabel->setText(tr("Directory: %1").arg(dirPath));
-        m_dirScanner->setFileExtensions(m_scanFileExtensions);
+        m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
         m_dirScanner->setConversionPattern(m_conversionPattern);
         m_dirScanner->scan(dirPath);
     }
@@ -1369,32 +1528,18 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
 
 void MainWindow::onConfigureScanExtensionsClicked()
 {
-    bool ok;
-    QString currentExtensions = m_scanFileExtensions.join(',');
-    QString text = QInputDialog::getText(this, tr("Configure Scan Extensions"),
-                                         tr("Enter file extensions (comma-separated, e.g., log,txt,data):"),
-                                         QLineEdit::Normal,
-                                         currentExtensions, &ok);
-    if (ok && !text.isEmpty())
-    {
-        m_scanFileExtensions = text.split(',', Qt::SkipEmptyParts);
-        for (QString &ext : m_scanFileExtensions)
-        {
-            ext = ext.trimmed().toLower(); // Normalize: lowercase and trimmed
-        }
-        // If a directory is currently displayed, you might want to offer to re-scan it.
-        // For now, new extensions apply to the next scan.
-        QString currentPath = ui->selectedDirectoryPathLabel->text();
-        if (QDir(currentPath).exists())
-        {   // A crude check if a path is loaded
-            // Consider re-populating or prompting user to re-scan.
-            // populateDirectoryScanResults(currentPath); // Example: auto-rescan
-        }
-    }
-    else if (ok && text.isEmpty())
-    {                                 // User entered empty string, effectively clearing custom extensions
-        m_scanFileExtensions.clear(); // Cleared, so scanDirectoryRecursive might use defaults
-    }
+    // Delegate to the full Settings dialog — opens on the General tab
+    // where the user can add/remove file extensions properly.
+    SettingsDialog dlg(this);
+    dlg.exec();
+    // If the user applied changes, AppSettings::settingsChanged() was already
+    // emitted and the scanner will use the new extensions on the next scan.
+}
+
+void MainWindow::onSettingsTriggered()
+{
+    SettingsDialog dlg(this);
+    dlg.exec();
 }
 
 void MainWindow::toggleTextFilterDock()
@@ -1505,9 +1650,9 @@ void MainWindow::onSearchEnterPressed()
 
 void MainWindow::onSearchNextTriggered()
 {
-    if (m_activeLogView && ui->searchLineEdit)
+    if (m_activeLogView && m_searchLineEdit)
     {
-        QString searchTerm = ui->searchLineEdit->text();
+        QString searchTerm = m_searchLineEdit->text();
         if (!searchTerm.isEmpty())
         {
             // For now, search is case-insensitive. This could be a checkbox in the UI later.
@@ -1518,13 +1663,122 @@ void MainWindow::onSearchNextTriggered()
 
 void MainWindow::onSearchPreviousTriggered()
 {
-    if (m_activeLogView && ui->searchLineEdit)
+    if (m_activeLogView && m_searchLineEdit)
     {
-        QString searchTerm = ui->searchLineEdit->text();
+        QString searchTerm = m_searchLineEdit->text();
         if (!searchTerm.isEmpty())
         {
             // For now, search is case-insensitive.
             m_activeLogView->searchTextPrevious(searchTerm, false /*caseSensitive*/);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::onReloadFileTriggered()
+{
+    // Manual one-shot reload of the active tab (F5 or left-click on the button).
+    if (!m_activeLogView)
+        return;
+    m_activeLogView->reloadChangedFiles();
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::onAutoReloadTimerTick()
+{
+    // Reload every tab that has per-tab auto-reload enabled.
+    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+        auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
+        if (lvw && lvw->autoReload())
+            lvw->reloadChangedFiles();
+    }
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::onToggleTabAutoReload()
+{
+    if (m_activeLogView)
+        setTabAutoReload(m_activeLogView, !m_activeLogView->autoReload());
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::updateAutoReloadTimer()
+{
+    bool anyActive = false;
+    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+        auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
+        if (lvw && lvw->autoReload()) {
+            anyActive = true;
+            break;
+        }
+    }
+    if (anyActive)
+        m_autoReloadTimer->start();
+    else
+        m_autoReloadTimer->stop();
+}
+
+// ---------------------------------------------------------------------------
+// Single atomic entry-point for changing a tab's auto-reload state.
+// Always call this instead of touching setAutoReload/setChecked/updateAutoReloadTimer
+// individually, so every caller stays in sync automatically.
+void MainWindow::setTabAutoReload(LogViewWidget* view, bool enabled)
+{
+    if (!view) return;
+    view->setAutoReload(enabled);
+    if (view == m_activeLogView)
+        syncReloadButton();
+    updateAutoReloadTimer();
+}
+
+// ---------------------------------------------------------------------------
+// Syncs the toolbar button's checked state to the currently active tab.
+void MainWindow::syncReloadButton()
+{
+    if (m_reloadButton)
+        m_reloadButton->setChecked(m_activeLogView && m_activeLogView->autoReload());
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::applyAutoReloadSettings()
+{
+    // Interval is always global (from Settings). Per-tab toggle controls participation.
+    const int intervalMs = AppSettings::instance().autoReloadIntervalSecs() * 1000;
+    m_autoReloadTimer->setInterval(intervalMs);
+    updateAutoReloadTimer();
+}
+
+// ---------------------------------------------------------------------------
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (obj == m_reloadButton) {
+        const auto type = event->type();
+
+        // Prevent the toolbar context menu from appearing on right-click over our
+        // button: ContextMenuEvent would otherwise bubble up to the QToolBar parent.
+        if (type == QEvent::ContextMenu)
+            return true;
+
+        if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton) {
+                if (type == QEvent::MouseButtonPress) {
+                    m_reloadButton->setDown(true);
+                } else {
+                    m_reloadButton->setDown(false);
+                    // If auto-reload is on, left-click exits that state first.
+                    if (m_activeLogView && m_activeLogView->autoReload())
+                        setTabAutoReload(m_activeLogView, false);
+                    onReloadFileTriggered();
+                }
+                return true;
+            } else if (me->button() == Qt::RightButton) {
+                // Right-click = toggle per-tab auto-reload.
+                if (type == QEvent::MouseButtonRelease)
+                    onToggleTabAutoReload();
+                return true;
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }

@@ -33,6 +33,59 @@ LogModel::LogModel(QObject* parent)
                            << QColor(Qt::darkRed).darker(220);
 }
 
+void LogModel::appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
+{
+    if (entries.isEmpty())
+        return;
+
+    // Assign file colors for any new source files.
+    for (const auto& entry : entries) {
+        if (entry && entry->sourceFile) {
+            const QString& fp = entry->sourceFile->filePath;
+            if (!m_fileColors.contains(fp)) {
+                if (!m_predefinedFileColors.isEmpty()) {
+                    m_fileColors[fp] = m_predefinedFileColors[m_nextColorIndex];
+                    m_nextColorIndex = (m_nextColorIndex + 1) % m_predefinedFileColors.size();
+                } else {
+                    m_fileColors[fp] = Qt::gray;
+                }
+            }
+        }
+    }
+
+    m_cachedUniqueSourceFileCount = -1;
+
+    // Collect new entries that pass current filters.
+    QVector<std::shared_ptr<LogEntry>> passing;
+    passing.reserve(entries.size());
+    for (const auto& e : entries) {
+        if (passesFilters(e))
+            passing.append(e);
+    }
+
+    // Append to all-entries unconditionally.
+    m_allEntries.append(entries);
+
+    if (!passing.isEmpty()) {
+        const int firstNew = m_filteredEntries.size();
+        const int lastNew  = firstNew + passing.size() - 1;
+        beginInsertRows(QModelIndex(), firstNew, lastNew);
+        m_filteredEntries.append(passing);
+        endInsertRows();
+        emit modelFiltered(m_filteredEntries.size());
+    }
+
+    // Replace the "new" set: previous batch loses its highlight, this batch gains it.
+    // Repaint old rows that were green before (they now lose the marker).
+    if (!m_newEntryIds.isEmpty() && rowCount() > (int)passing.size()) {
+        const int oldLastRow = rowCount() - (int)passing.size() - 1;
+        emit dataChanged(index(0, 0), index(oldLastRow, 0));
+    }
+    m_newEntryIds.clear();
+    for (const auto& e : entries)
+        if (e) m_newEntryIds.insert(e->logicalEntryId);
+}
+
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
     beginResetModel();
@@ -67,6 +120,9 @@ void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
     rebuildFilteredEntries();
     endResetModel();
     emit modelFiltered(m_filteredEntries.size());
+
+    // Clear the new-entry highlight state on full model reset.
+    m_newEntryIds.clear();
 }
 
 int LogModel::rowCount(const QModelIndex&) const
@@ -103,6 +159,8 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
         badge["color"] = getColorForFile(entry->sourceFile->filePath);
         return badge;
     }
+    case IsNewRole:
+        return m_newEntryIds.contains(entry->logicalEntryId);
     case Qt::BackgroundRole: // Handle background color
         return getLogLevelColor(entry->level);
     case Qt::DisplayRole:
@@ -121,7 +179,8 @@ QHash<int, QByteArray> LogModel::roleNames() const
         {DisplayMessageRole, "displayMessage"},
         {SourceFileRole,     "sourceFile"},
         {IsExpandedRole,     "isExpanded"},
-        {FileBadgeRole,      "fileBadge"}
+        {FileBadgeRole,      "fileBadge"},
+        {IsNewRole,          "isNew"}
     };
 }
 
@@ -307,19 +366,45 @@ QColor LogModel::defaultColorForLevel(LogLevel level) {
     return AppTheme::instance().forLevel(level);
 }
 
-// ---------------------------------------------------------------------------
-// setVisibleFields — controls which structured fields appear in the display.
-// ---------------------------------------------------------------------------
-
-void LogModel::setVisibleFields(FieldVisibilityMask mask)
+void LogModel::setAvailableFields(const QStringList& fieldNames)
 {
-    if (m_visibleFields == mask)
+    if (m_availableFieldNames == fieldNames)
         return;
 
-    m_visibleFields = mask;
-    clearElideCache(); // Elide cache stores text derived from the display message
+    m_availableFieldNames = fieldNames;
 
-    // Notify the view that display data has changed for every visible row.
+    QVector<int> sanitized;
+    sanitized.reserve(m_visibleFieldIndexes.size());
+    for (const int indexValue : m_visibleFieldIndexes) {
+        if (indexValue >= 0 && indexValue < m_availableFieldNames.size() && !sanitized.contains(indexValue))
+            sanitized.push_back(indexValue);
+    }
+    m_visibleFieldIndexes = std::move(sanitized);
+
+    clearElideCache();
+    if (!m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0),
+                         index(m_filteredEntries.size() - 1, 0),
+                         {Qt::DisplayRole, DisplayMessageRole});
+    }
+}
+
+void LogModel::setFieldDisplaySelection(bool enabled, const QVector<int>& visibleIndexes)
+{
+    QVector<int> sanitized;
+    sanitized.reserve(visibleIndexes.size());
+    for (const int fieldIndex : visibleIndexes) {
+        if (fieldIndex >= 0 && fieldIndex < m_availableFieldNames.size() && !sanitized.contains(fieldIndex))
+            sanitized.push_back(fieldIndex);
+    }
+
+    if (m_fieldFilterEnabled == enabled && m_visibleFieldIndexes == sanitized)
+        return;
+
+    m_fieldFilterEnabled = enabled;
+    m_visibleFieldIndexes = std::move(sanitized);
+    clearElideCache();
+
     if (!m_filteredEntries.isEmpty()) {
         emit dataChanged(index(0, 0),
                          index(m_filteredEntries.size() - 1, 0),
@@ -340,33 +425,32 @@ void LogModel::refreshDisplay()
 // ---------------------------------------------------------------------------
 // formatDisplayMessage — returns the text to show for a single entry row.
 //
-// Fast path: if all fields are visible (default) or the entry has no
-// structured fields (continuation line or no pattern set), the raw
-// entry.message is returned directly with no allocation.
+// Fast path: when field filtering is disabled or the entry has no extracted
+// fields, return the original line with no allocation.
 //
-// Slow path: builds a space-joined string from only the visible fields.
-// Called for every painted row, so it must stay cheap.
+// Filtered path: concatenate only the selected block values in schema order.
+// Called for every painted row, so it keeps allocations minimal.
 // ---------------------------------------------------------------------------
 
 QString LogModel::formatDisplayMessage(const LogEntry& entry) const
 {
-    // Fast path: all fields visible or no structured data extracted
-    if (m_visibleFields == LogFieldAllMask || entry.fields.isEmpty())
+    if (!m_fieldFilterEnabled || entry.fields.isEmpty())
         return entry.message;
 
-    QStringList parts;
-    parts.reserve(LogFieldCount);
-    for (int i = 0; i < LogFieldCount; ++i) {
-        if (!(m_visibleFields & (static_cast<FieldVisibilityMask>(1) << i)))
+    QString result;
+    bool first = true;
+    for (const int fieldIndex : m_visibleFieldIndexes) {
+        const QStringView value = entry.fields.get(fieldIndex, entry.message);
+        if (value.isEmpty())
             continue;
-        const QStringView sv = entry.fields.get(static_cast<LogField>(i), entry.message);
-        if (!sv.isEmpty())
-            parts << sv.toString();
+
+        if (!first)
+            result += QLatin1Char(' ');
+        result += value;
+        first = false;
     }
 
-    // Fallback: if the mask matched nothing (e.g. fields not present in this
-    // entry), show the full raw line so the row is never blank.
-    return parts.isEmpty() ? entry.message : parts.join(QLatin1Char(' '));
+    return result.isEmpty() ? entry.message : result;
 }
 
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround)

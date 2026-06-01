@@ -31,15 +31,20 @@ public:
     // This method can be called from a separate thread for stat analysis
     FileStats analyzeFileForStats(const QString& filePath);
 
-    // Optional: configure a Log4cxx / Log4j ConversionPattern so that the
-    // parser extracts structured fields (thread id, logger name, message body,
-    // NDC, source location) into LogEntry::fields for every primary line.
-    // Passing an empty string clears the pattern (no extraction).
-    void setPattern(const QString& conversionPattern);
+    // Optional: configure a dynamic block schema so that the parser extracts
+    // structured fields into LogEntry::fields for every primary line.
+    // The string may be either the new serialized schema format or a legacy
+    // log4cxx/log4j conversion pattern, which will be migrated on read.
+    // Passing an empty string clears structured extraction.
+    void setPattern(const QString& schemaString);
+    void setExtractionEnabled(bool enabled) { m_extractionEnabled = enabled; }
     const LogPattern& pattern() const noexcept { return m_pattern; }
 
 public slots:
     void startParsing(const LogFilePtr& logFile);
+    // Incremental parse: read only bytes starting at startOffset.
+    // startLogicalEntryId is the ID to assign to the first new primary entry.
+    void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId);
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
@@ -53,11 +58,13 @@ private:
     bool detectLogLevel(const QString &line, LogLevel &level) const;
 
     void doParse(const LogFilePtr& logFile);
+    void doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId);
 
     const QRegularExpression m_timestampRegex;
     QStringList m_timeFormats;
     const QRegularExpression m_levelRegex;
-    LogPattern m_pattern; // Optional ConversionPattern for structured field extraction
+    LogPattern m_pattern; // Optional block schema for structured field extraction
+    bool m_extractionEnabled = false; // Only extract fields when filter is active
 };
 
 #endif // LOGPARSER_H

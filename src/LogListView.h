@@ -7,13 +7,7 @@
 #include <QStringView>
 #include <QTimer>
 #include <QVector>
-
-// Структура для хранения информации о выделяемом токене (число, строка в кавычках)
-struct HighlightToken {
-    int start;          // Начальная позиция в оригинальной строке
-    int end;            // Конечная позиция в оригинальной строке
-    QColor color;       // Цвет для подсветки
-};
+#include "syntaxhighlighter.h"
 
 // Структура для хранения информации о фрагменте текста (одной строке в режиме word wrap)
 struct TextFragment {
@@ -26,7 +20,8 @@ struct TextFragment {
 // Типы плашек, которые рисуются справа от строки
 enum class BadgeType {
     HiddenToggle, // "+N" или "-" для скрытых символов / разворота строки
-    Info          // Информационная плашка (например, имя файла)
+    Info,         // Информационная плашка (например, имя файла)
+    Warning       // Предупреждение о несовпадении со схемой
 };
 
 struct BadgeSpec {
@@ -85,6 +80,68 @@ struct RowHitInfo {
     bool valid = false;
 };
 
+// ============================================================================
+// TextSelection — всё состояние текстового выделения в одном месте.
+// Инкапсулирует нормализацию, диапазоны и запросы так, чтобы вызывающий
+// код никогда не занимался ручной арифметикой min/max над полями.
+// ============================================================================
+struct TextSelection {
+    int  anchorRow  = -1;  // строка, где началось выделение (якорь — не меняется во время drag)
+    int  anchorPos  = -1;  // символьная позиция начала в anchorRow
+    int  activeRow  = -1;  // строка под курсором (меняется во время drag)
+    int  activePos  = -1;  // символьная позиция курсора в activeRow
+    bool isDragging = false;
+
+    bool isValid()    const { return anchorRow >= 0 && activeRow >= 0 && anchorPos >= 0 && activePos >= 0; }
+    bool isEmpty()    const { return !isValid() || (anchorRow == activeRow && anchorPos == activePos); }
+    bool isMultiRow() const { return isValid() && anchorRow != activeRow; }
+    bool containsRow(int row) const { return isValid() && row >= topRow() && row <= bottomRow(); }
+
+    // Нормализованные границы диапазона строк
+    int topRow()    const { return std::min(anchorRow, activeRow); }
+    int bottomRow() const { return std::max(anchorRow, activeRow); }
+
+    // Позиция начала выделения (в topRow)
+    int firstPos() const {
+        if (anchorRow == activeRow) return std::min(anchorPos, activePos);
+        return (anchorRow < activeRow) ? anchorPos : activePos;
+    }
+    // Позиция конца выделения (в bottomRow)
+    int lastPos() const {
+        if (anchorRow == activeRow) return std::max(anchorPos, activePos);
+        return (anchorRow > activeRow) ? anchorPos : activePos;
+    }
+
+    // Границы подсветки [selStart, selEnd] для указанной строки.
+    // Вызывать только если containsRow(row) == true.
+    void rangeForRow(int row, int textLen, int& selStart, int& selEnd) const {
+        if (anchorRow == activeRow) {
+            selStart = std::min(anchorPos, activePos);
+            selEnd   = std::max(anchorPos, activePos);
+        } else if (row == topRow()) {
+            selStart = firstPos();
+            selEnd   = textLen;
+        } else if (row == bottomRow()) {
+            selStart = 0;
+            selEnd   = lastPos();
+        } else {
+            selStart = 0;       // промежуточная строка — выделена целиком
+            selEnd   = textLen;
+        }
+    }
+
+    void clear() { *this = TextSelection{}; }
+
+    // Начать новое выделение: якорь = курсор = (row, pos), drag активен
+    void start(int row, int pos) {
+        anchorRow = activeRow = row;
+        anchorPos = activePos = pos;
+        isDragging = true;
+    }
+    void moveTo(int row, int pos) { activeRow = row; activePos = pos; }
+    void finish() { isDragging = false; }
+};
+
 class LogListView : public QListView {
     Q_OBJECT
 public:
@@ -114,15 +171,21 @@ protected:
     bool viewportEvent(QEvent *event) override;
     void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
     void updateGeometries() override;
+    void changeEvent(QEvent* event) override;
 
 private:
+    // ========== Подсветка парных скобок ======================================
+    struct BracketMatch {
+        int row = -1;  // строка, где найдена парная скобка (-1 = нет совпадения)
+        int pos = -1;  // позиция закрывающей скобки в строке
+        bool isValid() const { return row >= 0 && pos >= 0; }
+        void clear()         { row = -1; pos = -1; }
+    };
+    BracketMatch m_bracketMatch;          // текущее совпадение парной скобки
+    void updateBracketMatch();            // пересчитать совпадение по текущему выделению
+
     QSet<int> m_toggledRows; // строки, состояние которых инвертировано относительно m_wordWrapEnabled
-    int m_selRow = -1;
-    int m_selStart = -1;
-    int m_selEnd = -1;
-    bool m_selecting = false;
-    int m_selStartFragment = -1;  // Индекс фрагмента, где начали выделение
-    int m_selEndFragment = -1;    // Индекс текущего фрагмента
+    TextSelection m_selection;  // всё состояние текстового выделения
     bool m_wordWrapEnabled = false; // состояние по умолчанию для всех строк
     bool m_inUpdateGeometries = false; // предотвращение рекурсии
 
@@ -216,7 +279,6 @@ private:
     int calculateWidth(const QStringView& text) const;
     int textWidthUntil(const QStringView& text, int count) const;
     void drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens) const;
-    QList<HighlightToken> findHighlightTokens(const QString& text) const;
 
     // Вспомогательные методы для вычисления состояния строки
     QList<TextFragment> splitTextIntoLines(const QString& text, const QRect& rect) const;
@@ -227,9 +289,11 @@ private:
     // Отрисовка
     void drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state);
     void drawSelectionHighlight(QPainter& painter, const QRect& rect, const QString& text, int selStart, int selEnd, const RowState& state);
+    void drawBracketHighlight(QPainter& painter, const QRect& textRect, const RowState& state) const;
     void drawHighlightedText(QPainter& painter, int x, int y, const QString& text, const QList<QPair<int, int>>& highlights, const QColor& highlightColor, const QColor& defaultColor);
     int estimateTotalHeightForDirtyCache(int rows) const;
     void updateScrollbar();
+    void invalidateSelectionRange(int topRow, int bottomRow);  // точечная инвалидация диапазона строк
     
     // Кэширование растров строк
     QPixmap getRowPixmap(int row, const RowState& state);

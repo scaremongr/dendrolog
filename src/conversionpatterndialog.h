@@ -5,21 +5,22 @@
 #include <QPair>
 #include <QString>
 
-class QTableWidget;
-class QTextBrowser;
-class QLineEdit;
-class QToolButton;
-class QPushButton;
+#include "logpattern.h"
 
-/// Dialog for managing named Log4j/Log4cxx conversion patterns.
-/// Displays a table of (name, pattern) entries; users can add, remove,
-/// reorder and edit them.  Clicking "Use Selected" stores the chosen
-/// pattern and accepts the dialog.
+class QCloseEvent;
+class QTableWidget;
+class QLineEdit;
+class QPushButton;
+class QComboBox;
+
+/// Dialog for managing named dynamic field schemas.
+/// A schema consists of an ordered list of blocks.
+/// Each block has a name, a match rule and, when applicable, separator/details.
 class ConversionPatternDialog : public QDialog
 {
     Q_OBJECT
 public:
-    /// A single pattern entry: first = display name, second = pattern string.
+    /// A single schema entry: first = display name, second = serialized schema.
     using PatternEntry = QPair<QString, QString>;
     using PatternList  = QList<PatternEntry>;
 
@@ -35,30 +36,50 @@ public:
     int     chosenResultIndex() const { return m_chosenResultIndex; }
 
 private slots:
-    void onAdd();
-    void onRemove();
-    void onMoveUp();
-    void onMoveDown();
-    void onSelectionChanged();
-    void onNameEdited(const QString& text);
-    void onPatternEdited(const QString& text);
+    void onAddSchema();
+    void onRemoveSchema();
+    void onMoveSchemaUp();
+    void onMoveSchemaDown();
+    void onSchemaSelectionChanged(int currentRow, int currentColumn,
+                                  int previousRow, int previousColumn);
+    void onSchemaNameEdited(const QString& text);
+    void onAddBlock();
+    void onRemoveBlock();
+    void onMoveBlockUp();
+    void onMoveBlockDown();
+    void onBlockItemChanged();
     void onUseSelected();
 
-private:
-    void populateTable(const PatternList& list);
-    void syncFromRow(int row);
-    void syncToRow(int row);
-    void updateButtonStates();
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
-    QTableWidget* m_table       = nullptr;
-    QLineEdit*    m_nameEdit    = nullptr;
-    QLineEdit*    m_patternEdit = nullptr;
-    QToolButton*  m_insertBtn   = nullptr;
-    QPushButton*  m_addBtn      = nullptr;
-    QPushButton*  m_removeBtn   = nullptr;
-    QPushButton*  m_moveUpBtn   = nullptr;
-    QPushButton*  m_moveDownBtn = nullptr;
-    QPushButton*  m_useBtn      = nullptr;
+private:
+    void populateSchemas(const PatternList& list);
+    void setSchemaRow(int row, const QString& name, const QString& serializedSchema);
+    void updateSchemaSummary(int row);
+    void loadSchemaRow(int row);
+    void saveSchemaRow(int row);
+    void clearBlockTable();
+    void addBlockRow(const PatternBlock& block);
+    PatternDefinition currentDefinitionFromEditor() const;
+    void updateButtonStates();
+    // Called when Rule combo changes: refreshes Mode-combo enable state and Details visibility.
+    void updateRowMode(int row);
+    // Called when Mode combo changes: refreshes Details widget visibility.
+    void updateRowValue(int row);
+
+    QTableWidget* m_schemaTable      = nullptr;
+    QLineEdit*    m_nameEdit         = nullptr;
+    QTableWidget* m_blockTable       = nullptr;
+    QPushButton*  m_addSchemaBtn     = nullptr;
+    QPushButton*  m_removeSchemaBtn  = nullptr;
+    QPushButton*  m_moveSchemaUpBtn  = nullptr;
+    QPushButton*  m_moveSchemaDownBtn = nullptr;
+    QPushButton*  m_addBlockBtn      = nullptr;
+    QPushButton*  m_removeBlockBtn   = nullptr;
+    QPushButton*  m_moveBlockUpBtn   = nullptr;
+    QPushButton*  m_moveBlockDownBtn = nullptr;
+    QPushButton*  m_useBtn           = nullptr;
     QString       m_chosenPattern;
     int           m_chosenResultIndex = -1;
     bool          m_syncing = false;

@@ -1,16 +1,28 @@
 // logviewwidget.cpp
 #include "logviewwidget.h"
+#include "appsettings.h"
 #include <QVBoxLayout>
 #include <QFileInfo>
 #include <QDebug>
 #include <algorithm>
 
 
+// Comparator for merging/sorting LogEntry batches. Nulls sort first.
+static bool compareLogEntries(const std::shared_ptr<LogEntry>& a,
+                               const std::shared_ptr<LogEntry>& b)
+{
+    if (!a) return true;
+    if (!b) return false;
+    return *a < *b;
+}
+
 LogViewWidget::LogViewWidget(QWidget *parent)
     : QWidget(parent)
     , m_view(new LogListView(this))
     , m_model(new LogModel(this))
     , m_logParser(new LogParser(this))
+    , m_reloadParser(new LogParser(this))
+    , m_autoReload(AppSettings::instance().autoReload())
 {
     auto layout = new QVBoxLayout(this);
     layout->setContentsMargins(0,0,0,0);
@@ -24,12 +36,16 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumSize(0, 0);
 
-    // Соединяем сигналы парсера со слотами
-    connect(m_logParser, &LogParser::entriesParsed, this, &LogViewWidget::handleEntriesParsed);
-    connect(m_logParser, &LogParser::parsingStarted, this, [this](const LogFilePtr& logFile){ emit fileParsingStarted(logFile); });
-    connect(m_logParser, &LogParser::parsingProgress, this, [this](int progress, const LogFilePtr& logFile){ emit fileParsingProgress(logFile, progress); });
-    connect(m_logParser, &LogParser::parsingFinished, this, [this](int totalEntries, const LogFilePtr& logFile){ emit fileParsingFinished(logFile, totalEntries); });
-    connect(m_logParser, &LogParser::parsingFailed, this, [this](const LogFilePtr& logFile){ emit fileParsingFailed(logFile); });
+    // Соединяем сигналы парсера со слотами (начальная загрузка)
+    connect(m_logParser, &LogParser::entriesParsed,   this, &LogViewWidget::handleEntriesParsed);
+    connect(m_logParser, &LogParser::parsingStarted,  this, [this](const LogFilePtr& f){ emit fileParsingStarted(f); });
+    connect(m_logParser, &LogParser::parsingProgress, this, [this](int p, const LogFilePtr& f){ emit fileParsingProgress(f, p); });
+    connect(m_logParser, &LogParser::parsingFinished, this, &LogViewWidget::handleParsingFinished);
+    connect(m_logParser, &LogParser::parsingFailed,   this, [this](const LogFilePtr& f){ emit fileParsingFailed(f); });
+
+    // Соединяем сигналы reload-парсера (только для инкрементальных обновлений)
+    connect(m_reloadParser, &LogParser::entriesParsed, this, &LogViewWidget::handleIncrementalEntriesParsed);
+    connect(m_reloadParser, &LogParser::parsingFinished, this, &LogViewWidget::handleIncrementalParsingFinished);
 
     // Соединяем сигнал изменения текущей строки
     connect(m_view->selectionModel(), &QItemSelectionModel::currentRowChanged,
@@ -53,11 +69,25 @@ LogViewWidget::~LogViewWidget()
 void LogViewWidget::setParserPattern(const QString& pattern)
 {
     m_logParser->setPattern(pattern);
+    m_reloadParser->setPattern(pattern);
+    if (m_model)
+        m_model->setAvailableFields(m_logParser->pattern().fieldNames());
+}
+
+void LogViewWidget::setExtractionEnabled(bool enabled)
+{
+    m_logParser->setExtractionEnabled(enabled);
+    m_reloadParser->setExtractionEnabled(enabled);
 }
 
 QString LogViewWidget::parserPattern() const
 {
     return m_logParser->pattern().patternString();
+}
+
+QStringList LogViewWidget::parserFieldNames() const
+{
+    return m_logParser->pattern().fieldNames();
 }
 
 void LogViewWidget::addLogFile(const QString &filePath)
@@ -76,65 +106,51 @@ void LogViewWidget::addLogFile(const QString &filePath)
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
 }
 
-void LogViewWidget::handleEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& parsedLogFile)
+void LogViewWidget::handleEntriesParsed(
+    const QVector<std::shared_ptr<LogEntry>>& entriesBatch,
+    const LogFilePtr& parsedLogFile)
 {
-    qDebug() << "LogViewWidget: Received" << entriesBatch.size() << "entries for" << parsedLogFile->filePath;
     if (entriesBatch.isEmpty()) return;
 
-    // Получаем текущие записи из модели
-    QVector<std::shared_ptr<LogEntry>> currentEntries = m_model->allEntries();
-    
-    // Создаем компаратор (можно вынести в утилиты или сделать членом, если используется часто)
-    auto compareLogEntries = [](const std::shared_ptr<LogEntry>& a, const std::shared_ptr<LogEntry>& b) {
-        if (!a) return true;
-        if (!b) return false;
-        return *a < *b;
-    };
-
-    // Записи в entriesBatch уже отсортированы по originalLineNumber внутри своего файла.
-    // currentEntries уже глобально отсортированы.
-    // Нам нужно вставить batch в currentEntries, сохраняя общий порядок.
-
-    QVector<std::shared_ptr<LogEntry>> newMergedEntries;
-    newMergedEntries.reserve(currentEntries.size() + entriesBatch.size());
-
-    // Простое добавление и полная пересортировка - менее эффективно для частых батчей, но проще в реализации.
-    // currentEntries.append(entriesBatch);
-    // std::sort(currentEntries.begin(), currentEntries.end(), compareLogEntries);
-    // m_model->setEntries(currentEntries);
-
-    // Более эффективное слияние, если currentEntries и entriesBatch отсортированы согласно compareLogEntries
-    // entriesBatch приходит отсортированным по файлу, но для глобального merge его нужно отсортировать
-    // Однако, т.к. operator< в LogEntry сравнивает сначала timestamp, потом sourceFile, потом line, 
-    // то если batch от одного файла, он уже "частично" отсортирован для merge.
-    // Для корректного std::merge оба диапазона должны быть отсортированы по одному и тому же критерию.
-    // currentEntries УЖЕ отсортированы глобально.
-    // entriesBatch (от одного файла) также внутренне отсортирован (по времени/строке). 
-    // Если новый файл имеет времена, пересекающиеся с существующими, std::merge - правильный путь.
-    
-    // Batch может быть отсортирован по номеру строки в файле, но не по compareLogEntries
-    // (например, если метки времени в файле не монотонны). std::merge требует оба диапазона
-    // отсортированными по одному и тому же компаратору - поэтому сортируем копию batch.
+    // Sort the batch so it can be merged into the already-sorted model entries.
     QVector<std::shared_ptr<LogEntry>> sortedBatch(entriesBatch.begin(), entriesBatch.end());
     std::sort(sortedBatch.begin(), sortedBatch.end(), compareLogEntries);
 
-    std::merge(currentEntries.begin(), currentEntries.end(),
+    // Track the highest logical ID seen (bookkeeping for incremental reload).
+    if (parsedLogFile) {
+        int& nextId = m_fileReloadStates[parsedLogFile->filePath].nextLogicalEntryId;
+        for (const auto& e : sortedBatch)
+            if (e) nextId = qMax(nextId, e->logicalEntryId + 1);
+    }
+
+    // Merge into the model's current entries, preserving global sort order.
+    const auto& current = m_model->allEntries();
+    QVector<std::shared_ptr<LogEntry>> merged;
+    merged.reserve(current.size() + sortedBatch.size());
+    std::merge(current.begin(), current.end(),
                sortedBatch.constBegin(), sortedBatch.constEnd(),
-               std::back_inserter(newMergedEntries),
-               compareLogEntries);
-    
-    m_model->setEntries(newMergedEntries);
+               std::back_inserter(merged), compareLogEntries);
+
+    m_model->setEntries(merged);
     emit totalRowCountChanged(m_model->rowCount());
-    QModelIndex currentIndex = m_view->currentIndex();
-    emit currentRowChanged(currentIndex.isValid() ? currentIndex.row() : -1, m_model->rowCount());
+    const QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
 }
 
 void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& parsedLogFile)
 {
-    qDebug() << "LogViewWidget: Finished parsing for" << parsedLogFile->filePath << ", total entries:" << totalEntries;
+    // Record the file size at the end of the initial load. nextLogicalEntryId was
+    // already updated incrementally in handleEntriesParsed — no O(N) scan needed.
+    if (parsedLogFile) {
+        FileReloadState& st = m_fileReloadStates[parsedLogFile->filePath];
+        st.lastReadOffset  = QFileInfo(parsedLogFile->filePath).size();
+        st.initialLoadDone = true;
+    }
+
+    emit fileParsingFinished(parsedLogFile, totalEntries);
     emit totalRowCountChanged(m_model->rowCount());
-    QModelIndex currentIndexAfterFinish = m_view->currentIndex();
-    emit currentRowChanged(currentIndexAfterFinish.isValid() ? currentIndexAfterFinish.row() : -1, m_model->rowCount());
+    QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
 }
 
 void LogViewWidget::handleParsingFailed(const LogFilePtr& parsedLogFile)
@@ -150,10 +166,64 @@ void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
     emit modelFiltered(totalRowsAfterFilter);
 }
 
+bool LogViewWidget::reloadChangedFiles()
+{
+    bool anyChanged = false;
+    for (const auto& logFile : m_loadedFiles) {
+        if (!logFile) continue;
+
+        FileReloadState& st = m_fileReloadStates[logFile->filePath];
+        if (!st.initialLoadDone) continue; // Still doing the initial parse
+
+        const qint64 currentSize = QFileInfo(logFile->filePath).size();
+        if (currentSize < st.lastReadOffset) {
+            // File was truncated or replaced — do a full reload.
+            // Reset state so the next call to handleParsingFinished rebuilds it.
+            st.initialLoadDone = false;
+            st.lastReadOffset = 0;
+            st.nextLogicalEntryId = 0;
+            m_fileReloadStates.remove(logFile->filePath);
+            m_logParser->startParsing(logFile);
+            anyChanged = true;
+        } else if (currentSize > st.lastReadOffset) {
+            // File grew — do an incremental (append-only) read.
+            m_reloadParser->setPattern(m_logParser->pattern().patternString());
+            m_reloadParser->startParsingFrom(logFile, st.lastReadOffset, st.nextLogicalEntryId);
+            // Update offset immediately so concurrent polls don't re-trigger the same range.
+            st.lastReadOffset = currentSize;
+            anyChanged = true;
+        }
+    }
+    return anyChanged;
+}
+
+void LogViewWidget::handleIncrementalEntriesParsed(
+    const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr& logFile)
+{
+    if (batch.isEmpty() || !logFile) return;
+
+    // Update the next logical entry ID for this file.
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    for (const auto& e : batch) {
+        if (e)
+            st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId + 1);
+    }
+
+    // Append entries directly — no model reset, selection preserved.
+    m_model->appendEntries(batch);
+}
+
+void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& /*logFile*/)
+{
+    emit totalRowCountChanged(m_model->rowCount());
+    QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
+    emit reloadFinished(newEntries);
+}
+
 void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFilePtr& parsedLogFile)
 {
     // qDebug() << "LogViewWidget: Parsing progress for" << parsedLogFile->filePath << ":" << progressPercentage << "%";
-    // Обновить UI для отображения прогресса (например, QProgressBar для конкретного файла или общий)
 }
 
 
