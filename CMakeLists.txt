@@ -11,7 +11,7 @@ set(CMAKE_AUTORCC ON)    # Для обработки .qrc файлов
 set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если они есть)
 
 # Найти Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Core5Compat Gui Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Core5Compat Gui Concurrent Svg)
 
 # Добавить исходные файлы
 set(PROJECT_SOURCES
@@ -37,11 +37,25 @@ set(PROJECT_SOURCES
     src/conversionpatterndialog.h
     src/conversionpatterndialog.cpp
 
+    src/apptheme.cpp
+
+    src/appsettings.h
+    src/appsettings.cpp
+
+    src/settingsdialog.h
+    src/settingsdialog.cpp
+    src/settingsdialog.ui
+
     src/directoryscanner.h
     src/directoryscanner.cpp
 
     src/LogListView.h
     src/LogListView.cpp
+
+    src/texttoken.h
+    src/texttoken.cpp
+    src/syntaxhighlighter.h
+    src/syntaxhighlighter.cpp
     resources/resources.qrc
 )
 
@@ -54,6 +68,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Core5Compat
     Qt6::Gui
     Qt6::Concurrent
+    Qt6::Svg
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE src)

@@ -30,7 +30,7 @@
      <x>0</x>
      <y>0</y>
      <width>1200</width>
-     <height>17</height>
+     <height>21</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
@@ -45,6 +45,8 @@
     <addaction name="actionOpen"/>
     <addaction name="separator"/>
     <addaction name="menuRecentFiles"/>
+    <addaction name="separator"/>
+    <addaction name="actionReloadFile"/>
    </widget>
    <widget class="QMenu" name="menuView">
     <property name="title">
@@ -95,6 +97,8 @@
    <addaction name="actionInfo"/>
    <addaction name="actionDebug"/>
    <addaction name="actionTrace"/>
+   <addaction name="separator"/>
+   <addaction name="actionReloadFile"/>
   </widget>
   <widget class="QToolBar" name="searchToolBar">
    <property name="windowTitle">
@@ -106,14 +110,6 @@
    <attribute name="toolBarBreak">
     <bool>false</bool>
    </attribute>
-   <widget class="QLineEdit" name="searchLineEdit">
-    <property name="placeholderText">
-     <string>Search...</string>
-    </property>
-    <property name="maximumWidth">
-     <number>300</number>
-    </property>
-   </widget>
    <addaction name="actionSearchPrevious"/>
    <addaction name="actionSearchNext"/>
   </widget>
@@ -200,6 +196,15 @@
     </layout>
    </widget>
   </widget>
+  <widget class="QDockWidget" name="fieldVisibilityDockWidget">
+   <property name="windowTitle">
+    <string>Log Fields</string>
+   </property>
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <widget class="QWidget" name="fieldVisibilityContentsWidget"/>
+  </widget>
   <action name="actionFatal">
    <property name="checkable">
     <bool>true</bool>
@@ -248,15 +253,6 @@
     <string>Trace</string>
    </property>
   </action>
-  <widget class="QDockWidget" name="fieldVisibilityDockWidget">
-   <property name="windowTitle">
-    <string>Log Fields</string>
-   </property>
-   <attribute name="dockWidgetArea">
-    <number>2</number>
-   </attribute>
-   <widget class="QWidget" name="fieldVisibilityContentsWidget"/>
-  </widget>
   <action name="actionToggle_Field_Visibility_Panel">
    <property name="text">
     <string>Log Fields Panel</string>
@@ -293,23 +289,34 @@
     <string>&amp;Open Log File(s)...</string>
    </property>
   </action>
-  <action name="actionSearchPrevious">
-   <property name="iconText">
-    <string>Previous</string>
+  <action name="actionReloadFile">
+   <property name="text">
+    <string>&amp;Reload File</string>
    </property>
+   <property name="toolTip">
+    <string>Check for new content appended to the loaded file(s) and refresh the view</string>
+   </property>
+   <property name="shortcut">
+    <string>F5</string>
+   </property>
+  </action>
+  <action name="actionSearchPrevious">
    <property name="text">
     <string>Search Previous</string>
+   </property>
+   <property name="iconText">
+    <string>Previous</string>
    </property>
    <property name="toolTip">
     <string>Search previous occurrence</string>
    </property>
   </action>
   <action name="actionSearchNext">
-   <property name="iconText">
-    <string>Next</string>
-   </property>
    <property name="text">
     <string>Search Next</string>
+   </property>
+   <property name="iconText">
+    <string>Next</string>
    </property>
    <property name="toolTip">
     <string>Search next occurrence</string>

@@ -155,14 +155,106 @@ void LogParser::startParsing(const LogFilePtr& logFile)
 {
     // Запускаем doParse в отдельном потоке из пула потоков Qt
     // Передаем копию shared_ptr logFile
-    QtConcurrent::run([this, logFile]() {
+    (void)QtConcurrent::run([this, logFile]() {
         this->doParse(logFile);
     });
 }
 
-void LogParser::setPattern(const QString& conversionPattern)
+void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId)
 {
-    m_pattern.setPattern(conversionPattern);
+    (void)QtConcurrent::run([this, logFile, startOffset, startLogicalEntryId]() {
+        this->doParseFrom(logFile, startOffset, startLogicalEntryId);
+    });
+}
+
+void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId)
+{
+    if (!logFile || logFile->filePath.isEmpty()) {
+        emit parsingFinished(0, logFile);
+        return;
+    }
+
+    QFile file(logFile->filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        emit parsingFailed(logFile);
+        return;
+    }
+
+    // Seek to the continuation point.
+    if (startOffset > 0 && !file.seek(startOffset)) {
+        emit parsingFinished(0, logFile);
+        return;
+    }
+
+    QTextStream in(&file);
+    QVector<std::shared_ptr<LogEntry>> batchEntries;
+    const int BATCH_SIZE = 5000;
+    batchEntries.reserve(BATCH_SIZE);
+
+    int logicalEntryIdCounter = startLogicalEntryId;
+    int currentLogicalEntryId = logicalEntryIdCounter - 1; // will be set on first primary line
+    QDateTime currentLogicalEntryTimestamp;
+    LogLevel currentLogicalEntryLevel = LogLevel::Unknown;
+    int fileLineNumber = 0; // relative line counter within the new block
+    int totalParsedEntries = 0;
+
+    QString line;
+    while (!in.atEnd()) {
+        line = in.readLine();
+        // Skip empty lines: either the phantom EOF line produced after a trailing
+        // newline, or the completing \n of a line that had no newline at initial-parse time.
+        if (line.isEmpty())
+            continue;
+        fileLineNumber++;
+
+        QDateTime lineTs;
+        LogLevel lineLevel = LogLevel::Unknown;
+
+        bool hasTimestamp = detectTimestamp(line, lineTs);
+        bool hasLevel = detectLogLevel(line, lineLevel);
+        LogEntryFields extractedFields;
+        const bool schemaMatched = (m_extractionEnabled && m_pattern.isValid())
+            ? !(extractedFields = m_pattern.extractFields(line)).isEmpty()
+            : false;
+
+        std::shared_ptr<LogEntry> currentEntry;
+        if (schemaMatched || (hasTimestamp && hasLevel)) {
+            currentLogicalEntryId = logicalEntryIdCounter++;
+            currentLogicalEntryTimestamp = lineTs;
+            currentLogicalEntryLevel = lineLevel;
+            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
+                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            currentEntry->fields = extractedFields;
+        } else {
+            if (currentLogicalEntryId < startLogicalEntryId) {
+                // No primary line yet — treat as its own entry
+                currentLogicalEntryId = logicalEntryIdCounter++;
+                currentLogicalEntryTimestamp = QDateTime();
+                currentLogicalEntryLevel = LogLevel::Unknown;
+            }
+            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
+                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+        }
+        batchEntries.push_back(currentEntry);
+        totalParsedEntries++;
+
+        if (batchEntries.size() >= BATCH_SIZE) {
+            emit entriesParsed(batchEntries, logFile);
+            batchEntries.clear();
+            batchEntries.reserve(BATCH_SIZE);
+        }
+    }
+
+    if (!batchEntries.isEmpty()) {
+        emit entriesParsed(batchEntries, logFile);
+    }
+
+    emit parsingFinished(totalParsedEntries, logFile);
+}
+
+void LogParser::setPattern(const QString& schemaString)
+{
+    m_pattern.setPattern(schemaString);
 }
 
 void LogParser::doParse(const LogFilePtr& logFile)
@@ -199,6 +291,9 @@ void LogParser::doParse(const LogFilePtr& logFile)
     QString line;
     while (!in.atEnd()) {
         line = in.readLine();
+        // Skip the phantom empty line that QTextStream produces after a trailing newline.
+        if (line.isEmpty() && in.atEnd())
+            break;
         bytesRead += line.length() + 1; // Приблизительный подсчет, +1 для \n
         fileLineNumber++;
 
@@ -207,16 +302,18 @@ void LogParser::doParse(const LogFilePtr& logFile)
 
         bool hasTimestamp = detectTimestamp(line, lineTs);
         bool hasLevel = detectLogLevel(line, lineLevel);
+        LogEntryFields extractedFields;
+        const bool schemaMatched = (m_extractionEnabled && m_pattern.isValid())
+            ? !(extractedFields = m_pattern.extractFields(line)).isEmpty()
+            : false;
 
         std::shared_ptr<LogEntry> currentEntry;
-        if (hasTimestamp && hasLevel) {
+        if (schemaMatched || (hasTimestamp && hasLevel)) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber, currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            // Extract structured fields if a pattern is configured
-            if (m_pattern.isValid())
-                currentEntry->fields = m_pattern.extractFields(currentEntry->message);
+            currentEntry->fields = extractedFields;
         } else {
             if (currentLogicalEntryId == -1) { 
                 currentLogicalEntryId = logicalEntryIdCounter++;

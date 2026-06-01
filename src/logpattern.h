@@ -2,68 +2,91 @@
 #define LOGPATTERN_H
 
 #include "logfield.h"
+
+#include <QRegularExpression>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
-// ============================================================
-// PatternSegment — one element of a parsed ConversionPattern.
-// ============================================================
+struct PatternBlock {
+    enum class MatchKind {
+        ConstantText,
+        TextUntilSeparator,
+        OptionalTextUntilSeparator,
+        GreedyTextUntilSeparator,
+        Timestamp,
+        Level,
+        HexText,
+        Integer,
+        FilePath,
+        OptionalFilePath,
+        CustomRegex,
+        Remainder
+    };
 
-struct PatternSegment {
-    enum class Kind { Literal, Field };
+    QString   name;
+    MatchKind matchKind = MatchKind::TextUntilSeparator;
+    QString   leadingText;
+    QString   separator;
+    QString   customRegex;
+};
 
-    Kind     kind    = Kind::Literal;
-    LogField field   = LogField::Count; ///< Valid only when kind == Field
-    QString  literal;                   ///< Valid only when kind == Literal
+struct PatternDefinition {
+    QString               linePrefix;
+    QVector<PatternBlock> blocks;
 };
 
 // ============================================================
-// LogPattern — parses a Log4cxx / Log4j ConversionPattern string
-// and provides fast, zero-copy structured-field extraction for
-// individual log lines.
+// LogPattern
 //
-// Example pattern:
-//   "> %d [%-10t] %-20c  %-8p %m ~~ %x {%F:%L}%n"
+// Stores a dynamic field-extraction schema made of ordered blocks.
+// Each block has a name and a rule describing how its content is matched:
+// typed matchers (timestamp / level / integer), text-until-separator,
+// custom regex, or remainder-of-line.
 //
-// Supported specifiers:
-//   %d{fmt}  — Timestamp     %t  — ThreadId
-//   %c{prec} — LoggerName    %p  — Level
-//   %m       — Message       %x  — Ndc
-//   %F       — SourceFile    %L  — SourceLine
-//   %n       — end-of-line (stops parsing)
-//   %%       — literal '%'
-//   Alignment modifiers (%-10, %20, …) are recognised and ignored.
-//
-// Thread-safety: the object is read-only after construction and
-// may be shared across threads without additional locking.
+// The schema is compiled once into a single QRegularExpression and then
+// reused for every line. This keeps extraction fast enough for very large
+// log files while still supporting dynamic user-defined fields.
 // ============================================================
 
 class LogPattern {
 public:
     LogPattern() = default;
-    explicit LogPattern(const QString& conversionPattern);
+    explicit LogPattern(const QString& pattern);
 
-    /// (Re)set the pattern.  Returns false if the string is empty.
-    bool setPattern(const QString& conversionPattern);
+    bool setPattern(const QString& pattern);
 
-    bool           isValid()        const noexcept { return m_valid; }
-    const QString& patternString()  const noexcept { return m_patternString; }
+    bool                    isValid() const noexcept { return m_valid; }
+    const QString&          patternString() const noexcept { return m_patternString; }
+    const PatternDefinition& definition() const noexcept { return m_definition; }
+    QStringList             fieldNames() const;
 
-    /// Extract structured fields from a single raw log line.
-    ///
-    /// The returned FieldSpan offsets refer into \a line — the caller
-    /// must keep \a line alive for the lifetime of the returned fields.
-    ///
-    /// Returns an empty LogEntryFields when the line does not match
-    /// (e.g. a multiline continuation line without header tokens).
     LogEntryFields extractFields(const QString& line) const;
 
-private:
-    void parsePattern(const QString& pattern);
+    static QString serializeDefinition(const PatternDefinition& definition);
+    // strict=true (default): validates with isDefinitionValid — used when applying a
+    //   pattern for real parsing.
+    // strict=false: skips isDefinitionValid — used by the editor dialog so that
+    //   in-progress / partially-configured schemas can be loaded without data loss.
+    static bool deserializeDefinition(const QString& text,
+                                      PatternDefinition* definition,
+                                      bool allowLegacy = true,
+                                      bool strict = true);
 
-    QString                  m_patternString;
-    QVector<PatternSegment>  m_segments;
-    bool                     m_valid = false;
+private:
+    static bool parseLegacyConversionPattern(const QString& legacy,
+                                             PatternDefinition* definition);
+    static bool isDefinitionValid(const PatternDefinition& definition);
+
+    void buildExtractRegex();
+
+    QString            m_patternString;
+    PatternDefinition  m_definition;
+    QRegularExpression m_extractRegex;
+    QStringList        m_captureNames;
+    QVector<int>       m_captureBlockIndexes;
+    QVector<int>       m_captureFieldIndexes;
+    bool               m_valid = false;
 };
 
 #endif // LOGPATTERN_H

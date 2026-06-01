@@ -4,7 +4,9 @@
 #include "logentry.h"
 #include "logpattern.h"
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QFontMetrics>
+#include <QHash>
 #include <QSet>
 #include <memory>
 #include <QColor>
@@ -26,8 +28,12 @@ public:
     explicit LogModel(QObject* parent = nullptr);
 
     void setEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
-    QVector<std::shared_ptr<LogEntry>> allEntries() const { return m_allEntries; }
-    QVector<std::shared_ptr<LogEntry>> filteredEntries() const { return m_filteredEntries; }
+    // Append-only update: adds new entries without resetting the model.
+    // Preserves the current selection and scroll position in the view.
+    // New entries must be >= all existing entries (appended at end of file).
+    void appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
+    const QVector<std::shared_ptr<LogEntry>>& allEntries() const { return m_allEntries; }
+    const QVector<std::shared_ptr<LogEntry>>& filteredEntries() const { return m_filteredEntries; }
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role) const override;
 
@@ -46,20 +52,23 @@ public:
         // Returns the display-formatted message text respecting the current
         // field-visibility mask.  Identical to Qt::DisplayRole but exposed
         // as a named role for QML / delegate convenience.
-        DisplayMessageRole
+        DisplayMessageRole,
+        // Returns true for entries appended via appendEntries() within the last 15 seconds.
+        // Used by LogListView to paint the gutter marker green for newly loaded rows.
+        IsNewRole
     };
 
-    // ---- Field-visibility control -------------------------------------------
-    // Bitmask where bit N corresponds to LogField(N).
-    // LogFieldAllMask (from logfield.h) means "show all fields" (default).
-    using FieldVisibilityMask = uint8_t;
-
-    /// Set which structured fields are shown in the display message.
-    /// Has no visible effect when no LogPattern is configured on the parser.
-    void setVisibleFields(FieldVisibilityMask mask);
-    FieldVisibilityMask visibleFields() const noexcept { return m_visibleFields; }
-    /// Force a display refresh without changing the mask — call after re-extracting
-    /// structured fields on already-loaded entries (e.g. after pattern change).
+    // ---- Dynamic field-visibility control -----------------------------------
+    // The parser provides an ordered list of available field names. The model
+    // stores the active list and the subset selected by the UI when field
+    // filtering is enabled.
+    void setAvailableFields(const QStringList& fieldNames);
+    QStringList availableFields() const { return m_availableFieldNames; }
+    void setFieldDisplaySelection(bool enabled, const QVector<int>& visibleIndexes);
+    bool fieldDisplayFilterEnabled() const noexcept { return m_fieldFilterEnabled; }
+    QVector<int> visibleFieldIndexes() const { return m_visibleFieldIndexes; }
+    /// Force a display refresh without changing the schema or selection — call
+    /// after re-extracting structured fields on already-loaded entries.
     void refreshDisplay();
     // -------------------------------------------------------------------------
 
@@ -127,7 +136,8 @@ private:
     void rebuildFilteredEntries();
     void clearRowDependentCaches();
 
-    // Returns the message text to display for entry, applying m_visibleFields.
+    // Returns the message text to display for entry, applying the active field
+    // selection when field filtering is enabled.
     // Returns entry.message directly (no allocation) when no filtering needed.
     QString formatDisplayMessage(const LogEntry& entry) const;
 
@@ -148,7 +158,14 @@ private:
 
     QMap<LogLevel, QColor> m_logLevelColors; // For background colors
 
-    FieldVisibilityMask m_visibleFields = LogFieldAllMask; // Default: show all fields
+    QStringList m_availableFieldNames;
+    QVector<int> m_visibleFieldIndexes;
+    bool m_fieldFilterEnabled = false;
+
+    // Set of logicalEntryIds from the most recently appended batch.
+    // Cleared and replaced on every appendEntries() call, and on setEntries().
+    // Used by LogListView to paint the gutter marker green for the latest loaded rows.
+    QSet<int> m_newEntryIds;
 };
 
 #endif // LOGMODEL_H

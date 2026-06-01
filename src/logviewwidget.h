@@ -28,9 +28,19 @@ public:
     // Возвращает количество загруженных файлов
     int fileCount() const { return m_loadedFiles.size(); }
 
-    // Задаёт ConversionPattern для парсера (применяется к следующим загружаемым файлам).
+    // Проверяет, изменились ли файлы на диске, и дочитывает новые данные.
+    // Возвращает true если хотя бы один файл был обновлён.
+    bool reloadChangedFiles();
+
+    // Per-tab auto-reload. Default is taken from AppSettings at construction time.
+    bool autoReload() const { return m_autoReload; }
+    void setAutoReload(bool enabled) { m_autoReload = enabled; }
+
+    // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
     void setParserPattern(const QString& pattern);
+    void setExtractionEnabled(bool enabled);
     QString parserPattern() const;
+    QStringList parserFieldNames() const;
 
     // Search methods
     void searchTextNext(const QString& term, bool caseSensitive);
@@ -41,6 +51,9 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void fileParsingProgress(const LogFilePtr& logFile, int progressPercentage);
     void fileParsingFinished(const LogFilePtr& logFile, int totalEntries);
     void fileParsingFailed(const LogFilePtr& logFile);
+
+    // Emitted when an incremental reload finishes (new entry count passed).
+    void reloadFinished(int newEntriesCount);
 
     // Новые сигналы для информации о строках
     void totalRowCountChanged(int totalRows);
@@ -53,6 +66,9 @@ private slots:
     void handleParsingFailed(const LogFilePtr& parsedLogFile);
     void handleParsingProgress(int progressPercentage, const LogFilePtr& parsedLogFile);
     void handleModelFilteredRelay(int totalRowsAfterFilter);
+    // Incremental reload: append new entries without model reset
+    void handleIncrementalEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr& logFile);
+    void handleIncrementalParsingFinished(int totalEntries, const LogFilePtr& logFile);
 
 private:
     LogListView *m_view;
@@ -60,6 +76,21 @@ private:
     QVector<LogFilePtr> m_loadedFiles;  // Список загруженных файлов
 
     LogParser* m_logParser;
+
+    // Per-file reload state: last byte offset read and next logicalEntryId to assign.
+    struct FileReloadState {
+        qint64 lastReadOffset = 0;
+        int    nextLogicalEntryId = 0;
+        bool   initialLoadDone = false; // false = still doing the initial parse
+    };
+    QHash<QString, FileReloadState> m_fileReloadStates; // key = filePath
+
+    // Parser used exclusively for incremental reads (so it doesn't interfere with
+    // the initial parse that uses m_logParser).
+    LogParser* m_reloadParser = nullptr;
+
+    // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.
+    bool m_autoReload = false;
 };
 
 #endif // LOGVIEWWIDGET_H
