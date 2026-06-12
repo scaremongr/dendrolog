@@ -31,6 +31,10 @@ class AppSettings : public QObject
 public:
     static AppSettings& instance();
 
+    // Path of the shared INI file (also used by MainWindow and the
+    // pattern editor for presets / sample text).
+    static QString iniFilePath();
+
     // Load preferences from the INI file.
     // Safe to call multiple times; later calls overwrite in-memory state.
     void load();
@@ -81,8 +85,6 @@ private:
     AppSettings()  = default;
     ~AppSettings() = default;
     Q_DISABLE_COPY_MOVE(AppSettings)
-
-    static QString iniFilePath();
 
     // Default values match the hard-coded defaults previously in MainWindow.
     QStringList m_scanExtensions { QStringLiteral("log"), QStringLiteral("txt") };

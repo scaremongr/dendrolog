@@ -1,4 +1,5 @@
 #include "logparser.h"
+#include "patternheuristics.h"
 #include <QFile>
 #include <QTextStream>
 #include <QtConcurrent> // Для QtConcurrent::run
@@ -8,8 +9,10 @@
 
 LogParser::LogParser(QObject* parent)
     : QObject(parent),
-      m_timestampRegex(R"((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})([.,]\d+)?)"),
-      m_levelRegex(QRegularExpression(R"(\b(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b)",
+      // Canonical token patterns live in PatternHeuristics so that line
+      // classification and the schema editor never drift apart.
+      m_timestampRegex(PatternHeuristics::isoTimestampDetectPattern()),
+      m_levelRegex(QRegularExpression(PatternHeuristics::levelDetectPattern(),
                                       QRegularExpression::CaseInsensitiveOption))
 {
     m_timeFormats = {

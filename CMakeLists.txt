@@ -33,9 +33,16 @@ set(PROJECT_SOURCES
     src/logparser.cpp
     src/logpattern.h
     src/logpattern.cpp
+    src/patternheuristics.h
+    src/patternheuristics.cpp
 
     src/conversionpatterndialog.h
     src/conversionpatterndialog.cpp
+    src/conversionpatterndialog.ui
+    src/patternblockcard.h
+    src/patternblockcard.cpp
+    src/separatornode.h
+    src/separatornode.cpp
 
     src/apptheme.cpp
 
