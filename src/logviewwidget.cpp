@@ -243,9 +243,13 @@ void LogViewWidget::searchTextNext(const QString& term, bool caseSensitive)
 
     if (foundIndex.isValid()) {
         m_view->setCurrentIndex(foundIndex);
+        // Раскрыть найденную строку и подсветить в ней вхождения term
+        // ДО scrollTo: раскрытие меняет высоту строки, и прокрутка должна
+        // целиться уже в финальную геометрию.
+        m_view->showSearchMatch(foundIndex.row(), term, caseSensitive);
         m_view->scrollTo(foundIndex, QAbstractItemView::PositionAtCenter);
     } else {
-        // Optional: Indicate not found (e.g., status bar message or beep)
+        m_view->clearSearchMatch();
     }
 }
 
@@ -268,9 +272,10 @@ void LogViewWidget::searchTextPrevious(const QString& term, bool caseSensitive)
 
     if (foundIndex.isValid()) {
         m_view->setCurrentIndex(foundIndex);
+        m_view->showSearchMatch(foundIndex.row(), term, caseSensitive);
         m_view->scrollTo(foundIndex, QAbstractItemView::PositionAtCenter);
     } else {
-        // Optional: Indicate not found
+        m_view->clearSearchMatch();
     }
 }
 

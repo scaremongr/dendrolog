@@ -5,6 +5,8 @@
 #include "directoryscanner.h"
 #include "appsettings.h"
 #include "settingsdialog.h"
+#include "filterpanelwidget.h"
+#include "markerpanelwidget.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -34,9 +36,11 @@
 #include <QComboBox>
 #include <QToolButton>
 #include <QMouseEvent>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr), m_textFilterContainerWidget(nullptr), m_textFilterLayout(nullptr), m_textFilterGlobalCaseSensitiveCheckBox(nullptr), m_addTextFilterButton(nullptr), m_applyAllTextFiltersButton(nullptr)
+    : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr)
 {
     ui->setupUi(this);
 
@@ -47,6 +51,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupStatusBar();
     setupTimeFilterDockContents();
     setupTextFilterDockContents();
+    setupRowMarkerDock();
     setupDirectoryScanner();
     setupFieldVisibilityDock();
 
@@ -221,6 +226,18 @@ void MainWindow::saveSettings()
     }
     s.endGroup();
 
+    s.beginGroup("Filters");
+    if (m_filterPanel) {
+        const QJsonDocument doc(m_filterPanel->ruleSet().toJson());
+        s.setValue("textFilterRules", QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    }
+    if (m_markerPanel) {
+        const QJsonDocument doc(QJsonObject{
+            {QStringLiteral("markers"), highlightPatternsToJson(m_markerPanel->markers())}});
+        s.setValue("rowMarkers", QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    }
+    s.endGroup();
+
     s.beginGroup("RecentFiles");
     s.setValue("files", m_recentFiles);
     s.endGroup();
@@ -307,6 +324,31 @@ void MainWindow::loadSettings()
     rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
     s.endGroup();
 
+    s.beginGroup("Filters");
+    if (m_filterPanel) {
+        const QByteArray rulesJson = s.value("textFilterRules").toString().toUtf8();
+        if (!rulesJson.isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(rulesJson);
+            if (doc.isObject())
+                m_filterPanel->setRuleSet(FilterRuleSet::fromJson(doc.object()));
+        }
+    }
+    if (m_markerPanel) {
+        const QByteArray markersJson = s.value("rowMarkers").toString().toUtf8();
+        if (!markersJson.isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(markersJson);
+            if (doc.isObject()) {
+                m_markerPanel->setMarkers(highlightPatternsFromJson(
+                    doc.object()[QStringLiteral("markers")].toArray()));
+            }
+        }
+    }
+    s.endGroup();
+    // Привязать загруженные правила к восстановленной схеме полей.
+    // К документам ничего не применяется: фильтрация пер-вкладочная,
+    // пользователь применяет правила к нужному документу сам.
+    updateFilterPanelFieldNames();
+
     s.beginGroup("RecentFiles");
     m_recentFiles = s.value("files").toStringList();
     s.endGroup();
@@ -378,12 +420,11 @@ void MainWindow::setupFieldVisibilityDock()
     connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
         if (m_fieldFilterControlsWidget)
             m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
-        // Enable/disable schema-based field extraction in all parsers
-        for (int t = 0; t < ui->tabWidget->count(); ++t) {
-            auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-            if (lv) lv->setExtractionEnabled(enabled);
-        }
-        applyFieldVisibilityToAllViews();
+        // applyPatternToAllViews() включает/выключает извлечение полей,
+        // ре-экстрагирует поля на уже загруженных записях и перепривязывает
+        // колоночные правила конструктора фильтров (галочка "Filter blocks"
+        // управляет доступностью строгой фильтрации по колонкам).
+        applyPatternToAllViews();
     });
     if (m_fieldFilterControlsWidget)
         m_fieldFilterControlsWidget->setEnabled(false);
@@ -627,6 +668,12 @@ void MainWindow::applyPatternToAllViews()
     }
 
     applyFieldVisibilityToAllViews();
+
+    // Схема изменилась — обновляем список колонок в конструкторе фильтров и
+    // перепривязываем уже применённые колоночные правила каждой вкладки
+    // (не навязывая правила панели вкладкам без фильтров).
+    updateFilterPanelFieldNames();
+    rebindFiltersOnAllViews();
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
@@ -639,6 +686,12 @@ LogViewWidget* MainWindow::createLogViewWidget()
     view->setExtractionEnabled(filterEnabled);
     if (view->model())
         view->model()->setFieldDisplaySelection(filterEnabled, selectedVisibleFieldIndexes());
+
+    // Новый документ открывается БЕЗ фильтров и маркеров: применение
+    // пер-вкладочное — пользователь нажимает Apply в панели фильтров,
+    // когда хочет отфильтровать именно этот документ. Сами правила в
+    // панелях при этом сохраняются (и переживают перезапуск).
+
     // Start the timer if this new tab has auto-reload enabled by default.
     updateAutoReloadTimer();
     return view;
@@ -715,45 +768,49 @@ void MainWindow::setupTimeFilterDockContents()
 
 void MainWindow::setupTextFilterDockContents()
 {
-    m_textFilterContainerWidget = ui->textFilterContentsWidget;
-    if (!m_textFilterContainerWidget)
+    QWidget* container = ui->textFilterContentsWidget;
+    if (!container)
     {
         qWarning("textFilterContentsWidget not found in UI. Text filter dock will be empty.");
-        m_textFilterContainerWidget = new QWidget(ui->textFilterDockWidget);
-        ui->textFilterDockWidget->setWidget(m_textFilterContainerWidget);
+        container = new QWidget(ui->textFilterDockWidget);
+        ui->textFilterDockWidget->setWidget(container);
     }
 
-    m_textFilterLayout = new QVBoxLayout(m_textFilterContainerWidget);
-    m_textFilterLayout->setContentsMargins(5, 5, 5, 5);
-    m_textFilterLayout->setSpacing(5);
+    auto* layout = new QVBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
 
-    QHBoxLayout *controlsLayout = new QHBoxLayout();
-    m_addTextFilterButton = new QPushButton(tr("+"), this);
-    m_addTextFilterButton->setToolTip(tr("Add another text filter term (OR logic)"));
-    connect(m_addTextFilterButton, &QPushButton::clicked, this, &MainWindow::onAddTextFilterInputClicked);
-    controlsLayout->addWidget(m_addTextFilterButton);
+    m_filterPanel = new FilterPanelWidget(container);
+    layout->addWidget(m_filterPanel);
 
-    m_applyAllTextFiltersButton = new QPushButton(tr("Apply Text Filters"), this);
-    connect(m_applyAllTextFiltersButton, &QPushButton::clicked, this, &MainWindow::onApplyAllTextFiltersClicked);
-    controlsLayout->addWidget(m_applyAllTextFiltersButton);
-
-    m_textFilterGlobalCaseSensitiveCheckBox = new QCheckBox(tr("Case Sensitive"), this);
-    controlsLayout->addWidget(m_textFilterGlobalCaseSensitiveCheckBox);
-    controlsLayout->addStretch();
-    m_textFilterLayout->addLayout(controlsLayout);
-
-    addNewTextFilterInput();
-
-    // This stretch pushes newly added filter rows upwards and ensures that the layout
-    // doesn't try to grow unnecessarily beyond its content when the dock widget itself resizes.
-    m_textFilterLayout->addStretch(1);
-    m_textFilterContainerWidget->adjustSize(); // Update the container's size hint
+    connect(m_filterPanel, &FilterPanelWidget::applyRequested,
+            this, &MainWindow::onApplyAllTextFiltersClicked);
+    connect(m_filterPanel, &FilterPanelWidget::resetRequested,
+            this, &MainWindow::onResetTextFiltersClicked);
 
     // Allow the dock widget to expand vertically as its content grows.
-    // This replaces the previous QSizePolicy::Fixed.
     ui->textFilterDockWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+}
 
-    // No explicit setFixedHeight calls are needed here, the layout should manage it.
+void MainWindow::setupRowMarkerDock()
+{
+    m_markerDockWidget = new QDockWidget(tr("Row Highlighters"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_markerDockWidget->setObjectName(QStringLiteral("rowMarkerDockWidget"));
+
+    m_markerPanel = new MarkerPanelWidget(m_markerDockWidget);
+    m_markerDockWidget->setWidget(m_markerPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_markerDockWidget);
+
+    connect(m_markerPanel, &MarkerPanelWidget::applyRequested,
+            this, &MainWindow::onApplyRowMarkersClicked);
+    connect(m_markerPanel, &MarkerPanelWidget::resetRequested,
+            this, &MainWindow::onResetRowMarkersClicked);
+
+    if (ui->menuView) {
+        QAction* toggle = m_markerDockWidget->toggleViewAction();
+        toggle->setText(tr("Row Highlighters Panel"));
+        ui->menuView->addAction(toggle);
+    }
 }
 
 void MainWindow::setupDirectoryScanner()
@@ -767,148 +824,6 @@ void MainWindow::setupDirectoryScanner()
     });
     connect(m_dirScanner, &DirectoryScanner::filesActivated,
             this, &MainWindow::onOpenSelectedDirectoryFiles);
-}
-
-void MainWindow::addNewTextFilterInput(const QString &initialText)
-{
-    QHBoxLayout *rowLayout = new QHBoxLayout();
-    QLineEdit *textInput = new QLineEdit(this);
-    textInput->setPlaceholderText(tr("Enter filter text..."));
-    if (!initialText.isEmpty())
-    {
-        textInput->setText(initialText);
-    }
-    connect(textInput, &QLineEdit::returnPressed, this, &MainWindow::onApplyAllTextFiltersClicked);
-
-    QPushButton *removeButton = new QPushButton(tr("-"), this);
-    removeButton->setToolTip(tr("Remove this filter term"));
-
-    rowLayout->addWidget(textInput);
-    rowLayout->addWidget(removeButton);
-
-    m_textFilterLayout->insertLayout(m_textFilterLayout->count() - 1, rowLayout);
-
-    m_textFilterInputs.append(textInput);
-    m_textFilterRemoveButtons.append(removeButton);
-
-    connect(removeButton, &QPushButton::clicked, this, &MainWindow::onRemoveTextFilterInputClicked);
-
-    if (m_textFilterInputs.count() == 1)
-    {
-        m_textFilterRemoveButtons.first()->setEnabled(false);
-    }
-    else
-    {
-        for (QPushButton *btn : m_textFilterRemoveButtons)
-        {
-            btn->setEnabled(true);
-        }
-    }
-}
-
-void MainWindow::onRemoveTextFilterInputClicked()
-{
-    QPushButton *B = qobject_cast<QPushButton *>(sender());
-    if (!B)
-        return;
-
-    int indexToRemove = -1;
-    for (int i = 0; i < m_textFilterRemoveButtons.count(); ++i)
-    {
-        if (m_textFilterRemoveButtons.at(i) == B)
-        {
-            indexToRemove = i;
-            break;
-        }
-    }
-
-    if (indexToRemove != -1)
-    {
-        QLineEdit *lineEdit = m_textFilterInputs.takeAt(indexToRemove);
-        QPushButton *removeButton = m_textFilterRemoveButtons.takeAt(indexToRemove);
-
-        for (int i = 0; i < m_textFilterLayout->count(); ++i)
-        {
-            QLayoutItem *item = m_textFilterLayout->itemAt(i);
-            if (item && item->layout())
-            {
-                QHBoxLayout *row = static_cast<QHBoxLayout *>(item->layout());
-                bool found = false;
-                for (int j = 0; j < row->count(); ++j)
-                {
-                    QWidget *widget = row->itemAt(j)->widget();
-                    if (widget == lineEdit || widget == removeButton)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                {
-                    while (QLayoutItem *childItem = row->takeAt(0))
-                    {
-                        if (childItem->widget())
-                        {
-                            delete childItem->widget();
-                        }
-                        delete childItem;
-                    }
-                    m_textFilterLayout->removeItem(row);
-                    delete row;
-                    break;
-                }
-            }
-        }
-
-        if (m_textFilterInputs.count() == 1 && !m_textFilterRemoveButtons.isEmpty())
-        {
-            m_textFilterRemoveButtons.first()->setEnabled(false);
-        }
-    }
-}
-
-void MainWindow::clearTextFilterInputs()
-{
-    while (!m_textFilterInputs.isEmpty())
-    {
-        QLineEdit *lineEdit = m_textFilterInputs.takeFirst();
-        QPushButton *removeButton = m_textFilterRemoveButtons.takeFirst();
-
-        for (int i = 0; i < m_textFilterLayout->count(); ++i)
-        {
-            QLayoutItem *item = m_textFilterLayout->itemAt(i);
-            if (item && item->layout())
-            {
-                QHBoxLayout *row = static_cast<QHBoxLayout *>(item->layout());
-                bool found = false;
-                for (int j = 0; j < row->count(); ++j)
-                {
-                    QWidget *widget = row->itemAt(j)->widget();
-                    if (widget == lineEdit || widget == removeButton)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                {
-                    while (QLayoutItem *childItem = row->takeAt(0))
-                    {
-                        if (childItem->widget())
-                        {
-                            delete childItem->widget();
-                        }
-                        delete childItem;
-                    }
-                    m_textFilterLayout->removeItem(row);
-                    delete row;
-                    break;
-                }
-            }
-        }
-    }
-    m_textFilterInputs.clear();
-    m_textFilterRemoveButtons.clear();
 }
 
 void MainWindow::connectToLogView(LogViewWidget *logView)
@@ -1365,28 +1280,92 @@ void MainWindow::onResetTimeFilterClicked()
 
 void MainWindow::onApplyAllTextFiltersClicked()
 {
+    applyTextFiltersToActiveView();
+}
+
+void MainWindow::onResetTextFiltersClicked()
+{
+    // Снять фильтры и подсветку с активного документа; правила в панели
+    // остаются и могут быть применены заново.
+    if (!m_activeLogView)
+        return;
+    if (m_activeLogView->model())
+        m_activeLogView->model()->setFilterRules(FilterRuleSet{});
+    if (m_activeLogView->view())
+        m_activeLogView->view()->setTextHighlightPatterns({});
+}
+
+void MainWindow::onApplyRowMarkersClicked()
+{
+    applyRowMarkersToActiveView();
+}
+
+void MainWindow::onResetRowMarkersClicked()
+{
+    // Снять окраску маркеров с активного документа; маркеры в панели
+    // остаются и могут быть применены заново.
     if (m_activeLogView && m_activeLogView->model())
-    {
-        QVector<LogModel::MessageFilterRule> rules;
-        for (QLineEdit *lineEdit : m_textFilterInputs)
-        {
-            QString searchText = lineEdit->text();
-            if (!searchText.isEmpty())
-            {
-                LogModel::MessageFilterRule rule;
-                rule.substring = searchText;
-                rule.caseSensitivity = m_textFilterGlobalCaseSensitiveCheckBox->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
-                rules.append(rule);
-            }
-        }
-        m_activeLogView->model()->setMessageFilterRules(rules);
+        m_activeLogView->model()->setRowMarkers({});
+}
+
+void MainWindow::applyTextFiltersToActiveView()
+{
+    if (!m_filterPanel || !m_activeLogView)
+        return;
+
+    // Фильтрация пер-вкладочная: Apply действует только на текущий документ.
+    // Остальные документы сохраняют свои (или никакие) фильтры.
+    FilterRuleSet rules = m_filterPanel->ruleSet();
+    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+    rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+
+    if (m_activeLogView->model())
+        m_activeLogView->model()->setFilterRules(rules);
+    if (m_activeLogView->view())
+        m_activeLogView->view()->setTextHighlightPatterns(rules.highlightPatterns());
+}
+
+void MainWindow::applyRowMarkersToActiveView()
+{
+    if (!m_markerPanel || !m_activeLogView || !m_activeLogView->model())
+        return;
+    m_activeLogView->model()->setRowMarkers(m_markerPanel->markers());
+}
+
+void MainWindow::rebindFiltersOnAllViews()
+{
+    // Схема полей или галочка "Filter blocks" изменились: каждая вкладка
+    // сохраняет СВОЙ применённый набор правил, но колоночные привязки
+    // должны быть пересчитаны под новую схему.
+    const QStringList fieldNames = LogPattern(m_conversionPattern).fieldNames();
+    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (!lv || !lv->model())
+            continue;
+        FilterRuleSet rules = lv->model()->filterRules();
+        if (!rules.isActive())
+            continue; // у документа нет фильтров — нечего перепривязывать
+        rules.bindFields(fieldNames, fieldScope);
+        lv->model()->setFilterRules(rules);
     }
+}
+
+void MainWindow::updateFilterPanelFieldNames()
+{
+    if (!m_filterPanel)
+        return;
+    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+    m_filterPanel->setFieldNames(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
 }
 
 void MainWindow::updateFilterInputsFromModel()
 {
+    // Текстовые фильтры и маркеры пер-вкладочные и применяются явно
+    // (Apply / автоприменение маркеров), поэтому при смене вкладки
+    // синхронизируется только фильтр по времени.
     LogViewWidget *currentView = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
-    clearTextFilterInputs();
 
     if (currentView && currentView->model())
     {
@@ -1411,31 +1390,11 @@ void MainWindow::updateFilterInputsFromModel()
             m_timeFilterTo->clear();
         }
         m_applyTimeFilterButton->setChecked(modelStartTime.isValid() && modelEndTime.isValid());
-
-        QVector<LogModel::MessageFilterRule> rules = model->messageFilterRules();
-        if (!rules.isEmpty())
-        {
-            for (const auto &rule : rules)
-            {
-                addNewTextFilterInput(rule.substring);
-            }
-            if (m_textFilterGlobalCaseSensitiveCheckBox)
-                m_textFilterGlobalCaseSensitiveCheckBox->setChecked(rules.first().caseSensitivity == Qt::CaseSensitive);
-        }
-        else
-        {
-            addNewTextFilterInput();
-            if (m_textFilterGlobalCaseSensitiveCheckBox)
-                m_textFilterGlobalCaseSensitiveCheckBox->setChecked(false);
-        }
     }
     else
     {
         m_timeFilterFrom->setDateTime(QDateTime::currentDateTime().addDays(-1).date().startOfDay());
         m_timeFilterTo->setDateTime(QDateTime::currentDateTime().date().endOfDay());
-        addNewTextFilterInput();
-        if (m_textFilterGlobalCaseSensitiveCheckBox)
-            m_textFilterGlobalCaseSensitiveCheckBox->setChecked(false);
     }
 }
 
@@ -1446,11 +1405,6 @@ void MainWindow::handleModelFiltered()
         int totalRows = m_activeLogView->model()->rowCount();
         handleTotalRowCountChanged(totalRows);
     }
-}
-
-void MainWindow::onAddTextFilterInputClicked()
-{
-    addNewTextFilterInput();
 }
 
 void MainWindow::onScanDirectoryClicked()

@@ -63,6 +63,18 @@ set(PROJECT_SOURCES
     src/texttoken.cpp
     src/syntaxhighlighter.h
     src/syntaxhighlighter.cpp
+
+    src/cardframe.h
+    src/cardframe.cpp
+    src/textmatchhighlighter.h
+    src/textmatchhighlighter.cpp
+    src/filterruleset.h
+    src/filterruleset.cpp
+    src/highlightpalette.h
+    src/filterpanelwidget.h
+    src/filterpanelwidget.cpp
+    src/markerpanelwidget.h
+    src/markerpanelwidget.cpp
     resources/resources.qrc
 )
 

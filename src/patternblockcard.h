@@ -1,10 +1,10 @@
 #ifndef PATTERNBLOCKCARD_H
 #define PATTERNBLOCKCARD_H
 
+#include "cardframe.h"
 #include "logpattern.h"
 
 #include <QColor>
-#include <QFrame>
 
 class QCheckBox;
 class QComboBox;
@@ -36,7 +36,7 @@ class QWidget;
 // marked with a border in the block's accent colour.
 // ============================================================
 
-class PatternBlockCard : public QFrame
+class PatternBlockCard : public CardFrame
 {
     Q_OBJECT
 public:
@@ -48,6 +48,7 @@ public:
     /// Returns the card state; \c separator is always left empty.
     PatternBlock block() const;
 
+    /// Прячет базовый метод: дополнительно обновляет тонировку ⚙ и рамку.
     void setAccentColor(const QColor& color);
 
     /// Embeds the glue widget (SeparatorNode) at the right end of the
@@ -71,9 +72,6 @@ private:
     void updateGearHighlight();
     void applyFrameStyle();
 
-    QColor       m_accent;
-
-    QFrame*      m_stripe       = nullptr;
     QComboBox*   m_kindCombo    = nullptr;
     QLineEdit*   m_nameEdit     = nullptr;
     QCheckBox*   m_ignoreCheck  = nullptr;

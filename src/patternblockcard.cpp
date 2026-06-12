@@ -49,22 +49,10 @@ const KindEntry kKindEntries[] = {
 } // namespace
 
 PatternBlockCard::PatternBlockCard(QWidget* parent)
-    : QFrame(parent)
+    : CardFrame(parent)
 {
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    auto* outer = new QHBoxLayout(this);
-    outer->setContentsMargins(0, 3, 6, 3);
-    outer->setSpacing(5);
-
-    m_stripe = new QFrame(this);
-    m_stripe->setFixedWidth(6);
-    outer->addWidget(m_stripe);
-
-    auto* rows = new QVBoxLayout();
-    rows->setContentsMargins(0, 0, 0, 0);
-    rows->setSpacing(2);
-    outer->addLayout(rows, 1);
+    // Контейнер (полоска-акцент, рамка, скругление) живёт в CardFrame.
+    QVBoxLayout* rows = rowsLayout();
 
     // ---- Main row: identical columns for every block type ------------ //
     m_mainRow = new QHBoxLayout();
@@ -103,14 +91,7 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
                                  "but not shown as a field column."));
     m_mainRow->addWidget(m_ignoreCheck);
 
-    // Column 4: row actions.
-    auto makeToolButton = [this](const QString& text, const QString& tip) {
-        auto* btn = new QToolButton(this);
-        btn->setText(text);
-        btn->setToolTip(tip);
-        btn->setAutoRaise(true);
-        return btn;
-    };
+    // Column 4: row actions (единый стиль кнопок — CardFrame::makeToolButton).
     m_wrapBtn = makeToolButton(QStringLiteral("⚙"),
         tr("Advanced: the matched text / regex and wrappers around the value."));
     m_wrapBtn->setCheckable(true);
@@ -235,7 +216,7 @@ PatternBlock PatternBlockCard::block() const
 
 void PatternBlockCard::setAccentColor(const QColor& color)
 {
-    m_accent = color;
+    CardFrame::setAccentColor(color);
     updateGearHighlight();
     applyFrameStyle();
 }
@@ -318,17 +299,10 @@ void PatternBlockCard::updateGearHighlight()
         || (kind != PatternBlock::MatchKind::ConstantText
             && (!m_openEdit->text().isEmpty() || !m_closeEdit->text().isEmpty()));
 
-    if (hasContent && m_accent.isValid()) {
-        QColor tint = m_accent;
-        tint.setAlpha(70);
-        m_wrapBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { background-color: rgba(%1,%2,%3,%4); border-radius: 3px; }")
-                .arg(tint.red()).arg(tint.green()).arg(tint.blue()).arg(tint.alpha()));
-        m_wrapBtn->setToolTip(tr("Advanced settings contain values — click to view."));
-    } else {
-        m_wrapBtn->setStyleSheet(QString());
-        m_wrapBtn->setToolTip(tr("Advanced: the matched text / regex and wrappers around the value."));
-    }
+    tintToolButton(m_wrapBtn, hasContent);
+    m_wrapBtn->setToolTip(hasContent
+        ? tr("Advanced settings contain values — click to view.")
+        : tr("Advanced: the matched text / regex and wrappers around the value."));
 }
 
 void PatternBlockCard::applyFrameStyle()
@@ -343,17 +317,7 @@ void PatternBlockCard::applyFrameStyle()
 
     // Self-delimiting blocks carry a border in their accent colour — a
     // visual hint that the token ends by itself and needs no separator.
-    const QString border = selfDelimiting && m_accent.isValid()
-        ? QStringLiteral("2px solid %1").arg(m_accent.name())
-        : QStringLiteral("1px solid palette(mid)");
-    setStyleSheet(QStringLiteral(
-        "PatternBlockCard { border: %1; border-radius: 4px; }").arg(border));
-
-    if (m_stripe) {
-        m_stripe->setStyleSheet(QStringLiteral(
-            "background-color: %1; border: none; border-radius: 2px;")
-                .arg(m_accent.isValid() ? m_accent.name() : QStringLiteral("palette(mid)")));
-    }
+    setAccentBorder(selfDelimiting);
 
     setToolTip(selfDelimiting
         ? tr("Self-delimiting block: the token shape ends the match by itself,\n"

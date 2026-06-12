@@ -121,6 +121,10 @@ void LogListView::setModel(QAbstractItemModel *model) {
 
         connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
+            // Поисковая подсветка привязана к индексу строки — после reset
+            // индексы невалидны.
+            m_searchMatchRow = -1;
+            m_searchHighlighter.setPatterns({});
             invalidateRowState();
             rebuildHeightCache();
 
@@ -859,11 +863,107 @@ int LogListView::getTextPositionFromMouse(const QPoint& mousePos, const RowState
     }
 }
 
+void LogListView::setTextHighlightPatterns(const QVector<HighlightPattern>& patterns)
+{
+    m_textHighlighter.setPatterns(patterns);
+    // Заливки совпадений запечены в пиксмапы строк — сбрасываем кэш растров,
+    // кэш геометрии (RowState) не зависит от подсветки и остаётся валидным.
+    m_rowPixmapCache.clear();
+    viewport()->update();
+}
+
+void LogListView::showSearchMatch(int row, const QString& term, bool caseSensitive)
+{
+    if (row < 0 || term.isEmpty() || !model() || row >= model()->rowCount()) {
+        clearSearchMatch();
+        return;
+    }
+
+    // Снимаем подсветку с предыдущей найденной строки.
+    if (m_searchMatchRow >= 0 && m_searchMatchRow != row)
+        m_rowPixmapCache.remove(m_searchMatchRow);
+
+    m_searchMatchRow = row;
+    HighlightPattern pattern;
+    pattern.text            = term;
+    pattern.color           = AppTheme::instance().searchMatch;
+    pattern.caseSensitivity = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    m_searchHighlighter.setPatterns({pattern});
+
+    // Свёрнутую строку раскрываем в многострочный режим, чтобы были видны
+    // все вхождения (включая попавшие в скрытую часть). toggleRowMultiLine
+    // сам пересчитает высоты и сохранит позицию скролла.
+    if (!isRowMultiLine(row))
+        toggleRowMultiLine(row);
+
+    m_rowPixmapCache.remove(row);
+    viewport()->update();
+}
+
+void LogListView::clearSearchMatch()
+{
+    if (m_searchMatchRow < 0)
+        return;
+    m_rowPixmapCache.remove(m_searchMatchRow);
+    m_searchMatchRow = -1;
+    m_searchHighlighter.setPatterns({});
+    viewport()->update();
+}
+
+// Фоновые заливки совпадений. Геометрия повторяет drawSelectionHighlight:
+// однострочный режим клипуется по visibleChars, многострочный идёт по фрагментам.
+void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, const QString& text,
+                                          const RowState& state, const QVector<HighlightSpan>& spans) const
+{
+    for (const auto& span : spans) {
+        int spanBegin = span.start;
+        int spanFinish = span.start + span.length;
+
+        if (!state.multiLine) {
+            spanBegin  = qMin(spanBegin,  state.visibleChars);
+            spanFinish = qMin(spanFinish, state.visibleChars);
+            if (spanBegin >= spanFinish)
+                continue;
+            const QStringView textView(text);
+            const int x1 = rect.left() + kTextPaddingX + textWidthUntil(textView, spanBegin);
+            const int x2 = rect.left() + kTextPaddingX + textWidthUntil(textView, spanFinish);
+            painter.fillRect(x1, rect.top() + 1, x2 - x1, rect.height() - 2, span.color);
+            continue;
+        }
+
+        for (const auto& fragment : state.fragments) {
+            const int fragSelStart = qMax(spanBegin,  fragment.startPos) - fragment.startPos;
+            const int fragSelEnd   = qMin(spanFinish, fragment.startPos + fragment.length) - fragment.startPos;
+            if (fragSelEnd <= fragSelStart)
+                continue;
+            const int x1 = rect.left() + fragment.rect.left() + textWidthUntil(fragment.text, fragSelStart);
+            const int x2 = rect.left() + fragment.rect.left() + textWidthUntil(fragment.text, fragSelEnd);
+            const int y  = rect.top()  + fragment.rect.top();
+            painter.fillRect(x1, y, x2 - x1, fragment.rect.height(), span.color);
+        }
+    }
+}
+
 // Основная отрисовка строки лога с подсветкой чисел и строк
 // Использует кэшированные фрагменты из RowState
 void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state) {
+    // Заливки совпадений — до текста, чтобы существующая раскраска
+    // SyntaxHighlighter рисовалась поверх и не менялась.
+    if (!m_textHighlighter.isEmpty()) {
+        const QVector<HighlightSpan> spans = m_textHighlighter.computeSpans(text);
+        if (!spans.isEmpty())
+            drawMatchHighlightSpans(painter, rect, text, state, spans);
+    }
+
+    // Подсветка результата поиска — только в найденной строке.
+    if (state.row == m_searchMatchRow && !m_searchHighlighter.isEmpty()) {
+        const QVector<HighlightSpan> spans = m_searchHighlighter.computeSpans(text);
+        if (!spans.isEmpty())
+            drawMatchHighlightSpans(painter, rect, text, state, spans);
+    }
+
     QList<HighlightToken> tokens = SyntaxHighlighter::tokenize(text);
-    
+
     if (state.multiLine) {
         for (const auto& fragment : state.fragments) {
             // Корректируем X: фрагменты хранятся в локальных координатах пикселя (0-based),
@@ -1158,6 +1258,13 @@ void LogListView::paintEvent(QPaintEvent *event) {
             QModelIndex idx = model()->index(row, 0);
 
             QRect textRect = textAreaScreenRect(currentY, rowHeight, state.badgesWidth);
+
+            // Фон row-маркера (недеструктивная подсветка всей строки).
+            // Рисуется первым: выделение строки имеет визуальный приоритет.
+            const QVariant markerColor = model()->data(idx, LogModel::RowMarkerColorRole);
+            if (markerColor.isValid()) {
+                painter.fillRect(rect, markerColor.value<QColor>());
+            }
 
             // Фон выделенной строки (на всю ширину, включая левый желобок)
             if (selectionModel() && selectionModel()->isSelected(idx)) {

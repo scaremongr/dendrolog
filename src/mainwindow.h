@@ -30,6 +30,8 @@ class QCloseEvent;
 class QTimer;
 class QToolButton;
 class QWidget;
+class FilterPanelWidget;
+class MarkerPanelWidget;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -73,11 +75,12 @@ private slots:
     void updateLineInfoLabel(int currentRow, int totalRows);
     void onApplyTimeFilterClicked();
     void onResetTimeFilterClicked();
-    void onApplyAllTextFiltersClicked();
+    void onApplyAllTextFiltersClicked(); // Apply из конструктора фильтров (активная вкладка)
+    void onResetTextFiltersClicked();    // Reset — снять фильтры с активной вкладки
+    void onApplyRowMarkersClicked();     // Apply из панели маркеров (активная вкладка)
+    void onResetRowMarkersClicked();     // Reset — снять маркеры с активной вкладки
     void updateFilterInputsFromModel();
     void handleModelFiltered();
-    void onAddTextFilterInputClicked(); // For dynamic text filters
-    void onRemoveTextFilterInputClicked(); // For dynamic text filters
     void onOpenSelectedDirectoryFiles(const QStringList& filePaths);
     void openRecentFile(const QString& filePath);
     void onSettingsTriggered();
@@ -113,14 +116,13 @@ private:
     QPushButton* m_applyTimeFilterButton;
     QPushButton* m_resetTimeFilterButton; // Added
 
-    // Text Filter related widgets (dynamically created and added to ui->textFilterContentsWidget's layout)
-    QWidget* m_textFilterContainerWidget; // This will be set as the widget for ui->textFilterDockWidget
-    QVBoxLayout* m_textFilterLayout;      // Layout for m_textFilterContainerWidget
-    QCheckBox* m_textFilterGlobalCaseSensitiveCheckBox;
-    QPushButton* m_addTextFilterButton;
-    QPushButton* m_applyAllTextFiltersButton;
-    QList<QLineEdit*> m_textFilterInputs;
-    QList<QPushButton*> m_textFilterRemoveButtons;
+    // Конструктор текстовых фильтров (содержимое textFilterDockWidget).
+    // Вся логика динамического списка правил инкапсулирована в виджете.
+    FilterPanelWidget* m_filterPanel = nullptr;
+
+    // Недеструктивные row-маркеры (отдельный док, создаётся в коде).
+    MarkerPanelWidget* m_markerPanel = nullptr;
+    QDockWidget* m_markerDockWidget = nullptr;
 
     // Directory Scanner related members
     QString m_lastOpenDir;
@@ -162,11 +164,10 @@ private:
     // Setup methods
     void setupStatusBar();
     void setupTimeFilterDockContents(); // New method to set up the new dock
-    void setupTextFilterDockContents(); 
-    void setupDirectoryScanner();     
+    void setupTextFilterDockContents();
+    void setupRowMarkerDock();          // Док Row Highlighters
+    void setupDirectoryScanner();
     void setupFieldVisibilityDock();    // New: Log Fields panel
-    void addNewTextFilterInput(const QString& initialText = QString());
-    void clearTextFilterInputs();
 
     // Helper methods
     void connectToLogView(LogViewWidget* logView);
@@ -181,6 +182,18 @@ private:
     void applyFieldVisibilityToAllViews();
     // Apply current pattern to every open LogViewWidget's parser
     void applyPatternToAllViews();
+    // Применить набор правил из конструктора фильтров (+ inline-подсветку
+    // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
+    // у каждой вкладки свой применённый набор.
+    void applyTextFiltersToActiveView();
+    // Применить row-маркеры к активной вкладке.
+    void applyRowMarkersToActiveView();
+    // Перепривязать УЖЕ применённые правила каждой вкладки к новой схеме
+    // полей (вызывается при смене схемы / галочки "Filter blocks").
+    void rebindFiltersOnAllViews();
+    // Синхронизировать список колонок конструктора фильтров с активной
+    // схемой Log Fields и состоянием галочки "Filter blocks".
+    void updateFilterPanelFieldNames();
     void rebuildFieldVisibilityControls(const QStringList& fieldNames);
     QVector<int> selectedVisibleFieldIndexes() const;
     QStringList selectedVisibleFieldNames() const;
