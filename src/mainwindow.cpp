@@ -546,7 +546,22 @@ void MainWindow::onPatternComboChanged(int index)
 
 void MainWindow::onManagePatterns()
 {
-    ConversionPatternDialog dlg(m_patternList, this);
+    // Offer first lines of the active log as live-preview samples.
+    QStringList sampleLines;
+    if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) {
+        if (lv->model()) {
+            const auto& entries = lv->model()->allEntries();
+            for (const auto& entry : entries) {
+                if (!entry || entry->message.trimmed().isEmpty())
+                    continue;
+                sampleLines.append(entry->message);
+                if (sampleLines.size() >= 8)
+                    break;
+            }
+        }
+    }
+
+    ConversionPatternDialog dlg(m_patternList, this, sampleLines);
     if (dlg.exec() != QDialog::Accepted) return;
 
     m_patternList = dlg.resultPatterns();

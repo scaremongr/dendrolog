@@ -1,24 +1,29 @@
 #include "logpattern.h"
+#include "patternheuristics.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 
 namespace {
+
+// Hard cap on the number of compiled fallback variants so that a very
+// long schema cannot turn every unmatched line into dozens of matches.
+constexpr int kMaxPrefixVariants = 8;
 
 QString matchKindToString(PatternBlock::MatchKind kind)
 {
     switch (kind) {
     case PatternBlock::MatchKind::ConstantText:              return QStringLiteral("constant");
     case PatternBlock::MatchKind::TextUntilSeparator:         return QStringLiteral("text");
-    case PatternBlock::MatchKind::OptionalTextUntilSeparator: return QStringLiteral("optional-text");
     case PatternBlock::MatchKind::GreedyTextUntilSeparator:   return QStringLiteral("greedy-text");
     case PatternBlock::MatchKind::Timestamp:                  return QStringLiteral("timestamp");
     case PatternBlock::MatchKind::Level:                      return QStringLiteral("level");
     case PatternBlock::MatchKind::HexText:                    return QStringLiteral("hex");
     case PatternBlock::MatchKind::Integer:                    return QStringLiteral("integer");
+    case PatternBlock::MatchKind::IpAddress:                  return QStringLiteral("ip");
     case PatternBlock::MatchKind::FilePath:                   return QStringLiteral("path");
-    case PatternBlock::MatchKind::OptionalFilePath:           return QStringLiteral("optional-path");
     case PatternBlock::MatchKind::CustomRegex:                return QStringLiteral("regex");
     case PatternBlock::MatchKind::Remainder:                  return QStringLiteral("remainder");
     }
@@ -33,10 +38,10 @@ bool matchKindFromString(const QString& text, PatternBlock::MatchKind* kind)
     const QString normalized = text.trimmed().toLower();
     if (normalized == QLatin1String("constant")) {
         *kind = PatternBlock::MatchKind::ConstantText;
-    } else if (normalized == QLatin1String("text")) {
+    } else if (normalized == QLatin1String("text")
+               || normalized == QLatin1String("optional-text")) {
+        // "optional-text" is a legacy kind: Text allows empty values now.
         *kind = PatternBlock::MatchKind::TextUntilSeparator;
-    } else if (normalized == QLatin1String("optional-text")) {
-        *kind = PatternBlock::MatchKind::OptionalTextUntilSeparator;
     } else if (normalized == QLatin1String("greedy-text")) {
         *kind = PatternBlock::MatchKind::GreedyTextUntilSeparator;
     } else if (normalized == QLatin1String("timestamp")) {
@@ -47,12 +52,17 @@ bool matchKindFromString(const QString& text, PatternBlock::MatchKind* kind)
         *kind = PatternBlock::MatchKind::HexText;
     } else if (normalized == QLatin1String("integer")) {
         *kind = PatternBlock::MatchKind::Integer;
-    } else if (normalized == QLatin1String("path")) {
+    } else if (normalized == QLatin1String("ip")) {
+        *kind = PatternBlock::MatchKind::IpAddress;
+    } else if (normalized == QLatin1String("path")
+               || normalized == QLatin1String("optional-path")) {
+        // "optional-path" is a legacy kind folded into File path.
         *kind = PatternBlock::MatchKind::FilePath;
-    } else if (normalized == QLatin1String("optional-path")) {
-        *kind = PatternBlock::MatchKind::OptionalFilePath;
     } else if (normalized == QLatin1String("regex")) {
         *kind = PatternBlock::MatchKind::CustomRegex;
+    } else if (normalized == QLatin1String("ignore")) {
+        // Forward compatibility: older experimental kind maps to ignored text.
+        *kind = PatternBlock::MatchKind::TextUntilSeparator;
     } else if (normalized == QLatin1String("remainder")) {
         *kind = PatternBlock::MatchKind::Remainder;
     } else {
@@ -64,7 +74,7 @@ bool matchKindFromString(const QString& text, PatternBlock::MatchKind* kind)
 
 QString captureNameForIndex(int index)
 {
-    return QStringLiteral("f%1").arg(index);
+    return QStringLiteral("lv%1").arg(index);
 }
 
 bool isWhitespaceOnly(const QString& text)
@@ -79,14 +89,28 @@ bool isWhitespaceOnly(const QString& text)
     return true;
 }
 
-QString separatorRegex(const QString& separator)
+// Literal prefix before the value. Whitespace around the literal collapses:
+// "] " and "]" behave identically, padding never matters.
+QString leadingBoundaryRegex(const QString& boundary)
 {
-    if (separator.isEmpty())
+    if (boundary.isEmpty())
         return QString();
 
-    return isWhitespaceOnly(separator)
-        ? QStringLiteral("\\s+")
-        : QRegularExpression::escape(separator);
+    return isWhitespaceOnly(boundary)
+        ? QStringLiteral("[ \\t]+")
+        : QRegularExpression::escape(boundary.trimmed()) + QStringLiteral("[ \\t]*");
+}
+
+// Literal suffix after the value, with optional whitespace before it so
+// that "ERROR - msg" matches a separator entered as "-" or " - ".
+QString trailingBoundaryRegex(const QString& boundary)
+{
+    if (boundary.isEmpty())
+        return QString();
+
+    return isWhitespaceOnly(boundary)
+        ? QStringLiteral("[ \\t]+")
+        : QStringLiteral("[ \\t]*") + QRegularExpression::escape(boundary.trimmed());
 }
 
 QString defaultNameForLegacySpec(const QChar spec)
@@ -104,11 +128,6 @@ QString defaultNameForLegacySpec(const QChar spec)
     }
 }
 
-bool blockProducesField(PatternBlock::MatchKind kind)
-{
-    return kind != PatternBlock::MatchKind::ConstantText;
-}
-
 PatternBlock::MatchKind defaultKindForLegacySpec(const QChar spec)
 {
     switch (spec.toLatin1()) {
@@ -116,42 +135,77 @@ PatternBlock::MatchKind defaultKindForLegacySpec(const QChar spec)
     case 'p': return PatternBlock::MatchKind::Level;
     case 'L': return PatternBlock::MatchKind::Integer;
     case 'm': return PatternBlock::MatchKind::GreedyTextUntilSeparator;
-    case 'F': return PatternBlock::MatchKind::OptionalFilePath;
-    case 'x': return PatternBlock::MatchKind::OptionalTextUntilSeparator;
+    case 'F': return PatternBlock::MatchKind::FilePath;
+    case 'x': return PatternBlock::MatchKind::TextUntilSeparator;
     default:  return PatternBlock::MatchKind::TextUntilSeparator;
     }
 }
 
-QString regexForBlock(const PatternBlock& block, bool isLast)
+// Kinds that cannot match arbitrary junk on their own; a fallback prefix
+// may only end after one of these (or after a block with a closing wrapper
+// or explicit glue), otherwise a trailing lazy ".+?" would "match" one
+// character of anything.
+bool isSolidBlock(const PatternBlock& block)
 {
+    if (!block.separator.isEmpty() || !block.closingText.isEmpty())
+        return true;
+
+    switch (block.matchKind) {
+    case PatternBlock::MatchKind::TextUntilSeparator:
+    case PatternBlock::MatchKind::GreedyTextUntilSeparator:
+    case PatternBlock::MatchKind::Remainder:
+        return false;
+    default:
+        return true;
+    }
+}
+
+// Distinctive enough that matching it is real evidence of a structured
+// line (and not a coincidence on a free-form continuation line).
+bool isEvidenceBlock(const PatternBlock& block)
+{
+    switch (block.matchKind) {
+    case PatternBlock::MatchKind::Timestamp:
+    case PatternBlock::MatchKind::Level:
+    case PatternBlock::MatchKind::IpAddress:
+    case PatternBlock::MatchKind::CustomRegex:
+        return true;
+    case PatternBlock::MatchKind::ConstantText:
+        return block.customRegex.trimmed().size() >= 3;
+    default:
+        return false;
+    }
+}
+
+QString valueRegexForBlock(const PatternBlock& block, bool isLastAnchored)
+{
+    const bool greedyToEnd = isLastAnchored
+                          && block.separator.isEmpty()
+                          && block.closingText.isEmpty();
     switch (block.matchKind) {
     case PatternBlock::MatchKind::ConstantText:
         return QRegularExpression::escape(block.customRegex);
+    // Text kinds accept an empty value: a missing field must not kill
+    // the parse of the whole line.
     case PatternBlock::MatchKind::TextUntilSeparator:
-        return isLast && block.separator.isEmpty() ? QStringLiteral(".+")
-                                                   : QStringLiteral(".+?");
-    case PatternBlock::MatchKind::OptionalTextUntilSeparator:
-        return isLast && block.separator.isEmpty() ? QStringLiteral(".*")
-                                                   : QStringLiteral(".*?");
+        return greedyToEnd ? QStringLiteral(".*") : QStringLiteral(".*?");
     case PatternBlock::MatchKind::GreedyTextUntilSeparator:
-        return isLast && block.separator.isEmpty() ? QStringLiteral(".+")
-                                                   : QStringLiteral(".+");
+        return QStringLiteral(".*");
     case PatternBlock::MatchKind::Timestamp:
-        return QStringLiteral(R"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)");
+        return PatternHeuristics::timestampRegex();
     case PatternBlock::MatchKind::Level:
-        return QStringLiteral(R"((?i:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL))");
+        return PatternHeuristics::levelRegex();
     case PatternBlock::MatchKind::HexText:
-        return QStringLiteral(R"((?:0[xX])?[0-9A-Fa-f]+)");
+        return PatternHeuristics::hexRegex();
     case PatternBlock::MatchKind::Integer:
-        return QStringLiteral(R"(\d+)");
+        return PatternHeuristics::integerRegex();
+    case PatternBlock::MatchKind::IpAddress:
+        return PatternHeuristics::ipAddressRegex();
     case PatternBlock::MatchKind::FilePath:
-        // Simple non-backtracking path: one or more non-separator chars optionally followed
-        // by (slash + non-sep chars) repetitions.  No *? chain — no catastrophic backtrack.
-        return QStringLiteral(R"([^\r\n\s<>:"|?*]+(?:[\\/][^\r\n\s<>:"|?*]+)*)");
-    case PatternBlock::MatchKind::OptionalFilePath:
-        return QStringLiteral(R"((?:[^\r\n\s<>:"|?*]+(?:[\\/][^\r\n\s<>:"|?*]+)*)?)"  );
+        return PatternHeuristics::filePathRegex();
     case PatternBlock::MatchKind::CustomRegex:
-        return block.customRegex.trimmed();
+        // Isolate user alternations and keep our group numbering intact.
+        return QStringLiteral("(?:") + block.customRegex.trimmed() + QStringLiteral(")");
     case PatternBlock::MatchKind::Remainder:
         return QStringLiteral(".*");
     }
@@ -170,6 +224,18 @@ bool shouldTrimCapture(PatternBlock::MatchKind kind)
     }
 }
 
+bool isFreeTextKind(PatternBlock::MatchKind kind)
+{
+    switch (kind) {
+    case PatternBlock::MatchKind::TextUntilSeparator:
+    case PatternBlock::MatchKind::GreedyTextUntilSeparator:
+    case PatternBlock::MatchKind::Remainder:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 LogPattern::LogPattern(const QString& pattern)
@@ -177,10 +243,53 @@ LogPattern::LogPattern(const QString& pattern)
     setPattern(pattern);
 }
 
+bool LogPattern::isAnchorKind(PatternBlock::MatchKind kind)
+{
+    switch (kind) {
+    case PatternBlock::MatchKind::Timestamp:
+    case PatternBlock::MatchKind::Level:
+    case PatternBlock::MatchKind::IpAddress:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool LogPattern::isSelfDelimitingKind(PatternBlock::MatchKind kind)
+{
+    switch (kind) {
+    case PatternBlock::MatchKind::Timestamp:
+    case PatternBlock::MatchKind::Level:
+    case PatternBlock::MatchKind::HexText:
+    case PatternBlock::MatchKind::Integer:
+    case PatternBlock::MatchKind::IpAddress:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool LogPattern::blockIsSelfDelimiting(const PatternBlock& block)
+{
+    return isSelfDelimitingKind(block.matchKind)
+        || block.matchKind == PatternBlock::MatchKind::ConstantText
+        || !block.closingText.isEmpty();
+}
+
+bool LogPattern::blockCreatesField(const PatternBlock& block)
+{
+    if (block.ignored)
+        return false;
+    // A constant is structure by default; naming it turns it into a field.
+    if (block.matchKind == PatternBlock::MatchKind::ConstantText)
+        return !block.name.trimmed().isEmpty();
+    return true;
+}
+
 QString LogPattern::serializeDefinition(const PatternDefinition& definition)
 {
     QJsonObject root;
-    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("version"), 3);
     root.insert(QStringLiteral("type"), QStringLiteral("dynamic-block-schema"));
     root.insert(QStringLiteral("linePrefix"), definition.linePrefix);
 
@@ -190,8 +299,13 @@ QString LogPattern::serializeDefinition(const PatternDefinition& definition)
         blockJson.insert(QStringLiteral("name"), block.name);
         blockJson.insert(QStringLiteral("kind"), matchKindToString(block.matchKind));
         blockJson.insert(QStringLiteral("leadingText"), block.leadingText);
+        blockJson.insert(QStringLiteral("closingText"), block.closingText);
         blockJson.insert(QStringLiteral("separator"), block.separator);
+        if (block.separatorIsRegex)
+            blockJson.insert(QStringLiteral("separatorIsRegex"), true);
         blockJson.insert(QStringLiteral("customRegex"), block.customRegex);
+        if (block.ignored)
+            blockJson.insert(QStringLiteral("ignored"), true);
         blocksJson.append(blockJson);
     }
     root.insert(QStringLiteral("blocks"), blocksJson);
@@ -229,16 +343,32 @@ bool LogPattern::deserializeDefinition(const QString& text,
             const QJsonObject blockJson = value.toObject();
             PatternBlock block;
             block.name = blockJson.value(QStringLiteral("name")).toString().trimmed();
-            if (!matchKindFromString(blockJson.value(QStringLiteral("kind")).toString(), &block.matchKind))
+            const QString kindString = blockJson.value(QStringLiteral("kind")).toString();
+            if (!matchKindFromString(kindString, &block.matchKind))
                 return false;
 
             block.leadingText = blockJson.value(QStringLiteral("leadingText")).toString();
+            block.closingText = blockJson.value(QStringLiteral("closingText")).toString();
             block.separator = blockJson.value(QStringLiteral("separator")).toString();
+            block.separatorIsRegex = blockJson.value(QStringLiteral("separatorIsRegex")).toBool(false);
             block.customRegex = blockJson.value(QStringLiteral("customRegex")).toString();
+            block.ignored = blockJson.value(QStringLiteral("ignored")).toBool(false)
+                || kindString.trimmed().toLower() == QLatin1String("ignore");
+
+            // Migration from v1/v2 schemas: there the "separator" of an
+            // enclosed block doubled as its closing bracket. In the new
+            // model wrappers belong to the block and the separator is
+            // independent glue between blocks.
+            if (!blockJson.contains(QStringLiteral("closingText"))
+                    && !block.leadingText.isEmpty()) {
+                block.closingText = block.separator;
+                block.separator.clear();
+            }
+
             parsed.blocks.push_back(block);
         }
 
-        if (strict && !isDefinitionValid(parsed))
+        if (strict && !validateDefinition(parsed))
             return false;
 
         *definition = std::move(parsed);
@@ -324,29 +454,65 @@ bool LogPattern::parseLegacyConversionPattern(const QString& legacy,
 
     parsed.blocks.last().separator = currentLiteral;
 
-    if (!isDefinitionValid(parsed))
+    if (!validateDefinition(parsed))
         return false;
 
     *definition = std::move(parsed);
     return true;
 }
 
-bool LogPattern::isDefinitionValid(const PatternDefinition& definition)
+bool LogPattern::validateDefinition(const PatternDefinition& definition,
+                                    QString* errorMessage)
 {
-    if (definition.blocks.isEmpty())
+    auto fail = [errorMessage](const QString& message) {
+        if (errorMessage)
+            *errorMessage = message;
         return false;
+    };
 
+    if (definition.blocks.isEmpty())
+        return fail(QObject::tr("Schema has no blocks."));
+
+    QSet<QString> seenNames;
     for (int i = 0; i < definition.blocks.size(); ++i) {
         const PatternBlock& block = definition.blocks[i];
         const bool isLast = (i == definition.blocks.size() - 1);
-        if (block.matchKind != PatternBlock::MatchKind::ConstantText && block.name.trimmed().isEmpty())
-            return false;
-        if (block.matchKind == PatternBlock::MatchKind::ConstantText && block.customRegex.isEmpty())
-            return false;
-        if (block.matchKind == PatternBlock::MatchKind::CustomRegex && block.customRegex.trimmed().isEmpty())
-            return false;
+        const QString position = QObject::tr("Block %1").arg(i + 1);
+
+        if (block.matchKind == PatternBlock::MatchKind::ConstantText
+                && block.customRegex.isEmpty())
+            return fail(QObject::tr("%1: constant text block has no text.").arg(position));
+
+        if (block.matchKind == PatternBlock::MatchKind::CustomRegex) {
+            const QString rx = block.customRegex.trimmed();
+            if (rx.isEmpty())
+                return fail(QObject::tr("%1: custom regex is empty.").arg(position));
+            const QRegularExpression probe(QStringLiteral("(?:") + rx + QStringLiteral(")"));
+            if (!probe.isValid())
+                return fail(QObject::tr("%1: invalid regex — %2")
+                                .arg(position, probe.errorString()));
+        }
+
         if (block.matchKind == PatternBlock::MatchKind::Remainder && !isLast)
-            return false;
+            return fail(QObject::tr("%1: 'Remainder of line' must be the last block.").arg(position));
+
+        if (block.separatorIsRegex && !block.separator.trimmed().isEmpty()) {
+            const QRegularExpression probe(
+                QStringLiteral("(?:") + block.separator.trimmed() + QStringLiteral(")"));
+            if (!probe.isValid())
+                return fail(QObject::tr("%1: invalid separator regex — %2")
+                                .arg(position, probe.errorString()));
+        }
+
+        if (blockCreatesField(block)) {
+            const QString name = block.name.trimmed();
+            if (name.isEmpty())
+                return fail(QObject::tr("%1: field name is empty.").arg(position));
+            const QString key = name.toLower();
+            if (seenNames.contains(key))
+                return fail(QObject::tr("%1: duplicate field name '%2'.").arg(position, name));
+            seenNames.insert(key);
+        }
     }
 
     return true;
@@ -356,16 +522,17 @@ bool LogPattern::setPattern(const QString& pattern)
 {
     m_patternString = pattern;
     m_definition = PatternDefinition();
-    m_extractRegex = QRegularExpression();
-    m_captureNames.clear();
-    m_captureBlockIndexes.clear();
-    m_captureFieldIndexes.clear();
+    m_fullRegex = QRegularExpression();
+    m_prefixVariants.clear();
+    m_fieldIndexOfBlock.clear();
+    m_fieldCount = 0;
+    m_tailFieldBlockIndex = -1;
     m_valid = false;
 
     if (!deserializeDefinition(pattern, &m_definition, true))
         return false;
 
-    buildExtractRegex();
+    buildExtractRegexes();
     return m_valid;
 }
 
@@ -374,87 +541,206 @@ QStringList LogPattern::fieldNames() const
     QStringList names;
     names.reserve(m_definition.blocks.size());
     for (const PatternBlock& block : m_definition.blocks) {
-        if (!blockProducesField(block.matchKind))
+        if (!blockCreatesField(block))
             continue;
         names.append(block.name);
     }
     return names;
 }
 
-void LogPattern::buildExtractRegex()
+QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
 {
-    m_extractRegex = QRegularExpression();
-    m_captureNames.clear();
-    m_captureBlockIndexes.clear();
-    m_captureFieldIndexes.clear();
-    m_valid = false;
-
-    if (!isDefinitionValid(m_definition))
-        return;
-
+    const QVector<PatternBlock>& blocks = m_definition.blocks;
     QString regex = QStringLiteral("^");
     if (!m_definition.linePrefix.isEmpty())
         regex += QRegularExpression::escape(m_definition.linePrefix);
 
-    int outputFieldIndex = 0;
-    for (int i = 0; i < m_definition.blocks.size(); ++i) {
-        const PatternBlock& block = m_definition.blocks[i];
-        const bool isLast = (i == m_definition.blocks.size() - 1);
-        const QString blockRegex = regexForBlock(block, isLast);
-        if (blockRegex.isEmpty())
-            return;
+    for (int i = 0; i < blockCount; ++i) {
+        const PatternBlock& block = blocks[i];
+        const bool isLastOfSchema = (i == blocks.size() - 1);
 
-        regex += separatorRegex(block.leadingText);
+        // Gap before the block: anchors may skip arbitrary garbage so the
+        // token is *found*; everything else just collapses extra spaces.
+        // After a lazy free-text block the skip is pointless (the text
+        // itself absorbs anything) and would only shrink the field value.
+        const bool prevIsFreeText = i > 0 && isFreeTextKind(blocks[i - 1].matchKind);
+        if (isAnchorKind(block.matchKind) && !prevIsFreeText)
+            regex += QStringLiteral(".*?");
+        else
+            regex += QStringLiteral("[ \\t]*");
 
-        if (blockProducesField(block.matchKind)) {
-            const QString captureName = captureNameForIndex(i);
-            m_captureNames.push_back(captureName);
-            m_captureBlockIndexes.push_back(i);
-            m_captureFieldIndexes.push_back(outputFieldIndex++);
-            regex += QStringLiteral("(?<") + captureName + QStringLiteral(">") + blockRegex + QStringLiteral(")");
-        } else {
-            regex += blockRegex;
+        regex += leadingBoundaryRegex(block.leadingText);
+
+        const QString value = valueRegexForBlock(block, isLastOfSchema && anchorEnd);
+        if (value.isEmpty())
+            return QString();
+        regex += QStringLiteral("(?<") + captureNameForIndex(i) + QStringLiteral(">")
+               + value + QStringLiteral(")");
+
+        // Closing wrapper is part of the block itself and always required —
+        // for anchors the bracket pair is part of what makes them findable.
+        regex += trailingBoundaryRegex(block.closingText);
+
+        // Glue to the next block. Self-delimiting blocks (distinctive
+        // token shape, constant literal, or a closing wrapper) do not
+        // require it: the block already ends the match by itself.
+        if (!block.separator.isEmpty()) {
+            const QString sep = block.separatorIsRegex
+                ? QStringLiteral("[ \\t]*(?:") + block.separator + QStringLiteral(")")
+                : trailingBoundaryRegex(block.separator);
+            regex += blockIsSelfDelimiting(block)
+                ? QStringLiteral("(?:") + sep + QStringLiteral(")?")
+                : sep;
         }
-        regex += separatorRegex(block.separator);
     }
 
-    regex += QLatin1Char('$');
-    m_extractRegex = QRegularExpression(regex);
-    m_valid = m_extractRegex.isValid();
+    if (anchorEnd)
+        regex += QStringLiteral("[ \\t]*$");
+    return regex;
+}
+
+void LogPattern::buildExtractRegexes()
+{
+    m_fullRegex = QRegularExpression();
+    m_prefixVariants.clear();
+    m_fieldIndexOfBlock.clear();
+    m_fieldCount = 0;
+    m_tailFieldBlockIndex = -1;
+    m_valid = false;
+
+    if (!validateDefinition(m_definition))
+        return;
+
+    const int blockCount = m_definition.blocks.size();
+    m_fieldIndexOfBlock.fill(-1, blockCount);
+    for (int i = 0; i < blockCount; ++i) {
+        const PatternBlock& block = m_definition.blocks[i];
+        if (blockCreatesField(block)) {
+            m_fieldIndexOfBlock[i] = m_fieldCount++;
+            if (isFreeTextKind(block.matchKind))
+                m_tailFieldBlockIndex = i;
+        }
+    }
+
+    const QString fullSource = buildRegexSource(blockCount, true);
+    if (fullSource.isEmpty())
+        return;
+    m_fullRegex = QRegularExpression(fullSource);
+    if (!m_fullRegex.isValid())
+        return;
+
+    // Fallback cascade: prefixes ending after a "solid" block, longest first.
+    for (int i = blockCount - 2; i >= 0 && m_prefixVariants.size() < kMaxPrefixVariants; --i) {
+        if (!isSolidBlock(m_definition.blocks[i]))
+            continue;
+
+        bool hasEvidence = false;
+        for (int j = 0; j <= i && !hasEvidence; ++j)
+            hasEvidence = isEvidenceBlock(m_definition.blocks[j]);
+        // Without distinctive evidence a degraded match would accept any
+        // free-form line — skip such variants entirely.
+        if (!hasEvidence)
+            continue;
+
+        CompiledVariant variant;
+        variant.regex = QRegularExpression(buildRegexSource(i + 1, false));
+        if (!variant.regex.isValid())
+            continue;
+        variant.blockCount = i + 1;
+        variant.hasEvidence = hasEvidence;
+        m_prefixVariants.append(variant);
+    }
+
+    m_valid = true;
+}
+
+LineMatchResult LogPattern::matchLine(const QString& line) const
+{
+    LineMatchResult result;
+    if (!m_valid)
+        return result;
+
+    auto fillSpans = [&result](const QRegularExpressionMatch& match, int blockCount) {
+        result.spans.reserve(blockCount);
+        for (int i = 0; i < blockCount; ++i) {
+            const QString name = captureNameForIndex(i);
+            const int start = match.capturedStart(name);
+            if (start < 0)
+                continue;
+            BlockSpan span;
+            span.blockIndex = i;
+            span.start = start;
+            span.length = match.capturedLength(name);
+            result.spans.append(span);
+        }
+        result.matchedBlockCount = blockCount;
+    };
+
+    const QRegularExpressionMatch full = m_fullRegex.match(line);
+    if (full.hasMatch()) {
+        fillSpans(full, m_definition.blocks.size());
+        result.unparsedStart = -1;
+        result.ok = true;
+        return result;
+    }
+
+    for (const CompiledVariant& variant : m_prefixVariants) {
+        const QRegularExpressionMatch match = variant.regex.match(line);
+        if (!match.hasMatch())
+            continue;
+
+        fillSpans(match, variant.blockCount);
+        int tail = match.capturedEnd(0);
+        while (tail < line.size() && line[tail].isSpace())
+            ++tail;
+        result.unparsedStart = (tail < line.size()) ? tail : -1;
+        result.ok = true;
+        return result;
+    }
+
+    return result;
 }
 
 LogEntryFields LogPattern::extractFields(const QString& line) const
 {
     LogEntryFields result;
-    if (!m_valid || !m_extractRegex.isValid())
+    if (!m_valid)
         return result;
 
-    const QRegularExpressionMatch match = m_extractRegex.match(line);
-    if (!match.hasMatch())
+    const LineMatchResult match = matchLine(line);
+    if (!match.ok)
         return result;
 
     const QStringView lineView(line);
-    result.resize(m_captureFieldIndexes.size());
-    for (int i = 0; i < m_captureNames.size(); ++i) {
-        const int start = match.capturedStart(m_captureNames[i]);
-        const int length = match.capturedLength(m_captureNames[i]);
-        if (start < 0 || length <= 0)
+    result.resize(m_fieldCount);
+    for (const BlockSpan& blockSpan : match.spans) {
+        const int fieldIndex = m_fieldIndexOfBlock.value(blockSpan.blockIndex, -1);
+        if (fieldIndex < 0)
             continue;
 
-        QStringView captured = lineView.mid(start, length);
-        const int outputFieldIndex = m_captureFieldIndexes[i];
-        const int blockIndex = m_captureBlockIndexes.value(i, -1);
-        if (blockIndex < 0)
-            continue;
-
-        if (shouldTrimCapture(m_definition.blocks[blockIndex].matchKind))
+        QStringView captured = lineView.mid(blockSpan.start, blockSpan.length);
+        if (shouldTrimCapture(m_definition.blocks[blockSpan.blockIndex].matchKind))
             captured = captured.trimmed();
         if (captured.isEmpty())
             continue;
 
-        FieldSpan& span = result.spans[outputFieldIndex];
+        FieldSpan& span = result.spans[fieldIndex];
         span.start = static_cast<int>(captured.begin() - lineView.begin());
         span.length = static_cast<int>(captured.size());
+    }
+
+    // Graceful degradation: route the unparsed tail into the last free-text
+    // field (typically "Message") when that block was not matched itself.
+    if (match.unparsedStart >= 0 && m_tailFieldBlockIndex >= match.matchedBlockCount) {
+        const int fieldIndex = m_fieldIndexOfBlock.value(m_tailFieldBlockIndex, -1);
+        if (fieldIndex >= 0) {
+            const QStringView tail = lineView.mid(match.unparsedStart).trimmed();
+            if (!tail.isEmpty()) {
+                FieldSpan& span = result.spans[fieldIndex];
+                span.start = static_cast<int>(tail.begin() - lineView.begin());
+                span.length = static_cast<int>(tail.size());
+            }
+        }
     }
 
     return result;
