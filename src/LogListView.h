@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QVector>
 #include "syntaxhighlighter.h"
+#include "textmatchhighlighter.h"
 
 // Структура для хранения информации о фрагменте текста (одной строке в режиме word wrap)
 struct TextFragment {
@@ -152,6 +153,21 @@ public:
     void setModel(QAbstractItemModel *model) override;
     void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override;
 
+    // ---- Inline-подсветка совпадений (универсальная) ----------------------
+    // Источник паттернов внешний (фильтры, поиск, любой модуль) — view лишь
+    // рисует фоновые заливки под текстом, не затрагивая раскраску
+    // SyntaxHighlighter. Заливки попадают в кэш пиксмапов строк, поэтому
+    // стоимость при скролле не растёт.
+    void setTextHighlightPatterns(const QVector<HighlightPattern>& patterns);
+    const TextMatchHighlighter& textHighlighter() const { return m_textHighlighter; }
+
+    // ---- Подсветка результата поиска (одна строка) -------------------------
+    // Раскрывает строку row (если она свёрнута в однострочный режим) и
+    // подсвечивает в ней — и только в ней — все вхождения term.
+    // Предыдущая поисковая подсветка снимается автоматически.
+    void showSearchMatch(int row, const QString& term, bool caseSensitive);
+    void clearSearchMatch();
+
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
 
@@ -286,8 +302,21 @@ private:
     QList<BadgeSpec> collectBadgeSpecs(int row, const QString& text, int availableWidth, bool multiLine, bool showCollapseBadge, int& hiddenCount) const;
     QList<BadgeLayout> layoutBadges(const QList<BadgeSpec>& specs, int rowHeight) const;
     
+    // ========== Inline-подсветка совпадений ==========
+    TextMatchHighlighter m_textHighlighter;
+
+    // ========== Подсветка результата поиска ==========
+    // Действует ровно на одну строку (m_searchMatchRow); сбрасывается при
+    // reset модели, т.к. индексы строк меняются.
+    TextMatchHighlighter m_searchHighlighter;
+    int m_searchMatchRow = -1;
+
     // Отрисовка
     void drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state);
+    // Фоновые заливки совпадений; рисуются ДО текста, чтобы не конфликтовать
+    // с цветами SyntaxHighlighter и выделением.
+    void drawMatchHighlightSpans(QPainter& painter, const QRect& rect, const QString& text,
+                                 const RowState& state, const QVector<HighlightSpan>& spans) const;
     void drawSelectionHighlight(QPainter& painter, const QRect& rect, const QString& text, int selStart, int selEnd, const RowState& state);
     void drawBracketHighlight(QPainter& painter, const QRect& textRect, const RowState& state) const;
     void drawHighlightedText(QPainter& painter, int x, int y, const QString& text, const QList<QPair<int, int>>& highlights, const QColor& highlightColor, const QColor& defaultColor);

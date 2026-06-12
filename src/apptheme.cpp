@@ -41,6 +41,7 @@ void AppTheme::load(QSettings& s)
     badgeBg       = readColor(s, "badgeBg",         badgeBg);
     badgeFg       = readColor(s, "badgeFg",         badgeFg);
     bracketMatch  = readColor(s, "bracketMatch",    bracketMatch);
+    searchMatch   = readColor(s, "searchMatch",     searchMatch);
 
     s.endGroup();
 }
@@ -71,6 +72,7 @@ void AppTheme::save(QSettings& s) const
     s.setValue("badgeBg",         badgeBg.name(QColor::HexArgb));
     s.setValue("badgeFg",         badgeFg.name(QColor::HexArgb));
     s.setValue("bracketMatch",    bracketMatch.name(QColor::HexArgb));
+    s.setValue("searchMatch",     searchMatch.name(QColor::HexArgb));
 
     s.endGroup();
 }

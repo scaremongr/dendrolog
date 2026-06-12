@@ -3,6 +3,8 @@
 
 #include "logentry.h"
 #include "logpattern.h"
+#include "filterruleset.h"
+#include "textmatchhighlighter.h"
 #include <QAbstractListModel>
 #include <QDateTime>
 #include <QFontMetrics>
@@ -55,7 +57,11 @@ public:
         DisplayMessageRole,
         // Returns true for entries appended via appendEntries() within the last 15 seconds.
         // Used by LogListView to paint the gutter marker green for newly loaded rows.
-        IsNewRole
+        IsNewRole,
+        // Цвет фона строки от недеструктивного row-маркера (Row Highlighters).
+        // QColor если строка совпала с одним из маркеров, иначе invalid QVariant.
+        // Отделён от Qt::BackgroundRole, чтобы не менять существующую отрисовку.
+        RowMarkerColorRole
     };
 
     // ---- Dynamic field-visibility control -----------------------------------
@@ -109,12 +115,16 @@ public:
     QDateTime startTimeFilter() const { return m_filterStartTime; }
     QDateTime endTimeFilter() const { return m_filterEndTime; }
 
-    struct MessageFilterRule {
-        QString substring;
-        Qt::CaseSensitivity caseSensitivity;
-    };
-    void setMessageFilterRules(const QVector<MessageFilterRule>& rules);
-    QVector<MessageFilterRule> messageFilterRules() const { return m_messageFilterRules; }
+    // ---- Текстовая фильтрация (Include/Exclude + AND/OR + колонки) ----------
+    // Набор должен прийти уже привязанным к схеме (FilterRuleSet::bindFields).
+    void setFilterRules(const FilterRuleSet& rules);
+    const FilterRuleSet& filterRules() const { return m_filterRules; }
+
+    // ---- Недеструктивные row-маркеры ----------------------------------------
+    // Строки не скрываются — совпавшие получают цвет фона через
+    // RowMarkerColorRole. Смена маркеров не перефильтровывает модель.
+    void setRowMarkers(const QVector<HighlightPattern>& markers);
+    QVector<HighlightPattern> rowMarkers() const { return m_rowMarkers.patterns(); }
 
     QColor getLogLevelColor(LogLevel level) const;
 
@@ -146,7 +156,8 @@ private:
     QSet<LogLevel> m_activeLogLevels;
     QDateTime m_filterStartTime;
     QDateTime m_filterEndTime;
-    QVector<MessageFilterRule> m_messageFilterRules;
+    FilterRuleSet m_filterRules;
+    TextMatchHighlighter m_rowMarkers;
 
     QMap<QString, QColor> m_fileColors;
     QVector<QColor> m_predefinedFileColors;

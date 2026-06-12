@@ -161,6 +161,12 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     }
     case IsNewRole:
         return m_newEntryIds.contains(entry->logicalEntryId);
+    case RowMarkerColorRole: {
+        if (m_rowMarkers.isEmpty())
+            return QVariant();
+        const QColor color = m_rowMarkers.firstMatchColor(entry->message);
+        return color.isValid() ? QVariant(color) : QVariant();
+    }
     case Qt::BackgroundRole: // Handle background color
         return getLogLevelColor(entry->level);
     case Qt::DisplayRole:
@@ -180,7 +186,8 @@ QHash<int, QByteArray> LogModel::roleNames() const
         {SourceFileRole,     "sourceFile"},
         {IsExpandedRole,     "isExpanded"},
         {FileBadgeRole,      "fileBadge"},
-        {IsNewRole,          "isNew"}
+        {IsNewRole,          "isNew"},
+        {RowMarkerColorRole, "rowMarkerColor"}
     };
 }
 
@@ -285,10 +292,22 @@ void LogModel::setTimeRangeFilter(const QDateTime& start, const QDateTime& end)
     applyFilter();
 }
 
-void LogModel::setMessageFilterRules(const QVector<MessageFilterRule>& rules)
+void LogModel::setFilterRules(const FilterRuleSet& rules)
 {
-    m_messageFilterRules = rules;
+    m_filterRules = rules;
     applyFilter();
+}
+
+void LogModel::setRowMarkers(const QVector<HighlightPattern>& markers)
+{
+    m_rowMarkers.setPatterns(markers);
+    // Маркеры недеструктивны: состав строк не меняется, нужна только
+    // перерисовка фона видимых строк.
+    if (!m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0),
+                         index(m_filteredEntries.size() - 1, 0),
+                         {RowMarkerColorRole});
+    }
 }
 
 bool LogModel::passesFilters(const std::shared_ptr<LogEntry>& entry) const
@@ -308,12 +327,7 @@ bool LogModel::passesFilters(const std::shared_ptr<LogEntry>& entry) const
         return false;
     }
 
-    if (!m_messageFilterRules.isEmpty()) {
-        for (const auto& rule : m_messageFilterRules) {
-            if (entry->message.contains(rule.substring, rule.caseSensitivity)) {
-                return true;
-            }
-        }
+    if (m_filterRules.isActive() && !m_filterRules.matches(*entry)) {
         return false;
     }
 
