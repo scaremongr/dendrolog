@@ -25,6 +25,17 @@ LogParser::LogParser(QObject* parent)
     };
 }
 
+LogParser::~LogParser()
+{
+    // Tell any running parse to stop, drop not-yet-started tasks, then block
+    // until the workers have actually returned. This guarantees no worker is
+    // touching m_pattern / the regex members while they are being destroyed —
+    // the use-after-free that crashed on close.
+    m_abort.store(true);
+    m_pool.clear();
+    m_pool.waitForDone();
+}
+
 bool LogParser::detectTimestamp(const QString &line, QDateTime &ts)
 {
     auto match = m_timestampRegex.match(line);
@@ -156,21 +167,28 @@ bool LogParser::detectLogLevel(const QString &line, LogLevel &level) const
 
 void LogParser::startParsing(const LogFilePtr& logFile)
 {
-    // Запускаем doParse в отдельном потоке из пула потоков Qt
-    // Передаем копию shared_ptr logFile
-    (void)QtConcurrent::run([this, logFile]() {
-        this->doParse(logFile);
+    // Snapshot the schema + flag on the GUI thread so the worker never reads
+    // the mutable members (which setPattern may rebuild concurrently). The
+    // task runs on our own pool, which the destructor joins.
+    const LogPattern patternSnapshot = m_pattern;
+    const bool extraction = m_extractionEnabled;
+    (void)QtConcurrent::run(&m_pool, [this, logFile, patternSnapshot, extraction]() {
+        this->doParse(logFile, patternSnapshot, extraction);
     });
 }
 
 void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId)
 {
-    (void)QtConcurrent::run([this, logFile, startOffset, startLogicalEntryId]() {
-        this->doParseFrom(logFile, startOffset, startLogicalEntryId);
+    const LogPattern patternSnapshot = m_pattern;
+    const bool extraction = m_extractionEnabled;
+    (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, startLogicalEntryId,
+                                      patternSnapshot, extraction]() {
+        this->doParseFrom(logFile, startOffset, startLogicalEntryId, patternSnapshot, extraction);
     });
 }
 
-void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId)
+void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId,
+                            const LogPattern& pattern, bool extraction)
 {
     if (!logFile || logFile->filePath.isEmpty()) {
         emit parsingFinished(0, logFile);
@@ -203,6 +221,8 @@ void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int s
 
     QString line;
     while (!in.atEnd()) {
+        if (m_abort.load(std::memory_order_relaxed))
+            return; // Parser is shutting down — drop the rest.
         line = in.readLine();
         // Skip empty lines: either the phantom EOF line produced after a trailing
         // newline, or the completing \n of a line that had no newline at initial-parse time.
@@ -216,8 +236,8 @@ void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int s
         bool hasTimestamp = detectTimestamp(line, lineTs);
         bool hasLevel = detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
-        const bool schemaMatched = (m_extractionEnabled && m_pattern.isValid())
-            ? !(extractedFields = m_pattern.extractFields(line)).isEmpty()
+        const bool schemaMatched = (extraction && pattern.isValid())
+            ? !(extractedFields = pattern.extractFields(line)).isEmpty()
             : false;
 
         std::shared_ptr<LogEntry> currentEntry;
@@ -260,7 +280,7 @@ void LogParser::setPattern(const QString& schemaString)
     m_pattern.setPattern(schemaString);
 }
 
-void LogParser::doParse(const LogFilePtr& logFile)
+void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction)
 {
     emit parsingStarted(logFile); // Испускаем сигнал о начале парсинга
 
@@ -293,6 +313,8 @@ void LogParser::doParse(const LogFilePtr& logFile)
 
     QString line;
     while (!in.atEnd()) {
+        if (m_abort.load(std::memory_order_relaxed))
+            return; // Parser is shutting down — drop the rest.
         line = in.readLine();
         // Skip the phantom empty line that QTextStream produces after a trailing newline.
         if (line.isEmpty() && in.atEnd())
@@ -306,8 +328,8 @@ void LogParser::doParse(const LogFilePtr& logFile)
         bool hasTimestamp = detectTimestamp(line, lineTs);
         bool hasLevel = detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
-        const bool schemaMatched = (m_extractionEnabled && m_pattern.isValid())
-            ? !(extractedFields = m_pattern.extractFields(line)).isEmpty()
+        const bool schemaMatched = (extraction && pattern.isValid())
+            ? !(extractedFields = pattern.extractFields(line)).isEmpty()
             : false;
 
         std::shared_ptr<LogEntry> currentEntry;

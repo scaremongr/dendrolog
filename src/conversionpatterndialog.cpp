@@ -9,11 +9,14 @@
 #include <QCloseEvent>
 #include <QEventLoop>
 #include <QFontDatabase>
+#include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QToolButton>
 #include <QSet>
 #include <QSettings>
 #include <QTextBlock>
@@ -239,8 +242,10 @@ bool probeMatchesWithinTimeout(const LogPattern& pattern,
 
 ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
                                                  QWidget* parent,
-                                                 const QStringList& sampleLines)
+                                                 const QStringList& sampleLines,
+                                                 const QString& activeSchema)
     : QDialog(parent)
+    , m_fileSampleLines(sampleLines)
     , ui(new Ui::ConversionPatternDialog)
 {
     ui->setupUi(this);
@@ -263,6 +268,33 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     // Live preview
     ui->sampleEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     ui->sampleEdit->setTabChangesFocus(true);
+
+    // Small rounded tool button (same flat style as the block-card buttons)
+    // that refills the preview with the first lines of the active log on
+    // demand — the sample text otherwise persists between sessions and only
+    // auto-fills the very first time it is empty.
+    auto* reloadSampleBtn = new QToolButton(this);
+    reloadSampleBtn->setIcon(QIcon(QStringLiteral(":/icons/reload.svg")));
+    reloadSampleBtn->setAutoRaise(true);
+    reloadSampleBtn->setToolTip(
+        tr("Reload sample — replace the preview text with the first lines of the current log file."));
+    reloadSampleBtn->setEnabled(!m_fileSampleLines.isEmpty());
+    reloadSampleBtn->setStyleSheet(QStringLiteral(
+        "QToolButton { border: 1px solid palette(mid); border-radius: 4px; padding: 3px; }"
+        "QToolButton:hover { background-color: palette(midlight); }"
+        "QToolButton:disabled { border-color: palette(window); }"));
+    connect(reloadSampleBtn, &QToolButton::clicked, this, [this]() {
+        if (m_fileSampleLines.isEmpty())
+            return;
+        ui->sampleEdit->setPlainText(m_fileSampleLines.mid(0, 8).join(QLatin1Char('\n')));
+        schedulePreviewUpdate();
+    });
+
+    auto* reloadRow = new QHBoxLayout();
+    reloadRow->setContentsMargins(0, 0, 0, 0);
+    reloadRow->addStretch(1);
+    reloadRow->addWidget(reloadSampleBtn);
+    ui->previewLayout->insertLayout(0, reloadRow);
 
     // Help
     ui->helpBrowser->setHtml(QString::fromLatin1(kHelpHtml));
@@ -329,7 +361,7 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
             ui->sampleEdit->setPlainText(sampleLines.mid(0, 8).join(QLatin1Char('\n')));
     }
 
-    populateSchemas(patterns);
+    populateSchemas(patterns, activeSchema);
     if (ui->schemaTable->rowCount() == 0)
         onAddSchema();
     updateButtonStates();
@@ -370,7 +402,8 @@ ConversionPatternDialog::PatternList ConversionPatternDialog::resultPatterns() c
 // Schema list
 // ---------------------------------------------------------------- //
 
-void ConversionPatternDialog::populateSchemas(const PatternList& list)
+void ConversionPatternDialog::populateSchemas(const PatternList& list,
+                                              const QString& activeSchema)
 {
     ui->schemaTable->setRowCount(0);
     for (const auto& entry : list) {
@@ -379,8 +412,23 @@ void ConversionPatternDialog::populateSchemas(const PatternList& list)
         setSchemaRow(row, entry.first, entry.second);
     }
 
-    if (ui->schemaTable->rowCount() > 0)
-        ui->schemaTable->setCurrentCell(0, 0);
+    if (ui->schemaTable->rowCount() == 0)
+        return;
+
+    // Preselect the schema currently active in the main window, so the
+    // dialog opens on what the user is actually using (not always row 0).
+    int selectRow = 0;
+    const QString wanted = activeSchema.trimmed();
+    if (!wanted.isEmpty()) {
+        for (int row = 0; row < ui->schemaTable->rowCount(); ++row) {
+            const QTableWidgetItem* item = ui->schemaTable->item(row, SchemaColName);
+            if (item && item->data(SchemaDataRole).toString().trimmed() == wanted) {
+                selectRow = row;
+                break;
+            }
+        }
+    }
+    ui->schemaTable->setCurrentCell(selectRow, 0);
 }
 
 void ConversionPatternDialog::setSchemaRow(int row,

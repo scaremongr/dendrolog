@@ -146,15 +146,26 @@ private:
     void buildExtractRegexes();
     QString buildRegexSource(int blockCount, bool anchorEnd) const;
 
+    /// Literals that any line matched by the first \a blockCount blocks must
+    /// contain — a cheap pre-filter to skip impossible (and possibly
+    /// pathologically slow) regex matches.
+    static QStringList requiredLiteralsForPrefix(const PatternDefinition& def,
+                                                 int blockCount);
+
     struct CompiledVariant {
         QRegularExpression regex;
         int  blockCount  = 0;     ///< Leading blocks included in this variant.
         bool hasEvidence = false; ///< Contains at least one distinctive block.
+        ///< Literals that MUST appear in any line this variant can match.
+        ///< A cheap substring pre-check skips the (potentially very
+        ///< expensive) regex match when one of them is absent.
+        QStringList requiredLiterals;
     };
 
     QString                  m_patternString;
     PatternDefinition        m_definition;
     QRegularExpression       m_fullRegex;
+    QStringList              m_fullRequiredLiterals; ///< Mandatory literals for m_fullRegex.
     QVector<CompiledVariant> m_prefixVariants;  ///< Longest first.
     QVector<int>             m_fieldIndexOfBlock; ///< block index -> output field index (-1 = none).
     int                      m_fieldCount = 0;

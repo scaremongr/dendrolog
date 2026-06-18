@@ -7,6 +7,8 @@
 #include <QString>
 #include <QDateTime>
 #include <QRegularExpression>
+#include <QThreadPool>
+#include <atomic>
 #include <memory>
 #include <QObject>
 
@@ -16,6 +18,7 @@ class LogParser : public QObject
 
 public:
     explicit LogParser(QObject* parent = nullptr);
+    ~LogParser() override;
 
     struct FileStats {
         qint64 fileSize = 0;
@@ -57,14 +60,24 @@ private:
     bool detectTimestamp(const QString &line, QDateTime &ts);
     bool detectLogLevel(const QString &line, LogLevel &level) const;
 
-    void doParse(const LogFilePtr& logFile);
-    void doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId);
+    // The worker methods receive an immutable snapshot of the schema and the
+    // extraction flag taken on the GUI thread at launch time. They never read
+    // the mutable m_pattern / m_extractionEnabled members, so reconfiguring
+    // the parser (setPattern) while a parse is in flight is race-free.
+    void doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction);
+    void doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId,
+                     const LogPattern& pattern, bool extraction);
 
     const QRegularExpression m_timestampRegex;
     QStringList m_timeFormats;
     const QRegularExpression m_levelRegex;
     LogPattern m_pattern; // Optional block schema for structured field extraction
     bool m_extractionEnabled = false; // Only extract fields when filter is active
+
+    // Parse tasks run on this private pool, joined in the destructor so a
+    // worker can never outlive the parser (and its members) it reads from.
+    QThreadPool      m_pool;
+    std::atomic_bool m_abort{false}; // Set on teardown to cut a running parse short.
 };
 
 #endif // LOGPARSER_H

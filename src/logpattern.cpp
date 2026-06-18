@@ -238,6 +238,53 @@ bool isFreeTextKind(PatternBlock::MatchKind kind)
 
 } // namespace
 
+// Literals that any line matched by the first \a blockCount blocks must
+// contain. Used as a cheap necessary-condition pre-filter before running
+// the regex: when a required literal is missing the regex cannot match, so
+// we skip it and avoid catastrophic backtracking while it proves non-match.
+//
+// Soundness rule: only collect literals the generator emits unconditionally
+// (see buildRegexSource). Optional glue after a self-delimiting block, a
+// regex separator, and whitespace-only boundaries contribute nothing.
+QStringList LogPattern::requiredLiteralsForPrefix(const PatternDefinition& def,
+                                                  int blockCount)
+{
+    QStringList literals;
+
+    const QString prefix = def.linePrefix.trimmed();
+    if (!prefix.isEmpty())
+        literals.append(prefix);
+
+    for (int i = 0; i < blockCount && i < def.blocks.size(); ++i) {
+        const PatternBlock& block = def.blocks[i];
+
+        const QString lead = block.leadingText.trimmed();
+        if (!lead.isEmpty())
+            literals.append(lead);
+
+        if (block.matchKind == PatternBlock::MatchKind::ConstantText
+                && !block.customRegex.isEmpty())
+            literals.append(block.customRegex);
+
+        const QString close = block.closingText.trimmed();
+        if (!close.isEmpty())
+            literals.append(close);
+
+        // The glue separator is a mandatory literal only when it is a plain
+        // literal and the block does not delimit itself (otherwise the
+        // generator wraps it in an optional "(?:…)?" group).
+        if (!block.separator.isEmpty()
+                && !block.separatorIsRegex
+                && !blockIsSelfDelimiting(block)) {
+            const QString sep = block.separator.trimmed();
+            if (!sep.isEmpty())
+                literals.append(sep);
+        }
+    }
+
+    return literals;
+}
+
 LogPattern::LogPattern(const QString& pattern)
 {
     setPattern(pattern);
@@ -602,6 +649,7 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
 void LogPattern::buildExtractRegexes()
 {
     m_fullRegex = QRegularExpression();
+    m_fullRequiredLiterals.clear();
     m_prefixVariants.clear();
     m_fieldIndexOfBlock.clear();
     m_fieldCount = 0;
@@ -628,6 +676,7 @@ void LogPattern::buildExtractRegexes()
     m_fullRegex = QRegularExpression(fullSource);
     if (!m_fullRegex.isValid())
         return;
+    m_fullRequiredLiterals = requiredLiteralsForPrefix(m_definition, blockCount);
 
     // Fallback cascade: prefixes ending after a "solid" block, longest first.
     for (int i = blockCount - 2; i >= 0 && m_prefixVariants.size() < kMaxPrefixVariants; --i) {
@@ -648,6 +697,7 @@ void LogPattern::buildExtractRegexes()
             continue;
         variant.blockCount = i + 1;
         variant.hasEvidence = hasEvidence;
+        variant.requiredLiterals = requiredLiteralsForPrefix(m_definition, i + 1);
         m_prefixVariants.append(variant);
     }
 
@@ -676,15 +726,30 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
         result.matchedBlockCount = blockCount;
     };
 
-    const QRegularExpressionMatch full = m_fullRegex.match(line);
-    if (full.hasMatch()) {
-        fillSpans(full, m_definition.blocks.size());
-        result.unparsedStart = -1;
-        result.ok = true;
-        return result;
+    // Cheap necessary-condition gate: a regex whose mandatory literals are
+    // not all present in the line cannot match, so skip it without paying
+    // for the (possibly catastrophic) backtracking that proves non-match.
+    const auto lineHasAllLiterals = [&line](const QStringList& literals) {
+        for (const QString& literal : literals) {
+            if (!line.contains(literal))
+                return false;
+        }
+        return true;
+    };
+
+    if (lineHasAllLiterals(m_fullRequiredLiterals)) {
+        const QRegularExpressionMatch full = m_fullRegex.match(line);
+        if (full.hasMatch()) {
+            fillSpans(full, m_definition.blocks.size());
+            result.unparsedStart = -1;
+            result.ok = true;
+            return result;
+        }
     }
 
     for (const CompiledVariant& variant : m_prefixVariants) {
+        if (!lineHasAllLiterals(variant.requiredLiterals))
+            continue;
         const QRegularExpressionMatch match = variant.regex.match(line);
         if (!match.hasMatch())
             continue;

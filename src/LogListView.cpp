@@ -443,14 +443,17 @@ int LogListView::computeRowHeight(const QString& text, bool multiLine, int avail
         return singleRowHeight();
     }
     
-    // Для моноширинного шрифта — простая арифметика O(1)
+    // Для моноширинного шрифта — простая арифметика. Считаем по визуальным
+    // КОЛОНКАМ (с раскрытием табуляции), чтобы оценка высоты совпадала с реальным
+    // переносом в splitTextIntoLines.
     int lineWidth = (availableWidth > 0) ? availableWidth - 2 * kTextPaddingX : viewport()->width() - textAreaLeft() - 2 * kTextPaddingX;
     if (lineWidth <= 0) lineWidth = 100;  // fallback
-    
-    int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
-    int lineCount = (text.length() + charsPerLine - 1) / charsPerLine;
+
+    int colsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
+    int totalCols = m_tabExpander.columns(QStringView(text));
+    int lineCount = (totalCols + colsPerLine - 1) / colsPerLine;
     if (lineCount < 1) lineCount = 1;
-    
+
     return lineCount * m_lineHeight + kLineVerticalPadding;
 }
 
@@ -707,11 +710,11 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
         b.fg = theme.badgeFg;
         specs.prepend(b);
     } else if (!multiLine) {
-        // Для моноширинного шрифта — точный расчёт O(1)
-        int textWidth = qRound(text.length() * m_charWidth);
-        
+        // Ширина и точка обрезки считаются с учётом раскрытия табуляции.
+        int textWidth = calculateWidth(QStringView(text));
+
         if (textWidth > availableWidth && availableWidth > 0) {
-            int visibleChars = qMax(0, (int)(availableWidth / m_charWidth));
+            int visibleChars = getCharIndexAt(QStringView(text), availableWidth);
             visibleChars = qMin(visibleChars, static_cast<int>(text.length()));
             hiddenCount = text.length() - visibleChars;
             
@@ -785,30 +788,31 @@ int LogListView::getFragmentIndexForPosition(int pos, const QList<TextFragment>&
 }
 
 QList<TextFragment> LogListView::splitTextIntoLines(const QString& text, const QRect& rect) const {
-    // Для моноширинного шрифта — простое разбиение по количеству символов
+    // Разбиение по визуальным КОЛОНКАМ: табуляция занимает несколько колонок,
+    // поэтому перенос считается по фактической ширине, а не по числу символов.
+    // Каждый фрагмент меряется от своего начала (колонка 0) — так отрисовка,
+    // hit-test и выделение фрагмента остаются согласованными.
     QList<TextFragment> fragments;
-    
+
     int lineWidth = rect.width() - 2 * kTextPaddingX;
     if (lineWidth <= 0) lineWidth = 100;
-    
-    int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
-    int pos = 0;
+
+    const int colsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
+    const QStringView view(text);
     int y = rect.top() + 1;
-    int textLen = text.length();
-    
-    while (pos < textLen) {
-        int lineLen = qMin(charsPerLine, textLen - pos);
-        
+
+    // Перенос по словам: правило границ инкапсулировано в LineWrapper, здесь —
+    // только геометрия фрагментов. Каждый фрагмент меряется от своего начала
+    // (колонка 0), что согласуется с отрисовкой, hit-test и выделением.
+    m_lineWrapper.wrap(view, colsPerLine, [&](int start, int length) {
         TextFragment fragment;
-        fragment.startPos = pos;
-        fragment.length = lineLen;
-        fragment.text = QStringView(text).sliced(pos, lineLen);
+        fragment.startPos = start;
+        fragment.length = length;
+        fragment.text = view.sliced(start, length);
         fragment.rect = QRect(rect.left() + kTextPaddingX, y, lineWidth, m_lineHeight);
         fragments.append(fragment);
-        
-        pos += lineLen;
         y += m_lineHeight;
-    }
+    });
     
     // Минимум одна строка даже для пустого текста
     if (fragments.isEmpty()) {
@@ -1638,37 +1642,46 @@ bool LogListView::viewportEvent(QEvent *event)
 
 void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens) const {
     QColor defaultColor = palette().color(QPalette::Text);
-    
+
     // Позиция начала и конца фрагмента в оригинальной строке
     int fragmentStart = fragmentStartPos;
     int fragmentEnd = fragmentStart + text.length();
     int last = 0;
-    // baseX фиксирован — каждый сегмент вычисляет X от базы, а не накапливает смещение.
-    // Это предотвращает накопление ошибки округления при дробном m_charWidth.
+    // baseX фиксирован — каждый сегмент вычисляет X от базы (в КОЛОНКАХ через
+    // ColumnCursor), а не накапливает смещение. Это предотвращает накопление
+    // ошибки округления при дробном m_charWidth и корректно учитывает табуляцию.
     const int baseX = x;
-    
+
+    // Курсор раскрытия табуляции: индексы сегментов запрашиваются монотонно,
+    // поэтому весь проход — O(длина фрагмента). Сегмент рисуется expand()'ом
+    // (табы → пробелы до табстопа), чтобы глифы попали ровно в колонки сетки.
+    ColumnCursor cursor(text, m_tabExpander);
+
     // Проходим по всем токенам подсветки
     for (const auto& token : tokens) {
         // Проверяем, пересекается ли токен с текущим фрагментом
         if (token.end <= fragmentStart || token.start >= fragmentEnd) {
             continue; // Токен не пересекается с фрагментом
         }
-        
+
         // Вычисляем пересечение токена с фрагментом
         int tokenStartInFragment = qMax(0, token.start - fragmentStart);
-        int tokenEndInFragment = qMin(static_cast<qsizetype>(text.length()), static_cast<qsizetype>(token.end - fragmentStart));
-        
+        int tokenEndInFragment = qMin(static_cast<int>(text.length()), token.end - fragmentStart);
+
         // Отрисовываем текст до токена
         if (tokenStartInFragment > last) {
+            const int startCol = cursor.columnAt(last);
             QStringView before = text.sliced(last, tokenStartInFragment - last);
             painter.setPen(defaultColor);
-            painter.drawText(baseX + qRound(last * m_charWidth), y, before.toString());
+            painter.drawText(baseX + qRound(startCol * m_charWidth), y, m_tabExpander.expand(before, startCol));
         }
-        
+
         // Отрисовываем токен
         if (tokenEndInFragment > tokenStartInFragment) {
-            const int tx = baseX + qRound(tokenStartInFragment * m_charWidth);
-            const int tw = qRound((tokenEndInFragment - tokenStartInFragment) * m_charWidth);
+            const int startCol = cursor.columnAt(tokenStartInFragment);
+            const int endCol   = cursor.columnAt(tokenEndInFragment);
+            const int tx = baseX + qRound(startCol * m_charWidth);
+            const int tw = qRound((endCol - startCol) * m_charWidth);
             // Заливка фона (поиск с подсветкой и пр.)
             if (token.bgColor.isValid()) {
                 const QFontMetrics fm = painter.fontMetrics();
@@ -1676,40 +1689,37 @@ void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const 
             }
             QStringView tokenView = text.sliced(tokenStartInFragment, tokenEndInFragment - tokenStartInFragment);
             painter.setPen(token.color.isValid() ? token.color : defaultColor);
-            painter.drawText(tx, y, tokenView.toString());
+            painter.drawText(tx, y, m_tabExpander.expand(tokenView, startCol));
         }
-        
+
         last = tokenEndInFragment;
     }
-    
+
     // Отрисовываем остаток текста
     if (last < text.length()) {
+        const int startCol = cursor.columnAt(last);
         QStringView rest = text.sliced(last);
         painter.setPen(defaultColor);
-        painter.drawText(baseX + qRound(last * m_charWidth), y, rest.toString());
+        painter.drawText(baseX + qRound(startCol * m_charWidth), y, m_tabExpander.expand(rest, startCol));
     }
 }
 
 
-// Для моноширинного шрифта — O(1) вместо QTextLayout
+// Пиксель → индекс символа. Перевод X в визуальную колонку (с учётом табуляции)
+// и поиск ближайшей границы символа делегирован TabExpander — единственному
+// источнику правила табстопа.
 int LogListView::getCharIndexAt(const QStringView& text, int x) const {
     if (x <= 0) return 0;
     if (m_charWidth <= 0.0) return 0;
-    
-    // Округление к ближайшей границе символа (snap to nearest character boundary).
-    // Без этого курсор всегда прыгает к НАЧАЛУ символа под курсором,
-    // что вызывает ощущение смещения на символ.
-    int index = qRound(x / m_charWidth);
-    return std::clamp(index, 0, static_cast<int>(text.length()));
+    return m_tabExpander.indexAtColumn(text, x / m_charWidth);
 }
 
-// Для моноширинного шрифта — O(1)
+// Полная ширина текста в пикселях с учётом раскрытия табуляции.
 int LogListView::calculateWidth(const QStringView& text) const {
-    return qRound(text.length() * m_charWidth);
+    return qRound(m_tabExpander.columns(text) * m_charWidth);
 }
 
-// Для моноширинного шрифта — O(1)
+// Ширина первых count символов в пикселях с учётом раскрытия табуляции.
 int LogListView::textWidthUntil(const QStringView& text, int count) const {
-    int n = std::clamp(count, 0, static_cast<int>(text.length()));
-    return qRound(n * m_charWidth);
+    return qRound(m_tabExpander.columnAt(text, count) * m_charWidth);
 }

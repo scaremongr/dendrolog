@@ -1,5 +1,6 @@
 <RCC>
     <qresource>
         <file>icons/reload.svg</file>
+        <file>icons/wordwrap.svg</file>
     </qresource>
 </RCC>

@@ -42,7 +42,8 @@ public:
 
     explicit ConversionPatternDialog(const PatternList& patterns,
                                      QWidget* parent = nullptr,
-                                     const QStringList& sampleLines = QStringList());
+                                     const QStringList& sampleLines = QStringList(),
+                                     const QString& activeSchema = QString());
     ~ConversionPatternDialog() override;
 
     /// Returns the (possibly edited) list on dialog close.
@@ -80,7 +81,7 @@ private:
         QVector<LineMatchResult> lines;
     };
 
-    void populateSchemas(const PatternList& list);
+    void populateSchemas(const PatternList& list, const QString& activeSchema = QString());
     void setSchemaRow(int row, const QString& name, const QString& serializedSchema);
     void updateSchemaSummary(int row);
     void loadSchemaRow(int row);
@@ -108,6 +109,8 @@ private:
     void updateButtonStates();
 
     QStringList previewLines() const;
+
+    QStringList   m_fileSampleLines; ///< First lines of the active log, for the "reload sample" button.
 
     QVector<PatternBlockCard*> m_cards;
     QVector<SeparatorNode*>    m_separators; ///< Links between cards: m_separators[i] sits after m_cards[i].

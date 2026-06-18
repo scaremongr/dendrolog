@@ -9,6 +9,7 @@
 #include <QVector>
 #include "logfile.h"
 #include "LogListView.h"
+#include "filechangedetector.h"
 
 class LogViewWidget : public QWidget {
     Q_OBJECT
@@ -77,11 +78,12 @@ private:
 
     LogParser* m_logParser;
 
-    // Per-file reload state: last byte offset read and next logicalEntryId to assign.
+    // Per-file reload state: the anchor fingerprinting the already-consumed
+    // prefix (used to tell appends from rewrites) and the next logicalEntryId.
     struct FileReloadState {
-        qint64 lastReadOffset = 0;
+        FileChangeDetector::Anchor anchor;        // prefix size + boundary fingerprint
         int    nextLogicalEntryId = 0;
-        bool   initialLoadDone = false; // false = still doing the initial parse
+        bool   initialLoadDone = false;           // false = still doing the initial parse
     };
     QHash<QString, FileReloadState> m_fileReloadStates; // key = filePath
 

@@ -9,6 +9,8 @@
 #include <QVector>
 #include "syntaxhighlighter.h"
 #include "textmatchhighlighter.h"
+#include "tabexpander.h"
+#include "linewrapper.h"
 
 // Структура для хранения информации о фрагменте текста (одной строке в режиме word wrap)
 struct TextFragment {
@@ -229,6 +231,16 @@ private:
     qreal m_charWidth = 8.0; // Ширина одного символа (дробная для точного позиционирования)
     int m_lineHeight = 16;   // Высота строки
     void updateFontMetricsCache();  // Обновить кэш при смене шрифта
+
+    // ========== Раскрытие табуляции ==========
+    // Ширина табстопа в колонках (моноширинных ячейках). Вся tab-aware геометрия
+    // инкапсулирована в TabExpander — единственном источнике правила табстопа.
+    static constexpr int kTabWidth = 4;
+    TabExpander m_tabExpander{kTabWidth};
+
+    // Перенос по словам. Зависит от m_tabExpander (хранит ссылку) — поэтому
+    // объявлен СТРОГО после него, чтобы порядок инициализации членов был верным.
+    LineWrapper m_lineWrapper{m_tabExpander};
 
     // ========== Кэш состояний строк ==========
     mutable QHash<int, RowState> m_rowStateCache;

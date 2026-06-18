@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QStringList>
 #include <QTreeWidget>
 #include <QHeaderView>
@@ -13,6 +14,7 @@
 #include <QFutureWatcher>
 #include <QPair>
 #include <QTimer>
+#include <QDateTime>
 #include <Qt>
 
 // ─── Column indices ─────────────────────────────────────────────────────────
@@ -100,9 +102,38 @@ public:
     // Running workers finish gracefully; stale results are silently discarded.
     void scan(const QString& rootPath);
 
+    // ---- Filtering ----------------------------------------------------------
+    // Date filter: keep only files whose [first,last] timestamp range overlaps
+    // [from,to]. An invalid QDateTime means "unbounded" on that side; passing
+    // both invalid (or enabled=false) disables date filtering. Cheap & sync.
+    void setDateFilter(bool enabled, const QDateTime& from, const QDateTime& to);
+
+    // Content filter: keep only files whose contents match `text`. Empty text
+    // disables the content filter. Reading file contents is expensive, so the
+    // search runs in parallel in the background (see contentFilter* signals).
+    void setContentFilter(const QString& text, bool isRegex, bool caseSensitive);
+
+    // Re-evaluate visibility for the current filters. Launches the async content
+    // search when a content filter is active; date filtering is applied at once.
+    void applyFilters();
+
+    // Drop all filters and show every item.
+    void clearFilters();
+
+    // True while a background content search is running.
+    bool isContentFilterRunning() const { return m_contentWatcher != nullptr; }
+
 signals:
     void fileActivated(const QString& filePath);
     void filesActivated(const QStringList& filePaths);
+
+    // Emitted as scan results arrive: the earliest "from" and latest "to"
+    // timestamps across all scanned files. Invalid dates mean "not yet known".
+    void dateBoundsChanged(const QDateTime& earliest, const QDateTime& latest);
+
+    // Background content-search progress / completion.
+    void contentFilterProgress(int done, int total);
+    void contentFilterFinished(int matched, int total);
 
 private slots:
     void onItemExpanded(QTreeWidgetItem* item);
@@ -134,6 +165,16 @@ private:
     void applyStats(const FileStats& stats, const QString& filePath);
     void scheduleResort();
     void scheduleResize();
+    void scheduleBoundsUpdate();
+
+    // ---- Filtering ----
+    void cancelContentSearch();
+    void startContentSearch();
+    bool passesDateFilter(QTreeWidgetItem* item) const;
+    // Recursively recompute item visibility; returns true if `item` (or any
+    // descendant) stays visible, so empty directories collapse out of view.
+    bool refreshVisibility(QTreeWidgetItem* item);
+    void refreshAllVisibility();
 
     // ---- Utilities ----
     bool    matchesExtension(const QString& lowerSuffix) const;
@@ -151,6 +192,25 @@ private:
     Qt::SortOrder                   m_sortOrder   = Qt::DescendingOrder;
     bool                            m_resortScheduled = false;
     bool                            m_resizeScheduled = false;
+    bool                            m_boundsScheduled = false;
+
+    // ---- Global date bounds across scanned files ----
+    QDateTime                       m_globalMin;
+    QDateTime                       m_globalMax;
+
+    // ---- Date filter state ----
+    bool                            m_dateFilterEnabled = false;
+    QDateTime                       m_dateFrom;
+    QDateTime                       m_dateTo;
+
+    // ---- Content filter state ----
+    QString                         m_contentText;
+    bool                            m_contentRegex = false;
+    bool                            m_contentCaseSensitive = false;
+    bool                            m_contentFilterActive = false;   // results valid
+    QSet<QString>                   m_contentMatches;                // matching paths
+    QStringList                     m_contentPaths;                  // sequence for mapped()
+    QFutureWatcher<bool>*           m_contentWatcher = nullptr;      // running search
 };
 
 #endif // DIRECTORYSCANNER_H

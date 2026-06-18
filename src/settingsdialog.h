@@ -3,9 +3,11 @@
 #include <QColor>
 #include <QDialog>
 #include <QVector>
+#include <QString>
 
 // Forward declarations
 class QPushButton;
+class QKeySequenceEdit;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class SettingsDialog; }
@@ -49,14 +51,23 @@ private:
         QPushButton* button = nullptr;  // Created in buildColorsTab()
     };
 
+    // ---- Shortcut editor row ----------------------------------------------
+    struct ShortcutRow {
+        QString           id;            // ShortcutManager command id
+        QKeySequenceEdit* edit = nullptr;
+    };
+
     // ---- Helpers -----------------------------------------------------------
     void buildColorsTab();
     void updateColorButton(ColorEntry& entry);
+    void buildShortcutsTab();
+    void resetShortcutsToDefaults();
 
     // ---- Init / finalise ---------------------------------------------------
     void loadFromSettings();
     void applyToSettings();
 
     Ui::SettingsDialog* ui;
-    QVector<ColorEntry> m_colorEntries;
+    QVector<ColorEntry>  m_colorEntries;
+    QVector<ShortcutRow> m_shortcutRows;
 };
