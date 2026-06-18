@@ -2,6 +2,7 @@
 #define LOGLISTVIEW_H
 
 #include <QListView>
+#include <QDateTime>
 #include <QMap>
 #include <QSet>
 #include <QStringView>
@@ -173,6 +174,10 @@ public:
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
 
+    // Пользователь выбрал «использовать таймстамп как границу фильтра по времени»
+    // из контекстного меню. isStart == true → нижняя граница (From), иначе верхняя (To).
+    void timeFilterBoundRequested(const QDateTime& dt, bool isStart);
+
 protected:
     // Кастомная отрисовка элементов
     void paintEvent(QPaintEvent *event) override;
@@ -182,6 +187,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     int sizeHintForRow(int row) const override;  // фиксированная высота — предотвращает O(N) в базовом QListView
     void enterEvent(QEnterEvent *event) override;
@@ -347,6 +353,21 @@ private:
         return m_wordWrapEnabled != m_toggledRows.contains(row); 
     }
     void toggleRowMultiLine(int row);
+
+    // True if the row currently shows a HiddenToggle badge, i.e. it can be
+    // expanded/collapsed (longer than the visible width, or already multi-line).
+    bool rowHasWrapToggle(int row) const;
+
+    // Copies the current text selection to the clipboard (multi-row aware).
+    // No-op when the selection is empty.
+    void copySelectionToClipboard() const;
+
+    // Returns the currently selected text (rows joined with '\n'), or empty.
+    QString selectedText() const;
+
+    // Расширяет (двигает активный конец) текстового выделения с клавиатуры.
+    // direction: +1 вправо, −1 влево. byToken: true — на токен/блок, false — на символ.
+    void extendSelectionByKeyboard(int direction, bool byToken);
 };
 
 #endif // LOGLISTVIEW_H

@@ -60,6 +60,9 @@ protected:
 private slots:
     void onAddSchema();
     void onRemoveSchema();
+    void onImportSchema();
+    void onExportSchema();
+    void onOpenFolder();
     void onMoveSchemaUp();
     void onMoveSchemaDown();
     void onSchemaSelectionChanged(int currentRow, int currentColumn,

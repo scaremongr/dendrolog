@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <QElapsedTimer>
 
 static int g_failures = 0;
 
@@ -305,6 +306,79 @@ int main(int argc, char** argv)
             }
         }
         CHECK(allValid, "all built-in presets compile");
+    }
+
+    // 15. ReDoS guard: the "kernel" schema (constant > / timestamp / thread /
+    // logger / level / greedy message / context / two file paths / constant })
+    // must not hang on lines that pass the literal gate but do not fully match.
+    // A Windows path with many separators used to trigger catastrophic
+    // backtracking in filePathRegex (overlapping (chunk)+(\chunk)* factorings).
+    {
+        PatternDefinition k;
+        auto cst = [](const QString& text) {
+            PatternBlock b;
+            b.matchKind = PatternBlock::MatchKind::ConstantText;
+            b.customRegex = text;
+            return b;
+        };
+        k.blocks = {
+            cst(">"),
+            mk(PatternBlock::MatchKind::Timestamp, "Timestamp", "", "", " ["),
+            mk(PatternBlock::MatchKind::TextUntilSeparator, "Thread", "", "", "] "),
+            mk(PatternBlock::MatchKind::TextUntilSeparator, "Logger", "", "", " "),
+            mk(PatternBlock::MatchKind::Level, "Level", "", "", " "),
+            mk(PatternBlock::MatchKind::GreedyTextUntilSeparator, "Message", "", "", " ~~ "),
+            mk(PatternBlock::MatchKind::TextUntilSeparator, "Context", "", "", " {"),
+            mk(PatternBlock::MatchKind::FilePath, "Source File", "", "", ":"),
+            mk(PatternBlock::MatchKind::FilePath, "Source Line"),
+            cst("}"),
+        };
+        LogPattern kp(LogPattern::serializeDefinition(k));
+        CHECK(kp.isValid(), "kernel schema compiles");
+
+        // A long Windows path with a corrupted tail: the closing "}" of the
+        // structure is missing (an earlier "{-11}" keeps the literal gate
+        // satisfied), so the match must fail — exercising worst-case
+        // backtracking through the file-path block.
+        QString deepPath = QStringLiteral("Y:");
+        for (int i = 0; i < 24; ++i)
+            deepPath += QStringLiteral("\\segment%1").arg(i);
+        const QString stress =
+            QStringLiteral("> 2026-05-13 20:21:16,730 [0x00005f64] Compress.X WARN "
+                           "An expr AVError{-11}: EAGAIN ~~ CDecompressorImpl::Decompress {")
+            + deepPath + QStringLiteral(":530 and no closing brace here");
+
+        // Loop to imitate parsing a file full of such lines: catastrophic
+        // backtracking shows up as orders-of-magnitude slowdown here even
+        // though PCRE2's internal step limit keeps a single match from
+        // hanging forever.
+        constexpr int kIterations = 300;
+        QElapsedTimer timer;
+        timer.start();
+        for (int i = 0; i < kIterations; ++i)
+            kp.matchLine(stress);
+        const qint64 ms = timer.elapsed();
+        qInfo().noquote() << "       kernel stress" << kIterations
+                          << "x matchLine took" << ms << "ms";
+        CHECK(ms < 1500,
+              QString("kernel schema does not blow up on hostile lines (%1 ms / %2 lines)")
+                  .arg(ms).arg(kIterations));
+
+        // A well-formed line of the same shape must still parse correctly.
+        const QString good =
+            QStringLiteral("> 2026-05-13 20:21:16,734 [0x00005f64] Compress.CDecompressor INFO "
+                           "Need more data ~~ CDecompressorImpl::Decompress "
+                           "{Y:\\builds\\workspace\\Compress\\CDecompressorImpl.cpp:367}");
+        const LineMatchResult gr = kp.matchLine(good);
+        CHECK(gr.ok && gr.unparsedStart == -1, "kernel schema fully matches a well-formed line");
+        CHECK(fieldValue(kp, good, "Level") == "INFO", "kernel Level extracted");
+        CHECK(fieldValue(kp, good, "Message") == "Need more data",
+              QString("kernel Message extracted, got '%1'").arg(fieldValue(kp, good, "Message")));
+        CHECK(fieldValue(kp, good, "Source File")
+                  == "Y:\\builds\\workspace\\Compress\\CDecompressorImpl.cpp",
+              QString("kernel Source File extracted, got '%1'").arg(fieldValue(kp, good, "Source File")));
+        CHECK(fieldValue(kp, good, "Source Line") == "367",
+              QString("kernel Source Line extracted, got '%1'").arg(fieldValue(kp, good, "Source Line")));
     }
 
     qInfo().noquote() << (g_failures == 0 ? "\nALL TESTS PASSED"

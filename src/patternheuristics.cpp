@@ -93,10 +93,17 @@ QString ipAddressRegex()
 
 QString filePathRegex()
 {
-    // Optional drive letter, then one or more non-separator chunks joined
-    // by slashes. No nested quantifier chains — no catastrophic backtracking.
+    // Optional drive letter, then non-separator chunks joined by slashes.
+    //
+    // The chunk class MUST exclude the path separators \ and / themselves:
+    // otherwise [^…]+ can also swallow separators and overlaps the following
+    // (?:[\\/]…)* group, so a path with N separators factorises 2^N ways —
+    // catastrophic backtracking the moment the overall match has to fail or
+    // backtrack. With separators excluded from the chunk the alternation is
+    // unambiguous and matching stays linear. A leading [\\/]* handles
+    // absolute Unix paths and UNC shares.
     return QStringLiteral(
-        R"((?:[A-Za-z]:[\\/])?[^\r\n\s<>:"|?*]+(?:[\\/][^\r\n\s<>:"|?*]+)*)");
+        R"((?:[A-Za-z]:)?[\\/]*[^\r\n\s<>:"|?*\\/]+(?:[\\/]+[^\r\n\s<>:"|?*\\/]+)*)");
 }
 
 QString isoTimestampDetectPattern()

@@ -606,27 +606,32 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
         const PatternBlock& block = blocks[i];
         const bool isLastOfSchema = (i == blocks.size() - 1);
 
+        // Build the block's contribution in its own buffer so the whole of
+        // it (gap + value + wrappers + glue) can be wrapped in an atomic
+        // group below.
+        QString seg;
+
         // Gap before the block: anchors may skip arbitrary garbage so the
         // token is *found*; everything else just collapses extra spaces.
         // After a lazy free-text block the skip is pointless (the text
         // itself absorbs anything) and would only shrink the field value.
         const bool prevIsFreeText = i > 0 && isFreeTextKind(blocks[i - 1].matchKind);
         if (isAnchorKind(block.matchKind) && !prevIsFreeText)
-            regex += QStringLiteral(".*?");
+            seg += QStringLiteral(".*?");
         else
-            regex += QStringLiteral("[ \\t]*");
+            seg += QStringLiteral("[ \\t]*");
 
-        regex += leadingBoundaryRegex(block.leadingText);
+        seg += leadingBoundaryRegex(block.leadingText);
 
         const QString value = valueRegexForBlock(block, isLastOfSchema && anchorEnd);
         if (value.isEmpty())
             return QString();
-        regex += QStringLiteral("(?<") + captureNameForIndex(i) + QStringLiteral(">")
+        seg += QStringLiteral("(?<") + captureNameForIndex(i) + QStringLiteral(">")
                + value + QStringLiteral(")");
 
         // Closing wrapper is part of the block itself and always required —
         // for anchors the bracket pair is part of what makes them findable.
-        regex += trailingBoundaryRegex(block.closingText);
+        seg += trailingBoundaryRegex(block.closingText);
 
         // Glue to the next block. Self-delimiting blocks (distinctive
         // token shape, constant literal, or a closing wrapper) do not
@@ -635,10 +640,41 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
             const QString sep = block.separatorIsRegex
                 ? QStringLiteral("[ \\t]*(?:") + block.separator + QStringLiteral(")")
                 : trailingBoundaryRegex(block.separator);
-            regex += blockIsSelfDelimiting(block)
+            seg += blockIsSelfDelimiting(block)
                 ? QStringLiteral("(?:") + sep + QStringLiteral(")?")
                 : sep;
         }
+
+        // Atomic group per block: once a block has matched (by its own
+        // greedy/lazy rule), a failure further down the chain must not make
+        // the engine re-try this block's internal split. Without this, a
+        // schema with several free-text blocks backtracks polynomially on
+        // every line that ultimately fails to match (catastrophic on long
+        // lines). Internal backtracking inside the block — e.g. a path value
+        // giving characters back to its ':' glue — is still allowed; only
+        // cross-block re-exploration is cut. This matches the block semantics
+        // (lazy = shortest, greedy = longest); a shorter overall parse is
+        // produced by the prefix-variant cascade instead.
+        //
+        // It is only sound to wrap a block whose value is bounded on the
+        // right *inside its own segment*: a self-delimiting token, a constant
+        // literal, or any block carrying a closing wrapper / explicit glue.
+        // A value terminated only by the *next* block's leading literal —
+        // a bare free-text block, or a file path whose permissive class can
+        // run into the following literal (e.g. the trailing '}' of "{p:line}")
+        // — reaches that boundary by backtracking, so committing it atomically
+        // would freeze it too early. Those are left backtrackable; the path
+        // value is itself unambiguous (see filePathRegex), so its backtracking
+        // stays linear.
+        const bool valueIsBoundedToken =
+               isSelfDelimitingKind(block.matchKind)
+            || block.matchKind == PatternBlock::MatchKind::ConstantText;
+        const bool hasRightBoundary =
+               !block.closingText.isEmpty() || !block.separator.isEmpty();
+        if (valueIsBoundedToken || hasRightBoundary)
+            regex += QStringLiteral("(?>") + seg + QStringLiteral(")");
+        else
+            regex += seg;
     }
 
     if (anchorEnd)

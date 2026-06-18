@@ -7,6 +7,13 @@
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QApplication>
+#include <QMenu>
+#include <QContextMenuEvent>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QFileInfo>
+#include <QDateTime>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QTextLayout>
 #include <QFontDatabase>
@@ -1562,14 +1569,14 @@ void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
     const QPoint    localPos = QPoint(event->pos().x(), contentY - rowTop);
     const int       clickPos = getTextPositionFromMouse(localPos, state);
 
-    const auto [wordStart, wordEnd] = TextToken::findDoubleClickToken(state.text, clickPos);
-    if (wordStart == wordEnd) {
+    const TextToken::Token tok = TextToken::findDoubleClickToken(state.text, clickPos);
+    if (tok.isEmpty()) {
         QListView::mouseDoubleClickEvent(event);
         return;
     }
 
-    m_selection.start(row, wordStart);
-    m_selection.moveTo(row, wordEnd);
+    m_selection.start(row, tok.start);
+    m_selection.moveTo(row, tok.end);
     m_selection.finish();
     updateBracketMatch();
 
@@ -1580,20 +1587,253 @@ void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
     viewport()->update();
 }
 
-// Обработка нажатия клавиш (копирование выделенного текста)
+// Текущий выделенный текст (строки склеены через '\n'); пусто, если нет выделения.
+QString LogListView::selectedText() const {
+    if (m_selection.isEmpty() || !model())
+        return QString();
+    QStringList lines;
+    for (int row = m_selection.topRow(); row <= m_selection.bottomRow(); ++row) {
+        const QString rowText = model()->data(model()->index(row, 0)).toString();
+        int selStart = 0, selEnd = 0;
+        m_selection.rangeForRow(row, rowText.length(), selStart, selEnd);
+        lines.append(rowText.mid(selStart, selEnd - selStart));
+    }
+    return lines.join('\n');
+}
+
+// Копирование выделения в буфер обмена (многострочное).
+void LogListView::copySelectionToClipboard() const {
+    const QString text = selectedText();
+    if (!text.isEmpty())
+        QApplication::clipboard()->setText(text);
+}
+
+// Граница следующего токена справа от pos (для Ctrl+Shift+Right).
+static int rightTokenBoundary(const QString& text, int pos) {
+    const int n = text.length();
+    if (pos >= n) return n;
+    const TextToken::Token t = TextToken::findDoubleClickToken(text, pos);
+    if (t.isEmpty() || t.end <= pos) return std::min(pos + 1, n);  // гарантируем прогресс
+    return t.end;
+}
+
+// Граница предыдущего токена слева от pos (для Ctrl+Shift+Left).
+static int leftTokenBoundary(const QString& text, int pos) {
+    if (pos <= 0) return 0;
+    const TextToken::Token t = TextToken::findDoubleClickToken(text, pos - 1);
+    if (t.isEmpty() || t.start >= pos) return std::max(pos - 1, 0);
+    return t.start;
+}
+
+// Двигает активный конец выделения с клавиатуры (Shift / Ctrl+Shift + стрелки).
+void LogListView::extendSelectionByKeyboard(int direction, bool byToken) {
+    if (!model() || model()->rowCount() == 0)
+        return;
+
+    // Нужна валидная активная позиция. Если выделения ещё нет — сеем свёрнутое
+    // выделение в начале текущей строки, чтобы расширение заработало сразу.
+    if (!m_selection.isValid()) {
+        const QModelIndex cur = currentIndex();
+        if (!cur.isValid())
+            return;
+        m_selection.anchorRow = m_selection.activeRow = cur.row();
+        m_selection.anchorPos = m_selection.activePos = 0;
+        m_selection.isDragging = false;
+    }
+
+    int     row  = m_selection.activeRow;
+    int     pos  = m_selection.activePos;
+    QString text = model()->data(model()->index(row, 0)).toString();
+    int     len  = text.length();
+
+    if (direction > 0) {                       // вправо
+        if (pos >= len) {                      // конец строки — шаг на следующую
+            if (row + 1 >= model()->rowCount())
+                return;
+            ++row;
+            pos = 0;
+        } else {
+            pos = byToken ? rightTokenBoundary(text, pos) : pos + 1;
+        }
+    } else {                                   // влево
+        if (pos <= 0) {                        // начало строки — шаг на предыдущую
+            if (row <= 0)
+                return;
+            --row;
+            text = model()->data(model()->index(row, 0)).toString();
+            pos  = text.length();
+        } else {
+            pos = byToken ? leftTokenBoundary(text, pos) : pos - 1;
+        }
+    }
+
+    const int oldTop    = m_selection.topRow();
+    const int oldBottom = m_selection.bottomRow();
+
+    m_selection.activeRow = row;
+    m_selection.activePos = pos;
+    m_selection.isDragging = false;
+
+    const int dirtyTop    = std::min(oldTop,    m_selection.topRow());
+    const int dirtyBottom = std::max(oldBottom, m_selection.bottomRow());
+    invalidateSelectionRange(dirtyTop, dirtyBottom);
+
+    if (row >= 0 && row < model()->rowCount())
+        scrollTo(model()->index(row, 0), EnsureVisible);
+}
+
+// True если у строки есть плашка-переключатель раскрытия (она длиннее видимой
+// области либо уже развёрнута на несколько визуальных строк).
+bool LogListView::rowHasWrapToggle(int row) const {
+    if (row < 0 || !model() || row >= model()->rowCount())
+        return false;
+    const RowState state = getRowState(row);
+    for (const BadgeLayout& b : state.badges) {
+        if (b.spec.type == BadgeType::HiddenToggle)
+            return true;
+    }
+    return false;
+}
+
+// Обработка нажатия клавиш (копирование выделенного текста; пробел —
+// раскрытие/сворачивание текущей строки, как клик по плашке справа).
 void LogListView::keyPressEvent(QKeyEvent *event) {
     if (event->matches(QKeySequence::Copy) && !m_selection.isEmpty()) {
-        QStringList lines;
-        for (int row = m_selection.topRow(); row <= m_selection.bottomRow(); ++row) {
-            const QString rowText = model()->data(model()->index(row, 0)).toString();
-            int selStart = 0, selEnd = 0;
-            m_selection.rangeForRow(row, rowText.length(), selStart, selEnd);
-            lines.append(rowText.mid(selStart, selEnd - selStart));
-        }
-        QApplication::clipboard()->setText(lines.join('\n'));
-    } else {
-        QListView::keyPressEvent(event);
+        copySelectionToClipboard();
+        return;
     }
+
+    // Расширение текстового выделения с клавиатуры:
+    //   Shift + ←/→        — на один символ
+    //   Ctrl + Shift + ←/→ — на токен/блок
+    if ((event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)
+        && (event->modifiers() & Qt::ShiftModifier)
+        && !(event->modifiers() & (Qt::AltModifier | Qt::MetaModifier))) {
+        const bool byToken = event->modifiers() & Qt::ControlModifier;
+        const int  dir     = (event->key() == Qt::Key_Right) ? +1 : -1;
+        extendSelectionByKeyboard(dir, byToken);
+        return;
+    }
+
+    if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier) {
+        // Toggle wrap only for rows that can expand/collapse; for any other row
+        // do nothing (and consume the event) so the default QListView Space
+        // handling does not jump the selection.
+        const QModelIndex cur = currentIndex();
+        if (cur.isValid() && rowHasWrapToggle(cur.row()))
+            toggleRowMultiLine(cur.row());
+        return;
+    }
+
+    QListView::keyPressEvent(event);
+}
+
+// Разбор строки таймстампа в QDateTime по набору распространённых форматов.
+// Дробная часть секунд отбрасывается (гранулярность фильтра — секунды).
+static QDateTime parseTimestampText(const QString& raw) {
+    QString s = raw.trimmed();
+    s.replace(QChar(','), QChar('.'));
+    // Убрать дробные доли секунды в конце ("...:56.789" → "...:56").
+    static const QRegularExpression fracRe(QStringLiteral("[.]\\d+$"));
+    s.remove(fracRe);
+
+    static const QStringList dateTimeFormats = {
+        QStringLiteral("yyyy-MM-dd HH:mm:ss"), QStringLiteral("yyyy-MM-ddTHH:mm:ss"),
+        QStringLiteral("yyyy/MM/dd HH:mm:ss"),
+        QStringLiteral("dd.MM.yyyy HH:mm:ss"), QStringLiteral("dd/MM/yyyy HH:mm:ss"),
+        QStringLiteral("dd-MM-yyyy HH:mm:ss"),
+    };
+    for (const QString& f : dateTimeFormats) {
+        const QDateTime dt = QDateTime::fromString(s, f);
+        if (dt.isValid())
+            return dt;
+    }
+
+    // Только время — подставляем сегодняшнюю дату.
+    static const QStringList timeFormats = {
+        QStringLiteral("HH:mm:ss"), QStringLiteral("H:mm:ss"),
+    };
+    for (const QString& f : timeFormats) {
+        const QTime t = QTime::fromString(s, f);
+        if (t.isValid())
+            return QDateTime(QDate::currentDate(), t);
+    }
+    return QDateTime();
+}
+
+// Контекстное меню строки: копирование выделения, переключение word wrap для
+// строки под курсором и действия в зависимости от типа выделенного блока
+// (открыть ссылку / файл, подставить таймстамп в фильтр по времени).
+void LogListView::contextMenuEvent(QContextMenuEvent *event) {
+    const QPoint vpPos    = viewport()->mapFromGlobal(event->globalPos());
+    const int    scrollY  = verticalScrollBar()->value();
+    const int    contentY = vpPos.y() + scrollY;
+
+    int row = -1, rowTop = 0;
+    const bool haveRow = getRowAtContentY(contentY, row, rowTop);
+
+    QMenu menu(this);
+
+    if (!m_selection.isEmpty()) {
+        QAction* copyAct = menu.addAction(tr("Copy"));
+        copyAct->setShortcut(QKeySequence::Copy);
+        connect(copyAct, &QAction::triggered, this, [this]() { copySelectionToClipboard(); });
+    } else if (haveRow && model()) {
+        // Ничего не выделено — предлагаем скопировать всю строку под курсором
+        // (именно отображаемое содержимое, с учётом выбранных Log Fields).
+        QAction* copyLineAct = menu.addAction(tr("Copy Whole Line"));
+        const int copyRow = row;
+        connect(copyLineAct, &QAction::triggered, this, [this, copyRow]() {
+            if (model() && copyRow >= 0 && copyRow < model()->rowCount())
+                QApplication::clipboard()->setText(
+                    model()->data(model()->index(copyRow, 0), Qt::DisplayRole).toString());
+        });
+    }
+
+    // Действия, зависящие от типа выделенного блока.
+    const QString sel = selectedText().trimmed();
+    const TextToken::TokenType selType = TextToken::classify(sel);
+    if (selType == TextToken::TokenType::Url) {
+        menu.addSeparator();
+        QAction* a = menu.addAction(tr("Open Link"));
+        connect(a, &QAction::triggered, this, [sel]() {
+            QDesktopServices::openUrl(QUrl::fromUserInput(sel));
+        });
+    } else if (selType == TextToken::TokenType::FilePath) {
+        menu.addSeparator();
+        const bool exists = QFileInfo::exists(sel);
+        QAction* openFile = menu.addAction(tr("Open File"));
+        openFile->setEnabled(exists);
+        connect(openFile, &QAction::triggered, this, [sel]() {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(sel));
+        });
+        QAction* openDir = menu.addAction(tr("Open Containing Folder"));
+        openDir->setEnabled(exists);
+        connect(openDir, &QAction::triggered, this, [sel]() {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(sel).absolutePath()));
+        });
+    } else if (selType == TextToken::TokenType::Timestamp) {
+        const QDateTime dt = parseTimestampText(sel);
+        if (dt.isValid()) {
+            menu.addSeparator();
+            QAction* asStart = menu.addAction(tr("Use as Time Filter Start"));
+            connect(asStart, &QAction::triggered, this,
+                    [this, dt]() { emit timeFilterBoundRequested(dt, true); });
+            QAction* asEnd = menu.addAction(tr("Use as Time Filter End"));
+            connect(asEnd, &QAction::triggered, this,
+                    [this, dt]() { emit timeFilterBoundRequested(dt, false); });
+        }
+    }
+
+    if (haveRow && rowHasWrapToggle(row)) {
+        menu.addSeparator();
+        QAction* wrapAct = menu.addAction(tr("Word Wrap (this line)"));
+        wrapAct->setCheckable(true);
+        wrapAct->setChecked(isRowMultiLine(row));
+        connect(wrapAct, &QAction::triggered, this, [this, row]() { toggleRowMultiLine(row); });
+    }
+
+    menu.exec(event->globalPos());
 }
 
 void LogListView::currentChanged(const QModelIndex &current, const QModelIndex &previous) {
