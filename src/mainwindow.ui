@@ -43,6 +43,7 @@
      </property>
     </widget>
     <addaction name="actionOpen"/>
+    <addaction name="actionSaveAs"/>
     <addaction name="separator"/>
     <addaction name="menuRecentFiles"/>
     <addaction name="separator"/>
@@ -99,6 +100,7 @@
    <addaction name="actionTrace"/>
    <addaction name="separator"/>
    <addaction name="actionReloadFile"/>
+   <addaction name="actionWordWrap"/>
   </widget>
   <widget class="QToolBar" name="searchToolBar">
    <property name="windowTitle">
@@ -138,63 +140,7 @@
    <attribute name="dockWidgetArea">
     <number>2</number>
    </attribute>
-   <widget class="QWidget" name="directoryScannerContentsWidget">
-    <layout class="QVBoxLayout" name="verticalLayout_ds">
-     <item>
-      <layout class="QHBoxLayout" name="horizontalLayout_ds_buttons">
-       <item>
-        <widget class="QPushButton" name="scanDirectoryButton">
-         <property name="text">
-          <string>Scan Directory...</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QPushButton" name="configureScanExtensionsButton">
-         <property name="toolTip">
-          <string>Configure scan file extensions (e.g. log,txt)</string>
-         </property>
-         <property name="text">
-          <string>Exts...</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <spacer name="horizontalSpacer_ds_buttons">
-         <property name="orientation">
-          <enum>Qt::Orientation::Horizontal</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>40</width>
-           <height>20</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
-      </layout>
-     </item>
-     <item>
-      <widget class="QLabel" name="selectedDirectoryPathLabel">
-       <property name="text">
-        <string>Selected directory: None</string>
-       </property>
-       <property name="wordWrap">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QTreeWidget" name="directoryScanResultsTree">
-       <column>
-        <property name="text">
-         <string notr="true">1</string>
-        </property>
-       </column>
-      </widget>
-     </item>
-    </layout>
-   </widget>
+   <widget class="QWidget" name="directoryScannerContentsWidget"/>
   </widget>
   <widget class="QDockWidget" name="fieldVisibilityDockWidget">
    <property name="windowTitle">
@@ -287,6 +233,14 @@
   <action name="actionOpen">
    <property name="text">
     <string>&amp;Open Log File(s)...</string>
+   </property>
+  </action>
+  <action name="actionSaveAs">
+   <property name="text">
+    <string>Save View &amp;As...</string>
+   </property>
+   <property name="toolTip">
+    <string>Save the current view (all open documents in this tab) to a new file</string>
    </property>
   </action>
   <action name="actionReloadFile">
@@ -462,38 +416,6 @@
     <hint type="sourcelabel">
      <x>-1</x>
      <y>-1</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>20</x>
-     <y>20</y>
-    </hint>
-   </hints>
-  </connection>
-  <connection>
-   <sender>scanDirectoryButton</sender>
-   <signal>clicked()</signal>
-   <receiver>MainWindow</receiver>
-   <slot>onScanDirectoryClicked()</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>20</x>
-     <y>20</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>20</x>
-     <y>20</y>
-    </hint>
-   </hints>
-  </connection>
-  <connection>
-   <sender>configureScanExtensionsButton</sender>
-   <signal>clicked()</signal>
-   <receiver>MainWindow</receiver>
-   <slot>onConfigureScanExtensionsClicked()</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>20</x>
-     <y>20</y>
     </hint>
     <hint type="destinationlabel">
      <x>20</x>

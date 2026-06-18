@@ -139,11 +139,12 @@ void LogViewWidget::handleEntriesParsed(
 
 void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& parsedLogFile)
 {
-    // Record the file size at the end of the initial load. nextLogicalEntryId was
-    // already updated incrementally in handleEntriesParsed — no O(N) scan needed.
+    // Anchor the consumed prefix at the end of the initial load. nextLogicalEntryId
+    // was already updated incrementally in handleEntriesParsed — no O(N) scan needed.
     if (parsedLogFile) {
         FileReloadState& st = m_fileReloadStates[parsedLogFile->filePath];
-        st.lastReadOffset  = QFileInfo(parsedLogFile->filePath).size();
+        const qint64 size  = QFileInfo(parsedLogFile->filePath).size();
+        st.anchor          = FileChangeDetector::capture(parsedLogFile->filePath, size);
         st.initialLoadDone = true;
     }
 
@@ -175,23 +176,32 @@ bool LogViewWidget::reloadChangedFiles()
         FileReloadState& st = m_fileReloadStates[logFile->filePath];
         if (!st.initialLoadDone) continue; // Still doing the initial parse
 
-        const qint64 currentSize = QFileInfo(logFile->filePath).size();
-        if (currentSize < st.lastReadOffset) {
-            // File was truncated or replaced — do a full reload.
-            // Reset state so the next call to handleParsingFinished rebuilds it.
-            st.initialLoadDone = false;
-            st.lastReadOffset = 0;
-            st.nextLogicalEntryId = 0;
-            m_fileReloadStates.remove(logFile->filePath);
+        switch (FileChangeDetector::classify(logFile->filePath, st.anchor)) {
+        case FileChangeDetector::Change::Unchanged:
+            break;
+
+        case FileChangeDetector::Change::Appended: {
+            // Prefix is intact and the file grew — read only the new tail and
+            // append it, preserving selection and scroll position.
+            m_reloadParser->setPattern(m_logParser->pattern().patternString());
+            m_reloadParser->startParsingFrom(logFile, st.anchor.consumedBytes, st.nextLogicalEntryId);
+            // Re-anchor immediately so a concurrent poll won't re-read this range.
+            const qint64 newSize = QFileInfo(logFile->filePath).size();
+            st.anchor = FileChangeDetector::capture(logFile->filePath, newSize);
+            anyChanged = true;
+            break;
+        }
+
+        case FileChangeDetector::Change::Replaced: {
+            // File was truncated or overwritten with different content. Discard the
+            // now-stale entries for this file and re-parse it from scratch; state is
+            // rebuilt by handleParsingFinished. Other files' entries are untouched.
+            m_model->removeEntriesForFile(logFile->filePath);
+            m_fileReloadStates.remove(logFile->filePath); // invalidates `st`; do not reuse
             m_logParser->startParsing(logFile);
             anyChanged = true;
-        } else if (currentSize > st.lastReadOffset) {
-            // File grew — do an incremental (append-only) read.
-            m_reloadParser->setPattern(m_logParser->pattern().patternString());
-            m_reloadParser->startParsingFrom(logFile, st.lastReadOffset, st.nextLogicalEntryId);
-            // Update offset immediately so concurrent polls don't re-trigger the same range.
-            st.lastReadOffset = currentSize;
-            anyChanged = true;
+            break;
+        }
         }
     }
     return anyChanged;

@@ -34,6 +34,8 @@ void AppTheme::load(QSettings& s)
     syntaxUrl    = readColor(s, "syntaxUrl",    syntaxUrl);
     syntaxHex    = readColor(s, "syntaxHex",    syntaxHex);
     syntaxPath   = readColor(s, "syntaxPath",   syntaxPath);
+    syntaxGuid   = readColor(s, "syntaxGuid",   syntaxGuid);
+    syntaxTime   = readColor(s, "syntaxTime",   syntaxTime);
 
     // UI element colors
     gutterMarker  = readColor(s, "gutterMarker",   gutterMarker);
@@ -66,6 +68,8 @@ void AppTheme::save(QSettings& s) const
     s.setValue("syntaxUrl",    syntaxUrl.name(QColor::HexArgb));
     s.setValue("syntaxHex",    syntaxHex.name(QColor::HexArgb));
     s.setValue("syntaxPath",   syntaxPath.name(QColor::HexArgb));
+    s.setValue("syntaxGuid",   syntaxGuid.name(QColor::HexArgb));
+    s.setValue("syntaxTime",   syntaxTime.name(QColor::HexArgb));
 
     s.setValue("gutterMarker",   gutterMarker.name(QColor::HexArgb));
     s.setValue("gutterNewEntry",  gutterNewEntry.name(QColor::HexArgb));

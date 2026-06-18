@@ -2,10 +2,12 @@
 #include "ui_settingsdialog.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include "shortcutmanager.h"
 
 #include <QColorDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QKeySequenceEdit>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -22,6 +24,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
     buildColorsTab();
+    buildShortcutsTab();
     loadFromSettings();
 
     // Live font preview.
@@ -81,6 +84,8 @@ void SettingsDialog::buildColorsTab()
                 { tr("URLs"),            t.syntaxUrl,    &t.syntaxUrl    },
                 { tr("Hex values"),      t.syntaxHex,    &t.syntaxHex    },
                 { tr("File paths"),      t.syntaxPath,   &t.syntaxPath   },
+                { tr("UUID / GUID"),     t.syntaxGuid,   &t.syntaxGuid   },
+                { tr("Timestamps"),      t.syntaxTime,   &t.syntaxTime   },
             }
         },
         {
@@ -161,6 +166,48 @@ void SettingsDialog::updateColorButton(ColorEntry& entry)
 }
 
 // ---------------------------------------------------------------------------
+// buildShortcutsTab
+//
+// One row per configurable command: a label and a QKeySequenceEdit pre-filled
+// with the command's current sequence. Edits are committed in applyToSettings().
+// ---------------------------------------------------------------------------
+void SettingsDialog::buildShortcutsTab()
+{
+    const ShortcutManager& mgr = ShortcutManager::instance();
+
+    auto* content = new QWidget;
+    auto* form = new QFormLayout(content);
+    form->setHorizontalSpacing(12);
+    form->setVerticalSpacing(6);
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    for (const auto& cmd : mgr.commands()) {
+        auto* edit = new QKeySequenceEdit(content);
+        edit->setKeySequence(mgr.sequence(cmd.id));
+        // A single combination is enough for application shortcuts.
+        edit->setMaximumSequenceLength(1);
+
+        m_shortcutRows.append({ cmd.id, edit });
+        form->addRow(new QLabel(cmd.label, content), edit);
+    }
+
+    ui->shortcutsScrollArea->setWidget(content);
+
+    connect(ui->resetShortcutsButton, &QPushButton::clicked,
+            this, &SettingsDialog::resetShortcutsToDefaults);
+}
+
+// ---------------------------------------------------------------------------
+void SettingsDialog::resetShortcutsToDefaults()
+{
+    const ShortcutManager& mgr = ShortcutManager::instance();
+    for (const ShortcutRow& row : m_shortcutRows) {
+        if (row.edit)
+            row.edit->setKeySequence(mgr.defaultSequence(row.id));
+    }
+}
+
+// ---------------------------------------------------------------------------
 void SettingsDialog::loadFromSettings()
 {
     const AppSettings& s = AppSettings::instance();
@@ -223,6 +270,14 @@ void SettingsDialog::applyToSettings()
     // ---- General tab: reload --------------------------------------------- //
     s.setAutoReload(ui->autoReloadCheckBox->isChecked());
     s.setAutoReloadIntervalSecs(ui->autoReloadIntervalSpinBox->value());
+
+    // ---- Shortcuts tab ---------------------------------------------------- //
+    ShortcutManager& sm = ShortcutManager::instance();
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
+        if (row.edit)
+            sm.setSequence(row.id, row.edit->keySequence());
+    }
+    sm.save();
 
     // Persist everything (AppSettings::save() also delegates to AppTheme::save).
     s.save();

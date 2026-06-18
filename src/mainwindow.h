@@ -3,8 +3,11 @@
 
 #include <QMainWindow>
 #include <QPair>
+#include <QHash>
 #include <QStringList>
 #include <QVector>
+#include <QFutureWatcher>
+#include <memory>
 #include "logentry.h"
 #include "logfile.h"
 
@@ -26,12 +29,15 @@ class QComboBox;
 class QInputDialog; // For scan extensions
 class ConversionPatternDialog;
 class DirectoryScanner;
+class DirectoryScannerPanel;
 class QCloseEvent;
 class QTimer;
 class QToolButton;
 class QWidget;
 class FilterPanelWidget;
 class MarkerPanelWidget;
+class LogModel;
+class LogPattern;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -52,6 +58,7 @@ protected:
 private slots:
     // Slots connected by objectName in .ui file (or via connectSlotsByName)
     void on_actionOpen_triggered();
+    void on_actionSaveAs_triggered();
     void on_actionFatal_toggled(bool checked);
     void on_actionError_toggled(bool checked);
     void on_actionWarn_toggled(bool checked);
@@ -131,7 +138,8 @@ private:
 
     // Other members
     LogViewWidget*     m_activeLogView;
-    DirectoryScanner*  m_dirScanner = nullptr;
+    DirectoryScanner*  m_dirScanner = nullptr;        // owned by m_dirScannerPanel
+    DirectoryScannerPanel* m_dirScannerPanel = nullptr;
 
     // Field-visibility dock widgets
     QVector<QCheckBox*> m_fieldCheckBoxes;
@@ -144,6 +152,13 @@ private:
     using PatternEntry = QPair<QString, QString>; // (display name, pattern string)
     QList<PatternEntry> m_patternList;
     QStringList m_savedVisibleFieldNames;
+
+    // Background field re-extraction (schema switch). The worker only reads
+    // entry messages and writes entry->fields; the view's field display is
+    // disabled for the duration so nothing reads fields concurrently.
+    QFutureWatcher<void>*              m_fieldWatcher = nullptr;
+    std::shared_ptr<LogPattern>        m_pendingFieldPattern;
+    QVector<std::shared_ptr<LogEntry>> m_pendingFieldEntries; // kept alive while map() runs
 
     // Settings persistence
     void saveSettings();
@@ -160,6 +175,17 @@ private:
     void setTabAutoReload(LogViewWidget* view, bool enabled);
     // Sync button checked-state to whatever m_activeLogView says (or false if none).
     void syncReloadButton();
+
+    // Configurable keyboard shortcuts.
+    // Maps a ShortcutManager command id to the QAction it drives, so that
+    // applyShortcuts() can (re)assign sequences whenever the user edits them.
+    QHash<QString, QAction*> m_shortcutActions;
+    void registerShortcutActions();   // populate m_shortcutActions
+    void applyShortcuts();            // assign sequences from ShortcutManager
+
+    // Builds the file dialog filter string ("Log files (*.log *.txt);;All files (*)")
+    // from the shared scan-extension list so Open and Save use the same set.
+    QString logFileDialogFilter() const;
 
     // Setup methods
     void setupStatusBar();
@@ -182,6 +208,13 @@ private:
     void applyFieldVisibilityToAllViews();
     // Apply current pattern to every open LogViewWidget's parser
     void applyPatternToAllViews();
+    // Final display/filter refresh after fields have been (re)extracted.
+    void finishPatternApplication();
+    // Called when the background field re-extraction finishes.
+    void onFieldExtractionFinished();
+    // Abort any in-flight background field re-extraction (and wait for its
+    // worker threads to stop) before mutating entries again.
+    void cancelFieldExtraction();
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.

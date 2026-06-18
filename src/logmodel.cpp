@@ -1,5 +1,7 @@
 #include "logmodel.h"
 
+#include <algorithm>
+
 LogModel::LogModel(QObject* parent)
     : QAbstractListModel(parent)
     , m_nextColorIndex(0) // Initialize nextColorIndex
@@ -84,6 +86,29 @@ void LogModel::appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
     m_newEntryIds.clear();
     for (const auto& e : entries)
         if (e) m_newEntryIds.insert(e->logicalEntryId);
+}
+
+void LogModel::removeEntriesForFile(const QString& filePath)
+{
+    if (m_allEntries.isEmpty())
+        return;
+
+    beginResetModel();
+    m_allEntries.erase(
+        std::remove_if(m_allEntries.begin(), m_allEntries.end(),
+            [&filePath](const std::shared_ptr<LogEntry>& e) {
+                return e && e->sourceFile && e->sourceFile->filePath == filePath;
+            }),
+        m_allEntries.end());
+
+    m_cachedUniqueSourceFileCount = -1;
+    clearRowDependentCaches();
+    rebuildFilteredEntries();
+    endResetModel();
+    emit modelFiltered(m_filteredEntries.size());
+
+    // The removed rows may have carried the "new entry" highlight.
+    m_newEntryIds.clear();
 }
 
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)

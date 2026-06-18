@@ -3,7 +3,9 @@
 #include "logviewwidget.h"
 #include "conversionpatterndialog.h"
 #include "directoryscanner.h"
+#include "directoryscannerpanel.h"
 #include "appsettings.h"
+#include "shortcutmanager.h"
 #include "settingsdialog.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
@@ -25,6 +27,7 @@
 #include <QHeaderView>
 #include <QDirIterator>
 #include <QtConcurrent>
+#include <QFutureWatcher>
 #include <QInputDialog>
 #include <QMenu>
 #include <QApplication>
@@ -38,6 +41,38 @@
 #include <QMouseEvent>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTextStream>
+#include <QFile>
+#include <QIcon>
+#include <QPixmap>
+#include <QPainter>
+#include <QKeySequence>
+#include <QSvgRenderer>
+
+// Renders an SVG resource and recolours it to `color`, so monochrome toolbar
+// glyphs stay visible on both light and dark palettes. Uses QSvgRenderer (Qt
+// Svg is linked) rather than QPixmap so it does not depend on the SVG image
+// format plugin being deployed.
+static QIcon tintedIcon(const QString& resourcePath, const QColor& color)
+{
+    QSvgRenderer renderer(resourcePath);
+    if (!renderer.isValid())
+        return QIcon(resourcePath);
+
+    QSize size = renderer.defaultSize();
+    if (!size.isValid() || size.isEmpty())
+        size = QSize(64, 64);
+    size.scale(64, 64, Qt::KeepAspectRatio);
+
+    QPixmap result(size);
+    result.fill(Qt::transparent);
+    QPainter p(&result);
+    renderer.render(&p);
+    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    p.fillRect(result.rect(), color);
+    p.end();
+    return QIcon(result);
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr)
@@ -47,6 +82,7 @@ MainWindow::MainWindow(QWidget *parent)
     // Load persistent application preferences before anything else so that
     // setup methods (e.g. setupDirectoryScanner) can read correct values.
     AppSettings::instance().load();
+    ShortcutManager::instance().load();
 
     setupStatusBar();
     setupTimeFilterDockContents();
@@ -92,7 +128,8 @@ MainWindow::MainWindow(QWidget *parent)
     // actionReloadFile keeps the F5 shortcut and menu entry; the toolbar shows a
     // custom QToolButton so we can distinguish left-click (manual) from right-click
     // (toggle per-tab auto-reload). The action text is kept for the menu only.
-    ui->actionReloadFile->setIcon(QIcon(QStringLiteral(":/icons/reload.svg")));
+    const QColor toolGlyphColor = palette().buttonText().color();
+    ui->actionReloadFile->setIcon(tintedIcon(QStringLiteral(":/icons/reload.svg"), toolGlyphColor));
     // Replace the plain action widget in the toolbar with a proper QToolButton
     if (QToolButton* btn = qobject_cast<QToolButton*>(ui->toolBar->widgetForAction(ui->actionReloadFile))) {
         m_reloadButton = btn;
@@ -106,11 +143,19 @@ MainWindow::MainWindow(QWidget *parent)
     // Connect the manual reload action (F5 / menu) – does NOT toggle auto-reload
     connect(ui->actionReloadFile, &QAction::triggered, this, &MainWindow::onReloadFileTriggered);
 
+    // --- Word Wrap toolbar button (icon + checkable), styled like Reload ---
+    ui->actionWordWrap->setIcon(tintedIcon(QStringLiteral(":/icons/wordwrap.svg"), toolGlyphColor));
+    if (QToolButton* wwBtn = qobject_cast<QToolButton*>(ui->toolBar->widgetForAction(ui->actionWordWrap))) {
+        wwBtn->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        wwBtn->setFixedSize(26, 26);
+        wwBtn->setToolTip(tr("Toggle word wrap"));
+    }
+
     // "Tools" menu with Settings action.
     QMenu* menuTools = menuBar()->addMenu(tr("&Tools"));
     QAction* settingsAction = menuTools->addAction(tr("Settings..."));
-    settingsAction->setShortcut(QKeySequence::Preferences);
     connect(settingsAction, &QAction::triggered, this, &MainWindow::onSettingsTriggered);
+    m_shortcutActions.insert(QStringLiteral("settings"), settingsAction);
 
     // Search input is created in code because the .ui currently defines only actions.
     m_searchLineEdit = new QLineEdit(ui->searchToolBar);
@@ -127,20 +172,28 @@ MainWindow::MainWindow(QWidget *parent)
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {
-        auto setupDockToggle = [](QMenu* menu, QAction* staticAction, QDockWidget* dock, const QString& text) {
+        auto setupDockToggle = [this](QMenu* menu, QAction* staticAction, QDockWidget* dock,
+                                      const QString& text, const QString& shortcutId) -> QAction* {
             QAction* a = dock->toggleViewAction();
             a->setText(text);
             menu->insertAction(staticAction, a);
             menu->removeAction(staticAction);
+            if (!shortcutId.isEmpty())
+                m_shortcutActions.insert(shortcutId, a);
+            return a;
         };
         setupDockToggle(ui->menuView, ui->actionToggle_Text_Filters_Panel,
-                        ui->textFilterDockWidget, tr("Text Filters Panel"));
+                        ui->textFilterDockWidget, tr("Text Filters Panel"),
+                        QStringLiteral("panelTextFilters"));
         setupDockToggle(ui->menuView, ui->actionToggle_Directory_Scanner_Panel,
-                        ui->directoryScannerDockWidget, tr("Directory Scanner Panel"));
+                        ui->directoryScannerDockWidget, tr("Directory Scanner Panel"),
+                        QStringLiteral("panelDirScanner"));
         setupDockToggle(ui->menuView, ui->actionToggle_Time_Filter_Panel,
-                        ui->timeFilterDockWidget, tr("Time Filter Panel"));
+                        ui->timeFilterDockWidget, tr("Time Filter Panel"),
+                        QStringLiteral("panelTimeFilter"));
         setupDockToggle(ui->menuView, ui->actionToggle_Field_Visibility_Panel,
-                        ui->fieldVisibilityDockWidget, tr("Log Fields Panel"));
+                        ui->fieldVisibilityDockWidget, tr("Log Fields Panel"),
+                        QStringLiteral("panelFields"));
     }
 
     if (ui->tabWidget)
@@ -176,15 +229,67 @@ MainWindow::MainWindow(QWidget *parent)
 
     loadSettings();
     applyAutoReloadSettings();
+
+    // Configurable keyboard shortcuts: map the remaining actions and assign the
+    // current sequences. Re-apply automatically when the user edits them.
+    registerShortcutActions();
+    applyShortcuts();
+    connect(&ShortcutManager::instance(), &ShortcutManager::shortcutsChanged,
+            this, &MainWindow::applyShortcuts);
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::registerShortcutActions()
+{
+    // Dock-toggle actions and the Settings action are inserted into
+    // m_shortcutActions where they are created; register the static ones here.
+    m_shortcutActions.insert(QStringLiteral("open"),       ui->actionOpen);
+    m_shortcutActions.insert(QStringLiteral("saveAs"),     ui->actionSaveAs);
+    m_shortcutActions.insert(QStringLiteral("reload"),     ui->actionReloadFile);
+    m_shortcutActions.insert(QStringLiteral("searchNext"), ui->actionSearchNext);
+    m_shortcutActions.insert(QStringLiteral("searchPrev"), ui->actionSearchPrevious);
+    m_shortcutActions.insert(QStringLiteral("wordWrap"),   ui->actionWordWrap);
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::applyShortcuts()
+{
+    const ShortcutManager& mgr = ShortcutManager::instance();
+    for (const auto& cmd : mgr.commands()) {
+        if (QAction* a = m_shortcutActions.value(cmd.id, nullptr))
+            a->setShortcut(mgr.sequence(cmd.id));
+    }
+}
+
+// ---------------------------------------------------------------------------
+QString MainWindow::logFileDialogFilter() const
+{
+    QStringList patterns;
+    for (const QString& ext : AppSettings::instance().scanExtensions()) {
+        const QString e = ext.trimmed();
+        if (!e.isEmpty())
+            patterns << (QStringLiteral("*.") + e);
+    }
+    if (patterns.isEmpty())
+        patterns << QStringLiteral("*.log") << QStringLiteral("*.txt");
+
+    return tr("Log files (%1);;All files (*)").arg(patterns.join(QLatin1Char(' ')));
 }
 
 MainWindow::~MainWindow()
 {
+    // Make sure no worker thread is still writing into entries we are about
+    // to release (closeEvent usually handles this, but not every teardown
+    // path goes through it).
+    cancelFieldExtraction();
     delete ui;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // Stop any background field re-extraction before our members (which its
+    // workers reference) are torn down.
+    cancelFieldExtraction();
     saveSettings();
     QMainWindow::closeEvent(event);
 }
@@ -246,6 +351,7 @@ void MainWindow::saveSettings()
     // all app-level preferences (scan extensions, word wrap, etc.) in one call.
     AppSettings::instance().setWordWrap(ui->actionWordWrap->isChecked());
     AppSettings::instance().save();
+    ShortcutManager::instance().save();
 }
 
 void MainWindow::loadSettings()
@@ -602,7 +708,7 @@ void MainWindow::onManagePatterns()
         }
     }
 
-    ConversionPatternDialog dlg(m_patternList, this, sampleLines);
+    ConversionPatternDialog dlg(m_patternList, this, sampleLines, m_conversionPattern);
     if (dlg.exec() != QDialog::Accepted) return;
 
     m_patternList = dlg.resultPatterns();
@@ -637,15 +743,37 @@ void MainWindow::onManagePatterns()
 }
 
 
+void MainWindow::cancelFieldExtraction()
+{
+    if (!m_fieldWatcher)
+        return;
+    // Detach our slots first so the cancelled run does not finalize, then
+    // wait for the worker threads to actually stop touching entry->fields.
+    m_fieldWatcher->disconnect(this);
+    m_fieldWatcher->cancel();
+    m_fieldWatcher->waitForFinished();
+    m_fieldWatcher->deleteLater();
+    m_fieldWatcher = nullptr;
+    m_pendingFieldEntries.clear();
+    m_pendingFieldPattern.reset();
+}
+
 void MainWindow::applyPatternToAllViews()
 {
-    const LogPattern pattern(m_conversionPattern);
-    rebuildFieldVisibilityControls(pattern.fieldNames());
+    // A schema switch supersedes any re-extraction still in flight.
+    cancelFieldExtraction();
+
+    auto pattern = std::make_shared<LogPattern>(m_conversionPattern);
+    rebuildFieldVisibilityControls(pattern->fieldNames());
 
     const bool filterEnabled = m_fieldFilterEnabledCheckBox
         && m_fieldFilterEnabledCheckBox->isChecked()
         && !m_fieldCheckBoxes.isEmpty();
+    const bool doExtract = filterEnabled && pattern->isValid();
 
+    // Point every view's parser at the new schema up-front so newly loaded
+    // lines are parsed correctly even while the back-fill runs.
+    QVector<std::shared_ptr<LogEntry>> entries;
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
         if (!lv)
@@ -655,18 +783,88 @@ void MainWindow::applyPatternToAllViews()
         lv->setExtractionEnabled(filterEnabled);
 
         if (lv->model()) {
-            const auto& entries = lv->model()->allEntries();
-            for (const auto& entry : entries) {
+            for (const auto& entry : lv->model()->allEntries()) {
                 if (!entry)
                     continue;
-                entry->fields = (filterEnabled && pattern.isValid())
-                    ? pattern.extractFields(entry->message)
-                    : LogEntryFields();
+                if (doExtract)
+                    entries.append(entry);
+                else
+                    entry->fields = LogEntryFields();
             }
-            lv->model()->refreshDisplay();
         }
     }
 
+    // Small batches (or "no extraction") complete instantly on the GUI
+    // thread — no worker, no progress bar, no display flicker.
+    constexpr int kAsyncThreshold = 4000;
+    if (!doExtract || entries.size() < kAsyncThreshold) {
+        for (const auto& entry : entries)
+            entry->fields = pattern->extractFields(entry->message);
+        finishPatternApplication();
+        return;
+    }
+
+    // Large batch: re-extract in the background and show the same status-bar
+    // progress as file loading. While it runs we turn OFF field display so
+    // formatDisplayMessage never reads entry->fields concurrently with the
+    // workers that overwrite them (it falls back to the raw message text).
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->setFieldDisplaySelection(false, QVector<int>());
+    }
+
+    // Warm up the regex on this thread (QRegularExpression compiles lazily).
+    pattern->extractFields(QString());
+
+    m_pendingFieldPattern = pattern;
+    m_pendingFieldEntries = std::move(entries);
+
+    m_fieldWatcher = new QFutureWatcher<void>(this);
+    connect(m_fieldWatcher, &QFutureWatcher<void>::progressRangeChanged,
+            m_progressBar, &QProgressBar::setRange);
+    connect(m_fieldWatcher, &QFutureWatcher<void>::progressValueChanged,
+            m_progressBar, &QProgressBar::setValue);
+    connect(m_fieldWatcher, &QFutureWatcher<void>::finished,
+            this, &MainWindow::onFieldExtractionFinished);
+
+    m_statusLabel->setText(tr("Applying field schema…"));
+    m_progressBar->setRange(0, m_pendingFieldEntries.size());
+    m_progressBar->setValue(0);
+    m_progressBar->show();
+
+    auto worker = [pattern](const std::shared_ptr<LogEntry>& entry) {
+        if (entry)
+            entry->fields = pattern->extractFields(entry->message);
+    };
+    m_fieldWatcher->setFuture(QtConcurrent::map(m_pendingFieldEntries, worker));
+}
+
+void MainWindow::onFieldExtractionFinished()
+{
+    if (m_fieldWatcher) {
+        m_fieldWatcher->deleteLater();
+        m_fieldWatcher = nullptr;
+    }
+    m_pendingFieldEntries.clear();
+    m_pendingFieldPattern.reset();
+
+    m_progressBar->hide();
+    updateStatusBarDefaultText();
+
+    finishPatternApplication();
+}
+
+void MainWindow::finishPatternApplication()
+{
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->refreshDisplay();
+    }
+
+    // Re-enables field display with the active selection (it was turned off
+    // during a background re-extraction).
     applyFieldVisibilityToAllViews();
 
     // Схема изменилась — обновляем список колонок в конструкторе фильтров и
@@ -809,15 +1007,38 @@ void MainWindow::setupRowMarkerDock()
     if (ui->menuView) {
         QAction* toggle = m_markerDockWidget->toggleViewAction();
         toggle->setText(tr("Row Highlighters Panel"));
-        ui->menuView->addAction(toggle);
+        // Group it with the other panel toggles (above the first separator),
+        // instead of appending it to the very bottom of the View menu.
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelRowHighlighters"), toggle);
     }
 }
 
 void MainWindow::setupDirectoryScanner()
 {
-    m_dirScanner = new DirectoryScanner(ui->directoryScanResultsTree, this);
+    // The dock content is a self-contained panel (header card + results tree).
+    m_dirScannerPanel = new DirectoryScannerPanel(ui->directoryScannerDockWidget);
+    ui->directoryScannerDockWidget->setWidget(m_dirScannerPanel);
+
+    m_dirScanner = m_dirScannerPanel->scanner();
     m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
     m_dirScanner->setConversionPattern(m_conversionPattern);
+
+    connect(m_dirScannerPanel, &DirectoryScannerPanel::scanRequested,
+            this, &MainWindow::onScanDirectoryClicked);
+    connect(m_dirScannerPanel, &DirectoryScannerPanel::configureExtensionsRequested,
+            this, &MainWindow::onConfigureScanExtensionsClicked);
+
     connect(m_dirScanner, &DirectoryScanner::fileActivated,
             this, [this](const QString& path) {
         onOpenSelectedDirectoryFiles({path});
@@ -905,7 +1126,7 @@ void MainWindow::on_actionOpen_triggered()
         this,
         tr("Open log files"),
         m_lastOpenDir,
-        tr("Log files (*.log *.txt);;All files (*)"));
+        logFileDialogFilter());
 
     if (files.isEmpty())
         return;
@@ -991,6 +1212,67 @@ void MainWindow::on_actionOpen_triggered()
         ui->tabWidget->setTabText(currentTabIndex, tabText);
         ui->tabWidget->setTabToolTip(currentTabIndex, tabToolTip);
     }
+}
+
+void MainWindow::on_actionSaveAs_triggered()
+{
+    if (!m_activeLogView || !m_activeLogView->model() ||
+        m_activeLogView->model()->rowCount() == 0)
+    {
+        QMessageBox::information(this, tr("Save View As"),
+            tr("There is nothing to save — the current view is empty."));
+        return;
+    }
+
+    const QString fileName = QFileDialog::getSaveFileName(
+        this,
+        tr("Save view as"),
+        m_lastOpenDir,
+        logFileDialogFilter());
+
+    if (fileName.isEmpty())
+        return;
+
+    // Never overwrite a file that is currently open in any tab: the request is
+    // explicitly to save into a NEW file, leaving the originals untouched.
+    const QString targetPath = QFileInfo(fileName).absoluteFilePath();
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (!lvw)
+            continue;
+        for (const auto& lf : lvw->loadedFiles()) {
+            if (lf && QFileInfo(lf->filePath).absoluteFilePath() == targetPath) {
+                QMessageBox::warning(this, tr("Save View As"),
+                    tr("This file is currently open. Please choose a different, new file."));
+                return;
+            }
+        }
+    }
+
+    QFile out(fileName);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("Save View As"),
+            tr("Could not open '%1' for writing.").arg(fileName));
+        return;
+    }
+
+    // Save exactly what the view currently shows: iterate the model's visible
+    // rows (already filtered + merged across all documents in this tab) and use
+    // the display text, so the active Log Fields selection is honoured too.
+    QTextStream stream(&out);
+    stream.setEncoding(QStringConverter::Utf8);
+    LogModel* model = m_activeLogView->model();
+    const int rows = model->rowCount();
+    for (int r = 0; r < rows; ++r) {
+        const QString line = model->data(model->index(r), Qt::DisplayRole).toString();
+        stream << line << '\n';
+    }
+    out.close();
+
+    m_lastOpenDir = QFileInfo(fileName).absolutePath();
+    m_statusLabel->setText(tr("Saved %1 lines to %2")
+                               .arg(rows)
+                               .arg(QFileInfo(fileName).fileName()));
 }
 
 void MainWindow::handleFileParsingStarted(const LogFilePtr &logFile)
@@ -1414,10 +1696,9 @@ void MainWindow::onScanDirectoryClicked()
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (!dirPath.isEmpty()) {
         m_lastScanDir = dirPath;
-        ui->selectedDirectoryPathLabel->setText(tr("Directory: %1").arg(dirPath));
         m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
         m_dirScanner->setConversionPattern(m_conversionPattern);
-        m_dirScanner->scan(dirPath);
+        m_dirScannerPanel->scanDirectory(dirPath);
     }
 }
 

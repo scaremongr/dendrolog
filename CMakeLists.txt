@@ -31,6 +31,8 @@ set(PROJECT_SOURCES
     src/logmodel.cpp
     src/logparser.h
     src/logparser.cpp
+    src/filechangedetector.h
+    src/filechangedetector.cpp
     src/logpattern.h
     src/logpattern.cpp
     src/patternheuristics.h
@@ -49,15 +51,22 @@ set(PROJECT_SOURCES
     src/appsettings.h
     src/appsettings.cpp
 
+    src/shortcutmanager.h
+    src/shortcutmanager.cpp
+
     src/settingsdialog.h
     src/settingsdialog.cpp
     src/settingsdialog.ui
 
     src/directoryscanner.h
     src/directoryscanner.cpp
+    src/directoryscannerpanel.h
+    src/directoryscannerpanel.cpp
 
     src/LogListView.h
     src/LogListView.cpp
+    src/tabexpander.h
+    src/linewrapper.h
 
     src/texttoken.h
     src/texttoken.cpp

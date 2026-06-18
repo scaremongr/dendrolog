@@ -34,6 +34,10 @@ public:
     // Preserves the current selection and scroll position in the view.
     // New entries must be >= all existing entries (appended at end of file).
     void appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
+    // Drop every entry sourced from `filePath` and reset the view. Used when a
+    // watched file is replaced/truncated and must be re-parsed from scratch,
+    // without disturbing entries that belong to other files in the same tab.
+    void removeEntriesForFile(const QString& filePath);
     const QVector<std::shared_ptr<LogEntry>>& allEntries() const { return m_allEntries; }
     const QVector<std::shared_ptr<LogEntry>>& filteredEntries() const { return m_filteredEntries; }
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;

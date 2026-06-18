@@ -7,6 +7,8 @@
 #include <QLocale>
 #include <QMenu>
 #include <QThread>
+#include <QTextStream>
+#include <QRegularExpression>
 #include <QtConcurrent>
 #include <QStyledItemDelegate>
 #include <QPainter>
@@ -146,11 +148,22 @@ void DirectoryScanner::setConversionPattern(const QString& pattern)
 
 void DirectoryScanner::scan(const QString& rootPath)
 {
+    cancelContentSearch();
+
     m_tree->clear();
     m_itemMap.clear();
     m_pending.clear();
     // Already-running workers will finish and call applyStats(), which silently
     // discards results because m_itemMap no longer contains their paths.
+
+    // Reset accumulated date bounds and the content-filter result cache; the
+    // date-filter window itself is left to the panel to re-seed from the new
+    // bounds once results start arriving.
+    m_globalMin = QDateTime();
+    m_globalMax = QDateTime();
+    m_contentFilterActive = false;
+    m_contentMatches.clear();
+    emit dateBoundsChanged(m_globalMin, m_globalMax);
 
     if (!QDir(rootPath).exists()) return;
 
@@ -335,6 +348,15 @@ void DirectoryScanner::applyStats(const FileStats& stats, const QString& filePat
         applyTime(ScanCol::From, stats.firstEntryTimestamp);
         applyTime(ScanCol::To,   stats.lastEntryTimestamp);
 
+        // Widen the global date bounds used to seed the date filter window.
+        if (stats.firstEntryTimestamp.isValid()
+            && (!m_globalMin.isValid() || stats.firstEntryTimestamp < m_globalMin))
+            m_globalMin = stats.firstEntryTimestamp;
+        if (stats.lastEntryTimestamp.isValid()
+            && (!m_globalMax.isValid() || stats.lastEntryTimestamp > m_globalMax))
+            m_globalMax = stats.lastEntryTimestamp;
+        scheduleBoundsUpdate();
+
         // Composite key: true lexicographic sort — fatals > errors > warns.
         // Multipliers are large enough that even 999 999 errors can't reach
         // the weight of a single fatal (and same for warns vs errors).
@@ -376,13 +398,231 @@ void DirectoryScanner::scheduleResize()
     m_resizeScheduled = true;
     QTimer::singleShot(500, this, [this]() {
         m_resizeScheduled = false;
-        
+
         QHeaderView* hdr = m_tree->header();
+        Q_UNUSED(hdr);
         // Resize all columns except Name to contents
         for (int c = 1; c < ScanCol::Count; ++c) {
             m_tree->resizeColumnToContents(c);
         }
+
+        // Keep the date filter consistent as fresh stats stream in. The content
+        // filter is left untouched here (it only re-evaluates on Apply).
+        if (m_dateFilterEnabled)
+            refreshAllVisibility();
     });
+}
+
+// Debounced emission of the global date bounds so the panel can seed/extend the
+// date-filter window without a signal storm during a busy scan.
+void DirectoryScanner::scheduleBoundsUpdate()
+{
+    if (m_boundsScheduled)
+        return;
+    m_boundsScheduled = true;
+    QTimer::singleShot(200, this, [this]() {
+        m_boundsScheduled = false;
+        emit dateBoundsChanged(m_globalMin, m_globalMax);
+    });
+}
+
+// ─── Filtering ────────────────────────────────────────────────────────────────
+
+// Functor used by QtConcurrent::mapped to test one file's contents against the
+// content filter. Self-contained so it can run on any pool thread.
+namespace {
+struct ContentMatcher {
+    using result_type = bool;
+
+    QString             needle;
+    bool                isRegex = false;
+    Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+    QRegularExpression  re;   // precompiled when isRegex
+
+    bool operator()(const QString& path) const {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+            return false;
+        QTextStream in(&file);
+        while (!in.atEnd()) {
+            const QString line = in.readLine();
+            if (isRegex) {
+                if (re.isValid() && re.match(line).hasMatch())
+                    return true;
+            } else if (line.contains(needle, cs)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+} // namespace
+
+void DirectoryScanner::setDateFilter(bool enabled, const QDateTime& from, const QDateTime& to)
+{
+    m_dateFilterEnabled = enabled;
+    m_dateFrom = from;
+    m_dateTo   = to;
+}
+
+void DirectoryScanner::setContentFilter(const QString& text, bool isRegex, bool caseSensitive)
+{
+    m_contentText          = text;
+    m_contentRegex         = isRegex;
+    m_contentCaseSensitive = caseSensitive;
+}
+
+void DirectoryScanner::applyFilters()
+{
+    cancelContentSearch();
+
+    if (m_contentText.isEmpty()) {
+        // No content filter — just apply the (cheap) date filter immediately.
+        m_contentFilterActive = false;
+        m_contentMatches.clear();
+        refreshAllVisibility();
+        emit contentFilterFinished(0, 0);
+        return;
+    }
+    startContentSearch();
+}
+
+void DirectoryScanner::clearFilters()
+{
+    cancelContentSearch();
+    m_dateFilterEnabled   = false;
+    m_contentText.clear();
+    m_contentFilterActive = false;
+    m_contentMatches.clear();
+    refreshAllVisibility();
+}
+
+void DirectoryScanner::cancelContentSearch()
+{
+    if (!m_contentWatcher)
+        return;
+    m_contentWatcher->disconnect(this);
+    m_contentWatcher->cancel();
+    // Detach: let the cancelled future wind down and free itself without
+    // blocking the UI thread.
+    QFutureWatcher<bool>* w = m_contentWatcher;
+    m_contentWatcher = nullptr;
+    connect(w, &QFutureWatcher<bool>::finished, w, &QObject::deleteLater);
+}
+
+void DirectoryScanner::startContentSearch()
+{
+    // Snapshot the current file set as the search sequence (mapped() keeps a
+    // reference to it, so it must outlive the future → store as a member).
+    m_contentPaths = m_itemMap.keys();
+    if (m_contentPaths.isEmpty()) {
+        m_contentFilterActive = true;
+        m_contentMatches.clear();
+        refreshAllVisibility();
+        emit contentFilterFinished(0, 0);
+        return;
+    }
+
+    ContentMatcher matcher;
+    matcher.needle  = m_contentText;
+    matcher.isRegex = m_contentRegex;
+    matcher.cs = m_contentCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    if (m_contentRegex) {
+        QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
+        if (!m_contentCaseSensitive)
+            opts |= QRegularExpression::CaseInsensitiveOption;
+        matcher.re = QRegularExpression(m_contentText, opts);
+    }
+
+    m_contentWatcher = new QFutureWatcher<bool>(this);
+    connect(m_contentWatcher, &QFutureWatcher<bool>::progressValueChanged,
+            this, [this](int value) {
+        emit contentFilterProgress(value, m_contentPaths.size());
+    });
+    connect(m_contentWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
+        QFutureWatcher<bool>* w = m_contentWatcher;
+        m_contentWatcher = nullptr;
+
+        m_contentMatches.clear();
+        const int n = m_contentPaths.size();
+        for (int i = 0; i < n && i < w->future().resultCount(); ++i) {
+            if (w->resultAt(i))
+                m_contentMatches.insert(m_contentPaths.at(i));
+        }
+        m_contentFilterActive = true;
+        w->deleteLater();
+
+        refreshAllVisibility();
+        emit contentFilterFinished(m_contentMatches.size(), n);
+    });
+
+    emit contentFilterProgress(0, m_contentPaths.size());
+    m_contentWatcher->setFuture(QtConcurrent::mapped(m_contentPaths, matcher));
+}
+
+bool DirectoryScanner::passesDateFilter(QTreeWidgetItem* item) const
+{
+    if (!m_dateFilterEnabled)
+        return true;
+
+    const QVariant fromKey = item->data(ScanCol::From, ScanRole::SortKey);
+    const QVariant toKey   = item->data(ScanCol::To,   ScanRole::SortKey);
+    // A file with no detected timestamps can't be judged — keep it visible.
+    if (!fromKey.isValid() && !toKey.isValid())
+        return true;
+
+    const QDateTime fileFrom = fromKey.isValid()
+        ? QDateTime::fromMSecsSinceEpoch(fromKey.toLongLong()) : QDateTime();
+    const QDateTime fileTo = toKey.isValid()
+        ? QDateTime::fromMSecsSinceEpoch(toKey.toLongLong())
+        : fileFrom;
+    const QDateTime fileStart = fileFrom.isValid() ? fileFrom : fileTo;
+
+    // Overlap test against [m_dateFrom, m_dateTo] (either bound may be invalid).
+    if (m_dateFrom.isValid() && fileTo.isValid() && fileTo < m_dateFrom)
+        return false;
+    if (m_dateTo.isValid() && fileStart.isValid() && fileStart > m_dateTo)
+        return false;
+    return true;
+}
+
+bool DirectoryScanner::refreshVisibility(QTreeWidgetItem* item)
+{
+    const bool isFile = item->data(ScanCol::Name, ScanRole::IsFile).toBool();
+
+    if (isFile) {
+        bool visible = passesDateFilter(item);
+        if (visible && m_contentFilterActive) {
+            const QString path = item->data(ScanCol::Name, ScanRole::FilePath).toString();
+            visible = m_contentMatches.contains(path);
+        }
+        item->setHidden(!visible);
+        return visible;
+    }
+
+    // Directory: visible if it has any visible descendant. Unpopulated dirs
+    // (lazy children) are kept visible so the user can still expand them.
+    bool anyChildVisible = false;
+    const int count = item->childCount();
+    for (int i = 0; i < count; ++i)
+        if (refreshVisibility(item->child(i)))
+            anyChildVisible = true;
+
+    const bool populated = item->data(ScanCol::Name, ScanRole::Populated).toBool();
+    const bool filtering = m_dateFilterEnabled || m_contentFilterActive;
+    const bool visible = anyChildVisible || !populated || !filtering;
+    item->setHidden(!visible);
+    return visible;
+}
+
+void DirectoryScanner::refreshAllVisibility()
+{
+    m_tree->setUpdatesEnabled(false);
+    QTreeWidgetItem* root = m_tree->invisibleRootItem();
+    for (int i = 0; i < root->childCount(); ++i)
+        refreshVisibility(root->child(i));
+    m_tree->setUpdatesEnabled(true);
+    m_tree->viewport()->update();
 }
 
 // ─── Slots ───────────────────────────────────────────────────────────────────
