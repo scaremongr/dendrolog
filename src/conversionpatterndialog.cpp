@@ -4,10 +4,15 @@
 #include "appsettings.h"
 #include "patternblockcard.h"
 #include "patternheuristics.h"
+#include "schemastore.h"
 #include "separatornode.h"
 
 #include <QCloseEvent>
+#include <QDesktopServices>
+#include <QDir>
 #include <QEventLoop>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -16,6 +21,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QUrl>
 #include <QToolButton>
 #include <QSet>
 #include <QSettings>
@@ -137,6 +143,12 @@ field column — useful for session IDs and other noise you never analyse.</p>
       saved as presets too (stored in <code>LogViewer.ini</code>).</li>
   <li><b>Grok…</b> imports Logstash patterns such as
       <code>%{TIMESTAMP_ISO8601:time} %{LOGLEVEL:level} %{GREEDYDATA:msg}</code>.</li>
+  <li><b>Import / Export.</b> Every schema is stored as a separate
+      <code>.json</code> file in the <code>patterns</code> folder next to the
+      executable. <b>Export</b> writes the selected schema to a file you can
+      share; <b>Import</b> copies a file into that folder. Files dropped into
+      the folder by hand are picked up automatically. Use the <code>📁</code>
+      button to open the folder.</li>
 </ul>
 
 </body>
@@ -328,6 +340,9 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     // Signals
     connect(ui->addSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onAddSchema);
     connect(ui->removeSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onRemoveSchema);
+    connect(ui->importSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onImportSchema);
+    connect(ui->exportSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onExportSchema);
+    connect(ui->openFolderBtn, &QToolButton::clicked, this, &ConversionPatternDialog::onOpenFolder);
     connect(ui->moveSchemaUpBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onMoveSchemaUp);
     connect(ui->moveSchemaDownBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onMoveSchemaDown);
     connect(ui->schemaTable, &QTableWidget::currentCellChanged,
@@ -1039,6 +1054,7 @@ void ConversionPatternDialog::updateButtonStates()
     const bool hasSchema = schemaRow >= 0;
 
     ui->removeSchemaBtn->setEnabled(hasSchema);
+    ui->exportSchemaBtn->setEnabled(hasSchema);
     ui->moveSchemaUpBtn->setEnabled(schemaRow > 0);
     ui->moveSchemaDownBtn->setEnabled(hasSchema && schemaRow < ui->schemaTable->rowCount() - 1);
     ui->useBtn->setEnabled(hasSchema);
@@ -1084,6 +1100,69 @@ void ConversionPatternDialog::onRemoveSchema()
     else
         loadSchemaRow(-1);
     updateButtonStates();
+}
+
+void ConversionPatternDialog::onImportSchema()
+{
+    resolveDirtyState(ui->schemaTable->currentRow());
+
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import schema"), QString(),
+        tr("Schema files (*.json);;All files (*)"));
+    if (path.isEmpty())
+        return;
+
+    QString error;
+    const SchemaStore::SchemaEntry entry = SchemaStore::importFile(path, &error);
+    if (entry.first.isEmpty() && entry.second.isEmpty()) {
+        QMessageBox::warning(this, tr("Import schema"),
+            error.isEmpty() ? tr("The file could not be imported.") : error);
+        return;
+    }
+
+    // The file is now in the patterns folder; show it as a new row right away.
+    const int row = ui->schemaTable->rowCount();
+    ui->schemaTable->insertRow(row);
+    setSchemaRow(row, entry.first, entry.second);
+    ui->schemaTable->setCurrentCell(row, 0);
+    updateButtonStates();
+}
+
+void ConversionPatternDialog::onExportSchema()
+{
+    const int row = ui->schemaTable->currentRow();
+    if (row < 0)
+        return;
+
+    // Export exactly what the editor currently shows (including unapplied edits).
+    const QString name = ui->nameEdit->text().trimmed().isEmpty()
+        ? tr("schema")
+        : ui->nameEdit->text().trimmed();
+    const QString serialized = LogPattern::serializeDefinition(currentDefinitionFromEditor());
+
+    const QString suggested = QDir(QDir::homePath()).filePath(SchemaStore::suggestedFileName(name));
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export schema"), suggested,
+        tr("Schema files (*.json);;All files (*)"));
+    if (path.isEmpty())
+        return;
+
+    QString error;
+    if (!SchemaStore::exportToFile(name, serialized, path, &error)) {
+        QMessageBox::warning(this, tr("Export schema"),
+            error.isEmpty() ? tr("The schema could not be exported.") : error);
+    }
+}
+
+void ConversionPatternDialog::onOpenFolder()
+{
+    const QString dir = SchemaStore::patternsDir();
+    if (dir.isEmpty()) {
+        QMessageBox::warning(this, tr("Patterns folder"),
+            tr("Could not create the patterns folder."));
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
 void ConversionPatternDialog::onMoveSchemaUp()

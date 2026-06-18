@@ -1,4 +1,5 @@
 #include "texttoken.h"
+#include "patternheuristics.h"
 
 #include <QRegularExpression>
 #include <QStringView>
@@ -191,18 +192,51 @@ std::pair<int,int> detectDecimalNumber(const QString& text, int pos)
     return {start, end};
 }
 
-// ── Fallback: обычное слово или пробел → следующий токен ────────────────────
-std::pair<int,int> detectWord(const QString& text, int pos)
+// ── Таймстамп в различных форматах (опц. дата + обязательное время) ─────────
+std::pair<int,int> detectTimestamp(const QString& text, int pos)
 {
-    if (pos >= text.length()) return {pos, pos};
-    const QChar ch = text[pos];
-    if (ch.isSpace()) {
-        int start = pos;
-        while (start < text.length() && text[start].isSpace()) ++start;
-        return expandFromPos(text, start, isWordChar);
+    if (pos >= text.length()) return {-1, -1};
+
+    // Переиспользуем канонический regex таймстампа из эвристик схем, чтобы
+    // распознавание здесь и в авто-детекте схемы не расходилось.
+    static const QRegularExpression re(PatternHeuristics::timestampRegex());
+
+    QRegularExpressionMatchIterator it = re.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        const int s = m.capturedStart();
+        const int e = m.capturedEnd();
+        if (pos >= s && pos < e) return {s, e};
+        if (s > pos) break;  // совпадения идут по возрастанию — дальше уже мимо
     }
-    if (isWordChar(ch)) return expandFromPos(text, pos, isWordChar);
-    return {pos, pos + 1};  // одиночный символ пунктуации
+    return {-1, -1};
+}
+
+// ── Fallback: слово / пробельный прогон / группа пунктуации ──────────────────
+//
+// В отличие от текстовых редакторов прошлой версии, клик по пробелам НЕ
+// перескакивает на следующее слово — выделяется сам пробельный прогон.
+// Идущие подряд разделители (не-буквенно-цифровые, не-пробельные) выделяются
+// группой, как принято в большинстве редакторов.
+TextToken::Token detectWordOrSpace(const QString& text, int pos)
+{
+    if (pos >= text.length())
+        return { pos, pos, TextToken::TokenType::None };
+
+    const QChar ch = text[pos];
+
+    if (ch.isSpace()) {
+        auto [s, e] = expandFromPos(text, pos, [](QChar c) { return c.isSpace(); });
+        return { s, e, TextToken::TokenType::Whitespace };
+    }
+    if (isWordChar(ch)) {
+        auto [s, e] = expandFromPos(text, pos, isWordChar);
+        return { s, e, TextToken::TokenType::Word };
+    }
+    // Пунктуация: группируем подряд идущие разделители.
+    auto [s, e] = expandFromPos(text, pos,
+                                [](QChar c) { return !isWordChar(c) && !c.isSpace(); });
+    return { s, e, TextToken::TokenType::Punctuation };
 }
 
 } // namespace
@@ -212,18 +246,45 @@ std::pair<int,int> detectWord(const QString& text, int pos)
 namespace TextToken {
 
 // Главный диспетчер — обходит цепочку детекторов по приоритету.
-std::pair<int,int> findDoubleClickToken(const QString& text, int pos)
+Token findDoubleClickToken(const QString& text, int pos)
 {
     pos = std::clamp(pos, 0, static_cast<int>(text.length()));
     std::pair<int,int> r;
-    if ((r = detectQuotedString  (text, pos)).first >= 0) return r;
-    if ((r = detectUrl           (text, pos)).first >= 0) return r;
-    if ((r = detectFilePath      (text, pos)).first >= 0) return r;
-    if ((r = detectHexLiteral    (text, pos)).first >= 0) return r;
-    if ((r = detectIpAddress     (text, pos)).first >= 0) return r;
-    if ((r = detectSimpleFilename(text, pos)).first >= 0) return r;
-    if ((r = detectDecimalNumber (text, pos)).first >= 0) return r;
-    return detectWord(text, pos);
+    if ((r = detectQuotedString  (text, pos)).first >= 0) return { r.first, r.second, TokenType::QuotedString  };
+    if ((r = detectTimestamp     (text, pos)).first >= 0) return { r.first, r.second, TokenType::Timestamp      };
+    if ((r = detectUrl           (text, pos)).first >= 0) return { r.first, r.second, TokenType::Url            };
+    if ((r = detectFilePath      (text, pos)).first >= 0) return { r.first, r.second, TokenType::FilePath       };
+    if ((r = detectHexLiteral    (text, pos)).first >= 0) return { r.first, r.second, TokenType::HexLiteral     };
+    if ((r = detectIpAddress     (text, pos)).first >= 0) return { r.first, r.second, TokenType::IpAddress      };
+    if ((r = detectSimpleFilename(text, pos)).first >= 0) return { r.first, r.second, TokenType::SimpleFilename };
+    if ((r = detectDecimalNumber (text, pos)).first >= 0) return { r.first, r.second, TokenType::DecimalNumber  };
+    return detectWordOrSpace(text, pos);
+}
+
+// Классификация выделенного текста для контекстных действий.
+TokenType classify(const QString& text)
+{
+    const QString t = text.trimmed();
+    if (t.isEmpty() || t.contains(QChar('\n')))
+        return TokenType::None;
+
+    static const QRegularExpression urlRe(
+        QRegularExpression::anchoredPattern(QStringLiteral("[a-zA-Z][a-zA-Z0-9+\\-.]*://\\S+")));
+    if (urlRe.match(t).hasMatch())
+        return TokenType::Url;
+
+    static const QRegularExpression tsRe(
+        QRegularExpression::anchoredPattern(PatternHeuristics::timestampRegex()));
+    if (tsRe.match(t).hasMatch())
+        return TokenType::Timestamp;
+
+    // Абсолютный Windows-путь или строка, содержащая разделитель каталогов.
+    static const QRegularExpression winAbsRe(
+        QRegularExpression::anchoredPattern(QStringLiteral("[A-Za-z]:[\\\\/].*")));
+    if (winAbsRe.match(t).hasMatch() || t.contains(QChar('/')) || t.contains(QChar('\\')))
+        return TokenType::FilePath;
+
+    return TokenType::None;
 }
 
 } // namespace TextToken

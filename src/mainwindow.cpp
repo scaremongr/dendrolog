@@ -9,6 +9,7 @@
 #include "settingsdialog.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
+#include "schemastore.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -169,6 +170,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->actionSearchNext, &QAction::triggered, this, &MainWindow::onSearchNextTriggered);
     connect(ui->actionSearchPrevious, &QAction::triggered, this, &MainWindow::onSearchPreviousTriggered);
 
+    // Quick-search focus action (Ctrl+F by default): just move focus to the
+    // search field and pre-select its text for an immediate new query.
+    QAction* focusSearchAction = new QAction(tr("Find"), this);
+    connect(focusSearchAction, &QAction::triggered, this, [this]() {
+        m_searchLineEdit->setFocus(Qt::ShortcutFocusReason);
+        m_searchLineEdit->selectAll();
+    });
+    addAction(focusSearchAction);   // window-level shortcut
+    m_shortcutActions.insert(QStringLiteral("focusSearch"), focusSearchAction);
+
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {
@@ -320,14 +331,14 @@ void MainWindow::saveSettings()
         s.setValue("fieldVisibleNames", selectedVisibleFieldNames());
     }
     s.setValue("conversionPattern", m_conversionPattern);
+    // Schemas themselves live as files in <exe>/patterns/ (see SchemaStore);
+    // the INI only remembers their display order, keyed by name.
     {
-        QStringList names, values;
-        for (const auto& e : m_patternList) {
-            names  << e.first;
-            values << e.second;
-        }
-        s.setValue("patternNames",  names);
-        s.setValue("patternValues", values);
+        QStringList order;
+        order.reserve(m_patternList.size());
+        for (const auto& e : m_patternList)
+            order << e.first;
+        s.setValue("schemaOrder", order);
     }
     s.endGroup();
 
@@ -384,19 +395,32 @@ void MainWindow::loadSettings()
 
     m_conversionPattern = s.value("conversionPattern").toString();
     {
-        const QStringList names  = s.value("patternNames").toStringList();
-        const QStringList values = s.value("patternValues").toStringList();
-        m_patternList.clear();
-        const int cnt = qMin(names.size(), values.size());
-        m_patternList.reserve(cnt);
-        for (int i = 0; i < cnt; ++i)
-            m_patternList.append({names[i], values[i]});
-        // Backwards compatibility: migrate old single-string list
+        // Schemas are loaded from <exe>/patterns/*.json; the INI keeps only
+        // their display order, by name.
+        const QStringList order = s.value("schemaOrder").toStringList();
+        m_patternList = SchemaStore::loadAll(order);
+
+        // One-time migration of the old INI-stored schema list into files.
         if (m_patternList.isEmpty()) {
-            const QStringList old = s.value("conversionPatternList").toStringList();
-            for (const auto& p : old)
-                if (!p.trimmed().isEmpty())
-                    m_patternList.append({p.trimmed(), p.trimmed()});
+            const QStringList names  = s.value("patternNames").toStringList();
+            const QStringList values = s.value("patternValues").toStringList();
+            const int cnt = qMin(names.size(), values.size());
+            m_patternList.reserve(cnt);
+            for (int i = 0; i < cnt; ++i)
+                m_patternList.append({names[i], values[i]});
+            // Even older single-string list.
+            if (m_patternList.isEmpty()) {
+                const QStringList old = s.value("conversionPatternList").toStringList();
+                for (const auto& p : old)
+                    if (!p.trimmed().isEmpty())
+                        m_patternList.append({p.trimmed(), p.trimmed()});
+            }
+            if (!m_patternList.isEmpty()) {
+                SchemaStore::sync(m_patternList);
+                s.remove("patternNames");
+                s.remove("patternValues");
+                s.remove("conversionPatternList");
+            }
         }
         if (m_conversionPatternCombo) {
             m_conversionPatternCombo->blockSignals(true);
@@ -693,6 +717,16 @@ void MainWindow::onPatternComboChanged(int index)
 
 void MainWindow::onManagePatterns()
 {
+    // Refresh from the folder so schema files dropped in (or edited) since the
+    // last load are picked up, preserving the current display order.
+    {
+        QStringList order;
+        order.reserve(m_patternList.size());
+        for (const auto& e : m_patternList)
+            order << e.first;
+        m_patternList = SchemaStore::loadAll(order);
+    }
+
     // Offer first lines of the active log as live-preview samples.
     QStringList sampleLines;
     if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) {
@@ -712,6 +746,12 @@ void MainWindow::onManagePatterns()
     if (dlg.exec() != QDialog::Accepted) return;
 
     m_patternList = dlg.resultPatterns();
+
+    // Persist the (possibly edited) list back to the patterns folder.
+    QString syncError;
+    if (!SchemaStore::sync(m_patternList, &syncError) && !syncError.isEmpty())
+        QMessageBox::warning(this, tr("Schemas"),
+            tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
 
     // Rebuild combo names.  Set index to -1 first so any subsequent
     // setCurrentIndex() always triggers currentIndexChanged, even for index 0.
@@ -1069,6 +1109,10 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
     connect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
 
+    if (logView->view())
+        connect(logView->view(), &LogListView::timeFilterBoundRequested,
+                this, &MainWindow::onTimeFilterBoundRequested);
+
     if (m_activeLogView && m_activeLogView->model() && m_activeLogView->view())
     {
         int totalRows = m_activeLogView->model()->rowCount();
@@ -1092,6 +1136,10 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     disconnect(logView, &LogViewWidget::totalRowCountChanged, this, &MainWindow::handleTotalRowCountChanged);
     disconnect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
     disconnect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
+
+    if (logView->view())
+        disconnect(logView->view(), &LogListView::timeFilterBoundRequested,
+                   this, &MainWindow::onTimeFilterBoundRequested);
 
     if (m_activeLogView == logView)
     {
@@ -1558,6 +1606,25 @@ void MainWindow::onResetTimeFilterClicked()
     m_applyTimeFilterButton->setChecked(false);
     // Optionally, re-trigger onApplyTimeFilterClicked if other logic needs to run
     // onApplyTimeFilterClicked(); // This would immediately re-apply the (now cleared) filter
+}
+
+void MainWindow::onTimeFilterBoundRequested(const QDateTime& dt, bool isStart)
+{
+    if (!dt.isValid())
+        return;
+
+    // Подставляем выбранный таймстамп в нужное поле и показываем панель фильтра
+    // по времени, но НЕ применяем фильтр автоматически — пользователь сам решает,
+    // когда нажать Apply (вторая граница может быть ещё не задана).
+    if (isStart)
+        m_timeFilterFrom->setDateTime(dt);
+    else
+        m_timeFilterTo->setDateTime(dt);
+
+    if (ui->timeFilterDockWidget) {
+        ui->timeFilterDockWidget->setVisible(true);
+        ui->timeFilterDockWidget->raise();
+    }
 }
 
 void MainWindow::onApplyAllTextFiltersClicked()

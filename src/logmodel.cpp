@@ -473,6 +473,8 @@ void LogModel::refreshDisplay()
 
 QString LogModel::formatDisplayMessage(const LogEntry& entry) const
 {
+    // Lines that did not match the schema at all (continuation lines, junk)
+    // have no fields — show their raw text so nothing silently disappears.
     if (!m_fieldFilterEnabled || entry.fields.isEmpty())
         return entry.message;
 
@@ -489,7 +491,12 @@ QString LogModel::formatDisplayMessage(const LogEntry& entry) const
         first = false;
     }
 
-    return result.isEmpty() ? entry.message : result;
+    // The line *did* match (some field is present), so show exactly the
+    // selected fields. If none of them exist on this line — e.g. a line that
+    // only filled the first few blocks of a longer schema — the row is left
+    // blank on purpose. Falling back to the full raw message here would make
+    // a partially-parsed line look as though it was not parsed at all.
+    return result;
 }
 
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround)

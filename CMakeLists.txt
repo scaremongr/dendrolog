@@ -37,6 +37,8 @@ set(PROJECT_SOURCES
     src/logpattern.cpp
     src/patternheuristics.h
     src/patternheuristics.cpp
+    src/schemastore.h
+    src/schemastore.cpp
 
     src/conversionpatterndialog.h
     src/conversionpatterndialog.cpp

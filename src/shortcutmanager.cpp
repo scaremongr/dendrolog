@@ -19,6 +19,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("saveAs"),      tr("Save view as…"),             QKeySequence(QKeySequence::SaveAs) },
         { QStringLiteral("reload"),      tr("Reload file"),               QKeySequence(Qt::Key_F5) },
         { QStringLiteral("settings"),    tr("Settings…"),                 QKeySequence(QKeySequence::Preferences) },
+        { QStringLiteral("focusSearch"), tr("Focus quick search field"),  QKeySequence(QKeySequence::Find) },
         { QStringLiteral("searchNext"),  tr("Search next"),               QKeySequence(Qt::Key_F3) },
         { QStringLiteral("searchPrev"),  tr("Search previous"),           QKeySequence(Qt::SHIFT | Qt::Key_F3) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },

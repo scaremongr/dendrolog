@@ -82,6 +82,8 @@ private slots:
     void updateLineInfoLabel(int currentRow, int totalRows);
     void onApplyTimeFilterClicked();
     void onResetTimeFilterClicked();
+    // Подстановка таймстампа (из контекстного меню LogView) в поле фильтра по времени.
+    void onTimeFilterBoundRequested(const QDateTime& dt, bool isStart);
     void onApplyAllTextFiltersClicked(); // Apply из конструктора фильтров (активная вкладка)
     void onResetTextFiltersClicked();    // Reset — снять фильтры с активной вкладки
     void onApplyRowMarkersClicked();     // Apply из панели маркеров (активная вкладка)
