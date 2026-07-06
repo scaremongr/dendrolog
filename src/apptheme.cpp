@@ -24,6 +24,13 @@ void AppTheme::load(QSettings& s)
     logDebug  = readColor(s, "logDebug",  logDebug);
     logTrace  = readColor(s, "logTrace",  logTrace);
 
+    logDimFatal = readColor(s, "logDimFatal", logDimFatal);
+    logDimError = readColor(s, "logDimError", logDimError);
+    logDimWarn  = readColor(s, "logDimWarn",  logDimWarn);
+    logDimInfo  = readColor(s, "logDimInfo",  logDimInfo);
+    logDimDebug = readColor(s, "logDimDebug", logDimDebug);
+    logDimTrace = readColor(s, "logDimTrace", logDimTrace);
+
     // Selection colors
     selectionFill  = readColor(s, "selectionFill",  selectionFill);
     selectionRowBg = readColor(s, "selectionRowBg", selectionRowBg);
@@ -59,6 +66,13 @@ void AppTheme::save(QSettings& s) const
     s.setValue("logInfo",   logInfo.name(QColor::HexArgb));
     s.setValue("logDebug",  logDebug.name(QColor::HexArgb));
     s.setValue("logTrace",  logTrace.name(QColor::HexArgb));
+
+    s.setValue("logDimFatal", logDimFatal.name(QColor::HexArgb));
+    s.setValue("logDimError", logDimError.name(QColor::HexArgb));
+    s.setValue("logDimWarn",  logDimWarn.name(QColor::HexArgb));
+    s.setValue("logDimInfo",  logDimInfo.name(QColor::HexArgb));
+    s.setValue("logDimDebug", logDimDebug.name(QColor::HexArgb));
+    s.setValue("logDimTrace", logDimTrace.name(QColor::HexArgb));
 
     s.setValue("selectionFill",  selectionFill.name(QColor::HexArgb));
     s.setValue("selectionRowBg", selectionRowBg.name(QColor::HexArgb));

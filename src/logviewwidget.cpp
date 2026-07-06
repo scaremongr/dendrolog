@@ -7,14 +7,6 @@
 #include <algorithm>
 
 
-// Comparator for merging/sorting LogEntry batches. Nulls sort first.
-static bool compareLogEntries(const std::shared_ptr<LogEntry>& a,
-                               const std::shared_ptr<LogEntry>& b)
-{
-    if (!a) return true;
-    if (!b) return false;
-    return *a < *b;
-}
 
 LogViewWidget::LogViewWidget(QWidget *parent)
     : QWidget(parent)
@@ -114,7 +106,7 @@ void LogViewWidget::handleEntriesParsed(
 
     // Sort the batch so it can be merged into the already-sorted model entries.
     QVector<std::shared_ptr<LogEntry>> sortedBatch(entriesBatch.begin(), entriesBatch.end());
-    std::sort(sortedBatch.begin(), sortedBatch.end(), compareLogEntries);
+    std::sort(sortedBatch.begin(), sortedBatch.end(), logEntryPtrLess);
 
     // Track the highest logical ID seen (bookkeeping for incremental reload).
     if (parsedLogFile) {
@@ -123,15 +115,10 @@ void LogViewWidget::handleEntriesParsed(
             if (e) nextId = qMax(nextId, e->logicalEntryId + 1);
     }
 
-    // Merge into the model's current entries, preserving global sort order.
-    const auto& current = m_model->allEntries();
-    QVector<std::shared_ptr<LogEntry>> merged;
-    merged.reserve(current.size() + sortedBatch.size());
-    std::merge(current.begin(), current.end(),
-               sortedBatch.constBegin(), sortedBatch.constEnd(),
-               std::back_inserter(merged), compareLogEntries);
-
-    m_model->setEntries(merged);
+    // Слияние в модель без reset: выделение и позиция скролла сохраняются,
+    // стоимость батча O(B) при загрузке одного файла (append в конец) вместо
+    // прежней полной пересборки O(N) на каждый батч.
+    m_model->mergeEntries(sortedBatch);
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
