@@ -13,6 +13,8 @@
 #include "tabexpander.h"
 #include "linewrapper.h"
 
+struct LogFile;
+
 // Структура для хранения информации о фрагменте текста (одной строке в режиме word wrap)
 struct TextFragment {
     int startPos;       // Начальная позиция в оригинальной строке
@@ -276,7 +278,9 @@ private:
     // ========== Сохранение выделения и позиции при фильтрации ==========
     struct SelectionId {
         int logicalEntryId = -1;
-        void* sourceFile = nullptr; // Используем void* чтобы не тащить зависимость от LogFilePtr в заголовочный файл QListView, либо можем подключить <memory> и объявить
+        // Идентичность записи = пара (logicalEntryId, sourceFile):
+        // id уникален только внутри одного файла.
+        const LogFile* sourceFile = nullptr;
         bool isValid() const { return logicalEntryId >= 0; }
         void clear() { logicalEntryId = -1; sourceFile = nullptr; }
     };
@@ -298,6 +302,11 @@ private:
     // Инвалидировать кэш строки (или всех строк если row == -1)
     // preserveTextLengths=true: данные модели не изменились (resize/wrap-toggle) — длины текстов оставить
     void invalidateRowState(int row = -1, bool preserveTextLengths = false);
+
+    // Сдвинуть состояние, привязанное к номерам строк (toggled-строки, текстовое
+    // выделение, подсветка поиска и скобок), после вставки count строк начиная
+    // с first. Вставка в конец (обычный случай) ничего не сдвигает.
+    void shiftRowKeyedState(int first, int count);
     
     // Вычислить состояние строки (внутренний метод)
     RowState computeRowState(int row) const;

@@ -73,5 +73,11 @@ int main(int argc, char *argv[])
 
     MainWindow w;
     w.show();
+
+    // Файлы, переданные аргументами командной строки, открываются как обычные.
+    const QStringList cliFiles = a.arguments().mid(1);
+    if (!cliFiles.isEmpty())
+        w.openFilesFromCommandLine(cliFiles);
+
     return a.exec();
 }

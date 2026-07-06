@@ -1,30 +1,19 @@
 #include "logmodel.h"
 
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 
 LogModel::LogModel(QObject* parent)
     : QAbstractListModel(parent)
-    , m_nextColorIndex(0) // Initialize nextColorIndex
-    // m_filterStartTime and m_filterEndTime are default-constructed to be invalid (isNull() == true)
+    , m_nextColorIndex(0)
+    // m_filterStartTime / m_filterEndTime default-constructed невалидными —
+    // фильтр по времени выключен. Пустой m_activeLogLevels = «показывать все».
 {
-    qRegisterMetaType<LogFilePtr>();
-    // Initialize m_activeLogLevels to include all levels by default, so no filtering initially.
-    // Or leave it empty and handle empty set as "show all" in applyFilter.
-    // For now, let's leave it empty and handle in applyFilter.
-
-    // Initialize LogLevel colors
-    m_logLevelColors[LogLevel::Trace] = DIM_TRACE_COLOR;
-    m_logLevelColors[LogLevel::Debug] = DIM_DEBUG_COLOR;
-    m_logLevelColors[LogLevel::Info] = DIM_INFO_COLOR;
-    m_logLevelColors[LogLevel::Warn] = DIM_WARN_COLOR;
-    m_logLevelColors[LogLevel::Error] = DIM_ERROR_COLOR;
-    m_logLevelColors[LogLevel::Fatal] = DIM_FATAL_COLOR;
-    m_logLevelColors[LogLevel::Unknown] = DEFAULT_BACKGROUND_COLOR; // Or some other default
-
-    // Initialize predefined colors
+    // Палитра цветов для плашек файлов (при загрузке нескольких файлов в таб).
     m_predefinedFileColors << QColor(Qt::cyan).darker(220)
                            << QColor(Qt::magenta).darker(220)
-                           << QColor(Qt::yellow).darker(250) // Lighter yellow for better contrast with dark text
+                           << QColor(Qt::yellow).darker(250)
                            << QColor(Qt::green).darker(220)
                            << QColor(Qt::blue).darker(220)
                            << QColor(Qt::darkCyan).darker(220)
@@ -35,63 +24,151 @@ LogModel::LogModel(QObject* parent)
                            << QColor(Qt::darkRed).darker(220);
 }
 
+LogModel::~LogModel()
+{
+    // Обрываем фоновый фильтр-джоб. Ждать не нужно: воркер владеет своими
+    // снапшотами и не трогает модель, а watcher (наш child) умрёт вместе с нами.
+    cancelPendingFilter(false);
+}
+
+void LogModel::ensureFileColor(const QString& filePath)
+{
+    if (m_fileColors.contains(filePath))
+        return;
+    m_fileColors[filePath] = m_predefinedFileColors[m_nextColorIndex];
+    m_nextColorIndex = (m_nextColorIndex + 1) % m_predefinedFileColors.size();
+}
+
 void LogModel::appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
     if (entries.isEmpty())
         return;
 
-    // Assign file colors for any new source files.
-    for (const auto& entry : entries) {
-        if (entry && entry->sourceFile) {
-            const QString& fp = entry->sourceFile->filePath;
-            if (!m_fileColors.contains(fp)) {
-                if (!m_predefinedFileColors.isEmpty()) {
-                    m_fileColors[fp] = m_predefinedFileColors[m_nextColorIndex];
-                    m_nextColorIndex = (m_nextColorIndex + 1) % m_predefinedFileColors.size();
-                } else {
-                    m_fileColors[fp] = Qt::gray;
-                }
-            }
-        }
-    }
+    QVector<std::shared_ptr<LogEntry>> sortedBatch = entries;
+    std::sort(sortedBatch.begin(), sortedBatch.end(), logEntryPtrLess);
+    mergeSortedBatch(sortedBatch);
 
+    // Подсветка «новых» строк переходит на этот батч: строки предыдущего
+    // батча теряют зелёный маркер — перерисовываем гаттер.
+    const bool hadPrevious = !m_newEntries.isEmpty();
+    m_newEntries.clear();
+    for (const auto& e : entries)
+        if (e) m_newEntries.insert(e.get());
+    if (hadPrevious && rowCount() > 0)
+        emit dataChanged(index(0, 0), index(rowCount() - 1, 0), {IsNewRole});
+}
+
+void LogModel::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
+{
+    if (sortedBatch.isEmpty())
+        return;
+    mergeSortedBatch(sortedBatch);
+}
+
+void LogModel::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
+{
+    for (const auto& entry : sortedBatch) {
+        if (entry && entry->sourceFile)
+            ensureFileColor(entry->sourceFile->filePath);
+    }
     m_cachedUniqueSourceFileCount = -1;
 
-    // Collect new entries that pass current filters.
+    // Полный список. Частый случай — батч целиком позже конца (загрузка одного
+    // файла, tail-догрузка) — чистый append; иначе слияние отсортированного
+    // хвоста с отсортированной головой на месте.
+    const bool needMerge = !m_allEntries.isEmpty()
+        && logEntryPtrLess(sortedBatch.first(), m_allEntries.last());
+    const qsizetype oldAllCount = m_allEntries.size();
+    m_allEntries.append(sortedBatch);
+    if (needMerge) {
+        std::inplace_merge(m_allEntries.begin(),
+                           m_allEntries.begin() + oldAllCount,
+                           m_allEntries.end(), logEntryPtrLess);
+    }
+
+    // Видимый список: прошедшие фильтр вставляются с уведомлениями view —
+    // без reset, выделение и позиция скролла сохраняются.
     QVector<std::shared_ptr<LogEntry>> passing;
-    passing.reserve(entries.size());
-    for (const auto& e : entries) {
+    passing.reserve(sortedBatch.size());
+    for (const auto& e : sortedBatch) {
         if (passesFilters(e))
             passing.append(e);
     }
 
-    // Append to all-entries unconditionally.
-    m_allEntries.append(entries);
-
     if (!passing.isEmpty()) {
-        const int firstNew = m_filteredEntries.size();
-        const int lastNew  = firstNew + passing.size() - 1;
-        beginInsertRows(QModelIndex(), firstNew, lastNew);
-        m_filteredEntries.append(passing);
-        endInsertRows();
+        if (m_filteredEntries.isEmpty()
+            || !logEntryPtrLess(passing.first(), m_filteredEntries.last())) {
+            const int first = m_filteredEntries.size();
+            beginInsertRows(QModelIndex(), first, first + static_cast<int>(passing.size()) - 1);
+            m_filteredEntries.append(passing);
+            endInsertRows();
+        } else {
+            insertFilteredSorted(passing);
+        }
         emit modelFiltered(m_filteredEntries.size());
     }
 
-    // Replace the "new" set: previous batch loses its highlight, this batch gains it.
-    // Repaint old rows that were green before (they now lose the marker).
-    if (!m_newEntryIds.isEmpty() && rowCount() > (int)passing.size()) {
-        const int oldLastRow = rowCount() - (int)passing.size() - 1;
-        emit dataChanged(index(0, 0), index(oldLastRow, 0));
+    // Фоновая перефильтрация (если шла) работала со снапшотом без этого
+    // батча — перезапускаем её на актуальных данных.
+    if (m_filterJobActive) {
+        cancelPendingFilter(false);
+        startFilterJob();
     }
-    m_newEntryIds.clear();
-    for (const auto& e : entries)
-        if (e) m_newEntryIds.insert(e->logicalEntryId);
+}
+
+void LogModel::insertFilteredSorted(const QVector<std::shared_ptr<LogEntry>>& passing)
+{
+    // Серии подряд идущих записей с общей точкой вставки; позиции считаются
+    // относительно СТАРОГО списка. upper_bound даёт вставку ПОСЛЕ равных
+    // существующих записей — та же стабильность, что у inplace_merge выше,
+    // поэтому m_filteredEntries остаётся подпоследовательностью m_allEntries.
+    struct Run { int pos; int first; int count; };
+    QVector<Run> runs;
+    int searchFrom = 0;
+    for (int i = 0; i < passing.size(); ++i) {
+        const auto it = std::upper_bound(m_filteredEntries.constBegin() + searchFrom,
+                                         m_filteredEntries.constEnd(),
+                                         passing[i], logEntryPtrLess);
+        const int pos = static_cast<int>(it - m_filteredEntries.constBegin());
+        if (!runs.isEmpty() && runs.last().pos == pos)
+            ++runs.last().count;
+        else
+            runs.append({pos, i, 1});
+        searchFrom = pos;
+    }
+
+    // Патологическое чередование строк двух файлов: сотни вставок в середину
+    // дороже одной полной перестройки (и для модели, и для view).
+    if (runs.size() > 64) {
+        beginResetModel();
+        rebuildFilteredEntries();
+        endResetModel();
+        return;
+    }
+
+    int shift = 0;
+    for (const Run& run : runs) {
+        const int first = run.pos + shift;
+        beginInsertRows(QModelIndex(), first, first + run.count - 1);
+        m_filteredEntries.insert(first, run.count, std::shared_ptr<LogEntry>());
+        for (int k = 0; k < run.count; ++k)
+            m_filteredEntries[first + k] = passing[run.first + k];
+        endInsertRows();
+        shift += run.count;
+    }
 }
 
 void LogModel::removeEntriesForFile(const QString& filePath)
 {
     if (m_allEntries.isEmpty())
         return;
+
+    // Полная синхронная перестройка ниже даёт консистентный список сама —
+    // фоновый джоб (если шёл) больше не нужен и не должен примениться.
+    cancelPendingFilter(false);
+
+    // Чистим до удаления записей, чтобы не держать висячие указатели.
+    m_newEntries.clear();
 
     beginResetModel();
     m_allEntries.erase(
@@ -102,78 +179,52 @@ void LogModel::removeEntriesForFile(const QString& filePath)
         m_allEntries.end());
 
     m_cachedUniqueSourceFileCount = -1;
-    clearRowDependentCaches();
     rebuildFilteredEntries();
     endResetModel();
+    m_filteredListStale = false; // перестроено по текущим настройкам
     emit modelFiltered(m_filteredEntries.size());
-
-    // The removed rows may have carried the "new entry" highlight.
-    m_newEntryIds.clear();
 }
 
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
+    // Полная замена данных: фоновый джоб (если шёл) устарел, а старые
+    // указатели в m_newEntries недействительны.
+    cancelPendingFilter(false);
+    m_newEntries.clear();
+
     beginResetModel();
     m_allEntries = entries;
-    m_cachedUniqueSourceFileCount = -1; // Инвалидация кэша
+    m_cachedUniqueSourceFileCount = -1;
 
-    // Clear existing file colors to re-assign if file set changes (though typically we append)
-    // For a full refresh, this is appropriate. If appending, might need different logic.
-    // For now, let's assume setEntries is a full refresh.
+    // Полное обновление: цвета файлов назначаются заново в порядке появления.
     m_fileColors.clear();
-    m_nextColorIndex = 0; // Reset color index for fresh assignment
-
-    QSet<QString> processedFilePaths;
+    m_nextColorIndex = 0;
     for (const auto& entry : m_allEntries) {
-        if (entry && entry->sourceFile) {
-            const QString& filePath = entry->sourceFile->filePath;
-            if (!processedFilePaths.contains(filePath)) {
-                if (!m_fileColors.contains(filePath)) { // Should be true due to clear above, but good check
-                    if (!m_predefinedFileColors.isEmpty()) {
-                        m_fileColors[filePath] = m_predefinedFileColors[m_nextColorIndex];
-                        m_nextColorIndex = (m_nextColorIndex + 1) % m_predefinedFileColors.size();
-                    } else {
-                        m_fileColors[filePath] = Qt::gray; // Fallback if no predefined colors
-                    }
-                }
-                processedFilePaths.insert(filePath);
-            }
-        }
+        if (entry && entry->sourceFile)
+            ensureFileColor(entry->sourceFile->filePath);
     }
 
-    clearRowDependentCaches();
     rebuildFilteredEntries();
     endResetModel();
+    m_filteredListStale = false; // перестроено по текущим настройкам
     emit modelFiltered(m_filteredEntries.size());
-
-    // Clear the new-entry highlight state on full model reset.
-    m_newEntryIds.clear();
 }
 
-int LogModel::rowCount(const QModelIndex&) const
+int LogModel::rowCount(const QModelIndex& parent) const
 {
-    return m_filteredEntries.size(); // Use filtered entries
+    // Плоская модель: у элементов нет детей.
+    return parent.isValid() ? 0 : m_filteredEntries.size();
 }
 
 QVariant LogModel::data(const QModelIndex& index, int role) const
 {
-    if (!index.isValid() || index.row() >= m_filteredEntries.size()) // Use filtered entries
+    if (!index.isValid() || index.row() >= m_filteredEntries.size())
         return QVariant();
 
-    const std::shared_ptr<LogEntry>& entry = m_filteredEntries.at(index.row()); // Changed type, use const&
+    const std::shared_ptr<LogEntry>& entry = m_filteredEntries.at(index.row());
     switch (role) {
-    case TimestampRole:
-        return entry->timestamp; // Use ->
-    case LevelRole:
-        return static_cast<int>(entry->level); // Use ->
-    case MessageRole:
-        return entry->message; // Raw, unfiltered — use for search / copy
-    case DisplayMessageRole:
+    case Qt::DisplayRole:
         return formatDisplayMessage(*entry);
-    case SourceFileRole:
-        return QVariant::fromValue<LogFilePtr>(entry->sourceFile); // Use ->
-    case IsExpandedRole:
-        return m_expandedRows.contains(index.row());
     case FileBadgeRole: {
         // Плашка показывается только если загружено несколько файлов.
         // Вся логика (показывать/нет, текст, цвет) инкапсулирована здесь.
@@ -185,87 +236,16 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
         return badge;
     }
     case IsNewRole:
-        return m_newEntryIds.contains(entry->logicalEntryId);
+        return m_newEntries.contains(entry.get());
     case RowMarkerColorRole: {
         if (m_rowMarkers.isEmpty())
             return QVariant();
         const QColor color = m_rowMarkers.firstMatchColor(entry->message);
         return color.isValid() ? QVariant(color) : QVariant();
     }
-    case Qt::BackgroundRole: // Handle background color
-        return getLogLevelColor(entry->level);
-    case Qt::DisplayRole:
-        return formatDisplayMessage(*entry);
     default:
         return QVariant();
     }
-}
-
-QHash<int, QByteArray> LogModel::roleNames() const
-{
-    return {
-        {TimestampRole,      "timestamp"},
-        {LevelRole,          "level"},
-        {MessageRole,        "message"},
-        {DisplayMessageRole, "displayMessage"},
-        {SourceFileRole,     "sourceFile"},
-        {IsExpandedRole,     "isExpanded"},
-        {FileBadgeRole,      "fileBadge"},
-        {IsNewRole,          "isNew"},
-        {RowMarkerColorRole, "rowMarkerColor"}
-    };
-}
-
-bool LogModel::getOrBuildElide(int row,
-                               const QString& msg,
-                               const QFontMetrics& fm,
-                               int available,
-                               int badgeReserve,
-                               QString& outElided,
-                               int& outHidden) const
-{
-    auto it = m_elideCache.constFind(row);
-    if (it != m_elideCache.cend() && it->viewWidth == available - badgeReserve) {
-        outElided = it->elided;
-        outHidden = it->hidden;
-        return true;
-    }
-    // строим заново
-    QString el = fm.elidedText(msg, Qt::ElideRight, available - badgeReserve);
-    int hid   = msg.length() - el.length();
-    m_elideCache[row] = { available - badgeReserve, el, hid };
-    outElided = el;
-    outHidden = hid;
-    return false;
-}
-
-void LogModel::clearElideCache()
-{
-    m_elideCache.clear();
-}
-
-bool LogModel::setData(const QModelIndex &index, const QVariant &value, int role)
-{
-    if (!index.isValid() || index.row() >= m_filteredEntries.size())
-        return false;
-
-    if (role == IsExpandedRole) {
-        bool expanded = value.toBool();
-        if (expanded)
-            m_expandedRows.insert(index.row());
-        else {
-            m_expandedRows.remove(index.row());
-            m_expandedRowHeightCache.remove(index.row());
-        }
-        emit dataChanged(index, index, {IsExpandedRole, Qt::SizeHintRole});
-        return true;
-    }
-    return QAbstractListModel::setData(index, value, role);
-}
-
-bool LogModel::isRowExpanded(int row) const
-{
-    return m_expandedRows.contains(row);
 }
 
 int LogModel::uniqueSourceFileCount() const
@@ -275,33 +255,13 @@ int LogModel::uniqueSourceFileCount() const
     }
 
     QSet<LogFilePtr> uniqueFiles;
-    for (const auto& entry : m_allEntries) { // entry is now std::shared_ptr<LogEntry>
-        if (entry->sourceFile) { // Use ->
-            uniqueFiles.insert(entry->sourceFile); // Use ->
+    for (const auto& entry : m_allEntries) {
+        if (entry && entry->sourceFile) {
+            uniqueFiles.insert(entry->sourceFile);
         }
     }
     m_cachedUniqueSourceFileCount = uniqueFiles.size();
     return m_cachedUniqueSourceFileCount;
-}
-
-int LogModel::getCachedExpandedRowHeight(int row) const
-{
-    return m_expandedRowHeightCache.value(row, -1);
-}
-
-void LogModel::cacheExpandedRowHeight(int row, int height) const
-{
-    m_expandedRowHeightCache.insert(row, height);
-}
-
-void LogModel::clearExpandedRowHeightCache()
-{
-    m_expandedRowHeightCache.clear();
-}
-
-void LogModel::invalidateExpandedRowHeightCache(int row)
-{
-    m_expandedRowHeightCache.remove(row);
 }
 
 void LogModel::setLogLevelFilter(const QSet<LogLevel>& levels)
@@ -335,28 +295,40 @@ void LogModel::setRowMarkers(const QVector<HighlightPattern>& markers)
     }
 }
 
-bool LogModel::passesFilters(const std::shared_ptr<LogEntry>& entry) const
+// Общая проверка фильтров. Вынесена в свободную функцию, потому что фоновый
+// воркер работает со СНАПШОТАМИ настроек и не имеет права читать члены модели.
+static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
+                               const QSet<LogLevel>& levels,
+                               const QDateTime& startTime,
+                               const QDateTime& endTime,
+                               const FilterRuleSet& rules)
 {
     if (!entry) {
         return false;
     }
 
-    if (!m_activeLogLevels.isEmpty() && !m_activeLogLevels.contains(entry->level)) {
+    if (!levels.isEmpty() && !levels.contains(entry->level)) {
         return false;
     }
 
-    if (m_filterStartTime.isValid() && entry->timestamp < m_filterStartTime) {
+    if (startTime.isValid() && entry->timestamp < startTime) {
         return false;
     }
-    if (m_filterEndTime.isValid() && entry->timestamp > m_filterEndTime) {
+    if (endTime.isValid() && entry->timestamp > endTime) {
         return false;
     }
 
-    if (m_filterRules.isActive() && !m_filterRules.matches(*entry)) {
+    if (rules.isActive() && !rules.matches(*entry)) {
         return false;
     }
 
     return true;
+}
+
+bool LogModel::passesFilters(const std::shared_ptr<LogEntry>& entry) const
+{
+    return entryPassesFilters(entry, m_activeLogLevels,
+                              m_filterStartTime, m_filterEndTime, m_filterRules);
 }
 
 void LogModel::rebuildFilteredEntries()
@@ -371,25 +343,99 @@ void LogModel::rebuildFilteredEntries()
     }
 }
 
-void LogModel::clearRowDependentCaches()
-{
-    // Эти кэши индексируются по row в текущем filtered view.
-    // После любого reset соответствие row -> entry меняется полностью.
-    m_expandedRows.clear();
-    m_elideCache.clear();
-    m_expandedRowHeightCache.clear();
-}
-
 void LogModel::applyFilter()
 {
-    beginResetModel();
-    rebuildFilteredEntries();
-    clearRowDependentCaches();
-    endResetModel();
-    emit modelFiltered(m_filteredEntries.size());
+    cancelPendingFilter(false);
+
+    // Небольшие данные фильтруем синхронно: мгновенно и без промежуточного
+    // состояния. Большие — в пуле потоков, чтобы не замораживать GUI.
+    if (m_allEntries.size() < kAsyncFilterThreshold) {
+        beginResetModel();
+        rebuildFilteredEntries();
+        endResetModel();
+        m_filteredListStale = false;
+        emit modelFiltered(m_filteredEntries.size());
+        return;
+    }
+    startFilterJob();
 }
 
-int LogModel::rowForEntry(int logicalEntryId, const void* sourceFile) const
+void LogModel::reapplyFilterIfStale()
+{
+    if (m_filteredListStale)
+        applyFilter();
+}
+
+void LogModel::startFilterJob()
+{
+    using FilterResult = QVector<std::shared_ptr<LogEntry>>;
+
+    m_filterJobActive = true;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_filterJobCancel = cancel;
+
+    // Снапшоты: COW-копия вектора shared_ptr держит записи живыми на время
+    // работы воркера, копии настроек отвязывают его от изменений модели.
+    const QVector<std::shared_ptr<LogEntry>> entries = m_allEntries;
+    const QSet<LogLevel> levels = m_activeLogLevels;
+    const QDateTime startTime = m_filterStartTime;
+    const QDateTime endTime = m_filterEndTime;
+    const FilterRuleSet rules = m_filterRules;
+
+    QFuture<FilterResult> future = QtConcurrent::run(
+        [entries, levels, startTime, endTime, rules, cancel]() -> FilterResult {
+            FilterResult passing;
+            passing.reserve(entries.size());
+            for (qsizetype i = 0; i < entries.size(); ++i) {
+                // Проверка отмены раз в 8192 записи: почти бесплатно, а
+                // ненужный воркер обрывается за миллисекунды.
+                if ((i & 0x1FFF) == 0 && cancel->load(std::memory_order_relaxed))
+                    return FilterResult();
+                if (entryPassesFilters(entries[i], levels, startTime, endTime, rules))
+                    passing.append(entries[i]);
+            }
+            return passing;
+        });
+    m_filterJobFuture = future;
+
+    // Поколение фиксируется на момент запуска: результат применяется, только
+    // если к его приходу не изменились ни настройки фильтра, ни данные.
+    auto* watcher = new QFutureWatcher<FilterResult>(this);
+    const int generation = m_filterGeneration;
+    connect(watcher, &QFutureWatcher<FilterResult>::finished, this,
+            [this, watcher, generation]() {
+                watcher->deleteLater();
+                if (generation != m_filterGeneration)
+                    return; // результат устарел (отменён или заменён новым джобом)
+                m_filterJobActive = false;
+                beginResetModel();
+                m_filteredEntries = watcher->result();
+                endResetModel();
+                m_filteredListStale = false;
+                emit modelFiltered(m_filteredEntries.size());
+            });
+    watcher->setFuture(future);
+}
+
+void LogModel::cancelPendingFilter(bool wait)
+{
+    // Смена поколения гарантирует, что уже посчитанный (в т.ч. пустой из-за
+    // отмены) результат в полёте не будет применён.
+    ++m_filterGeneration;
+    // Джоб в полёте означает, что видимый список ещё не догнал настройки —
+    // после отмены это надо будет довести (reapplyFilterIfStale / applyFilter).
+    if (m_filterJobActive)
+        m_filteredListStale = true;
+    m_filterJobActive = false;
+    if (m_filterJobCancel) {
+        m_filterJobCancel->store(true);
+        m_filterJobCancel.reset();
+    }
+    if (wait)
+        m_filterJobFuture.waitForFinished();
+}
+
+int LogModel::rowForEntry(int logicalEntryId, const LogFile* sourceFile) const
 {
     for (int i = 0; i < m_filteredEntries.size(); ++i) {
         const auto& e = m_filteredEntries[i];
@@ -400,7 +446,7 @@ int LogModel::rowForEntry(int logicalEntryId, const void* sourceFile) const
     return -1;
 }
 
-int LogModel::nearestVisibleRow(int logicalEntryId, const void* sourceFile) const
+int LogModel::nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const
 {
     if (m_filteredEntries.isEmpty()) {
         return -1;
@@ -431,18 +477,27 @@ int LogModel::nearestVisibleRow(int logicalEntryId, const void* sourceFile) cons
 
 QColor LogModel::getColorForFile(const QString& filePath) const
 {
-    return m_fileColors.value(filePath, Qt::darkGray); // Return darkGray if not found
+    return m_fileColors.value(filePath, Qt::darkGray);
 }
 
-QColor LogModel::getLogLevelColor(LogLevel level) const
+QVector<int> LogModel::sanitizeFieldIndexes(const QVector<int>& indexes) const
 {
-    return m_logLevelColors.value(level, DEFAULT_BACKGROUND_COLOR);
+    QVector<int> sanitized;
+    sanitized.reserve(indexes.size());
+    for (const int fieldIndex : indexes) {
+        if (fieldIndex >= 0 && fieldIndex < m_availableFieldNames.size() && !sanitized.contains(fieldIndex))
+            sanitized.push_back(fieldIndex);
+    }
+    return sanitized;
 }
 
-#include "apptheme.h"
-
-QColor LogModel::defaultColorForLevel(LogLevel level) {
-    return AppTheme::instance().forLevel(level);
+void LogModel::notifyDisplayChanged()
+{
+    if (!m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0),
+                         index(m_filteredEntries.size() - 1, 0),
+                         {Qt::DisplayRole});
+    }
 }
 
 void LogModel::setAvailableFields(const QStringList& fieldNames)
@@ -451,54 +506,24 @@ void LogModel::setAvailableFields(const QStringList& fieldNames)
         return;
 
     m_availableFieldNames = fieldNames;
-
-    QVector<int> sanitized;
-    sanitized.reserve(m_visibleFieldIndexes.size());
-    for (const int indexValue : m_visibleFieldIndexes) {
-        if (indexValue >= 0 && indexValue < m_availableFieldNames.size() && !sanitized.contains(indexValue))
-            sanitized.push_back(indexValue);
-    }
-    m_visibleFieldIndexes = std::move(sanitized);
-
-    clearElideCache();
-    if (!m_filteredEntries.isEmpty()) {
-        emit dataChanged(index(0, 0),
-                         index(m_filteredEntries.size() - 1, 0),
-                         {Qt::DisplayRole, DisplayMessageRole});
-    }
+    m_visibleFieldIndexes = sanitizeFieldIndexes(m_visibleFieldIndexes);
+    notifyDisplayChanged();
 }
 
 void LogModel::setFieldDisplaySelection(bool enabled, const QVector<int>& visibleIndexes)
 {
-    QVector<int> sanitized;
-    sanitized.reserve(visibleIndexes.size());
-    for (const int fieldIndex : visibleIndexes) {
-        if (fieldIndex >= 0 && fieldIndex < m_availableFieldNames.size() && !sanitized.contains(fieldIndex))
-            sanitized.push_back(fieldIndex);
-    }
-
+    QVector<int> sanitized = sanitizeFieldIndexes(visibleIndexes);
     if (m_fieldFilterEnabled == enabled && m_visibleFieldIndexes == sanitized)
         return;
 
     m_fieldFilterEnabled = enabled;
     m_visibleFieldIndexes = std::move(sanitized);
-    clearElideCache();
-
-    if (!m_filteredEntries.isEmpty()) {
-        emit dataChanged(index(0, 0),
-                         index(m_filteredEntries.size() - 1, 0),
-                         {Qt::DisplayRole, DisplayMessageRole});
-    }
+    notifyDisplayChanged();
 }
 
 void LogModel::refreshDisplay()
 {
-    clearElideCache();
-    if (!m_filteredEntries.isEmpty()) {
-        emit dataChanged(index(0, 0),
-                         index(m_filteredEntries.size() - 1, 0),
-                         {Qt::DisplayRole, DisplayMessageRole});
-    }
+    notifyDisplayChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -539,17 +564,17 @@ QString LogModel::formatDisplayMessage(const LogEntry& entry) const
     return result;
 }
 
-QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround)
+QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround) const
 {
     if (text.isEmpty() || m_filteredEntries.isEmpty()) {
         return QModelIndex();
     }
 
-    int currentRow = startRow + 1;
-    int numRows = m_filteredEntries.size();
+    const int numRows = m_filteredEntries.size();
+    const int firstRow = qBound(0, startRow + 1, numRows);
 
     // Search from startRow + 1 to the end
-    for (int i = currentRow; i < numRows; ++i) {
+    for (int i = firstRow; i < numRows; ++i) {
         if (m_filteredEntries[i] && m_filteredEntries[i]->message.contains(text, cs)) {
             return index(i, 0);
         }
@@ -566,18 +591,17 @@ QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::
     return QModelIndex(); // Not found
 }
 
-QModelIndex LogModel::findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround)
+QModelIndex LogModel::findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround) const
 {
     if (text.isEmpty() || m_filteredEntries.isEmpty()) {
         return QModelIndex();
     }
 
-    int numRows = m_filteredEntries.size();
+    const int numRows = m_filteredEntries.size();
     int currentRow = startRow - 1;
     if (startRow < 0 || startRow >= numRows) { // If startRow is out of bounds, start from the end
         currentRow = numRows - 1;
     }
-
 
     // Search from startRow - 1 to the beginning
     for (int i = currentRow; i >= 0; --i) {

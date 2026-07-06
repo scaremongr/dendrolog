@@ -75,6 +75,17 @@ struct LogEntry {
 };
 
 
+// Компаратор для сортировки и слияния батчей записей (shared_ptr-обёртки).
+// Null-указатели считаются «большими» и уходят в конец. Строгое слабое
+// упорядочение: comp(x, x) == false, в том числе для двух null.
+inline bool logEntryPtrLess(const std::shared_ptr<LogEntry>& a,
+                            const std::shared_ptr<LogEntry>& b)
+{
+    if (!a || !b)
+        return a && !b;
+    return *a < *b;
+}
+
 // Преобразование enum → QString
 inline QString LevelToStr(LogLevel lvl) {
     switch (lvl) {

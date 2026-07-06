@@ -10,6 +10,7 @@
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
 #include "schemastore.h"
+#include "apptheme.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -873,6 +874,16 @@ void MainWindow::applyPatternToAllViews()
     m_progressBar->setValue(0);
     m_progressBar->show();
 
+    // Воркеры ниже перезаписывают entry->fields, а фоновая перефильтрация
+    // модели эти поля читает — останавливаем фильтр-джобы всех вкладок
+    // (с ожиданием) до старта. Фильтры переприменятся по завершении схемы
+    // в finishPatternApplication().
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->cancelPendingFilter(true);
+    }
+
     auto worker = [pattern](const std::shared_ptr<LogEntry>& entry) {
         if (entry)
             entry->fields = pattern->extractFields(entry->message);
@@ -899,8 +910,12 @@ void MainWindow::finishPatternApplication()
 {
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
+        if (lv && lv->model()) {
             lv->model()->refreshDisplay();
+            // Фильтр-джоб, отменённый на время переизвлечения полей, мог
+            // оставить список строк со старыми настройками — доводим.
+            lv->model()->reapplyFilterIfStale();
+        }
     }
 
     // Re-enables field display with the active selection (it was turned off
@@ -1496,13 +1511,14 @@ void MainWindow::updateLogLevelFilterButtons()
     auto updateButtonState = [&](QAction *action, LogLevel level)
     {
         bool active = false;
-        QColor baseColor = LogModel::defaultColorForLevel(level);
+        // Неактивная кнопка — насыщенный цвет уровня, активная — пастельный фон.
+        QColor baseColor = AppTheme::instance().forLevel(level);
 
         if (model)
         {
             active = model->logLevelFilter().contains(level);
             if (active)
-                baseColor = model->getLogLevelColor(level);
+                baseColor = AppTheme::instance().dimForLevel(level);
         }
         else
         {
@@ -1910,6 +1926,15 @@ void MainWindow::updateRecentFilesMenu()
         connect(a, &QAction::triggered, this, [this, filePath]() {
             openRecentFile(filePath);
         });
+    }
+}
+
+void MainWindow::openFilesFromCommandLine(const QStringList& paths)
+{
+    for (const QString& path : paths) {
+        const QFileInfo fi(path);
+        if (fi.isFile())
+            openRecentFile(fi.absoluteFilePath());
     }
 }
 

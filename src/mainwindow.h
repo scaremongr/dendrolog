@@ -51,6 +51,9 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+    // Открыть файлы, переданные в командной строке (LogViewer.exe a.log b.log).
+    void openFilesFromCommandLine(const QStringList& paths);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;

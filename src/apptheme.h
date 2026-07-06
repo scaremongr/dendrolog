@@ -42,6 +42,17 @@ public:
     QColor logTrace    {169, 169, 169}; // Светло-серый
     QColor logSeparator{180, 180, 180}; // Разделитель «/» между уровнями W/E/F
 
+    // ---- Пастельные (dim) варианты уровней -----------------------------------
+    // Приглушённые фоновые цвета уровней; сейчас используются для фона активных
+    // кнопок фильтра уровней в тулбаре (MainWindow::updateLogLevelFilterButtons).
+
+    QColor logDimFatal{230, 180, 180}; // Тёмно-розовый
+    QColor logDimError{255, 200, 200}; // Бледно-красный
+    QColor logDimWarn {255, 240, 180}; // Бледно-жёлтый
+    QColor logDimInfo {200, 255, 200}; // Бледно-зелёный
+    QColor logDimDebug{200, 200, 255}; // Бледно-голубой
+    QColor logDimTrace{220, 220, 220}; // Светло-серый
+
     // ---- Бейджи в дереве файлов (насыщенность ниже — для маленьких плашек) --
 
     QColor treeBadgeFatal{110,   0,   0}; // Тёмно-багровый
@@ -94,6 +105,19 @@ public:
             case LogLevel::Debug: return logDebug;
             case LogLevel::Trace: return logTrace;
             default:              return QColor(Qt::black);
+        }
+    }
+
+    // Пастельный (dim) цвет для произвольного уровня лога.
+    QColor dimForLevel(LogLevel level) const {
+        switch (level) {
+            case LogLevel::Fatal: return logDimFatal;
+            case LogLevel::Error: return logDimError;
+            case LogLevel::Warn:  return logDimWarn;
+            case LogLevel::Info:  return logDimInfo;
+            case LogLevel::Debug: return logDimDebug;
+            case LogLevel::Trace: return logDimTrace;
+            default:              return QColor(Qt::white);
         }
     }
 

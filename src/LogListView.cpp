@@ -218,6 +218,14 @@ void LogListView::setModel(QAbstractItemModel *model) {
             }
         });
 
+        // При вставке строк В СЕРЕДИНУ (слияние нескольких файлов по времени)
+        // номера существующих строк ниже точки вставки сдвигаются — переносим
+        // привязанное к ним состояние. Должно выполняться ДО общей инвалидации.
+        connect(model, &QAbstractItemModel::rowsInserted, this,
+                [this](const QModelIndex&, int first, int last) {
+                    shiftRowKeyedState(first, last - first + 1);
+                });
+
         // Инвалидация при вставке/удалении строк
         auto onRowsChanged = [this]() {
             invalidateRowState();
@@ -268,6 +276,40 @@ void LogListView::setModel(QAbstractItemModel *model) {
 }
 
 LogListView::~LogListView() {}
+
+void LogListView::shiftRowKeyedState(int first, int count)
+{
+    if (count <= 0)
+        return;
+
+    // Кэши строк (RowState, высоты, длины текстов) не сдвигаем — их целиком
+    // инвалидирует общий обработчик rowsInserted сразу после этого сдвига.
+
+    if (!m_toggledRows.isEmpty()) {
+        bool needShift = false;
+        for (auto it = m_toggledRows.cbegin(); it != m_toggledRows.cend(); ++it) {
+            if (*it >= first) { needShift = true; break; }
+        }
+        if (needShift) {
+            QSet<int> shifted;
+            shifted.reserve(m_toggledRows.size());
+            for (auto it = m_toggledRows.cbegin(); it != m_toggledRows.cend(); ++it)
+                shifted.insert(*it >= first ? *it + count : *it);
+            m_toggledRows = std::move(shifted);
+        }
+    }
+
+    if (m_searchMatchRow >= first)
+        m_searchMatchRow += count;
+    if (m_selection.anchorRow >= first)
+        m_selection.anchorRow += count;
+    if (m_selection.activeRow >= first)
+        m_selection.activeRow += count;
+    if (m_bracketMatch.row >= first)
+        m_bracketMatch.row += count;
+    if (m_anchorRow >= first)
+        m_anchorRow += count;
+}
 
 // Обновление кэша метрик шрифта (вызывать при смене шрифта)
 void LogListView::updateFontMetricsCache() {
