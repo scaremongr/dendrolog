@@ -1,5 +1,6 @@
 #include "syntaxhighlighter.h"
 #include "apptheme.h"
+#include "texttoken.h"
 
 // =============================================================================
 // Правила подсветки синтаксиса
@@ -179,65 +180,14 @@ int ruleNumber(const QString& text, int pos, const RuleColors& colors, QColor& o
 }
 
 // ── Путь к файлу: /unix/path, C:\win\path, ./rel/path ──────────────────
+// Алгоритм общий с выделением по двойному клику — TextToken::matchPathAt.
 int ruleFilePath(const QString& text, int pos, const RuleColors& colors, QColor& outColor)
 {
-    // Старт пути должен быть началом токена: иначе "X" из "SOMETEX:\abc"
-    // ошибочно опознаётся как драйв-буква.
-    if (!isTokenStart(text, pos)) return pos;
-
-    const QChar c0  = text[pos];
-    const int   len = text.length();
-
-    const bool isWinAbs = c0.isLetter() && pos + 2 < len
-                          && text[pos + 1] == ':'
-                          && (text[pos + 2] == '\\' || text[pos + 2] == '/');
-    const bool isUnixAbs = c0 == '/' && pos + 1 < len && text[pos + 1] != '/';
-    const bool isRelative = c0 == '.'
-                            && pos + 1 < len
-                            && (text[pos + 1] == '/'
-                                || (text[pos + 1] == '.' && pos + 2 < len && text[pos + 2] == '/'));
-
-    if (!isWinAbs && !isUnixAbs && !isRelative) return pos;
-
-    const auto isPathChar = [](QChar c) {
-        return c.isLetterOrNumber()
-            || c == '/' || c == '\\' || c == '.'
-            || c == '-' || c == '_'  || c == '@' || c == '~'
-            || c == '(' || c == ')';  // скобки в путях: "Program Files (x86)"
-        // ':' исключён — останавливаемся перед суффиксом вида :324
-    };
-
-    // Windows: драйв-префикс "C:\" / "C:/" уже проверен, сканируем с позиции pos+3
-    const int scanStart = isWinAbs ? pos + 3 : pos + 1;
-    int i = scanStart;
-    // Пробел разрешён внутри пути, только если за ним сразу следует обычный
-    // символ имени (буква/цифра): покрывает "C:\Program Files (x86)", но не
-    // даёт пути «съесть» текст после завершающего пробела.
-    while (i < len) {
-        if (isPathChar(text[i])) { ++i; continue; }
-        if (text[i] == ' ' && i + 1 < len
-            && (text[i + 1].isLetterOrNumber())) { ++i; continue; }
-        break;
-    }
-
-    if (isWinAbs) {
-        if (i < pos + 4) return pos;  // минимум C:\a
-    } else if (isRelative) {
-        if (i < pos + 4) return pos;  // минимум ./a
-    } else {
-        // Unix absolute: требуем хотя бы один внутренний разделитель (/a/b)
-        bool hasInternal = false;
-        for (int j = pos + 1; j < i; ++j) {
-            if (text[j] == '/' || text[j] == '\\') { hasInternal = true; break; }
-        }
-        if (!hasInternal) return pos;
-    }
-
-    // Обрезаем замыкающую пунктуацию и пробелы
-    while (i > pos + 1 && QStringLiteral(".,;: ").contains(text[i - 1])) --i;
+    const int end = TextToken::matchPathAt(text, pos);
+    if (end <= pos) return pos;
 
     outColor = colors.path;
-    return i;
+    return end;
 }
 
 // ── Вспомогательная: hex-цифра ──────────────────────────────────────────────

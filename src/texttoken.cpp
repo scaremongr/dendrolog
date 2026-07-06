@@ -78,6 +78,22 @@ std::pair<int,int> detectFilePath(const QString& text, int pos)
 {
     if (pos >= text.length()) return {-1, -1};
 
+    // 1) Якорные пути ("C:\…", "/…", "./…"): сканируем строку слева от клика
+    //    и проверяем, попадает ли позиция клика внутрь найденного пути. Так
+    //    пути с пробелами ("C:\Program Files (x86)\…") выделяются целиком —
+    //    расширение от позиции клика через пробел работать не может.
+    int lineStart = pos;
+    while (lineStart > 0 && text[lineStart - 1] != '\n') --lineStart;
+    for (int i = lineStart; i <= pos; ++i) {
+        const int e = TextToken::matchPathAt(text, i);
+        if (e > i) {
+            if (pos < e) return {i, e};
+            i = e - 1;  // путь закончился левее клика — ищем следующий
+        }
+    }
+
+    // 2) Fallback: путь без якоря ("src/main.cpp") — расширение от позиции
+    //    клика; пробелы здесь не допускаются.
     const auto isPathChar = [](QChar c) {
         return c.isLetterOrNumber() || QStringLiteral("_-.~/\\:@").contains(c);
     };
@@ -285,6 +301,77 @@ TokenType classify(const QString& text)
         return TokenType::FilePath;
 
     return TokenType::None;
+}
+
+int matchPathAt(const QString& text, int pos)
+{
+    const int len = text.length();
+    if (pos >= len) return pos;
+
+    // Старт пути должен быть началом токена: иначе "X" из "SOMETEX:\abc"
+    // ошибочно опознаётся как драйв-буква.
+    if (pos > 0) {
+        const QChar prev = text[pos - 1];
+        if (prev.isLetterOrNumber() || prev == '_') return pos;
+    }
+
+    const QChar c0 = text[pos];
+    const bool isWinAbs = c0.isLetter() && pos + 2 < len
+                          && text[pos + 1] == ':'
+                          && (text[pos + 2] == '\\' || text[pos + 2] == '/');
+    const bool isUnixAbs = c0 == '/' && pos + 1 < len && text[pos + 1] != '/';
+    const bool isRelative = c0 == '.'
+                            && pos + 1 < len
+                            && (text[pos + 1] == '/'
+                                || (text[pos + 1] == '.' && pos + 2 < len && text[pos + 2] == '/'));
+    if (!isWinAbs && !isUnixAbs && !isRelative) return pos;
+
+    // Символы, допустимые внутри пути. Windows запрещает в именах только
+    // < > : " / \ | ? * (плюс управляющие), поэтому набор широкий.
+    // Сознательно исключены: кавычки, ',' и ';' — в логах это почти всегда
+    // разделители; ':' — чтобы остановиться перед суффиксом вида :324.
+    const auto isPathChar = [](QChar c) {
+        return c.isLetterOrNumber()
+            || QStringLiteral("/\\._-@~()[]{}+&#$%!=^").contains(c);
+    };
+
+    // Windows: драйв-префикс "C:\" / "C:/" уже проверен, сканируем с pos+3
+    const int scanStart = isWinAbs ? pos + 3 : pos + 1;
+    int i = scanStart;
+    // Пробел разрешён внутри пути, только если за ним сразу следует обычный
+    // символ имени (буква/цифра) или открывающая скобка: покрывает
+    // "C:\Program Files (x86)", но не даёт пути «съесть» текст после
+    // завершающего пробела.
+    while (i < len) {
+        const QChar c = text[i];
+        if (isPathChar(c)) { ++i; continue; }
+        if (c == ' ' && i + 1 < len) {
+            const QChar next = text[i + 1];
+            if (next.isLetterOrNumber() || next == '(' || next == '[' || next == '{') {
+                ++i;
+                continue;
+            }
+        }
+        break;
+    }
+
+    if (isWinAbs) {
+        if (i < pos + 4) return pos;  // минимум C:\a
+    } else if (isRelative) {
+        if (i < pos + 4) return pos;  // минимум ./a
+    } else {
+        // Unix absolute: требуем хотя бы один внутренний разделитель (/a/b)
+        bool hasInternal = false;
+        for (int j = pos + 1; j < i; ++j) {
+            if (text[j] == '/' || text[j] == '\\') { hasInternal = true; break; }
+        }
+        if (!hasInternal) return pos;
+    }
+
+    // Обрезаем замыкающую пунктуацию и пробелы
+    while (i > pos + 1 && QStringLiteral(".,;:! ").contains(text[i - 1])) --i;
+
+    return i;
 }
 
 } // namespace TextToken

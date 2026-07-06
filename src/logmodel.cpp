@@ -389,6 +389,46 @@ void LogModel::applyFilter()
     emit modelFiltered(m_filteredEntries.size());
 }
 
+int LogModel::rowForEntry(int logicalEntryId, const void* sourceFile) const
+{
+    for (int i = 0; i < m_filteredEntries.size(); ++i) {
+        const auto& e = m_filteredEntries[i];
+        if (e->logicalEntryId == logicalEntryId && e->sourceFile.get() == sourceFile) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int LogModel::nearestVisibleRow(int logicalEntryId, const void* sourceFile) const
+{
+    if (m_filteredEntries.isEmpty()) {
+        return -1;
+    }
+
+    // m_filteredEntries — упорядоченная подпоследовательность m_allEntries,
+    // поэтому идём по обоим спискам одним проходом: j — количество видимых
+    // записей, расположенных до текущей позиции i в полном списке.
+    int j = 0;
+    for (int i = 0; i < m_allEntries.size(); ++i) {
+        const auto& e = m_allEntries[i];
+        const bool visible = (j < m_filteredEntries.size()
+                              && m_filteredEntries[j].get() == e.get());
+        if (e->logicalEntryId == logicalEntryId && e->sourceFile.get() == sourceFile) {
+            if (visible) {
+                return j;
+            }
+            // Запись скрыта: ближайшая видимая — первая после неё (j),
+            // если такой нет — последняя перед ней (j - 1).
+            return (j < m_filteredEntries.size()) ? j : j - 1;
+        }
+        if (visible) {
+            ++j;
+        }
+    }
+    return -1;
+}
+
 QColor LogModel::getColorForFile(const QString& filePath) const
 {
     return m_fileColors.value(filePath, Qt::darkGray); // Return darkGray if not found
