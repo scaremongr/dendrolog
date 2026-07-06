@@ -134,6 +134,17 @@ public:
 
     static QColor defaultColorForLevel(LogLevel level);
 
+    // ---- Поиск записи в отфильтрованном представлении -----------------------
+    // Идентификация записи — пара (logicalEntryId, sourceFile): logicalEntryId
+    // уникален только внутри одного файла.
+    // Точная строка записи в текущем отфильтрованном виде; -1 если запись
+    // скрыта фильтром или отсутствует.
+    int rowForEntry(int logicalEntryId, const void* sourceFile) const;
+    // Ближайшая к записи видимая строка (сама запись может быть скрыта
+    // фильтром). Возвращает -1, только если записи нет в m_allEntries или
+    // отфильтрованный список пуст.
+    int nearestVisibleRow(int logicalEntryId, const void* sourceFile) const;
+
     // Search methods
     QModelIndex findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true);
     QModelIndex findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true);

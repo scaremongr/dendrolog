@@ -38,4 +38,10 @@ Token findDoubleClickToken(const QString& text, int pos);
 // Возвращает Url / FilePath / Timestamp, либо None, если ничего не распознано.
 TokenType classify(const QString& text);
 
+// Путь к файлу, начинающийся точно в позиции pos (якоря: "C:\", "/", "./",
+// "../"). Допускает пробелы внутри пути ("C:\Program Files (x86)\…").
+// Возвращает позицию за концом пути, либо pos при промахе.
+// Общий алгоритм для подсветки синтаксиса и выделения по двойному клику.
+int matchPathAt(const QString& text, int pos);
+
 } // namespace TextToken

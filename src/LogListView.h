@@ -273,14 +273,23 @@ private:
     int m_anchorRow = -1;           // Строка-якорь для сохранения позиции при resize
     int m_anchorOffsetInViewport = 0; // Смещение якорной строки относительно viewport
 
-    // ========== Сохранение выделения при фильтрации ==========
+    // ========== Сохранение выделения и позиции при фильтрации ==========
     struct SelectionId {
         int logicalEntryId = -1;
         void* sourceFile = nullptr; // Используем void* чтобы не тащить зависимость от LogFilePtr в заголовочный файл QListView, либо можем подключить <memory> и объявить
         bool isValid() const { return logicalEntryId >= 0; }
         void clear() { logicalEntryId = -1; sourceFile = nullptr; }
     };
-    SelectionId m_pendingSelection;
+    // Долгоживущий якорь: ЗАПИСЬ (не номер строки), которую пользователь выбрал
+    // последней. Обновляется в currentChanged() и переживает любые reset модели.
+    // Благодаря этому выделение и позиция восстанавливаются даже если запись
+    // была временно скрыта фильтром, а затем фильтр сняли.
+    SelectionId m_persistentSelection;
+    // Транзиентный якорь вьюпорта: первая видимая строка на момент
+    // modelAboutToBeReset. Используется, когда выделения нет (или выделенная
+    // запись исчезла из данных), чтобы прокрутка не сбрасывалась на начало.
+    SelectionId m_resetViewportAnchor;
+    int m_resetViewportOffset = 0; // scrollY - rowTop якорной строки
 
     // Получить кэшированное состояние строки (вычисляет если нужно)
     // Возвращает по значению, чтобы избежать dangling reference при инвалидации кэша

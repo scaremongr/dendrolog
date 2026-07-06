@@ -107,23 +107,28 @@ void LogListView::setWordWrap(bool enabled) {
 
 void LogListView::setModel(QAbstractItemModel *model) {
     QListView::setModel(model);
+    m_persistentSelection.clear();
+    m_resetViewportAnchor.clear();
+    m_resetViewportOffset = 0;
     invalidateRowState();
     if (model) {
         // Полная инвалидация при сбросе модели (фильтрация, setEntries и т.п.)
-        // Запоминаем выделение ДО сброса модели.
-        // ВАЖНО: используем m_selection.anchorRow, а не selectionModel()->currentIndex() —
-        // QItemSelectionModel подключён к modelAboutToBeReset раньше нас и к моменту
-        // вызова нашего слота уже очищает currentIndex. anchorRow не зависит от selectionModel.
+        // Выделенную ЗАПИСЬ здесь запоминать не нужно — она уже хранится в
+        // m_persistentSelection (обновляется в currentChanged и переживает
+        // любые reset). Здесь захватываем только якорь вьюпорта — первую
+        // видимую строку — на случай, когда выделения нет вовсе.
         connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
-            m_pendingSelection.clear();
-            if (m_selection.anchorRow < 0) return;
+            m_resetViewportAnchor.clear();
+            m_resetViewportOffset = 0;
             auto* logModel = qobject_cast<LogModel*>(this->model());
             if (!logModel) return;
             const auto& entries = logModel->filteredEntries();
-            if (m_selection.anchorRow < entries.size()) {
-                m_pendingSelection.logicalEntryId = entries[m_selection.anchorRow]->logicalEntryId;
-                m_pendingSelection.sourceFile = entries[m_selection.anchorRow]->sourceFile.get();
-            }
+            if (entries.isEmpty()) return;
+            const int scrollY = verticalScrollBar()->value();
+            const int row = qBound(0, rowAtY(scrollY), (int)entries.size() - 1);
+            m_resetViewportAnchor.logicalEntryId = entries[row]->logicalEntryId;
+            m_resetViewportAnchor.sourceFile = entries[row]->sourceFile.get();
+            m_resetViewportOffset = scrollY - rowYOffset(row);
         });
 
         connect(model, &QAbstractItemModel::modelReset, this, [this]() {
@@ -135,49 +140,75 @@ void LogListView::setModel(QAbstractItemModel *model) {
             invalidateRowState();
             rebuildHeightCache();
 
-            // Восстанавливаем выделение по logicalEntryId и sourceFile.
-            int restoreRow = -1;
-            if (m_pendingSelection.isValid()) {
-                auto* logModel = qobject_cast<LogModel*>(this->model());
-                if (logModel) {
-                    const auto& entries = logModel->filteredEntries();
-                    for (int i = 0; i < entries.size(); ++i) {
-                        if (entries[i]->logicalEntryId == m_pendingSelection.logicalEntryId &&
-                            entries[i]->sourceFile.get() == m_pendingSelection.sourceFile) {
-                            restoreRow = i;
-                            break;
-                        }
-                    }
-                }
-                m_pendingSelection.clear();
+            auto* logModel = qobject_cast<LogModel*>(this->model());
+
+            // 1) Выделенная запись видна в новом наборе строк — восстанавливаем
+            //    выделение и центрируем на ней.
+            int selectedRow = -1;
+            if (logModel && m_persistentSelection.isValid()) {
+                selectedRow = logModel->rowForEntry(m_persistentSelection.logicalEntryId,
+                                                    m_persistentSelection.sourceFile);
             }
+
+            // 2) Запись скрыта фильтром — прокручиваем к ближайшей видимой.
+            //    Сам якорь НЕ сбрасываем: когда фильтр снимут, запись снова
+            //    найдётся точно, выделение и позиция вернутся.
+            int centerRow = selectedRow;
+            if (centerRow < 0 && logModel && m_persistentSelection.isValid()) {
+                centerRow = logModel->nearestVisibleRow(m_persistentSelection.logicalEntryId,
+                                                        m_persistentSelection.sourceFile);
+            }
+
+            // 3) Выделения не было (или запись исчезла из данных) — держим
+            //    вьюпорт на строке, которая была первой видимой до reset.
+            int viewportRow = -1;
+            if (centerRow < 0 && logModel && m_resetViewportAnchor.isValid()) {
+                viewportRow = logModel->nearestVisibleRow(m_resetViewportAnchor.logicalEntryId,
+                                                          m_resetViewportAnchor.sourceFile);
+            }
+            const int viewportOffset = m_resetViewportOffset;
+            m_resetViewportAnchor.clear();
+            m_resetViewportOffset = 0;
 
             // Обновляем скроллбар ДО вызова setCurrentIndex, чтобы первоначальные границы были корректны
             updateScrollbar();
 
-            // Если нашли нашу строку, мы должны её выделить и прокрутить к ней.
+            if (selectedRow >= 0 && selectionModel() && this->model()) {
+                selectionModel()->setCurrentIndex(
+                    this->model()->index(selectedRow, 0),
+                    QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+                m_selection.anchorRow = m_selection.activeRow = selectedRow;
+            } else {
+                // Строки старого выделения в новом наборе нет — сбрасываем
+                // текстовое выделение, иначе stale anchorRow подсветит чужую
+                // строку и испортит захват при следующем reset.
+                m_selection.clear();
+            }
+
             // ВАЖНО: Базовый QListView может откладывать вызовы updateGeometries() или внутренние пересчеты.
             // Поэтому прокрутку к элементу обязательно нужно делать через QTimer::singleShot,
             // чтобы наш код выполнился ПОСЛЕ того, как Qt закончит все свои внутренние обновления.
-            if (restoreRow >= 0 && selectionModel() && this->model()) {
-                selectionModel()->setCurrentIndex(
-                    this->model()->index(restoreRow, 0),
-                    QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-                m_selection.anchorRow = m_selection.activeRow = restoreRow;
+            if (centerRow >= 0 || viewportRow >= 0) {
+                QTimer::singleShot(0, this, [this, centerRow, viewportRow, viewportOffset]() {
+                    if (!this->model()) return;
+                    const int rowCount = this->model()->rowCount();
 
-                QTimer::singleShot(0, this, [this, restoreRow]() {
-                    if (!this->model() || restoreRow >= this->model()->rowCount()) return;
-                    
                     // Еще раз обновляем скроллбар на случай, если Qt что-то сбросило
                     updateScrollbar();
 
-                    // Вычисляем точную позицию новой строки в пикселях
-                    int rowY = rowYOffset(restoreRow);
-                    int rowH = getRowHeight(restoreRow);
-                    int vpH  = viewport()->height();
-                    
-                    // Центрируем строку на экране
-                    int target = qBound(0, rowY - (vpH - rowH) / 2, verticalScrollBar()->maximum());
+                    int target = -1;
+                    if (centerRow >= 0 && centerRow < rowCount) {
+                        // Центрируем строку на экране
+                        int rowY = rowYOffset(centerRow);
+                        int rowH = getRowHeight(centerRow);
+                        int vpH  = viewport()->height();
+                        target = qBound(0, rowY - (vpH - rowH) / 2, verticalScrollBar()->maximum());
+                    } else if (viewportRow >= 0 && viewportRow < rowCount) {
+                        // Восстанавливаем позицию вьюпорта с прежним смещением
+                        target = qBound(0, rowYOffset(viewportRow) + viewportOffset,
+                                        verticalScrollBar()->maximum());
+                    }
+                    if (target < 0) return;
                     verticalScrollBar()->setValue(target);
                     viewport()->update();
                 });
@@ -1838,6 +1869,20 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
 
 void LogListView::currentChanged(const QModelIndex &current, const QModelIndex &previous) {
     QListView::currentChanged(current, previous);
+
+    // Долгоживущий якорь выделения: запоминаем ЗАПИСЬ, а не номер строки.
+    // Invalid current (например, очистка при reset) якорь не затирает —
+    // именно он позволит восстановить выделение после смены фильтра.
+    if (current.isValid()) {
+        if (auto* logModel = qobject_cast<LogModel*>(model())) {
+            const auto& entries = logModel->filteredEntries();
+            if (current.row() >= 0 && current.row() < entries.size()) {
+                m_persistentSelection.logicalEntryId = entries[current.row()]->logicalEntryId;
+                m_persistentSelection.sourceFile = entries[current.row()]->sourceFile.get();
+            }
+        }
+    }
+
     // Во время drag-выделения anchorRow задан вручную — не сбрасывать.
     // При обычной навигации (клавиши, внешний setCurrentIndex) — сбрасываем текстовое выделение.
     if (!m_selection.isDragging && current.isValid() && current.row() != m_selection.anchorRow) {
