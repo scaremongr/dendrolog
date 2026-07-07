@@ -97,6 +97,9 @@ MainWindow::MainWindow(QWidget *parent)
     setupTimelineDock();
     setupDirectoryScanner();
     setupFieldVisibilityDock();
+    // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
+    // ДО loadSettings — restoreState() должен знать тулбар по objectName.
+    setupFilterStatusToolbar();
 
     // Propagate settings changes that originate from the Settings dialog
     // (e.g. word-wrap toggled there) back into the UI without requiring a restart.
@@ -473,6 +476,10 @@ void MainWindow::loadSettings()
     }
     rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
     s.endGroup();
+
+    // Чекбокс Log Fields восстановлен с blockSignals — синхронизировать
+    // кнопку-индикатор Fields вручную.
+    updateFilterStatusButtons();
 
     s.beginGroup("Filters");
     if (m_filterPanel) {
@@ -1112,6 +1119,12 @@ void MainWindow::setupTimelineDock()
 
     connect(m_timelinePanel, &TimelineHistogramWidget::timeClicked,
             this, &MainWindow::onTimelineTimeClicked);
+    connect(m_timelinePanel, &TimelineHistogramWidget::timeRangeSelected,
+            this, &MainWindow::onTimelineRangeSelected);
+    // «Reset time filter» из контекстного меню таймлайна — тот же сброс,
+    // что и кнопка Reset в доке Time Filter.
+    connect(m_timelinePanel, &TimelineHistogramWidget::resetRequested,
+            this, &MainWindow::onResetTimeFilterClicked);
 
     if (ui->menuView) {
         QAction* toggle = m_timelineDockWidget->toggleViewAction();
@@ -1130,6 +1143,120 @@ void MainWindow::setupTimelineDock()
         else
             ui->menuView->addAction(toggle);
         m_shortcutActions.insert(QStringLiteral("panelTimeline"), toggle);
+    }
+}
+
+void MainWindow::setupFilterStatusToolbar()
+{
+    QToolBar* tb = addToolBar(tr("Filters"));
+    tb->setObjectName(QStringLiteral("filterStatusToolBar"));
+
+    const auto makeAction = [&](const QString& text) {
+        QAction* a = tb->addAction(text);
+        a->setCheckable(true);
+        return a;
+    };
+    m_timeFilterStatusAction  = makeAction(tr("Time"));
+    m_textFilterStatusAction  = makeAction(tr("Text"));
+    m_fieldFilterStatusAction = makeAction(tr("Fields"));
+    m_markerStatusAction      = makeAction(tr("Markers"));
+
+    // triggered приходит только от клика пользователя (не от setChecked при
+    // синхронизации). После Apply/Reset реальное состояние перечитывается из
+    // модели — если применять было нечего, кнопка сама вернётся в «отжато».
+    connect(m_timeFilterStatusAction, &QAction::triggered, this, [this](bool on) {
+        if (on)
+            onApplyTimeFilterClicked();
+        else
+            onResetTimeFilterClicked();
+        updateFilterStatusButtons();
+    });
+    connect(m_textFilterStatusAction, &QAction::triggered, this, [this](bool on) {
+        if (on)
+            onApplyAllTextFiltersClicked();
+        else
+            onResetTextFiltersClicked();
+        updateFilterStatusButtons();
+    });
+    connect(m_fieldFilterStatusAction, &QAction::triggered, this, [this](bool on) {
+        // Дальше отрабатывает toggled-пайплайн самого чекбокса Log Fields.
+        if (m_fieldFilterEnabledCheckBox)
+            m_fieldFilterEnabledCheckBox->setChecked(on);
+        updateFilterStatusButtons();
+    });
+    connect(m_markerStatusAction, &QAction::triggered, this, [this](bool on) {
+        if (on)
+            onApplyRowMarkersClicked();
+        else
+            onResetRowMarkersClicked();
+        updateFilterStatusButtons();
+    });
+
+    // Глобальный чекбокс Log Fields могут переключить и из самого дока.
+    if (m_fieldFilterEnabledCheckBox)
+        connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled,
+                this, &MainWindow::updateFilterStatusButtons);
+
+    updateFilterStatusButtons();
+}
+
+void MainWindow::updateFilterStatusButtons()
+{
+    if (!m_timeFilterStatusAction)
+        return; // тулбар ещё не создан
+
+    LogModel* model = (m_activeLogView && m_activeLogView->model())
+                          ? m_activeLogView->model()
+                          : nullptr;
+
+    // Time (пер-вкладочный)
+    {
+        const bool active = model && (model->startTimeFilter().isValid()
+                                      || model->endTimeFilter().isValid());
+        m_timeFilterStatusAction->setEnabled(model != nullptr);
+        m_timeFilterStatusAction->setChecked(active);
+        m_timeFilterStatusAction->setToolTip(active
+            ? tr("Time filter: %1 – %2\nClick to reset")
+                  .arg(model->startTimeFilter().toString(QStringLiteral("dd.MM.yyyy HH:mm:ss")),
+                       model->endTimeFilter().toString(QStringLiteral("dd.MM.yyyy HH:mm:ss")))
+            : tr("Time filter is off\nClick to apply the range from the Time Filter panel"));
+    }
+
+    // Text (пер-вкладочный)
+    {
+        int ruleCount = 0;
+        if (model) {
+            for (const FilterRule& r : model->filterRules().rules)
+                if (r.isActive())
+                    ++ruleCount;
+        }
+        m_textFilterStatusAction->setEnabled(model != nullptr);
+        m_textFilterStatusAction->setChecked(ruleCount > 0);
+        m_textFilterStatusAction->setToolTip(ruleCount > 0
+            ? tr("Text filters: %n active rule(s)\nClick to reset", nullptr, ruleCount)
+            : tr("Text filters are off\nClick to apply rules from the Text Filters panel"));
+    }
+
+    // Fields (глобальный — действует на все вкладки)
+    {
+        const bool active = m_fieldFilterEnabledCheckBox
+                         && m_fieldFilterEnabledCheckBox->isChecked();
+        m_fieldFilterStatusAction->setChecked(active);
+        m_fieldFilterStatusAction->setToolTip(active
+            ? tr("Field filtering: %1 of %2 blocks shown (all tabs)\nClick to show full lines")
+                  .arg(selectedVisibleFieldIndexes().size())
+                  .arg(m_fieldCheckBoxes.size())
+            : tr("Field filtering is off\nClick to show only the blocks selected in the Log Fields panel"));
+    }
+
+    // Row highlighters (пер-вкладочные; строки не скрывают, но индикатор полезен)
+    {
+        const int markerCount = model ? model->rowMarkers().size() : 0;
+        m_markerStatusAction->setEnabled(model != nullptr);
+        m_markerStatusAction->setChecked(markerCount > 0);
+        m_markerStatusAction->setToolTip(markerCount > 0
+            ? tr("Row highlighters: %n marker(s) applied\nClick to clear", nullptr, markerCount)
+            : tr("Row highlighters are off\nClick to apply markers from the Row Highlighters panel"));
     }
 }
 
@@ -1195,6 +1322,7 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     }
     syncReloadButton();
     updateFilterInputsFromModel();
+    updateFilterStatusButtons();
 }
 
 void MainWindow::disconnectFromLogView(LogViewWidget *logView)
@@ -1242,6 +1370,7 @@ void MainWindow::onCurrentTabChanged(int index)
     updateStatusBarDefaultText();
     updateLogLevelFilterButtons();
     updateFilterInputsFromModel();
+    updateFilterStatusButtons();
 }
 
 void MainWindow::on_actionOpen_triggered()
@@ -1768,6 +1897,46 @@ void MainWindow::onTimelineTimeClicked(const QDateTime& time, bool preferErrors)
     m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
 }
 
+void MainWindow::onTimelineRangeSelected(const QDateTime& from, const QDateTime& to)
+{
+    if (!from.isValid() || !to.isValid() || from >= to
+        || !m_activeLogView || !m_activeLogView->model())
+        return;
+
+    // Синхронизируем поля дока Time Filter, чтобы Apply/Reset там работали
+    // с выделенным интервалом, но сам док не показываем и не поднимаем.
+    if (m_timeFilterFrom)
+        m_timeFilterFrom->setDateTime(from);
+    if (m_timeFilterTo)
+        m_timeFilterTo->setDateTime(to);
+
+    // Интервал покрывает весь файл (zoom-out «до упора») — честнее снять
+    // фильтр по времени совсем, чем держать фильтр шире данных.
+    const auto& all = m_activeLogView->model()->allEntries();
+    int allEnd = all.size();
+    while (allEnd > 0) {
+        const auto& e = all[allEnd - 1];
+        if (e && e->timestamp.isValid())
+            break;
+        --allEnd;
+    }
+    if (allEnd > 0 && all.first() && all.first()->timestamp.isValid()
+        && from <= all.first()->timestamp && to >= all[allEnd - 1]->timestamp)
+    {
+        m_activeLogView->model()->setTimeRangeFilter(QDateTime(), QDateTime());
+        if (m_applyTimeFilterButton)
+            m_applyTimeFilterButton->setChecked(false);
+        return;
+    }
+
+    // Фильтр применяется исходными границами, не значениями QDateTimeEdit:
+    // редактор обрезает время до отображаемых секций (теряет миллисекунды),
+    // и записи на краях интервала выпадали бы из выборки.
+    m_activeLogView->model()->setTimeRangeFilter(from, to);
+    if (m_applyTimeFilterButton)
+        m_applyTimeFilterButton->setChecked(true);
+}
+
 void MainWindow::onApplyAllTextFiltersClicked()
 {
     applyTextFiltersToActiveView();
@@ -1788,6 +1957,9 @@ void MainWindow::onResetTextFiltersClicked()
 void MainWindow::onApplyRowMarkersClicked()
 {
     applyRowMarkersToActiveView();
+    // Маркеры не перефильтровывают модель (modelFiltered не придёт) —
+    // кнопку-индикатор обновляем явно.
+    updateFilterStatusButtons();
 }
 
 void MainWindow::onResetRowMarkersClicked()
@@ -1796,6 +1968,7 @@ void MainWindow::onResetRowMarkersClicked()
     // остаются и могут быть применены заново.
     if (m_activeLogView && m_activeLogView->model())
         m_activeLogView->model()->setRowMarkers({});
+    updateFilterStatusButtons();
 }
 
 void MainWindow::applyTextFiltersToActiveView()
@@ -1895,6 +2068,9 @@ void MainWindow::handleModelFiltered()
         int totalRows = m_activeLogView->model()->rowCount();
         handleTotalRowCountChanged(totalRows);
     }
+    // Любая перефильтрация (Apply/Reset из панелей, зум таймлайна, уровни)
+    // могла изменить состояние фильтров — обновить кнопки-индикаторы.
+    updateFilterStatusButtons();
 }
 
 void MainWindow::onScanDirectoryClicked()

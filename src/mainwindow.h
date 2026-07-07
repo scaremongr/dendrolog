@@ -91,6 +91,9 @@ private slots:
     // Клик по таймлайн-гистограмме: переход к моменту (или к ближайшей
     // ошибке, если клик пришёлся в дорожку Warn/Error/Fatal).
     void onTimelineTimeClicked(const QDateTime& time, bool preferErrors);
+    // Протяжка по таймлайну: применить выделенный интервал к фильтру по
+    // времени (поля дока Time Filter синхронизируются, док не поднимается).
+    void onTimelineRangeSelected(const QDateTime& from, const QDateTime& to);
     void onApplyAllTextFiltersClicked(); // Apply из конструктора фильтров (активная вкладка)
     void onResetTextFiltersClicked();    // Reset — снять фильтры с активной вкладки
     void onApplyRowMarkersClicked();     // Apply из панели маркеров (активная вкладка)
@@ -143,6 +146,16 @@ private:
     // Таймлайн-гистограмма плотности записей (нижний док, создаётся в коде).
     TimelineHistogramWidget* m_timelinePanel = nullptr;
     QDockWidget* m_timelineDockWidget = nullptr;
+
+    // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
+    // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной
+    // вкладке, Fields — глобально). Отжать = Reset этого фильтра,
+    // зажать = Apply текущих настроек его панели. Состояние синхронизирует
+    // updateFilterStatusButtons().
+    QAction* m_timeFilterStatusAction = nullptr;
+    QAction* m_textFilterStatusAction = nullptr;
+    QAction* m_fieldFilterStatusAction = nullptr;
+    QAction* m_markerStatusAction = nullptr;
 
     // Directory Scanner related members
     QString m_lastOpenDir;
@@ -206,6 +219,7 @@ private:
     void setupTextFilterDockContents();
     void setupRowMarkerDock();          // Док Row Highlighters
     void setupTimelineDock();           // Док Timeline (гистограмма по времени)
+    void setupFilterStatusToolbar();    // Тулбар «Filters» (индикаторы-кнопки фильтров)
     void setupDirectoryScanner();
     void setupFieldVisibilityDock();    // New: Log Fields panel
 
@@ -214,6 +228,7 @@ private:
     void disconnectFromLogView(LogViewWidget* logView);
     void updateStatusBarDefaultText();
     void updateLogLevelFilterButtons();
+    void updateFilterStatusButtons();
     void setFilterLogLvl(LogLevel level, bool add);
 
     // Factory: creates a LogViewWidget with current global settings pre-applied
