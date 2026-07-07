@@ -2,11 +2,51 @@
 #include "apptheme.h"
 #include "logmodel.h"
 
+#include <QContextMenuEvent>
 #include <QLocale>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPolygon>
 #include <QTimer>
+#include <QWheelEvent>
+
+#include <cmath>
+
+// «6 d 06 h», «1 h 05 min», «4 min 30 s», «12 s», «350 ms» — для плашек.
+static QString durationText(qint64 ms)
+{
+    if (ms < 1000)
+        return QStringLiteral("%1 ms").arg(ms);
+    qint64 s = ms / 1000;
+    if (s < 60)
+        return QStringLiteral("%1 s").arg(s);
+    qint64 m = s / 60;
+    s %= 60;
+    if (m < 60)
+        return QStringLiteral("%1 min %2 s").arg(m).arg(s, 2, 10, QLatin1Char('0'));
+    qint64 h = m / 60;
+    m %= 60;
+    if (h < 24)
+        return QStringLiteral("%1 h %2 min").arg(h).arg(m, 2, 10, QLatin1Char('0'));
+    const qint64 d = h / 24;
+    h %= 24;
+    return QStringLiteral("%1 d %2 h").arg(d).arg(h, 2, 10, QLatin1Char('0'));
+}
+
+// «07.07.2026 10:41:20 – 11:02:10  (20 min 50 s)»; дата у правой границы
+// повторяется, только если день другой — логи легко тянутся на много суток.
+static QString rangeText(qint64 fromMs, qint64 toMs)
+{
+    const QDateTime from = QDateTime::fromMSecsSinceEpoch(fromMs);
+    const QDateTime to   = QDateTime::fromMSecsSinceEpoch(toMs);
+    const QString timeFmt = (toMs - fromMs) < 3600000 ? QStringLiteral("HH:mm:ss")
+                                                      : QStringLiteral("HH:mm");
+    const QString dateFmt = QStringLiteral("dd.MM.yyyy ") + timeFmt;
+    return from.toString(dateFmt) + QStringLiteral(" – ")
+        + to.toString(to.date() == from.date() ? timeFmt : dateFmt)
+        + QStringLiteral("  (") + durationText(toMs - fromMs) + QLatin1Char(')');
+}
 
 TimelineHistogramWidget::TimelineHistogramWidget(QWidget* parent)
     : QWidget(parent)
@@ -24,6 +64,19 @@ TimelineHistogramWidget::TimelineHistogramWidget(QWidget* parent)
     m_rebuildTimer->setInterval(200);
     connect(m_rebuildTimer, &QTimer::timeout, this, [this]() {
         rebuildHistogram();
+        update();
+    });
+
+    // Коммит накопленного Ctrl+wheel-зума после паузы между тиками.
+    m_zoomCommitTimer = new QTimer(this);
+    m_zoomCommitTimer->setSingleShot(true);
+    m_zoomCommitTimer->setInterval(300);
+    connect(m_zoomCommitTimer, &QTimer::timeout, this, [this]() {
+        if (!m_zoomPending)
+            return;
+        m_zoomPending = false;
+        emit timeRangeSelected(QDateTime::fromMSecsSinceEpoch(m_pendingMin),
+                               QDateTime::fromMSecsSinceEpoch(m_pendingMax));
         update();
     });
 }
@@ -57,7 +110,10 @@ void TimelineHistogramWidget::setModel(LogModel* model)
         });
     }
 
-    // Смена вкладки — перестроить сразу, без дебаунса.
+    // Смена вкладки — перестроить сразу, без дебаунса; недокоммиченный
+    // зум прежней модели больше не имеет смысла.
+    m_zoomPending = false;
+    m_zoomCommitTimer->stop();
     m_rebuildTimer->stop();
     rebuildHistogram();
     update();
@@ -97,10 +153,37 @@ void TimelineHistogramWidget::rebuildHistogram()
         --validEnd;
     }
 
-    if (validEnd > 0 && entriesPtr->first() && entriesPtr->first()->timestamp.isValid()) {
+    // Диапазон шкалы: границы данных, РАСШИРЕННЫЕ до границ активного
+    // фильтра по времени. Так zoom-out за пределы загруженных данных виден
+    // как пустые поля по краям (иначе шкала прижимается к данным и отдаление
+    // «не применяется» визуально), а зум в пустой промежуток не блокирует
+    // дальнейшую работу колеса.
+    const bool haveEntries = validEnd > 0 && entriesPtr->first()
+                          && entriesPtr->first()->timestamp.isValid();
+    qint64 viewMin = 0, viewMax = 0;
+    if (haveEntries) {
+        viewMin = entriesPtr->first()->timestamp.toMSecsSinceEpoch();
+        viewMax = (*entriesPtr)[validEnd - 1]->timestamp.toMSecsSinceEpoch();
+    }
+    if (m_model) {
+        const QDateTime fs = m_model->startTimeFilter();
+        const QDateTime fe = m_model->endTimeFilter();
+        if (fs.isValid() && fe.isValid() && fs < fe) {
+            if (haveEntries) {
+                viewMin = qMin(viewMin, fs.toMSecsSinceEpoch());
+                viewMax = qMax(viewMax, fe.toMSecsSinceEpoch());
+            } else {
+                viewMin = fs.toMSecsSinceEpoch();
+                viewMax = fe.toMSecsSinceEpoch();
+            }
+            m_hasData = true; // пустое окно фильтра — шкала и зум живут
+        }
+    }
+
+    if (haveEntries || m_hasData) {
         const QVector<std::shared_ptr<LogEntry>>& entries = *entriesPtr;
-        m_tMin = entries.first()->timestamp.toMSecsSinceEpoch();
-        m_tMax = entries[validEnd - 1]->timestamp.toMSecsSinceEpoch();
+        m_tMin = viewMin;
+        m_tMax = viewMax;
         const qint64 span = qMax<qint64>(1, m_tMax - m_tMin);
         m_hasData = true;
 
@@ -283,8 +366,22 @@ void TimelineHistogramWidget::renderCache()
     // Подписи дорожек. Идентичность серий — не только цветом: чип + имя.
     const QFontMetrics fm = fontMetrics();
     p.setPen(mutedInk);
-    p.drawText(l.label1, Qt::AlignLeft | Qt::AlignVCenter,
-               tr("All entries — %1").arg(loc.toString(qlonglong(m_totalPrefix.last()))));
+    const QString countText =
+        tr("All entries — %1").arg(loc.toString(qlonglong(m_totalPrefix.last())));
+    p.drawText(l.label1, Qt::AlignLeft | Qt::AlignVCenter, countText);
+
+    // Справа — покрываемый шкалой диапазон: после зума (фильтра по времени)
+    // сразу видно, на какой отрезок «смотрим». Прячем, если не влезает.
+    const QDateTime rangeFrom = QDateTime::fromMSecsSinceEpoch(m_tMin);
+    const QDateTime rangeTo   = QDateTime::fromMSecsSinceEpoch(m_tMax);
+    const QString rangeLabel = rangeFrom.toString(QStringLiteral("dd.MM.yyyy HH:mm:ss"))
+        + QStringLiteral(" – ")
+        + rangeTo.toString(rangeTo.date() == rangeFrom.date()
+                               ? QStringLiteral("HH:mm:ss")
+                               : QStringLiteral("dd.MM.yyyy HH:mm:ss"))
+        + QStringLiteral("  (") + durationText(m_tMax - m_tMin) + QLatin1Char(')');
+    if (fm.horizontalAdvance(countText) + fm.horizontalAdvance(rangeLabel) + 24 <= l.label1.width())
+        p.drawText(l.label1, Qt::AlignRight | Qt::AlignVCenter, rangeLabel);
 
     struct LegendItem {
         QColor  color;
@@ -349,10 +446,25 @@ void TimelineHistogramWidget::paintAxis(QPainter& p, const Layout& l) const
         qint64(QDateTime::fromMSecsSinceEpoch(m_tMin).offsetFromUtc()) * 1000;
     qint64 tick = ((m_tMin + utcOffsetMs + step - 1) / step) * step - utcOffsetMs;
 
+    // Лог может тянуться на много суток: у первого тика (при
+    // многодневной шкале) и на каждой смене дня подпись получает дату.
+    QDate prevDate;
+    bool firstTick = true;
     for (; tick <= m_tMax; tick += step) {
         const int x = l.plotX + int((tick - m_tMin) * l.plotW / span);
         p.drawLine(x, l.axis.top(), x, l.axis.top() + 3);
-        const QString text = QDateTime::fromMSecsSinceEpoch(tick).toString(QLatin1String(fmt));
+
+        const QDateTime dt = QDateTime::fromMSecsSinceEpoch(tick);
+        QString text = dt.toString(QLatin1String(fmt));
+        if (step < 86400000LL) {
+            const bool withDate = firstTick ? (span > 86400000LL)
+                                            : (dt.date() != prevDate);
+            if (withDate)
+                text.prepend(dt.toString(QStringLiteral("dd.MM ")));
+        }
+        prevDate = dt.date();
+        firstTick = false;
+
         const int tw = fm.horizontalAdvance(text);
         const int tx = x - tw / 2;
         if (tx < 1 || tx + tw > width() - 1)
@@ -451,6 +563,80 @@ void TimelineHistogramWidget::paintHoverOverlay(QPainter& p, const Layout& l) co
     }
 }
 
+void TimelineHistogramWidget::drawInfoBox(QPainter& p, const Layout& l,
+                                          const QString& text, int centerX) const
+{
+    const QFontMetrics fm = fontMetrics();
+    const int pad = 6;
+    const int boxW = fm.horizontalAdvance(text) + pad * 2;
+    const int boxH = fm.height() + pad * 2;
+    const int bx = qBound(2, centerX - boxW / 2, qMax(2, width() - boxW - 2));
+    const int by = qMax(2, l.plot1.top());
+
+    QColor bg = palette().color(QPalette::ToolTipBase);
+    bg.setAlpha(245);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(palette().color(QPalette::Mid));
+    p.setBrush(bg);
+    p.drawRoundedRect(QRect(bx, by, boxW, boxH), 3, 3);
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(palette().color(QPalette::ToolTipText));
+    p.drawText(bx + pad, by + pad + fm.ascent(), text);
+}
+
+void TimelineHistogramWidget::paintDragOverlay(QPainter& p, const Layout& l) const
+{
+    const int x0 = qMin(m_pressPos.x(), m_dragCurX);
+    const int x1 = qMax(m_pressPos.x(), m_dragCurX);
+    const QRect sel(x0, l.plot1.top(), x1 - x0 + 1, l.plot2.bottom() - l.plot1.top() + 1);
+
+    const AppTheme& t = AppTheme::instance();
+    QColor fill = t.selectionFill;
+    fill.setAlpha(70);
+    p.fillRect(sel, fill);
+    QColor edge = t.badgeBg;
+    edge.setAlpha(200);
+    p.setPen(edge);
+    p.drawLine(sel.left(), sel.top(), sel.left(), sel.bottom());
+    p.drawLine(sel.right(), sel.top(), sel.right(), sel.bottom());
+
+    const qint64 span = qMax<qint64>(1, m_tMax - m_tMin);
+    const qint64 from = m_tMin + qint64(qBound(0, x0 - l.plotX, l.plotW - 1)) * span / l.plotW;
+    const qint64 to   = m_tMin + qint64(qBound(0, x1 - l.plotX, l.plotW - 1) + 1) * span / l.plotW;
+    drawInfoBox(p, l, rangeText(from, to), (x0 + x1) / 2);
+}
+
+void TimelineHistogramWidget::paintZoomOverlay(QPainter& p, const Layout& l) const
+{
+    const qint64 span = qMax<qint64>(1, m_tMax - m_tMin);
+    const auto xOf = [&](qint64 ms) {
+        const qint64 col = qBound<qint64>(0, (ms - m_tMin) * l.plotW / span, qint64(l.plotW));
+        return l.plotX + int(col);
+    };
+    const int x0 = xOf(m_pendingMin);
+    const int x1 = xOf(m_pendingMax);
+
+    // Затемняем то, что останется за пределами будущего окна (при
+    // отдалении pending-границы шире данных — затемнять нечего).
+    QColor shade = palette().color(QPalette::Window);
+    shade.setAlpha(160);
+    const int top = l.plot1.top();
+    const int h = l.plot2.bottom() - top + 1;
+    if (x0 > l.plotX)
+        p.fillRect(QRect(l.plotX, top, x0 - l.plotX, h), shade);
+    if (x1 < l.plotX + l.plotW)
+        p.fillRect(QRect(x1, top, l.plotX + l.plotW - x1, h), shade);
+
+    QColor edge = AppTheme::instance().badgeBg;
+    edge.setAlpha(200);
+    p.setPen(edge);
+    p.drawLine(x0, top, x0, top + h - 1);
+    p.drawLine(x1, top, x1, top + h - 1);
+
+    drawInfoBox(p, l, rangeText(m_pendingMin, m_pendingMax), (x0 + x1) / 2);
+}
+
 void TimelineHistogramWidget::paintEvent(QPaintEvent* /*event*/)
 {
     if (m_cacheDirty || m_cache.size() != size() * devicePixelRatio())
@@ -486,7 +672,12 @@ void TimelineHistogramWidget::paintEvent(QPaintEvent* /*event*/)
         }
     }
 
-    paintHoverOverlay(p, l);
+    if (m_dragging)
+        paintDragOverlay(p, l);
+    else if (m_zoomPending)
+        paintZoomOverlay(p, l);
+    else
+        paintHoverOverlay(p, l);
 }
 
 void TimelineHistogramWidget::resizeEvent(QResizeEvent* event)
@@ -505,24 +696,146 @@ void TimelineHistogramWidget::changeEvent(QEvent* event)
 void TimelineHistogramWidget::mouseMoveEvent(QMouseEvent* event)
 {
     m_hoverPos = event->pos();
+    if (m_pressPos.x() >= 0) {
+        const Layout l = layoutForSize(size());
+        m_dragCurX = qBound(l.plotX, event->pos().x(), l.plotX + l.plotW - 1);
+        if (!m_dragging && qAbs(m_dragCurX - m_pressPos.x()) >= kDragThresholdPx)
+            m_dragging = true;
+    }
     update();
     QWidget::mouseMoveEvent(event);
 }
 
 void TimelineHistogramWidget::mousePressEvent(QMouseEvent* event)
 {
+    // Правая кнопка во время протяжки — отмена выделения (и не показывать
+    // контекстное меню по этому же клику).
+    if (event->button() == Qt::RightButton && m_pressPos.x() >= 0) {
+        m_pressPos = QPoint(-1, -1);
+        m_dragging = false;
+        m_suppressContextMenu = true;
+        update();
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && m_hasData) {
         const Layout l = layoutForSize(size());
         const int x = event->pos().x();
         if (x >= l.plotX && x < l.plotX + l.plotW) {
-            const bool preferErrors = event->pos().y() >= l.label2.top()
-                                   && event->pos().y() <= l.plot2.bottom();
-            emit timeClicked(QDateTime::fromMSecsSinceEpoch(timeAtX(x, l)), preferErrors);
+            // Клик или начало протяжки — решается в mouseReleaseEvent.
+            m_pressPos = event->pos();
+            m_dragCurX = x;
+            m_dragging = false;
             event->accept();
             return;
         }
     }
     QWidget::mousePressEvent(event);
+}
+
+void TimelineHistogramWidget::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && m_pressPos.x() >= 0) {
+        const QPoint press = m_pressPos;
+        const bool wasDragging = m_dragging;
+        m_pressPos = QPoint(-1, -1);
+        m_dragging = false;
+
+        if (m_hasData) {
+            const Layout l = layoutForSize(size());
+            if (wasDragging) {
+                // Интервал — от начала левой колонки до конца правой.
+                const qint64 span = qMax<qint64>(1, m_tMax - m_tMin);
+                const int x0 = qMin(press.x(), m_dragCurX) - l.plotX;
+                const int x1 = qMax(press.x(), m_dragCurX) - l.plotX;
+                const qint64 from = m_tMin + qint64(qBound(0, x0, l.plotW - 1)) * span / l.plotW;
+                const qint64 to   = m_tMin + qint64(qBound(0, x1, l.plotW - 1) + 1) * span / l.plotW;
+                emit timeRangeSelected(QDateTime::fromMSecsSinceEpoch(from),
+                                       QDateTime::fromMSecsSinceEpoch(to));
+            } else {
+                const bool preferErrors = press.y() >= l.label2.top()
+                                       && press.y() <= l.plot2.bottom();
+                emit timeClicked(QDateTime::fromMSecsSinceEpoch(timeAtX(press.x(), l)),
+                                 preferErrors);
+            }
+        }
+        update();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
+}
+
+void TimelineHistogramWidget::wheelEvent(QWheelEvent* event)
+{
+    if (!(event->modifiers() & Qt::ControlModifier) || !m_hasData) {
+        QWidget::wheelEvent(event);
+        return;
+    }
+    const Layout l = layoutForSize(size());
+    const int x = int(event->position().x());
+    if (x < l.plotX || x >= l.plotX + l.plotW) {
+        event->accept();
+        return;
+    }
+
+    // База — накопленный незакоммиченный зум либо текущие границы шкалы.
+    const qint64 curMin = m_zoomPending ? m_pendingMin : m_tMin;
+    const qint64 curMax = m_zoomPending ? m_pendingMax : m_tMax;
+
+    // Предел отдаления — полный диапазон файла (allEntries, а не текущая
+    // отфильтрованная выборка): zoom-out после зума выделением раздвигает
+    // фильтр вплоть до целого файла и останавливается на его границах.
+    qint64 fullMin = curMin, fullMax = curMax;
+    if (m_model) {
+        const auto& all = m_model->allEntries();
+        int end = all.size();
+        while (end > 0) {
+            const auto& e = all[end - 1];
+            if (e && e->timestamp.isValid())
+                break;
+            --end;
+        }
+        if (end > 0 && all.first() && all.first()->timestamp.isValid()) {
+            fullMin = qMin(fullMin, all.first()->timestamp.toMSecsSinceEpoch());
+            fullMax = qMax(fullMax, all[end - 1]->timestamp.toMSecsSinceEpoch());
+        }
+    }
+
+    // Время под курсором — якорь: остаётся на том же x после зума.
+    const double frac = double(x - l.plotX) / l.plotW;
+    const double anchor = double(curMin) + frac * double(curMax - curMin);
+
+    const double steps = event->angleDelta().y() / 120.0;
+    const double factor = std::pow(1.5, steps); // >1 — приближение
+    double newSpan = double(curMax - curMin) / factor;
+    newSpan = qMax(newSpan, 100.0); // не уже 100 мс
+
+    m_pendingMin = qMax(qint64(anchor - frac * newSpan), fullMin);
+    m_pendingMax = qMin(qint64(anchor + (1.0 - frac) * newSpan), fullMax);
+    if (m_pendingMax <= m_pendingMin)
+        m_pendingMax = m_pendingMin + 1;
+    m_zoomPending = true;
+    m_zoomCommitTimer->start(); // рестарт паузы на каждом тике
+    update();
+    event->accept();
+}
+
+void TimelineHistogramWidget::contextMenuEvent(QContextMenuEvent* event)
+{
+    if (m_suppressContextMenu) {
+        m_suppressContextMenu = false;
+        event->accept();
+        return;
+    }
+
+    QMenu menu(this);
+    QAction* resetAction = menu.addAction(tr("Reset time filter"));
+    resetAction->setEnabled(m_model != nullptr);
+    connect(resetAction, &QAction::triggered,
+            this, &TimelineHistogramWidget::resetRequested);
+    menu.exec(event->globalPos());
+    event->accept();
 }
 
 void TimelineHistogramWidget::leaveEvent(QEvent* event)

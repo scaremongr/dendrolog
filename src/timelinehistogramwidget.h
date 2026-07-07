@@ -58,12 +58,26 @@ signals:
     // а не просто к ближайшей по времени строке.
     void timeClicked(const QDateTime& time, bool preferErrors);
 
+    // Протяжка левой кнопкой — выделен временной интервал (from < to,
+    // границы — края крайних колонок). Получатель применяет его к фильтру
+    // по времени. Короткое движение (< kDragThresholdPx) остаётся кликом.
+    // Ctrl+колесо шлёт тот же сигнал: новые границы вокруг курсора-якоря
+    // (тики накапливаются и коммитятся одним сигналом после паузы).
+    void timeRangeSelected(const QDateTime& from, const QDateTime& to);
+
+    // Контекстное меню «Reset time filter»: снять фильтр по времени
+    // (отменить зум), не открывая док Time Filter.
+    void resetRequested();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void changeEvent(QEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
     void leaveEvent(QEvent* event) override;
 
 private:
@@ -94,6 +108,10 @@ private:
     void renderCache();     // статичная часть: фон, дорожки, подписи, ось
     void paintAxis(QPainter& p, const Layout& l) const;
     void paintHoverOverlay(QPainter& p, const Layout& l) const;
+    void paintDragOverlay(QPainter& p, const Layout& l) const;
+    void paintZoomOverlay(QPainter& p, const Layout& l) const;
+    // Плашка-подсказка «от – до (длительность)» по центру centerX.
+    void drawInfoBox(QPainter& p, const Layout& l, const QString& text, int centerX) const;
     qint64 timeAtX(int x, const Layout& l) const; // центр колонки, мс epoch
 
     LogModel* m_model = nullptr;
@@ -110,6 +128,22 @@ private:
 
     QDateTime m_currentTime;         // маркер текущей строки списка
     QPoint    m_hoverPos{-1, -1};    // позиция мыши; (-1,-1) — вне виджета
+
+    // Протяжка выделения интервала. m_pressPos.x() < 0 — кнопка не зажата;
+    // выделением протяжка становится после сдвига на kDragThresholdPx.
+    static constexpr int kDragThresholdPx = 4;
+    QPoint m_pressPos{-1, -1};
+    int    m_dragCurX = -1;
+    bool   m_dragging = false;
+    bool   m_suppressContextMenu = false; // ПКМ отменила протяжку — меню не показывать
+
+    // Ctrl+колесо: накопленный, ещё не применённый диапазон зума. Тики
+    // мультипликативно сужают/расширяют pending-границы вокруг курсора,
+    // m_zoomCommitTimer коммитит одним timeRangeSelected после паузы —
+    // без перефильтровки модели на каждый щелчок колеса.
+    QTimer* m_zoomCommitTimer = nullptr;
+    bool    m_zoomPending = false;
+    qint64  m_pendingMin = 0, m_pendingMax = 0;
 
     QPixmap m_cache;                 // отрисованная статичная часть
     bool    m_cacheDirty = true;
