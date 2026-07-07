@@ -41,6 +41,12 @@ public:
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role) const override;
 
+    // Длина текста, который вернёт DisplayRole для строки row, БЕЗ построения
+    // самой строки: O(1) в fast path, O(число видимых полей) при field-фильтре.
+    // Используется view для быстрой оценки высот строк в wrap-режиме — оценка
+    // обязана считаться по отображаемому тексту, а не по сырому message.
+    int displayTextLength(int row) const;
+
     enum Roles {
         // Возвращает QVariantMap{"text": QString, "color": QColor} для Info-плашки.
         // Возвращает QVariant() (invalid) если загружен только один файл.

@@ -8,6 +8,7 @@
 #include <QStringView>
 #include <QTimer>
 #include <QVector>
+#include <limits>
 #include "syntaxhighlighter.h"
 #include "textmatchhighlighter.h"
 #include "tabexpander.h"
@@ -80,7 +81,6 @@ struct RowState {
 // Вспомогательная структура для информации о строке под курсором
 struct RowHitInfo {
     int row = -1;
-    int rowTop = 0;
     int rowHeight = 0;
     QPoint localPos;  // позиция мыши относительно начала строки
     bool valid = false;
@@ -212,6 +212,11 @@ private:
 
     QSet<int> m_toggledRows; // строки, состояние которых инвертировано относительно m_wordWrapEnabled
     TextSelection m_selection;  // всё состояние текстового выделения
+
+    // Соединения с текущей моделью. connect(model, ..., this, ...) живёт, пока
+    // живы ОБА объекта — при замене модели соединения нужно рвать явно, иначе
+    // старая модель продолжит дёргать кэши view.
+    QList<QMetaObject::Connection> m_modelConnections;
     bool m_wordWrapEnabled = false; // состояние по умолчанию для всех строк
     bool m_inUpdateGeometries = false; // предотвращение рекурсии
 
@@ -238,6 +243,8 @@ private:
     // ========== Кэш метрик моноширинного шрифта ==========
     qreal m_charWidth = 8.0; // Ширина одного символа (дробная для точного позиционирования)
     int m_lineHeight = 16;   // Высота строки
+    int m_collapseBadgeWidth = 0;     // ширина бейджа "-" (+ паддинг и зазор) — не мерить шрифтом на каждую строку
+    int m_hiddenToggleBadgeWidth = 0; // резерв под бейдж "+9999" (+ паддинг и зазор)
     void updateFontMetricsCache();  // Обновить кэш при смене шрифта
 
     // ========== Раскрытие табуляции ==========
@@ -251,24 +258,54 @@ private:
     LineWrapper m_lineWrapper{m_tabExpander};
 
     // ========== Кэш состояний строк ==========
+    // Ограничен по размеру: RowState хранит копию текста строки, безлимитный
+    // кэш при скролле накапливал бы копию всего файла. Лимит с запасом
+    // покрывает видимые строки + окно точечных обновлений (dataChanged ≤ 500).
+    static constexpr int kMaxCachedRowStates = 2048;
     mutable QHash<int, RowState> m_rowStateCache;
     mutable int m_cachedViewportWidth = -1;
 
     // ========== Кэш высот строк (O(log N) поиск) ==========
+    // Пиксельные координаты КОНТЕНТА 64-битные: суммарная высота большого лога
+    // (особенно в wrap-режиме) переполняет int (~2.1 млрд px). Высота одной
+    // строки остаётся int. Скроллбар Qt 32-битный — при превышении диапазона
+    // его значения масштабируются через m_scrollScale (см. updateScrollbar).
     QVector<int> m_rowHeights;       // m_rowHeights[i] = высота строки i
-    QVector<int> m_rowPrefixY;       // m_rowPrefixY[i] = Y-смещение строки i; размер rowCount+1
-    int m_totalHeight = 0;
+    QVector<qint64> m_rowPrefixY;    // m_rowPrefixY[i] = Y-смещение строки i; размер rowCount+1
+    qint64 m_totalHeight = 0;
     bool m_heightsDirty = true;
     bool m_uniformHeights = false;   // все строки однострочные → O(1) вместо prefix-sum
-    mutable QHash<int, int> m_rowTextLengths; // row → длина текста; переживает resize, сбрасывается только при смене модели
+    // row → длина display-текста; -1 = неизвестно. Плотный вектор вместо хэша:
+    // на миллионах строк QHash<int,int> занимал бы в разы больше памяти.
+    // Переживает resize, сбрасывается при изменении данных модели.
+    mutable QVector<int> m_rowTextLengths;
     QTimer* m_heightUpdateTimer = nullptr;    // отложенный пересчёт prefix-sum после ленивого уточнения высот
+    // Первая строка, начиная с которой prefix-суммы устарели (INT_MAX = актуальны).
+    // Все изменения m_rowHeights[i] без немедленного пересчёта сумм обязаны
+    // отметиться здесь — rebuildPrefixSums() пересчитывает только суффикс от
+    // этой строки (при уточнении высот видимых строк это O(N−row), а не O(N)).
+    int m_prefixDirtyFrom = std::numeric_limits<int>::max();
+    void markPrefixDirtyFrom(int row) { m_prefixDirtyFrom = qMin(m_prefixDirtyFrom, row); }
     void rebuildHeightCache();       // пересчитать кэш высот без обращения к модели (только GUI-поток)
-    void rebuildPrefixSums();        // пересчитать prefix-суммы из m_rowHeights
-    int rowYOffset(int row) const;   // O(1) Y-позиция начала строки
-    int rowAtY(int contentY) const;  // O(log N) индекс строки по Y-позиции
-    int targetScrollValueForRow(int row, ScrollHint hint) const;
-    int targetScrollValueForRowOffset(int row, int viewportOffset) const;
+    void rebuildPrefixSums();        // достроить prefix-суммы из m_rowHeights (частично, от m_prefixDirtyFrom)
+    void cacheTextLength(int row, int length) const; // записать длину в m_rowTextLengths (с ростом вектора)
+    int wrapCharsPerLine() const;    // сколько моноширинных колонок помещается в строку wrap-режима
+    int estimateWrappedRowHeight(int length, int charsPerLine) const; // оценка высоты по длине; length < 0 → заглушка
+    void handleRowsInserted(int first, int last); // инкрементальный append / полная инвалидация для вставки в середину
+    qint64 rowYOffset(int row) const;    // O(1) Y-позиция начала строки (координаты контента)
+    int rowAtY(qint64 contentY) const;   // O(log N) индекс строки по Y-позиции
+    int targetScrollValueForRow(int row, ScrollHint hint) const;      // → значение скроллбара
+    int targetScrollValueForRowOffset(int row, int viewportOffset) const; // → значение скроллбара
     bool captureVisibleRowOffset(int row, int& viewportOffset) const;
+
+    // ========== Отображение скроллбар ↔ координаты контента ==========
+    // Пока контент помещается в int, масштаб равен 1 и значение скроллбара —
+    // это пиксель контента (прежнее поведение бит-в-бит). За пределами int
+    // скроллбар работает в сжатой шкале [0, kMaxScrollRange].
+    static constexpr int kMaxScrollRange = std::numeric_limits<int>::max() / 2;
+    qreal m_scrollScale = 1.0;               // contentY ≈ scrollValue * m_scrollScale
+    qint64 scrollContentY() const;           // текущая позиция скролла в координатах контента
+    int contentYToScrollValue(qint64 contentY) const; // обратное преобразование (с клампом)
     // Заменяет ОЦЕНКИ высот точными значениями для строк над row (на глубину
     // вьюпорта). Нужно перед якорением скролла на row: rebuildHeightCache даёт
     // приближённые высоты, и накопленная ошибка строк выше якоря сместила бы
@@ -312,6 +349,9 @@ private:
     // выделение, подсветка поиска и скобок), после вставки count строк начиная
     // с first. Вставка в конец (обычный случай) ничего не сдвигает.
     void shiftRowKeyedState(int first, int count);
+    // Симметрично для удаления count строк начиная с first: сдвиг вверх,
+    // состояние из удалённого диапазона сбрасывается.
+    void removeRowKeyedState(int first, int count);
     
     // Вычислить состояние строки (внутренний метод)
     RowState computeRowState(int row) const;
@@ -320,15 +360,42 @@ private:
     int getRowHeight(int row) const;
 
     // ========== Кэш растров для отрисовки ==========
+    // Кэш ограничен бюджетом в байтах и адаптивным лимитом записей; вытеснение —
+    // строки, далёкие от позиции скролла, а не полный сброс (иначе каждый новый
+    // рендер выбрасывал бы и видимые строки). Все операции над кэшем — только
+    // через removeRowPixmap()/clearRowPixmaps()/getRowPixmap(), чтобы счётчик
+    // байт не разошёлся с содержимым.
     mutable QHash<int, QPixmap> m_rowPixmapCache;
-    static const int MAX_CACHED_ROWS = 100;
+    mutable qint64 m_rowPixmapCacheBytes = 0;
+    static constexpr qint64 kMaxPixmapCacheBytes = 64ll * 1024 * 1024;
+    // Растры крупнее порога не кэшируем (гигантские wrapped-строки): один такой
+    // растр съел бы весь бюджет, а за пределами ~32K пикселей вообще не создастся.
+    // Такие строки рисуются напрямую с отсечением невидимых фрагментов.
+    static constexpr qint64 kMaxSingleRowPixmapBytes = 8ll * 1024 * 1024;
+    int maxCachedPixmaps() const;       // адаптивный лимит записей (≥ 3 экранов строк)
+    bool isRowPixmapCacheable(const RowState& state) const; // false — строка рисуется напрямую каждый кадр
+    void removeRowPixmap(int row) const;   // также сбрасывает кэш разбора строки
+    void clearRowPixmaps() const;          // также сбрасывает кэш разбора
+    void evictDistantPixmaps() const;   // вытеснить строки, далёкие от вьюпорта
+
+    // ========== Кэш разбора строк для прямой отрисовки ==========
+    // Строки, не влезающие в пиксмап-кэш (isRowPixmapCacheable() == false),
+    // рисуются напрямую на каждый кадр — токенизация и заливки совпадений для
+    // них кэшируются, иначе каждый кадр стоил бы O(длина строки).
+    // Жизненный цикл строго совпадает с пиксмап-кэшем: инвалидация только
+    // через removeRowPixmap()/clearRowPixmaps().
+    struct RowParseCache {
+        QList<HighlightToken> tokens;      // синтаксическая подсветка
+        QVector<HighlightSpan> matchSpans; // заливки m_textHighlighter
+    };
+    mutable QHash<int, RowParseCache> m_rowParseCache;
+    static constexpr int kMaxParseCacheRows = 16; // гигантских строк на экране единицы
 
     // Универсальная функция для определения позиции текста по координатам мыши
     int getTextPositionFromMouse(const QPoint& mousePos, const RowState& state) const;
 
-    // Хелперы для корректного определения строки и фрагмента
-    bool getRowAtContentY(int contentY, int& row, int& rowTop) const;
-    int getFragmentIndexForPosition(int pos, const QList<TextFragment>& fragments) const;
+    // Хелпер для корректного определения строки под Y-координатой контента
+    bool getRowAtContentY(qint64 contentY, int& row, qint64& rowTop) const;
 
 private:
     // Helper-функции для эффективной работы с QStringView
@@ -360,8 +427,7 @@ private:
                                  const RowState& state, const QVector<HighlightSpan>& spans) const;
     void drawSelectionHighlight(QPainter& painter, const QRect& rect, const QString& text, int selStart, int selEnd, const RowState& state);
     void drawBracketHighlight(QPainter& painter, const QRect& textRect, const RowState& state) const;
-    void drawHighlightedText(QPainter& painter, int x, int y, const QString& text, const QList<QPair<int, int>>& highlights, const QColor& highlightColor, const QColor& defaultColor);
-    int estimateTotalHeightForDirtyCache(int rows) const;
+    qint64 estimateTotalHeightForDirtyCache(int rows) const;
     void updateScrollbar();
     void invalidateSelectionRange(int topRow, int bottomRow);  // точечная инвалидация диапазона строк
     

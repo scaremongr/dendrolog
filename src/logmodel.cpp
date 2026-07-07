@@ -67,6 +67,9 @@ void LogModel::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatc
 
 void LogModel::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
 {
+    // До инвалидации кэша: нужен для детекции перехода «один файл → несколько»
+    const int oldUniqueFiles = uniqueSourceFileCount();
+
     for (const auto& entry : sortedBatch) {
         if (entry && entry->sourceFile)
             ensureFileColor(entry->sourceFile->filePath);
@@ -106,6 +109,14 @@ void LogModel::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sorted
             insertFilteredSorted(passing);
         }
         emit modelFiltered(m_filteredEntries.size());
+    }
+
+    // Появился второй файл — FileBadgeRole у ВСЕХ строк меняется с invalid на
+    // плашку имени файла. Явно уведомляем view: при инкрементальном append
+    // строки, закэшированные до этого батча, иначе остались бы без плашек.
+    if (oldUniqueFiles <= 1 && uniqueSourceFileCount() > 1 && !m_filteredEntries.isEmpty()) {
+        emit dataChanged(index(0, 0), index(m_filteredEntries.size() - 1, 0),
+                         {FileBadgeRole});
     }
 
     // Фоновая перефильтрация (если шла) работала со снапшотом без этого
@@ -562,6 +573,32 @@ QString LogModel::formatDisplayMessage(const LogEntry& entry) const
     // blank on purpose. Falling back to the full raw message here would make
     // a partially-parsed line look as though it was not parsed at all.
     return result;
+}
+
+// Длина результата formatDisplayMessage() без конкатенации строк.
+// Обязана давать ровно ту же длину, что и построенный display-текст.
+int LogModel::displayTextLength(int row) const
+{
+    if (row < 0 || row >= m_filteredEntries.size())
+        return 0;
+    const auto& entryPtr = m_filteredEntries.at(row);
+    if (!entryPtr)
+        return 0;
+    const LogEntry& entry = *entryPtr;
+
+    if (!m_fieldFilterEnabled || entry.fields.isEmpty())
+        return entry.message.length();
+
+    int length = 0;
+    bool first = true;
+    for (const int fieldIndex : m_visibleFieldIndexes) {
+        const QStringView value = entry.fields.get(fieldIndex, entry.message);
+        if (value.isEmpty())
+            continue;
+        length += (first ? 0 : 1) + static_cast<int>(value.length());
+        first = false;
+    }
+    return length;
 }
 
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround) const
