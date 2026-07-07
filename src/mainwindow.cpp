@@ -9,6 +9,7 @@
 #include "settingsdialog.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
+#include "timelinehistogramwidget.h"
 #include "schemastore.h"
 #include "apptheme.h"
 
@@ -51,6 +52,9 @@
 #include <QKeySequence>
 #include <QSvgRenderer>
 
+#include <algorithm>
+#include <limits>
+
 // Renders an SVG resource and recolours it to `color`, so monochrome toolbar
 // glyphs stay visible on both light and dark palettes. Uses QSvgRenderer (Qt
 // Svg is linked) rather than QPixmap so it does not depend on the SVG image
@@ -90,6 +94,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupTimeFilterDockContents();
     setupTextFilterDockContents();
     setupRowMarkerDock();
+    setupTimelineDock();
     setupDirectoryScanner();
     setupFieldVisibilityDock();
 
@@ -379,6 +384,20 @@ void MainWindow::loadSettings()
         restoreGeometry(geometry);
     if (!state.isEmpty())
         restoreState(state);
+
+    // Layout, сохранённый версией без таймлайн-дока, оставляет новому доку
+    // нулевую высоту. До show() resizeDocks игнорируется, поэтому проверка
+    // откладывается до первого прохода event loop; трогаем размер только у
+    // реально сплющенного дока, чтобы не затирать выбранную пользователем высоту.
+    QTimer::singleShot(0, this, [this]() {
+        if (m_timelineDockWidget && m_timelinePanel && !m_timelineDockWidget->isFloating()
+            && m_timelineDockWidget->isVisible()
+            && m_timelinePanel->height() < m_timelinePanel->minimumSizeHint().height())
+        {
+            resizeDocks({ m_timelineDockWidget },
+                        { m_timelinePanel->sizeHint().height() }, Qt::Vertical);
+        }
+    });
 
     s.beginGroup("Files");
     m_lastOpenDir = s.value("lastOpenDir").toString();
@@ -1079,6 +1098,41 @@ void MainWindow::setupRowMarkerDock()
     }
 }
 
+void MainWindow::setupTimelineDock()
+{
+    m_timelineDockWidget = new QDockWidget(tr("Timeline"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_timelineDockWidget->setObjectName(QStringLiteral("timelineDockWidget"));
+    // Горизонтальная шкала времени — только верх/низ окна.
+    m_timelineDockWidget->setAllowedAreas(Qt::TopDockWidgetArea | Qt::BottomDockWidgetArea);
+
+    m_timelinePanel = new TimelineHistogramWidget(m_timelineDockWidget);
+    m_timelineDockWidget->setWidget(m_timelinePanel);
+    addDockWidget(Qt::BottomDockWidgetArea, m_timelineDockWidget);
+
+    connect(m_timelinePanel, &TimelineHistogramWidget::timeClicked,
+            this, &MainWindow::onTimelineTimeClicked);
+
+    if (ui->menuView) {
+        QAction* toggle = m_timelineDockWidget->toggleViewAction();
+        toggle->setText(tr("Timeline Panel"));
+        // Group it with the other panel toggles (above the first separator),
+        // instead of appending it to the very bottom of the View menu.
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelTimeline"), toggle);
+    }
+}
+
 void MainWindow::setupDirectoryScanner()
 {
     // The dock content is a self-contained panel (header card + results tree).
@@ -1128,6 +1182,10 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
         connect(logView->view(), &LogListView::timeFilterBoundRequested,
                 this, &MainWindow::onTimeFilterBoundRequested);
 
+    // Таймлайн следит за моделью активной вкладки.
+    if (m_timelinePanel)
+        m_timelinePanel->setModel(logView->model());
+
     if (m_activeLogView && m_activeLogView->model() && m_activeLogView->view())
     {
         int totalRows = m_activeLogView->model()->rowCount();
@@ -1155,6 +1213,9 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     if (logView->view())
         disconnect(logView->view(), &LogListView::timeFilterBoundRequested,
                    this, &MainWindow::onTimeFilterBoundRequested);
+
+    if (m_timelinePanel)
+        m_timelinePanel->setModel(nullptr);
 
     if (m_activeLogView == logView)
     {
@@ -1470,6 +1531,19 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
     {
         m_lineInfoLabel->setText("-");
     }
+
+    // Маркер позиции текущей строки на таймлайн-гистограмме.
+    if (m_timelinePanel)
+    {
+        QDateTime markerTime;
+        if (currentRow >= 0 && m_activeLogView && m_activeLogView->model())
+        {
+            const auto& entries = m_activeLogView->model()->filteredEntries();
+            if (currentRow < entries.size() && entries[currentRow])
+                markerTime = entries[currentRow]->timestamp;
+        }
+        m_timelinePanel->setCurrentTime(markerTime);
+    }
 }
 
 void MainWindow::on_actionInfo_toggled(bool checked)
@@ -1641,6 +1715,57 @@ void MainWindow::onTimeFilterBoundRequested(const QDateTime& dt, bool isStart)
         ui->timeFilterDockWidget->setVisible(true);
         ui->timeFilterDockWidget->raise();
     }
+}
+
+void MainWindow::onTimelineTimeClicked(const QDateTime& time, bool preferErrors)
+{
+    if (!time.isValid() || !m_activeLogView || !m_activeLogView->model()
+        || !m_activeLogView->view())
+        return;
+
+    LogModel* model = m_activeLogView->model();
+    const auto& entries = model->filteredEntries();
+    if (entries.isEmpty())
+        return;
+
+    // Первая строка с timestamp >= time. Список отсортирован по времени,
+    // строки без валидной метки — в конце и считаются «больше» любого времени.
+    const auto it = std::lower_bound(
+        entries.constBegin(), entries.constEnd(), time,
+        [](const std::shared_ptr<LogEntry>& e, const QDateTime& t) {
+            return e && e->timestamp.isValid() && e->timestamp < t;
+        });
+    int row = qMin(int(it - entries.constBegin()), int(entries.size()) - 1);
+
+    if (preferErrors) {
+        // Клик в дорожке ошибок — ближайшая по времени строка Warn/Error/Fatal.
+        const auto isError = [](const std::shared_ptr<LogEntry>& e) {
+            return e && (e->level == LogLevel::Warn || e->level == LogLevel::Error
+                         || e->level == LogLevel::Fatal);
+        };
+        int before = -1, after = -1;
+        for (int i = row; i >= 0; --i)
+            if (isError(entries[i])) { before = i; break; }
+        for (int i = row + 1; i < entries.size(); ++i)
+            if (isError(entries[i])) { after = i; break; }
+
+        const auto distanceMs = [&entries, &time](int i) {
+            const QDateTime& ts = entries[i]->timestamp;
+            return ts.isValid() ? qAbs(ts.msecsTo(time))
+                                : std::numeric_limits<qint64>::max();
+        };
+        if (before >= 0 && after >= 0)
+            row = distanceMs(before) <= distanceMs(after) ? before : after;
+        else if (before >= 0)
+            row = before;
+        else if (after >= 0)
+            row = after;
+        // ни одной ошибки в видимом списке — остаёмся на строке по времени
+    }
+
+    const QModelIndex idx = model->index(row, 0);
+    m_activeLogView->view()->setCurrentIndex(idx);
+    m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
 }
 
 void MainWindow::onApplyAllTextFiltersClicked()

@@ -28,6 +28,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("panelTimeFilter"),    tr("Show/Hide Time Filter panel"),        QKeySequence(Qt::CTRL | Qt::Key_F3) },
         { QStringLiteral("panelFields"),        tr("Show/Hide Log Fields panel"),         QKeySequence(Qt::CTRL | Qt::Key_F4) },
         { QStringLiteral("panelRowHighlighters"), tr("Show/Hide Row Highlighters panel"), QKeySequence(Qt::CTRL | Qt::Key_F5) },
+        { QStringLiteral("panelTimeline"),        tr("Show/Hide Timeline panel"),         QKeySequence(Qt::CTRL | Qt::Key_F6) },
     };
 }
 

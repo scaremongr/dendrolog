@@ -36,6 +36,7 @@ class QToolButton;
 class QWidget;
 class FilterPanelWidget;
 class MarkerPanelWidget;
+class TimelineHistogramWidget;
 class LogModel;
 class LogPattern;
 
@@ -87,6 +88,9 @@ private slots:
     void onResetTimeFilterClicked();
     // Подстановка таймстампа (из контекстного меню LogView) в поле фильтра по времени.
     void onTimeFilterBoundRequested(const QDateTime& dt, bool isStart);
+    // Клик по таймлайн-гистограмме: переход к моменту (или к ближайшей
+    // ошибке, если клик пришёлся в дорожку Warn/Error/Fatal).
+    void onTimelineTimeClicked(const QDateTime& time, bool preferErrors);
     void onApplyAllTextFiltersClicked(); // Apply из конструктора фильтров (активная вкладка)
     void onResetTextFiltersClicked();    // Reset — снять фильтры с активной вкладки
     void onApplyRowMarkersClicked();     // Apply из панели маркеров (активная вкладка)
@@ -135,6 +139,10 @@ private:
     // Недеструктивные row-маркеры (отдельный док, создаётся в коде).
     MarkerPanelWidget* m_markerPanel = nullptr;
     QDockWidget* m_markerDockWidget = nullptr;
+
+    // Таймлайн-гистограмма плотности записей (нижний док, создаётся в коде).
+    TimelineHistogramWidget* m_timelinePanel = nullptr;
+    QDockWidget* m_timelineDockWidget = nullptr;
 
     // Directory Scanner related members
     QString m_lastOpenDir;
@@ -197,6 +205,7 @@ private:
     void setupTimeFilterDockContents(); // New method to set up the new dock
     void setupTextFilterDockContents();
     void setupRowMarkerDock();          // Док Row Highlighters
+    void setupTimelineDock();           // Док Timeline (гистограмма по времени)
     void setupDirectoryScanner();
     void setupFieldVisibilityDock();    // New: Log Fields panel
 

@@ -86,6 +86,8 @@ set(PROJECT_SOURCES
     src/filterpanelwidget.cpp
     src/markerpanelwidget.h
     src/markerpanelwidget.cpp
+    src/timelinehistogramwidget.h
+    src/timelinehistogramwidget.cpp
     resources/resources.qrc
 )
 
