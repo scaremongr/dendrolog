@@ -88,21 +88,52 @@ LogListView::LogListView(QWidget *parent)
 void LogListView::setWordWrap(bool enabled) {
     if (m_wordWrapEnabled == enabled) return;
 
+    // Якорь захватываем ДО пересчёта высот, пока геометрия старая:
+    // выделенная строка (и её смещение от верха вьюпорта, если видима),
+    // а без выделения — первая видимая строка, чтобы позиция чтения
+    // не уезжала.
+    const QModelIndex cur = currentIndex();
+    int anchorRow = -1;
+    int anchorOffset = 0;
+    bool anchorIsSelection = false;
+    bool selectionWasVisible = false;
+    if (cur.isValid()) {
+        anchorRow = cur.row();
+        anchorIsSelection = true;
+        selectionWasVisible = captureVisibleRowOffset(anchorRow, anchorOffset);
+    } else if (model() && model()->rowCount() > 0) {
+        const int scrollY = verticalScrollBar()->value();
+        anchorRow = rowAtY(scrollY);
+        anchorOffset = rowYOffset(anchorRow) - scrollY;
+    }
+
     m_wordWrapEnabled = enabled;
 
     m_toggledRows.clear();
     invalidateRowState(-1, /*preserveTextLengths=*/true);
     rebuildHeightCache();
     updateScrollbar();
-    viewport()->update();
 
-    // Высоты строк изменились — прокручиваем к выделенному элементу,
-    // чтобы он не уплыл за пределы видимой области.
-    QTimer::singleShot(0, this, [this]() {
-        const QModelIndex cur = currentIndex();
-        if (cur.isValid())
-            scrollTo(cur, QAbstractItemView::EnsureVisible);
-    });
+    if (anchorRow >= 0 && model() && anchorRow < model()->rowCount()) {
+        // rebuildHeightCache даёт ОЦЕНКИ высот, реальная раскладка появляется
+        // только при отрисовке. Без точных высот строк над якорем накопленная
+        // ошибка оценки утащит выделение за границу вьюпорта (именно так оно
+        // «уплывало чуть ниже» при включении WordWrap).
+        refineHeightsAbove(anchorRow);
+        updateScrollbar();
+
+        int offset = anchorOffset;
+        if (anchorIsSelection) {
+            // Выделение остаётся в поле видимости: сохраняем прежнее смещение;
+            // если строка была частично срезана сверху или не видна вовсе —
+            // ставим её в верх вьюпорта.
+            const int maxOffset = qMax(0, viewport()->height() - singleRowHeight());
+            offset = selectionWasVisible ? qBound(0, anchorOffset, maxOffset) : 0;
+        }
+        verticalScrollBar()->setValue(targetScrollValueForRowOffset(anchorRow, offset));
+    }
+
+    viewport()->update();
 }
 
 void LogListView::setModel(QAbstractItemModel *model) {
@@ -629,6 +660,28 @@ void LogListView::rebuildPrefixSums() {
     for (int i = 0; i < rows; ++i)
         m_rowPrefixY[i + 1] = m_rowPrefixY[i] + m_rowHeights[i];
     m_totalHeight = (rows > 0) ? m_rowPrefixY[rows] : 0;
+}
+
+void LogListView::refineHeightsAbove(int row) {
+    if (m_uniformHeights || m_heightsDirty || !model()) return;
+    if (row < 0 || row >= m_rowHeights.size()) return;
+
+    // Идём от row вверх, пока точные высоты не перекроют вьюпорт (с запасом
+    // в одну строку): только эти строки влияют на экранную позицию якоря —
+    // отрисовка стартует с первой видимой строки и идёт вниз реальными
+    // высотами, поэтому внутри этого окна расчёт и отрисовка совпадут.
+    const int need = viewport()->height() + singleRowHeight();
+    int acc = 0;
+    bool changed = false;
+    for (int r = row; r >= 0 && acc < need; --r) {
+        const int h = getRowState(r).height;
+        if (m_rowHeights[r] != h) {
+            m_rowHeights[r] = h;
+            changed = true;
+        }
+        acc += h;
+    }
+    if (changed) rebuildPrefixSums();
 }
 
 // O(1): Y-позиция начала строки row

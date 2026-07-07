@@ -269,6 +269,11 @@ private:
     int targetScrollValueForRow(int row, ScrollHint hint) const;
     int targetScrollValueForRowOffset(int row, int viewportOffset) const;
     bool captureVisibleRowOffset(int row, int& viewportOffset) const;
+    // Заменяет ОЦЕНКИ высот точными значениями для строк над row (на глубину
+    // вьюпорта). Нужно перед якорением скролла на row: rebuildHeightCache даёт
+    // приближённые высоты, и накопленная ошибка строк выше якоря сместила бы
+    // его при реальной отрисовке.
+    void refineHeightsAbove(int row);
 
     // ========== Debounce для resize ==========
     QTimer* m_resizeDebounceTimer = nullptr;
