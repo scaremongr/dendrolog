@@ -19,6 +19,7 @@
 #include <QFontDatabase>
 #include <QTimer>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include "texttoken.h"
 
@@ -40,18 +41,25 @@ LogListView::LogListView(QWidget *parent)
     monoFont.setPointSize(AppSettings::instance().fontSize());
     monoFont.setWeight(QFont::Medium);
     setFont(monoFont);
-    // updateFontMetricsCache() вызовется через changeEvent(FontChange)
+    // changeEvent(FontChange) тоже вызовет updateFontMetricsCache(), но если
+    // шрифт из настроек совпал с текущим, событие не придёт — инициализируем явно.
+    updateFontMetricsCache();
     
     // Подключаем сигнал скроллбара для плавной прокрутки
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
         viewport()->update();
     });
 
-    // Таймер для отложенного пересчёта prefix-сумм после ленивого уточнения высот строк
+    // Таймер для отложенного пересчёта высот/prefix-сумм. Два режима:
+    // кэш высот актуален (ленивое уточнение при отрисовке) — только prefix-суммы;
+    // кэш помечен грязным (точечная инвалидация) — полный пересчёт высот.
     m_heightUpdateTimer = new QTimer(this);
     m_heightUpdateTimer->setSingleShot(true);
     connect(m_heightUpdateTimer, &QTimer::timeout, this, [this]() {
-        rebuildPrefixSums();
+        if (m_heightsDirty)
+            rebuildHeightCache();   // включает rebuildPrefixSums()
+        else
+            rebuildPrefixSums();
         updateScrollbar();
         viewport()->update();
     });
@@ -71,9 +79,8 @@ LogListView::LogListView(QWidget *parent)
 
         // Восстанавливаем позицию скролла по якорной строке
         if (savedAnchorRow >= 0 && model() && savedAnchorRow < model()->rowCount()) {
-            int newRowTop = rowYOffset(savedAnchorRow);
-            int newScrollY = qBound(0, newRowTop - savedAnchorOffset, verticalScrollBar()->maximum());
-            verticalScrollBar()->setValue(newScrollY);
+            verticalScrollBar()->setValue(
+                contentYToScrollValue(rowYOffset(savedAnchorRow) - savedAnchorOffset));
         }
 
         m_anchorRow = -1;
@@ -102,9 +109,9 @@ void LogListView::setWordWrap(bool enabled) {
         anchorIsSelection = true;
         selectionWasVisible = captureVisibleRowOffset(anchorRow, anchorOffset);
     } else if (model() && model()->rowCount() > 0) {
-        const int scrollY = verticalScrollBar()->value();
+        const qint64 scrollY = scrollContentY();
         anchorRow = rowAtY(scrollY);
-        anchorOffset = rowYOffset(anchorRow) - scrollY;
+        anchorOffset = int(rowYOffset(anchorRow) - scrollY);
     }
 
     m_wordWrapEnabled = enabled;
@@ -137,6 +144,12 @@ void LogListView::setWordWrap(bool enabled) {
 }
 
 void LogListView::setModel(QAbstractItemModel *model) {
+    // Рвём соединения с предыдущей моделью: они живут, пока живы оба объекта,
+    // и при замене модели старые лямбды продолжили бы дёргать кэши view.
+    for (const QMetaObject::Connection& connection : std::as_const(m_modelConnections))
+        disconnect(connection);
+    m_modelConnections.clear();
+
     QListView::setModel(model);
     m_persistentSelection.clear();
     m_resetViewportAnchor.clear();
@@ -148,21 +161,21 @@ void LogListView::setModel(QAbstractItemModel *model) {
         // m_persistentSelection (обновляется в currentChanged и переживает
         // любые reset). Здесь захватываем только якорь вьюпорта — первую
         // видимую строку — на случай, когда выделения нет вовсе.
-        connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
+        m_modelConnections << connect(model, &QAbstractItemModel::modelAboutToBeReset, this, [this]() {
             m_resetViewportAnchor.clear();
             m_resetViewportOffset = 0;
             auto* logModel = qobject_cast<LogModel*>(this->model());
             if (!logModel) return;
             const auto& entries = logModel->filteredEntries();
             if (entries.isEmpty()) return;
-            const int scrollY = verticalScrollBar()->value();
+            const qint64 scrollY = scrollContentY();
             const int row = qBound(0, rowAtY(scrollY), (int)entries.size() - 1);
             m_resetViewportAnchor.logicalEntryId = entries[row]->logicalEntryId;
             m_resetViewportAnchor.sourceFile = entries[row]->sourceFile.get();
-            m_resetViewportOffset = scrollY - rowYOffset(row);
+            m_resetViewportOffset = int(scrollY - rowYOffset(row));
         });
 
-        connect(model, &QAbstractItemModel::modelReset, this, [this]() {
+        m_modelConnections << connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
             // Поисковая подсветка привязана к индексу строки — после reset
             // индексы невалидны.
@@ -230,14 +243,13 @@ void LogListView::setModel(QAbstractItemModel *model) {
                     int target = -1;
                     if (centerRow >= 0 && centerRow < rowCount) {
                         // Центрируем строку на экране
-                        int rowY = rowYOffset(centerRow);
-                        int rowH = getRowHeight(centerRow);
-                        int vpH  = viewport()->height();
-                        target = qBound(0, rowY - (vpH - rowH) / 2, verticalScrollBar()->maximum());
+                        const qint64 rowY = rowYOffset(centerRow);
+                        const int rowH = getRowHeight(centerRow);
+                        const int vpH  = viewport()->height();
+                        target = contentYToScrollValue(rowY - (vpH - rowH) / 2);
                     } else if (viewportRow >= 0 && viewportRow < rowCount) {
                         // Восстанавливаем позицию вьюпорта с прежним смещением
-                        target = qBound(0, rowYOffset(viewportRow) + viewportOffset,
-                                        verticalScrollBar()->maximum());
+                        target = contentYToScrollValue(rowYOffset(viewportRow) + viewportOffset);
                     }
                     if (target < 0) return;
                     verticalScrollBar()->setValue(target);
@@ -252,26 +264,46 @@ void LogListView::setModel(QAbstractItemModel *model) {
         // При вставке строк В СЕРЕДИНУ (слияние нескольких файлов по времени)
         // номера существующих строк ниже точки вставки сдвигаются — переносим
         // привязанное к ним состояние. Должно выполняться ДО общей инвалидации.
-        connect(model, &QAbstractItemModel::rowsInserted, this,
+        m_modelConnections << connect(model, &QAbstractItemModel::rowsInserted, this,
                 [this](const QModelIndex&, int first, int last) {
                     shiftRowKeyedState(first, last - first + 1);
                 });
 
-        // Инвалидация при вставке/удалении строк
-        auto onRowsChanged = [this]() {
-            invalidateRowState();
-            rebuildHeightCache();
-            updateScrollbar();
-            viewport()->update();
-        };
-        connect(model, &QAbstractItemModel::rowsInserted, this, onRowsChanged);
-        connect(model, &QAbstractItemModel::rowsRemoved,  this, onRowsChanged);
+        // Пересчёт кэшей при вставке: дозагрузка в конец (tail-follow) идёт
+        // инкрементально за O(count), вставка в середину — полная инвалидация.
+        m_modelConnections << connect(model, &QAbstractItemModel::rowsInserted, this,
+                [this](const QModelIndex&, int first, int last) {
+                    handleRowsInserted(first, last);
+                });
+
+        // При удалении строк номера строк ниже точки удаления сдвигаются
+        // вверх — переносим/сбрасываем привязанное к номерам состояние
+        // (симметрично shiftRowKeyedState при вставке), затем инвалидация.
+        m_modelConnections << connect(model, &QAbstractItemModel::rowsRemoved, this,
+                [this](const QModelIndex&, int first, int last) {
+                    removeRowKeyedState(first, last - first + 1);
+                    invalidateRowState();
+                    rebuildHeightCache();
+                    updateScrollbar();
+                    viewport()->update();
+                });
 
         // Инвалидация кэша строк при изменении данных (например, смена видимых полей /
         // применение нового ConversionPattern). Без этого getRowState() возвращает
         // устаревший текст из кэша даже после того, как модель уже прислала dataChanged.
-        connect(model, &QAbstractItemModel::dataChanged, this,
-            [this](const QModelIndex& topLeft, const QModelIndex& bottomRight, const QList<int>&) {
+        m_modelConnections << connect(model, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex& topLeft, const QModelIndex& bottomRight, const QList<int>& roles) {
+                // Роли, не влияющие на текст и раскладку (IsNewRole — маркер в
+                // желобке, RowMarkerColorRole — фон), рисуются напрямую из
+                // модели на каждый кадр: кэши валидны, достаточно перерисовать.
+                // Пустой список ролей по конвенции Qt = «изменилось всё».
+                if (!roles.isEmpty()
+                    && !roles.contains(Qt::DisplayRole)
+                    && !roles.contains(int(LogModel::FileBadgeRole))) {
+                    viewport()->update();
+                    return;
+                }
+
                 const int total = this->model() ? this->model()->rowCount() : 0;
                 const int count = bottomRight.row() - topLeft.row() + 1;
                 const bool isBulk = (count >= total / 4 || count > 500);
@@ -280,9 +312,33 @@ void LogListView::setModel(QAbstractItemModel *model) {
                     invalidateRowState(-1, /*preserveTextLengths=*/false);
                     rebuildHeightCache();
                 } else {
+                    // Точечная инвалидация. Кэш высот нельзя оставлять грязным:
+                    // до следующего полного пересчёта rowAtY/rowYOffset падали бы
+                    // в линейный fallback, который строит RowState для каждой
+                    // строки от начала файла (заморозка на больших логах).
+                    const bool heightsWereClean = !m_heightsDirty;
                     for (int row = topLeft.row(); row <= bottomRight.row(); ++row)
                         invalidateRowState(row, /*preserveTextLengths=*/false);
-                    m_heightsDirty = true;
+
+                    if (heightsWereClean && m_uniformHeights) {
+                        // Все строки одной высоты — смена текста её не меняет.
+                        m_heightsDirty = false;
+                    } else if (heightsWereClean && m_rowHeights.size() == total) {
+                        // Обновляем высоты только изменённых строк (диапазон ≤ 500),
+                        // prefix-суммы и скроллбар — отложенно.
+                        for (int row = topLeft.row(); row <= bottomRight.row(); ++row) {
+                            const int newHeight = getRowState(row).height;
+                            if (m_rowHeights[row] != newHeight) {
+                                m_rowHeights[row] = newHeight;
+                                markPrefixDirtyFrom(row);
+                            }
+                        }
+                        m_heightsDirty = false;
+                        m_heightUpdateTimer->start(0);
+                    } else {
+                        // Кэш уже требовал пересчёта — полный отложенный rebuild.
+                        m_heightUpdateTimer->start(0);
+                    }
                 }
                 viewport()->update();
                 // После массового изменения высот строк прокручиваем к выделенному
@@ -342,13 +398,134 @@ void LogListView::shiftRowKeyedState(int first, int count)
         m_anchorRow += count;
 }
 
+// Симметрично shiftRowKeyedState: после удаления count строк начиная с first
+// состояние, привязанное к номерам строк, сдвигается вверх; указывавшее
+// в удалённый диапазон — сбрасывается.
+void LogListView::removeRowKeyedState(int first, int count)
+{
+    if (count <= 0)
+        return;
+    const int lastRemoved = first + count - 1;
+
+    // row < first — не задет; row в [first, lastRemoved] — удалён (-1); дальше — сдвиг.
+    auto shiftRow = [first, lastRemoved, count](int row) {
+        if (row < first) return row;
+        if (row > lastRemoved) return row - count;
+        return -1;
+    };
+
+    if (!m_toggledRows.isEmpty()) {
+        QSet<int> shifted;
+        shifted.reserve(m_toggledRows.size());
+        for (int row : std::as_const(m_toggledRows)) {
+            const int newRow = shiftRow(row);
+            if (newRow >= 0)
+                shifted.insert(newRow);
+        }
+        m_toggledRows = std::move(shifted);
+    }
+
+    if (m_searchMatchRow >= first) {
+        m_searchMatchRow = shiftRow(m_searchMatchRow);
+        if (m_searchMatchRow < 0)
+            m_searchHighlighter.setPatterns({});
+    }
+
+    // Выделение, пересекающееся с удалённым диапазоном, сбрасываем целиком —
+    // частичная перепривязка дала бы неочевидный для пользователя результат.
+    if (m_selection.isValid()) {
+        if (m_selection.topRow() <= lastRemoved && m_selection.bottomRow() >= first) {
+            m_selection.clear();
+        } else {
+            m_selection.anchorRow = shiftRow(m_selection.anchorRow);
+            m_selection.activeRow = shiftRow(m_selection.activeRow);
+        }
+    }
+
+    if (m_bracketMatch.row >= first) {
+        const int newRow = shiftRow(m_bracketMatch.row);
+        if (newRow < 0)
+            m_bracketMatch.clear();
+        else
+            m_bracketMatch.row = newRow;
+    }
+
+    if (m_anchorRow >= first)
+        m_anchorRow = shiftRow(m_anchorRow);
+}
+
+// Вставка строк в модель. Частый случай — дозагрузка в конец (tail-follow):
+// кэши существующих строк остаются валидными, достаточно досчитать длины и
+// высоты новых строк и достроить prefix-суммы — O(count) вместо полной
+// инвалидации с O(N)-пересчётом на каждый батч. Вставка в середину (слияние
+// файлов по времени) — редкий путь с полной инвалидацией; сдвиг row-keyed
+// состояния к этому моменту уже выполнен shiftRowKeyedState().
+void LogListView::handleRowsInserted(int first, int last)
+{
+    if (!model())
+        return;
+    const int rows = model()->rowCount();
+    const bool isAppend = (last == rows - 1);
+
+    if (!isAppend) {
+        invalidateRowState();
+        rebuildHeightCache();
+        updateScrollbar();
+        viewport()->update();
+        return;
+    }
+
+    // --- Append: инкрементальное расширение кэшей ---
+
+    // Кэш длин: досчитываем только новые строки (O(1) на строку, без model()->data()).
+    if (auto* logModel = qobject_cast<LogModel*>(model())) {
+        if (m_rowTextLengths.size() < rows) {
+            const int oldSize = m_rowTextLengths.size();
+            m_rowTextLengths.resize(rows);
+            std::fill(m_rowTextLengths.begin() + oldSize, m_rowTextLengths.end(), -1);
+        }
+        for (int i = first; i <= last; ++i)
+            m_rowTextLengths[i] = logModel->displayTextLength(i);
+    }
+
+    if (!m_wordWrapEnabled && m_toggledRows.isEmpty()) {
+        // Однострочный режим: rebuildHeightCache — это O(1) fast path
+        rebuildHeightCache();
+    } else if (!m_heightsDirty && m_rowHeights.size() == first
+               && m_rowPrefixY.size() == first + 1) {
+        // Достраиваем высоты только для новых строк; prefix-суммы досчитывает
+        // частичный rebuildPrefixSums от first (или раньше, если уже был
+        // взведён отложенный маркер от ленивого уточнения высот).
+        m_rowHeights.resize(rows);
+        const int charsPerLine = wrapCharsPerLine();
+        for (int i = first; i <= last; ++i) {
+            m_rowHeights[i] = isRowMultiLine(i)
+                ? estimateWrappedRowHeight(m_rowTextLengths.value(i, -1), charsPerLine)
+                : singleRowHeight();
+        }
+        m_rowPrefixY.resize(rows + 1);
+        markPrefixDirtyFrom(first);
+        rebuildPrefixSums();
+    } else {
+        // Кэш высот в неожиданном состоянии — честный полный пересчёт
+        rebuildHeightCache();
+    }
+
+    updateScrollbar();
+    viewport()->update();
+}
+
 // Обновление кэша метрик шрифта (вызывать при смене шрифта)
 void LogListView::updateFontMetricsCache() {
     QFontMetrics fm(font());
     QFontMetricsF fmF(font());
     m_charWidth = fmF.horizontalAdvance(QLatin1Char('M')); // дробная точность — избегаем накопленной ошибки округления
     m_lineHeight = fm.height();
-    
+    // Ширины служебных бейджей зависят только от шрифта — меряем один раз,
+    // а не QFontMetrics'ом на каждую строку в горячих путях.
+    m_collapseBadgeWidth = fm.horizontalAdvance(QStringLiteral("-")) + kBadgeHPadding + kBadgeGap;
+    m_hiddenToggleBadgeWidth = fm.horizontalAdvance(QStringLiteral("+9999")) + kBadgeHPadding + kBadgeGap;
+
     // Инвалидируем кэши при смене шрифта
     invalidateRowState(-1, /*preserveTextLengths=*/true);
 }
@@ -363,9 +540,8 @@ void LogListView::changeEvent(QEvent* event)
 {
     QListView::changeEvent(event);
     if (event->type() == QEvent::FontChange) {
-        updateFontMetricsCache();
+        updateFontMetricsCache();  // сам инвалидирует кэши строк
         if (m_heightUpdateTimer) {  // null during constructor — timer not yet created
-            invalidateRowState(-1, /*preserveTextLengths=*/true);
             m_heightUpdateTimer->start(0);
             viewport()->update();
         }
@@ -384,7 +560,7 @@ int LogListView::sizeHintForRow(int) const {
 void LogListView::invalidateRowState(int row, bool preserveTextLengths) {
     if (row == -1) {
         m_rowStateCache.clear();
-        m_rowPixmapCache.clear();
+        clearRowPixmaps();
         m_cachedViewportWidth = -1;
         m_heightsDirty = true;
         if (!preserveTextLengths) {
@@ -392,12 +568,25 @@ void LogListView::invalidateRowState(int row, bool preserveTextLengths) {
         }
     } else {
         m_rowStateCache.remove(row);
-        m_rowPixmapCache.remove(row);
+        removeRowPixmap(row);
         m_heightsDirty = true;  // prefix sums stale after any single-row change
-        if (!preserveTextLengths) {
-            m_rowTextLengths.remove(row);
+        if (!preserveTextLengths && row < m_rowTextLengths.size()) {
+            m_rowTextLengths[row] = -1;
         }
     }
+}
+
+// Записывает длину display-текста строки в плотный вектор, при необходимости
+// расширяя его до размера модели (новые ячейки — «неизвестно»).
+void LogListView::cacheTextLength(int row, int length) const {
+    if (row < 0) return;
+    if (row >= m_rowTextLengths.size()) {
+        const int oldSize = m_rowTextLengths.size();
+        const int rows = model() ? model()->rowCount() : 0;
+        m_rowTextLengths.resize(qMax(rows, row + 1));
+        std::fill(m_rowTextLengths.begin() + oldSize, m_rowTextLengths.end(), -1);
+    }
+    m_rowTextLengths[row] = length;
 }
 
 RowState LogListView::getRowState(int row) const {
@@ -411,9 +600,15 @@ RowState LogListView::getRowState(int row) const {
 
     if (m_cachedViewportWidth != vpWidth) {
         m_rowStateCache.clear();
-        m_rowPixmapCache.clear();
+        clearRowPixmaps();
         m_cachedViewportWidth = vpWidth;
     }
+    // Кэш ограничен: каждый RowState хранит копию текста строки, и без лимита
+    // долгий скролл по большому файлу накопил бы в памяти копию всего файла.
+    // Пересчёт дёшев (одно обращение к модели), поэтому при переполнении
+    // сбрасываем целиком; лимит с запасом больше числа видимых строк.
+    if (m_rowStateCache.size() >= kMaxCachedRowStates)
+        m_rowStateCache.clear();
     m_rowStateCache[row] = state;
     return state;
 }
@@ -479,21 +674,20 @@ RowState LogListView::computeRowState(int row) const {
     // Текстовая область начинается после всех левых желобков
     const int effectiveVpWidth = state.viewportWidth - textAreaLeft();
     state.text = model()->data(model()->index(row, 0)).toString();
-    m_rowTextLengths[row] = state.text.length();  // кэшируем длину — пережнвает resize
+    cacheTextLength(row, state.text.length());  // кэшируем длину — переживает resize
     const bool expandedRow = isRowMultiLine(row);
     const bool forceCollapseBadge = !m_wordWrapEnabled && m_toggledRows.contains(row);
     
     // Шаг 1: Определяем, нужен ли вообще бейдж сворачивания.
     // Для auto-wrap в глобальном режиме WordWrap короткие строки не должны получать "-".
     // Для строк, раскрытых вручную из режима +N, бейдж сворачивания сохраняем всегда.
-    QFontMetrics fm(font());
     int fileBadgeWidth = 0;
     QVariant fileBadgeVar = model()->data(model()->index(row, 0), LogModel::FileBadgeRole);
     if (fileBadgeVar.isValid()) {
-        fileBadgeWidth = fm.horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + kBadgeHPadding + kBadgeGap;
+        fileBadgeWidth = fontMetrics().horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + kBadgeHPadding + kBadgeGap;
     }
-    const int collapseBadgeWidth = fm.horizontalAdvance(QStringLiteral("-")) + kBadgeHPadding + kBadgeGap;
-    const int hiddenToggleBadgeWidth = fm.horizontalAdvance("+9999") + kBadgeHPadding + kBadgeGap; // максимальная оценка для HiddenToggle
+    const int collapseBadgeWidth = m_collapseBadgeWidth;
+    const int hiddenToggleBadgeWidth = m_hiddenToggleBadgeWidth; // максимальная оценка для HiddenToggle
     const int baseAvailableTextWidth = effectiveVpWidth - fileBadgeWidth - kTextBadgeGap;
     const int fullTextWidth = calculateWidth(QStringView(state.text));
 
@@ -602,7 +796,7 @@ void LogListView::rebuildHeightCache() {
     if (!m_wordWrapEnabled && m_toggledRows.isEmpty()) {
         m_rowHeights.clear();
         m_rowPrefixY.clear();
-        m_totalHeight = singleRowH * rows;
+        m_totalHeight = qint64(singleRowH) * rows;
         m_uniformHeights = true;
         m_heightsDirty = false;
         return;
@@ -611,55 +805,103 @@ void LogListView::rebuildHeightCache() {
     m_uniformHeights = false;
     m_rowHeights.resize(rows);
 
-    const int vpWidth = viewport()->width();
-    const int toggleDashW = QFontMetrics(font()).horizontalAdvance(QChar('-')) + kBadgeHPadding + kBadgeGap;
-    const bool vpCacheValid = (m_cachedViewportWidth == vpWidth);
+    const bool vpCacheValid = (m_cachedViewportWidth == viewport()->width());
 
-    // Забираем кэш длины строк напрямик (минуя тормозящий model()->data()),
-    // это позволяет за доли секунды предсказать количество строк-переносов!
+    // Кэш длин display-текста: недостающие значения добираем напрямую из модели
+    // (O(1) на строку, минуя model()->data() и построение строки) —
+    // это позволяет за доли секунды предсказать количество строк-переносов.
     auto* logModel = qobject_cast<LogModel*>(this->model());
-    if (logModel && m_rowTextLengths.isEmpty()) {
-        const auto& entries = logModel->filteredEntries();
-        for (int i = 0; i < qMin(rows, (int)entries.size()); ++i) {
-            m_rowTextLengths[i] = entries[i]->message.length();
+    if (m_rowTextLengths.size() != rows) {
+        const int oldSize = m_rowTextLengths.size();
+        m_rowTextLengths.resize(rows);
+        std::fill(m_rowTextLengths.begin() + qMin(oldSize, rows), m_rowTextLengths.end(), -1);
+    }
+
+    const int charsPerLine = wrapCharsPerLine();
+    const bool anyStates = vpCacheValid && !m_rowStateCache.isEmpty();
+
+    // Высота развернутой строки: точная раскладка из кэша состояний или
+    // быстрая оценка по длине текста (длина / вместимость ширины).
+    auto expandedRowHeight = [&](int i) -> int {
+        if (anyStates && m_rowStateCache.contains(i))
+            return m_rowStateCache[i].height;
+        int len = m_rowTextLengths[i];
+        if (len < 0 && logModel) {
+            len = logModel->displayTextLength(i);
+            m_rowTextLengths[i] = len;
+        }
+        return estimateWrappedRowHeight(len, charsPerLine);
+    };
+
+    if (!m_wordWrapEnabled) {
+        // Wrap выключен: все строки однострочные, кроме точечно развернутых —
+        // заполняем константой и правим только развернутые, не делая по
+        // hash-lookup (isRowMultiLine) на каждую из миллионов строк.
+        m_rowHeights.fill(singleRowH);
+        for (int row : std::as_const(m_toggledRows)) {
+            if (row >= 0 && row < rows)
+                m_rowHeights[row] = expandedRowHeight(row);
+        }
+    } else {
+        // Wrap включен: развернуто всё, кроме точечно свернутых
+        const bool anyToggled = !m_toggledRows.isEmpty();
+        for (int i = 0; i < rows; ++i) {
+            const bool multi = anyToggled ? isRowMultiLine(i) : true;
+            m_rowHeights[i] = multi ? expandedRowHeight(i) : singleRowH;
         }
     }
 
-    // Вычисляем сколько символов МОНОШИРИННОГО шрифта помещается в одну строку на экране
-    int lineWidth = vpWidth - textAreaLeft() - toggleDashW - kTextBadgeGap - 2 * kTextPaddingX;
-    if (lineWidth <= 0) lineWidth = 100;
-    const int charsPerLine = qMax(1, (int)(lineWidth / m_charWidth));
-
-    for (int i = 0; i < rows; ++i) {
-        if (!isRowMultiLine(i)) {
-            // Строка свернута — высота = 1 базовая строка
-            m_rowHeights[i] = singleRowH;
-        } else if (vpCacheValid && m_rowStateCache.contains(i)) {
-            // Для этой строки уже был отрендерен пиксельный кэш
-            m_rowHeights[i] = m_rowStateCache[i].height;
-        } else if (m_rowTextLengths.contains(i)) {
-            // Быстрый математический расчет высоты при переносе (длина / вместимость ширины)
-            const int lineCount = qMax(1, (m_rowTextLengths[i] + charsPerLine - 1) / charsPerLine);
-            m_rowHeights[i] = lineCount * m_lineHeight + kLineVerticalPadding;
-        } else {
-            // Заглушка, если кэш оборвался (практически не вызывается)
-            m_rowHeights[i] = singleRowH * 3;
-        }
-    }
-
-    // Восстанавливаем кэш смещений для бинарного поиска строк O(log N)
+    // Все высоты пересчитаны — prefix-суммы устарели целиком.
+    // Восстанавливаем кэш смещений для бинарного поиска строк O(log N).
+    m_prefixDirtyFrom = 0;
     rebuildPrefixSums();
     m_heightsDirty = false;
 }
 
+// Сколько моноширинных колонок помещается в одну визуальную строку wrap-режима
+// при текущей ширине viewport (с учётом желобка, бейджа "-" и отступов).
+int LogListView::wrapCharsPerLine() const {
+    int lineWidth = viewport()->width() - textAreaLeft() - m_collapseBadgeWidth
+                    - kTextBadgeGap - 2 * kTextPaddingX;
+    if (lineWidth <= 0) lineWidth = 100;
+    return qMax(1, (int)(lineWidth / m_charWidth));
+}
+
+// Оценка высоты развернутой строки по длине текста; length < 0 (длина
+// неизвестна) — консервативная заглушка, уточнится при отрисовке.
+int LogListView::estimateWrappedRowHeight(int length, int charsPerLine) const {
+    if (length < 0)
+        return singleRowHeight() * 3;
+    const int lineCount = qMax(1, (length + charsPerLine - 1) / charsPerLine);
+    return lineCount * m_lineHeight + kLineVerticalPadding;
+}
+
+// Достраивает prefix-суммы из m_rowHeights. Частично: пересчитывается только
+// суффикс от первой изменённой строки (m_prefixDirtyFrom) — при ленивом
+// уточнении высот видимых строк во время прокрутки это O(N − row), а не O(N)
+// на каждый экран. При несовпадении размеров — полный пересчёт.
 void LogListView::rebuildPrefixSums() {
+    // В uniform-режиме prefix-суммы не используются, а m_totalHeight уже
+    // вычислен точной формулой в rebuildHeightCache — пересчёт по пустому
+    // m_rowHeights обнулил бы его (например, отложенный таймер сработал уже
+    // после выключения WordWrap) и схлопнул скроллбар.
+    if (m_uniformHeights) {
+        m_prefixDirtyFrom = std::numeric_limits<int>::max();
+        return;
+    }
+
     const int rows = m_rowHeights.size();
-    if (m_rowPrefixY.size() != rows + 1)
+    int from = 0;
+    if (m_rowPrefixY.size() == rows + 1) {
+        from = qBound(0, m_prefixDirtyFrom, rows);
+    } else {
         m_rowPrefixY.resize(rows + 1);
-    m_rowPrefixY[0] = 0;
-    for (int i = 0; i < rows; ++i)
+        m_rowPrefixY[0] = 0;
+    }
+    for (int i = from; i < rows; ++i)
         m_rowPrefixY[i + 1] = m_rowPrefixY[i] + m_rowHeights[i];
     m_totalHeight = (rows > 0) ? m_rowPrefixY[rows] : 0;
+    m_prefixDirtyFrom = std::numeric_limits<int>::max();
 }
 
 void LogListView::refineHeightsAbove(int row) {
@@ -677,6 +919,7 @@ void LogListView::refineHeightsAbove(int row) {
         const int h = getRowState(r).height;
         if (m_rowHeights[r] != h) {
             m_rowHeights[r] = h;
+            markPrefixDirtyFrom(r);
             changed = true;
         }
         acc += h;
@@ -684,16 +927,16 @@ void LogListView::refineHeightsAbove(int row) {
     if (changed) rebuildPrefixSums();
 }
 
-// O(1): Y-позиция начала строки row
-int LogListView::rowYOffset(int row) const {
+// O(1): Y-позиция начала строки row (64-битные координаты контента)
+qint64 LogListView::rowYOffset(int row) const {
     if (m_uniformHeights) {
-        return row * singleRowHeight();  // O(1) — однострочный режим
+        return qint64(row) * singleRowHeight();  // O(1) — однострочный режим
     }
     if (!m_heightsDirty && row >= 0 && row < m_rowPrefixY.size()) {
         return m_rowPrefixY[row];
     }
     // Fallback: линейная сумма
-    int y = 0;
+    qint64 y = 0;
     int limit = qBound(0, row, model() ? model()->rowCount() : 0);
     for (int i = 0; i < limit; ++i) {
         y += getRowHeight(i);
@@ -702,13 +945,13 @@ int LogListView::rowYOffset(int row) const {
 }
 
 // O(log N): индекс строки по Y-позиции в контенте
-int LogListView::rowAtY(int contentY) const {
+int LogListView::rowAtY(qint64 contentY) const {
     const int rows = model() ? model()->rowCount() : 0;
     if (rows == 0) return 0;
 
     if (m_uniformHeights) {
         const int h = singleRowHeight();
-        return qBound(0, contentY / h, rows - 1);  // O(1) — однострочный режим
+        return int(qBound(qint64(0), contentY / h, qint64(rows - 1)));  // O(1) — однострочный режим
     }
 
     if (!m_heightsDirty && (int)m_rowPrefixY.size() == rows + 1) {
@@ -721,7 +964,7 @@ int LogListView::rowAtY(int contentY) const {
     }
 
     // Fallback: линейный поиск
-    int y = 0;
+    qint64 y = 0;
     for (int i = 0; i < rows; ++i) {
         int h = getRowHeight(i);
         if (contentY < y + h) return i;
@@ -730,17 +973,37 @@ int LogListView::rowAtY(int contentY) const {
     return rows - 1;
 }
 
+// ============================================================================
+// Отображение скроллбар ↔ координаты контента.
+// Пока контент помещается в 32-битный диапазон, масштаб равен 1 и значение
+// скроллбара — это пиксель контента (прежнее поведение бит-в-бит).
+// ============================================================================
+
+qint64 LogListView::scrollContentY() const {
+    const int value = verticalScrollBar()->value();
+    if (m_scrollScale <= 1.0)
+        return value;
+    return qint64(std::llround(qreal(value) * m_scrollScale));
+}
+
+int LogListView::contentYToScrollValue(qint64 contentY) const {
+    qint64 value = contentY;
+    if (m_scrollScale > 1.0)
+        value = qint64(std::llround(qreal(contentY) / m_scrollScale));
+    return int(qBound(qint64(0), value, qint64(verticalScrollBar()->maximum())));
+}
+
 int LogListView::targetScrollValueForRow(int row, ScrollHint hint) const {
     if (!model() || row < 0 || row >= model()->rowCount()) {
         return verticalScrollBar()->value();
     }
 
-    const int rowTop = rowYOffset(row);
+    const qint64 rowTop = rowYOffset(row);
     const int rowHeight = getRowHeight(row);
     const int viewportHeight = viewport()->height();
-    const int currentScroll = verticalScrollBar()->value();
+    const qint64 currentScroll = scrollContentY();
 
-    int target = currentScroll;
+    qint64 target = currentScroll;
     switch (hint) {
         case PositionAtTop:
             target = rowTop;
@@ -761,7 +1024,7 @@ int LogListView::targetScrollValueForRow(int row, ScrollHint hint) const {
             break;
     }
 
-    return qBound(0, target, verticalScrollBar()->maximum());
+    return contentYToScrollValue(target);
 }
 
 int LogListView::targetScrollValueForRowOffset(int row, int viewportOffset) const {
@@ -769,7 +1032,7 @@ int LogListView::targetScrollValueForRowOffset(int row, int viewportOffset) cons
         return verticalScrollBar()->value();
     }
 
-    return qBound(0, rowYOffset(row) - viewportOffset, verticalScrollBar()->maximum());
+    return contentYToScrollValue(rowYOffset(row) - viewportOffset);
 }
 
 bool LogListView::captureVisibleRowOffset(int row, int& viewportOffset) const {
@@ -778,16 +1041,17 @@ bool LogListView::captureVisibleRowOffset(int row, int& viewportOffset) const {
         return false;
     }
 
-    const int scrollY = verticalScrollBar()->value();
-    const int rowTop = rowYOffset(row);
-    const int rowBottom = rowTop + getRowHeight(row);
-    const int viewportBottom = scrollY + viewport()->height();
+    const qint64 scrollY = scrollContentY();
+    const qint64 rowTop = rowYOffset(row);
+    const qint64 rowBottom = rowTop + getRowHeight(row);
+    const qint64 viewportBottom = scrollY + viewport()->height();
 
     if (rowBottom <= scrollY || rowTop >= viewportBottom) {
         return false;
     }
 
-    viewportOffset = rowTop - scrollY;
+    // Строка видима — смещение ограничено высотой вьюпорта, в int помещается
+    viewportOffset = int(rowTop - scrollY);
     return true;
 }
 
@@ -888,7 +1152,7 @@ QList<BadgeLayout> LogListView::layoutBadges(const QList<BadgeSpec>& specs, int 
 // Хелперы для позиционирования
 // ============================================================================
 
-bool LogListView::getRowAtContentY(int contentY, int& row, int& rowTop) const {
+bool LogListView::getRowAtContentY(qint64 contentY, int& row, qint64& rowTop) const {
     row = -1;
     rowTop = 0;
     const int rows = model() ? model()->rowCount() : 0;
@@ -897,27 +1161,13 @@ bool LogListView::getRowAtContentY(int contentY, int& row, int& rowTop) const {
     int r = rowAtY(contentY);
     if (r < 0 || r >= rows) return false;
 
-    int yOff = rowYOffset(r);
+    qint64 yOff = rowYOffset(r);
     // Verify contentY is within this row (guards against contentY past end of content)
     if (contentY >= yOff + getRowHeight(r)) return false;
 
     row    = r;
     rowTop = yOff;
     return true;
-}
-
-int LogListView::getFragmentIndexForPosition(int pos, const QList<TextFragment>& fragments) const {
-    if (fragments.isEmpty()) return -1;
-
-    for (int i = 0; i < fragments.size(); ++i) {
-        const auto& fragment = fragments[i];
-        if (pos >= fragment.startPos && pos <= fragment.startPos + fragment.length) {
-            return i;
-        }
-    }
-    // Если позиция за пределами, выбираем ближайший край
-    if (pos < fragments.first().startPos) return 0;
-    return fragments.size() - 1;
 }
 
 QList<TextFragment> LogListView::splitTextIntoLines(const QString& text, const QRect& rect) const {
@@ -1005,7 +1255,7 @@ void LogListView::setTextHighlightPatterns(const QVector<HighlightPattern>& patt
     m_textHighlighter.setPatterns(patterns);
     // Заливки совпадений запечены в пиксмапы строк — сбрасываем кэш растров,
     // кэш геометрии (RowState) не зависит от подсветки и остаётся валидным.
-    m_rowPixmapCache.clear();
+    clearRowPixmaps();
     viewport()->update();
 }
 
@@ -1018,7 +1268,7 @@ void LogListView::showSearchMatch(int row, const QString& term, bool caseSensiti
 
     // Снимаем подсветку с предыдущей найденной строки.
     if (m_searchMatchRow >= 0 && m_searchMatchRow != row)
-        m_rowPixmapCache.remove(m_searchMatchRow);
+        removeRowPixmap(m_searchMatchRow);
 
     m_searchMatchRow = row;
     HighlightPattern pattern;
@@ -1033,7 +1283,7 @@ void LogListView::showSearchMatch(int row, const QString& term, bool caseSensiti
     if (!isRowMultiLine(row))
         toggleRowMultiLine(row);
 
-    m_rowPixmapCache.remove(row);
+    removeRowPixmap(row);
     viewport()->update();
 }
 
@@ -1041,7 +1291,7 @@ void LogListView::clearSearchMatch()
 {
     if (m_searchMatchRow < 0)
         return;
-    m_rowPixmapCache.remove(m_searchMatchRow);
+    removeRowPixmap(m_searchMatchRow);
     m_searchMatchRow = -1;
     m_searchHighlighter.setPatterns({});
     viewport()->update();
@@ -1052,6 +1302,10 @@ void LogListView::clearSearchMatch()
 void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, const QString& text,
                                           const RowState& state, const QVector<HighlightSpan>& spans) const
 {
+    // Прямая отрисовка гигантской строки клипуется видимой областью —
+    // фрагменты вне клипа пропускаем (см. drawLogLine).
+    const QRectF clip = painter.hasClipping() ? painter.clipBoundingRect() : QRectF();
+
     for (const auto& span : spans) {
         int spanBegin = span.start;
         int spanFinish = span.start + span.length;
@@ -1069,6 +1323,11 @@ void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, 
         }
 
         for (const auto& fragment : state.fragments) {
+            if (!clip.isNull()) {
+                const int fragTop = rect.top() + fragment.rect.top();
+                if (fragTop + fragment.rect.height() < clip.top() || fragTop > clip.bottom())
+                    continue;
+            }
             const int fragSelStart = qMax(spanBegin,  fragment.startPos) - fragment.startPos;
             const int fragSelEnd   = qMin(spanFinish, fragment.startPos + fragment.length) - fragment.startPos;
             if (fragSelEnd <= fragSelStart)
@@ -1084,25 +1343,58 @@ void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, 
 // Основная отрисовка строки лога с подсветкой чисел и строк
 // Использует кэшированные фрагменты из RowState
 void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state) {
-    // Заливки совпадений — до текста, чтобы существующая раскраска
-    // SyntaxHighlighter рисовалась поверх и не менялась.
-    if (!m_textHighlighter.isEmpty()) {
-        const QVector<HighlightSpan> spans = m_textHighlighter.computeSpans(text);
-        if (!spans.isEmpty())
-            drawMatchHighlightSpans(painter, rect, text, state, spans);
+    // Токенизация и поиск совпадений — O(длина строки). Для обычных строк
+    // результат запекается в пиксмап и повторно не нужен; гигантские строки
+    // (не влезающие в пиксмап-кэш) рисуются напрямую на каждый кадр — для них
+    // результаты разбора кэшируются по номеру строки.
+    QList<HighlightToken> tokens;
+    QVector<HighlightSpan> matchSpans;
+    const bool useParseCache = !isRowPixmapCacheable(state);
+    bool haveCached = false;
+    if (useParseCache) {
+        const auto it = m_rowParseCache.constFind(state.row);
+        if (it != m_rowParseCache.constEnd()) {
+            tokens     = it->tokens;
+            matchSpans = it->matchSpans;
+            haveCached = true;
+        }
+    }
+    if (!haveCached) {
+        tokens = SyntaxHighlighter::tokenize(text);
+        if (!m_textHighlighter.isEmpty())
+            matchSpans = m_textHighlighter.computeSpans(text);
+        if (useParseCache) {
+            if (m_rowParseCache.size() >= kMaxParseCacheRows)
+                m_rowParseCache.clear();
+            m_rowParseCache.insert(state.row, {tokens, matchSpans});
+        }
     }
 
-    // Подсветка результата поиска — только в найденной строке.
+    // Заливки совпадений — до текста, чтобы существующая раскраска
+    // SyntaxHighlighter рисовалась поверх и не менялась.
+    if (!matchSpans.isEmpty())
+        drawMatchHighlightSpans(painter, rect, text, state, matchSpans);
+
+    // Подсветка результата поиска — только в найденной строке. Не кэшируем:
+    // ровно одна строка, и подсветка живёт только пока активен поиск.
     if (state.row == m_searchMatchRow && !m_searchHighlighter.isEmpty()) {
         const QVector<HighlightSpan> spans = m_searchHighlighter.computeSpans(text);
         if (!spans.isEmpty())
             drawMatchHighlightSpans(painter, rect, text, state, spans);
     }
 
-    QList<HighlightToken> tokens = SyntaxHighlighter::tokenize(text);
-
     if (state.multiLine) {
+        // При прямой отрисовке (без пиксмапа — гигантские строки) painter обрезан
+        // видимой областью: фрагменты вне неё пропускаем, иначе строка на тысячи
+        // фрагментов отрисовывалась бы целиком на каждый кадр. При рендере в
+        // pixmap клипа нет (clip пуст) — рисуются все фрагменты.
+        const QRectF clip = painter.hasClipping() ? painter.clipBoundingRect() : QRectF();
         for (const auto& fragment : state.fragments) {
+            if (!clip.isNull()) {
+                const int fragTop = rect.top() + fragment.rect.top();
+                if (fragTop + fragment.rect.height() < clip.top() || fragTop > clip.bottom())
+                    continue;
+            }
             // Корректируем X: фрагменты хранятся в локальных координатах пикселя (0-based),
             // rect.left() добавляет смещение до текстовой области (kLeftMarginWidth или 0 в пикселе)
             int x = rect.left() + fragment.rect.left();
@@ -1273,43 +1565,109 @@ void LogListView::updateBracketMatch()
     }
 }
 
+// Байтовый размер растра (для учёта бюджета кэша)
+static qint64 pixmapByteSize(const QPixmap& p) {
+    return qint64(p.width()) * p.height() * qMax(1, p.depth()) / 8;
+}
+
+// Адаптивный лимит числа записей: минимум 100, иначе три экрана однострочных
+// строк — чтобы на высоких мониторах кэш не вытеснял ещё видимые строки.
+int LogListView::maxCachedPixmaps() const {
+    return qMax(100, 3 * (viewport()->height() / qMax(1, singleRowHeight())));
+}
+
+// Растр строки помещается в пиксмап-кэш? Гигантские (и вырожденные) строки —
+// нет: их рисует напрямую fallback-ветка paintEvent на каждый кадр, с
+// отсечением невидимых фрагментов и кэшем разбора (m_rowParseCache).
+bool LogListView::isRowPixmapCacheable(const RowState& state) const {
+    const int width = state.textRect.width();
+    const int height = state.height;
+    if (width <= 0 || height <= 0)
+        return false;
+    const qreal dpr = devicePixelRatioF();
+    const qint64 estimatedBytes = qint64(width * dpr) * qint64(height * dpr) * 4;
+    return estimatedBytes <= kMaxSingleRowPixmapBytes;
+}
+
+void LogListView::removeRowPixmap(int row) const {
+    m_rowParseCache.remove(row);  // кэш разбора живёт и умирает вместе с растром
+    auto it = m_rowPixmapCache.find(row);
+    if (it == m_rowPixmapCache.end())
+        return;
+    m_rowPixmapCacheBytes -= pixmapByteSize(it.value());
+    m_rowPixmapCache.erase(it);
+}
+
+void LogListView::clearRowPixmaps() const {
+    m_rowParseCache.clear();      // кэш разбора живёт и умирает вместе с растрами
+    m_rowPixmapCache.clear();
+    m_rowPixmapCacheBytes = 0;
+}
+
+// Вытесняет растры строк, далёких от текущей позиции скролла. Если и после
+// этого кэш переполнен (всё близко к вьюпорту) — полный сброс.
+void LogListView::evictDistantPixmaps() const {
+    const int anchor = rowAtY(scrollContentY());
+    const int keepRadius = qMax(maxCachedPixmaps() / 2,
+                                viewport()->height() / qMax(1, singleRowHeight()) + 1);
+    for (auto it = m_rowPixmapCache.begin(); it != m_rowPixmapCache.end();) {
+        if (std::abs(it.key() - anchor) > keepRadius) {
+            m_rowPixmapCacheBytes -= pixmapByteSize(it.value());
+            it = m_rowPixmapCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_rowPixmapCacheBytes > kMaxPixmapCacheBytes
+        || m_rowPixmapCache.size() >= maxCachedPixmaps()) {
+        clearRowPixmaps();
+    }
+}
+
 // Кэширование растров строк для ускорения отрисовки
 QPixmap LogListView::getRowPixmap(int row, const RowState& state) {
     if (!model() || row < 0 || row >= model()->rowCount()) {
         return QPixmap();
     }
-    
+
     // Проверяем кэш (pixmap кэш синхронизирован с RowState кэшем)
     if (m_rowPixmapCache.contains(row)) {
         return m_rowPixmapCache[row];
     }
-    
-    // Ограничиваем размер кэша — при переполнении сбрасываем целиком
-    if (m_rowPixmapCache.size() >= MAX_CACHED_ROWS) {
-        m_rowPixmapCache.clear();
-    }
-    
+
+    // Гигантские (и вырожденные) развернутые строки не кэшируем: fallback-ветка
+    // paintEvent нарисует их напрямую, отсекая невидимые фрагменты.
+    if (!isRowPixmapCacheable(state))
+        return QPixmap();
+
+    const int width = state.textRect.width();
+    const int height = state.height;
+    const qreal devicePixelRatio = devicePixelRatioF();
+
     // Создаем новый растр с высоким качеством
-    int width = state.textRect.width();
-    int height = state.height;
-    qreal devicePixelRatio = devicePixelRatioF();
-    
     QPixmap pixmap(width * devicePixelRatio, height * devicePixelRatio);
     pixmap.setDevicePixelRatio(devicePixelRatio);
     pixmap.fill(Qt::transparent);
-    
+
     QPainter painter(&pixmap);
     painter.setFont(font());
-    
+
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    
+
     QRect rect(0, 0, width, height);
     drawLogLine(painter, rect, state.text, state);
-    
+
+    // Бюджет кэша: при переполнении вытесняем далёкие от вьюпорта строки
+    const qint64 bytes = pixmapByteSize(pixmap);
+    if (m_rowPixmapCacheBytes + bytes > kMaxPixmapCacheBytes
+        || m_rowPixmapCache.size() >= maxCachedPixmaps()) {
+        evictDistantPixmaps();
+    }
     m_rowPixmapCache[row] = pixmap;
-    
+    m_rowPixmapCacheBytes += bytes;
+
     return pixmap;
 }
 
@@ -1325,8 +1683,26 @@ void LogListView::toggleRowMultiLine(int row) {
         m_toggledRows.insert(row);
     }
 
+    const bool heightsWereClean = !m_heightsDirty;
     invalidateRowState(row, /*preserveTextLengths=*/true);
-    rebuildHeightCache();
+
+    // Меняется высота ровно одной строки. Если кэш высот был актуален и режим
+    // структурно не меняется (не входим в uniform-режим и не выходим из него),
+    // обновляем одну высоту и суффикс prefix-сумм вместо полного O(N)-пересчёта.
+    const int rows = model() ? model()->rowCount() : 0;
+    const bool nowUniform = !m_wordWrapEnabled && m_toggledRows.isEmpty();
+    if (heightsWereClean && !m_uniformHeights && !nowUniform
+        && row < rows && m_rowHeights.size() == rows) {
+        const int newHeight = getRowState(row).height;
+        if (m_rowHeights[row] != newHeight) {
+            m_rowHeights[row] = newHeight;
+            markPrefixDirtyFrom(row);
+            rebuildPrefixSums();
+        }
+        m_heightsDirty = false;
+    } else {
+        rebuildHeightCache();
+    }
     updateScrollbar();
 
     if (keepRowAnchor) {
@@ -1362,12 +1738,14 @@ void LogListView::paintEvent(QPaintEvent *event) {
     int rows = model() ? model()->rowCount() : 0;
     if (rows == 0) return;
 
-    int scrollY = verticalScrollBar()->value();
+    const qint64 scrollY = scrollContentY();
     QRect visibleRect = event->rect();
-    
-    // O(log N) поиск первой видимой строки
-    int firstVisibleRow = rowAtY(scrollY);
-    int currentY = rowYOffset(firstVisibleRow) - scrollY;
+
+    // O(log N) поиск первой строки, попадающей в ОБЛАСТЬ ОБНОВЛЕНИЯ (не только
+    // вьюпорта): при частичной перерисовке (точечная инвалидация выделения)
+    // не гоняем цикл по строкам выше области.
+    int firstVisibleRow = rowAtY(scrollY + qMax(0, visibleRect.top()));
+    int currentY = int(rowYOffset(firstVisibleRow) - scrollY);
     bool anyHeightChanged = false;
     for (int row = firstVisibleRow; row < rows; ++row) {
         // Получаем кэшированное состояние строки
@@ -1378,6 +1756,7 @@ void LogListView::paintEvent(QPaintEvent *event) {
         if (!m_uniformHeights && !m_heightsDirty && row < m_rowHeights.size()) {
             if (m_rowHeights[row] != state.height) {
                 m_rowHeights[row] = state.height;
+                markPrefixDirtyFrom(row);
                 anyHeightChanged = true;
             }
         }
@@ -1419,9 +1798,11 @@ void LogListView::paintEvent(QPaintEvent *event) {
                 painter.drawPixmap(textRect.topLeft(), rowPixmap);
                 painter.restore();
             } else {
-                // Fallback на обычную отрисовку
+                // Прямая отрисовка (гигантские строки не кэшируются в pixmap).
+                // Клип пересекаем с видимой областью: по нему drawLogLine
+                // отсекает невидимые фрагменты, не рисуя всю строку целиком.
                 painter.save();
-                painter.setClipRect(textRect);
+                painter.setClipRect(textRect.intersected(visibleRect));
                 drawLogLine(painter, textRect, state.text, state);
                 painter.restore();
             }
@@ -1465,10 +1846,10 @@ void LogListView::resizeEvent(QResizeEvent *event) {
     QListView::resizeEvent(event);
     
     if (m_anchorRow < 0 && model() && model()->rowCount() > 0) {
-        int scrollY = verticalScrollBar()->value();
-        int rowTop = 0;
+        const qint64 scrollY = scrollContentY();
+        qint64 rowTop = 0;
         if (getRowAtContentY(scrollY, m_anchorRow, rowTop)) {
-            m_anchorOffsetInViewport = rowTop - scrollY;
+            m_anchorOffsetInViewport = int(rowTop - scrollY);
         }
     }
 
@@ -1484,7 +1865,7 @@ void LogListView::leaveEvent(QEvent *event) {
     // Полностью игнорируем события выхода мыши
 }
 
-int LogListView::estimateTotalHeightForDirtyCache(int rows) const {
+qint64 LogListView::estimateTotalHeightForDirtyCache(int rows) const {
     const int singleRowH = singleRowHeight();
     if (rows <= 0) {
         return 0;
@@ -1492,12 +1873,12 @@ int LogListView::estimateTotalHeightForDirtyCache(int rows) const {
 
     // В однострочном режиме точная формула O(1).
     if (!m_wordWrapEnabled && m_toggledRows.isEmpty()) {
-        return singleRowH * rows;
+        return qint64(singleRowH) * rows;
     }
 
     // Для word-wrap нужен консервативный estimate, иначе scrollbar может исчезнуть
     // до первого точного пересчёта высот после reset/filter.
-    const int estimatedWrappedRowH = singleRowH * 3;
+    const qint64 estimatedWrappedRowH = qint64(singleRowH) * 3;
     return estimatedWrappedRowH * rows;
 }
 
@@ -1506,11 +1887,12 @@ void LogListView::updateScrollbar() {
 
     const int rows = model()->rowCount();
     if (rows == 0) {
+        m_scrollScale = 1.0;
         verticalScrollBar()->setRange(0, 0);
         return;
     }
 
-    int totalHeight;
+    qint64 totalHeight;
     if (!m_heightsDirty) {
         // Точное (или оценочное из кэша) значение — никакого обращения к модели
         totalHeight = m_totalHeight;
@@ -1520,7 +1902,7 @@ void LogListView::updateScrollbar() {
         totalHeight = estimateTotalHeightForDirtyCache(rows);
     }
 
-    int maxScroll = std::max(0, totalHeight - viewport()->height());
+    const qint64 maxScroll = std::max<qint64>(0, totalHeight - viewport()->height());
 
     // Явно диктуем политику отображения скроллбара, чтобы разорвать
     // бесконечный цикл resizeEvent (ScrollBar Oscillation), который возникает,
@@ -1531,9 +1913,20 @@ void LogListView::updateScrollbar() {
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     }
 
-    verticalScrollBar()->setRange(0, maxScroll);
-    verticalScrollBar()->setPageStep(viewport()->height());
-    verticalScrollBar()->setSingleStep(singleRowHeight());
+    // Пока контент помещается в 32-битный диапазон, значение скроллбара — это
+    // пиксель контента (масштаб 1, прежнее поведение). Дальше — сжатая шкала:
+    // page/single step пересчитываются, чтобы прокрутка на страницу/строку
+    // соответствовала тем же пикселям контента.
+    if (maxScroll <= kMaxScrollRange) {
+        m_scrollScale = 1.0;
+        verticalScrollBar()->setRange(0, int(maxScroll));
+    } else {
+        m_scrollScale = qreal(maxScroll) / kMaxScrollRange;
+        verticalScrollBar()->setRange(0, kMaxScrollRange);
+    }
+    const qreal invScale = 1.0 / m_scrollScale;
+    verticalScrollBar()->setPageStep(qMax(1, int(viewport()->height() * invScale)));
+    verticalScrollBar()->setSingleStep(qMax(1, int(singleRowHeight() * invScale)));
 }
 
 // Обработка нажатия мыши для выделения текста
@@ -1554,12 +1947,14 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
     // Получение информации о строке под курсором
     auto getRowHitInfoFromMouse = [this](const QPoint& viewportPos) -> RowHitInfo {
         RowHitInfo info;
-        int scrollY = verticalScrollBar()->value();
-        int contentY = viewportPos.y() + scrollY;
+        const qint64 contentY = viewportPos.y() + scrollContentY();
 
-        if (getRowAtContentY(contentY, info.row, info.rowTop)) {
-            info.rowHeight = getRowHeight(info.row);
-            info.localPos = QPoint(viewportPos.x(), contentY - info.rowTop);
+        int row = -1;
+        qint64 rowTop = 0;
+        if (getRowAtContentY(contentY, row, rowTop)) {
+            info.row = row;
+            info.rowHeight = getRowHeight(row);
+            info.localPos = QPoint(viewportPos.x(), int(contentY - rowTop));
             info.valid = true;
         }
         return info;
@@ -1621,23 +2016,29 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
 
 // Обновляет только изменившийся диапазон строк в viewport.
 void LogListView::invalidateSelectionRange(int topRow, int bottomRow) {
-    const int scrollY = verticalScrollBar()->value();
-    const int topY    = rowYOffset(topRow) - scrollY;
-    const int botY    = rowYOffset(bottomRow) + getRowHeight(bottomRow) - scrollY;
-    viewport()->update(QRect(0, topY, viewport()->width(), botY - topY));
+    const qint64 scrollY = scrollContentY();
+    const qint64 topY    = rowYOffset(topRow) - scrollY;
+    const qint64 botY    = rowYOffset(bottomRow) + getRowHeight(bottomRow) - scrollY;
+    // Диапазон может уходить далеко за пределы вьюпорта — обрезаем (QRect 32-битный)
+    const int vpHeight = viewport()->height();
+    if (botY <= 0 || topY >= vpHeight)
+        return;
+    const int top    = int(qMax<qint64>(0, topY));
+    const int bottom = int(qMin<qint64>(vpHeight, botY));
+    viewport()->update(QRect(0, top, viewport()->width(), bottom - top));
 }
 
 // Обработка движения мыши — расширяет выделение на несколько строк.
 void LogListView::mouseMoveEvent(QMouseEvent *event) {
     if (!m_selection.isDragging) return;
 
-    const int scrollY  = verticalScrollBar()->value();
-    const int contentY = event->pos().y() + scrollY;
+    const qint64 contentY = event->pos().y() + scrollContentY();
     const int rowCount = model() ? model()->rowCount() : 0;
     if (rowCount == 0) return;
 
     // Определяем строку под курсором с зажимом на границах контента
-    int newRow = -1, rowTop = 0;
+    int newRow = -1;
+    qint64 rowTop = 0;
     if (contentY < 0) {
         newRow = 0;
         rowTop = 0;
@@ -1647,7 +2048,7 @@ void LogListView::mouseMoveEvent(QMouseEvent *event) {
     }
 
     const RowState& state   = getRowState(newRow);
-    const QPoint    localPos(event->pos().x(), contentY - rowTop);
+    const QPoint    localPos(event->pos().x(), int(contentY - rowTop));
     const int       newPos  = getTextPositionFromMouse(localPos, state);
 
     if (newRow == m_selection.activeRow && newPos == m_selection.activePos) return;
@@ -1683,16 +2084,16 @@ void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
         return;
     }
 
-    int scrollY  = verticalScrollBar()->value();
-    int contentY = event->pos().y() + scrollY;
-    int row = -1, rowTop = 0;
+    const qint64 contentY = event->pos().y() + scrollContentY();
+    int row = -1;
+    qint64 rowTop = 0;
     if (!getRowAtContentY(contentY, row, rowTop)) {
         QListView::mouseDoubleClickEvent(event);
         return;
     }
 
     const RowState& state    = getRowState(row);
-    const QPoint    localPos = QPoint(event->pos().x(), contentY - rowTop);
+    const QPoint    localPos = QPoint(event->pos().x(), int(contentY - rowTop));
     const int       clickPos = getTextPositionFromMouse(localPos, state);
 
     const TextToken::Token tok = TextToken::findDoubleClickToken(state.text, clickPos);
@@ -1892,10 +2293,10 @@ static QDateTime parseTimestampText(const QString& raw) {
 // (открыть ссылку / файл, подставить таймстамп в фильтр по времени).
 void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     const QPoint vpPos    = viewport()->mapFromGlobal(event->globalPos());
-    const int    scrollY  = verticalScrollBar()->value();
-    const int    contentY = vpPos.y() + scrollY;
+    const qint64 contentY = vpPos.y() + scrollContentY();
 
-    int row = -1, rowTop = 0;
+    int row = -1;
+    qint64 rowTop = 0;
     const bool haveRow = getRowAtContentY(contentY, row, rowTop);
 
     QMenu menu(this);
@@ -1916,9 +2317,14 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
         });
     }
 
-    // Действия, зависящие от типа выделенного блока.
-    const QString sel = selectedText().trimmed();
-    const TextToken::TokenType selType = TextToken::classify(sel);
+    // Действия, зависящие от типа выделенного блока. URL/путь/таймстамп —
+    // всегда однострочные токены: для многострочного выделения не собираем
+    // полный текст (он может быть огромным) и не классифицируем.
+    QString sel;
+    if (!m_selection.isEmpty() && !m_selection.isMultiRow())
+        sel = selectedText().trimmed();
+    const TextToken::TokenType selType = sel.isEmpty()
+        ? TextToken::TokenType::None : TextToken::classify(sel);
     if (selType == TextToken::TokenType::Url) {
         menu.addSeparator();
         QAction* a = menu.addAction(tr("Open Link"));
@@ -2037,12 +2443,13 @@ void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const 
     // (табы → пробелы до табстопа), чтобы глифы попали ровно в колонки сетки.
     ColumnCursor cursor(text, m_tabExpander);
 
-    // Проходим по всем токенам подсветки
-    for (const auto& token : tokens) {
-        // Проверяем, пересекается ли токен с текущим фрагментом
-        if (token.end <= fragmentStart || token.start >= fragmentEnd) {
-            continue; // Токен не пересекается с фрагментом
-        }
+    // Токены отсортированы и не пересекаются (однопроходный сканер) — бинарным
+    // поиском находим первый токен, пересекающийся с фрагментом, и идём до
+    // конца фрагмента: O(log T + K) вместо полного перебора O(T) на фрагмент.
+    auto tokenIt = std::lower_bound(tokens.constBegin(), tokens.constEnd(), fragmentStart,
+        [](const HighlightToken& t, int pos) { return t.end <= pos; });
+    for (; tokenIt != tokens.constEnd() && tokenIt->start < fragmentEnd; ++tokenIt) {
+        const auto& token = *tokenIt;
 
         // Вычисляем пересечение токена с фрагментом
         int tokenStartInFragment = qMax(0, token.start - fragmentStart);
