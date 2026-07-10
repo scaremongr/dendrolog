@@ -1,14 +1,10 @@
-# Релизный конвейер: пуш тега vX.Y.Z собирает все артефакты и публикует
-# GitHub Release. Ничего не собирается вручную на локальной машине —
-# сборка воспроизводима и происходит только из содержимого репозитория.
+# Релизный конвейер: пуш тега vX.Y.Z собирает все артефакты (через общий
+# build.yml) и публикует GitHub Release. Ничего не собирается вручную на
+# локальной машине — сборка воспроизводима из содержимого репозитория.
 #
 # Как выпустить релиз:
 #   1. Обновить версию в CMakeLists.txt (project(... VERSION X.Y.Z)) и CHANGELOG.md.
 #   2. git tag vX.Y.Z && git push origin vX.Y.Z
-#
-# Артефакты: DendroLog-X.Y.Z-setup.exe (установщик),
-#            DendroLog-X.Y.Z-win64-portable.zip (portable),
-#            DendroLog-X.Y.Z-x86_64.AppImage (Linux).
 
 name: Release
 
@@ -18,9 +14,6 @@ on:
 
 permissions:
   contents: write
-
-env:
-  QT_VERSION: '6.8.*'
 
 jobs:
   # Страховка от расхождения версий: тег обязан совпадать с версией в CMake.
@@ -40,107 +33,15 @@ jobs:
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-  windows:
+  build:
     needs: verify-version
-    runs-on: windows-latest
-    env:
-      VERSION: ${{ needs.verify-version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          cache: true
-
-      - name: Configure and build
-        run: |
-          cmake -S . -B build
-          cmake --build build --config Release --parallel
-
-      - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
-
-      - name: Stage with Qt runtime
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory build\stage | Out-Null
-          Copy-Item build\Release\DendroLog.exe build\stage\
-          Copy-Item LICENSE,README.md,CHANGELOG.md build\stage\
-          windeployqt --release --no-translations build\stage\DendroLog.exe
-
-      - name: Build installer (Inno Setup)
-        shell: pwsh
-        run: |
-          choco install innosetup -y --no-progress
-          iscc /DAppVersion=$env:VERSION /DStagingDir=..\..\build\stage `
-               /O"dist" packaging\windows\dendrolog.iss
-
-      - name: Build portable ZIP
-        shell: pwsh
-        run: |
-          # Маркер portable: настройки будут храниться рядом с exe.
-          New-Item -ItemType File build\stage\portable | Out-Null
-          Compress-Archive -Path build\stage\* `
-            -DestinationPath "dist\DendroLog-$env:VERSION-win64-portable.zip"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: dist/*
-          if-no-files-found: error
-
-  linux:
-    needs: verify-version
-    runs-on: ubuntu-22.04
-    env:
-      VERSION: ${{ needs.verify-version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          cache: true
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev \
-            libxcb-cursor0 libfuse2
-
-      - name: Configure and build
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-      - name: Build AppImage
-        run: |
-          curl -fLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -fLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
-          chmod +x linuxdeploy-*.AppImage
-          export QMAKE="$QT_ROOT_DIR/bin/qmake"
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            -e build/DendroLog \
-            -d packaging/linux/dendrolog.desktop \
-            -i packaging/linux/dendrolog.png \
-            --plugin qt --output appimage
-          mkdir dist
-          mv DendroLog-*.AppImage "dist/DendroLog-$VERSION-x86_64.AppImage"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: dist/*
-          if-no-files-found: error
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.verify-version.outputs.version }}
+      numeric-version: ${{ needs.verify-version.outputs.version }}
 
   publish:
-    needs: [verify-version, windows, linux]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
