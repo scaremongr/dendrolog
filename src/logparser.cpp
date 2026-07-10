@@ -4,7 +4,7 @@
 #include <QTextStream>
 #include <QtConcurrent> // Для QtConcurrent::run
 #include <QFileInfo>    // Для получения размера файла (для progress)
-#include <QStringRef>
+#include <QStringView>
 #include <QDebug>       // Для qWarning()
 
 LogParser::LogParser(QObject* parent)
@@ -78,8 +78,8 @@ bool LogParser::detectTimestamp(const QString &line, QDateTime &ts)
         return false; // Невалидная дата/время, несмотря на совпадение с regex
     } else {
         // m_timestampRegex не нашел совпадения. Пробуем другие форматы вручную.
-        // Используем QStringRef для line для эффективности
-        const QStringRef lineRef = QStringRef(&line);
+        // Используем QStringView для line для эффективности
+        const QStringView lineRef{line};
         bool convOk = true;
 
         // Порядок m_timeFormats важен для проверки.
