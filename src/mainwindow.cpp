@@ -14,6 +14,7 @@
 #include "statisticspanel.h"
 #include "schemastore.h"
 #include "apptheme.h"
+#include "updatechecker.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -55,6 +56,15 @@
 #include <QPainter>
 #include <QKeySequence>
 #include <QSvgRenderer>
+#include <QTextBrowser>
+#include <QDialog>
+#include <QDesktopServices>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QLocale>
+#include <QUrl>
+#include <QDate>
 
 #include <algorithm>
 #include <limits>
@@ -173,6 +183,11 @@ MainWindow::MainWindow(QWidget *parent)
     QAction* settingsAction = menuTools->addAction(tr("Settings..."));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::onSettingsTriggered);
     m_shortcutActions.insert(QStringLiteral("settings"), settingsAction);
+
+    setupHelpMenu();
+
+    // Файлы можно бросать в окно из проводника.
+    setAcceptDrops(true);
 
     // Search input is created in code because the .ui currently defines only actions.
     m_searchLineEdit = new QLineEdit(ui->searchToolBar);
@@ -323,7 +338,148 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 static QString settingsFilePath()
 {
-    return QApplication::applicationDirPath() + "/LogViewer.ini";
+    return AppSettings::iniFilePath();
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event)
+{
+    const QMimeData* mime = event->mimeData();
+    if (!mime->hasUrls())
+        return;
+    for (const QUrl& url : mime->urls()) {
+        if (url.isLocalFile()) {
+            event->acceptProposedAction();
+            return;
+        }
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent* event)
+{
+    QStringList paths;
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (!url.isLocalFile())
+            continue;
+        const QFileInfo info(url.toLocalFile());
+        if (info.isFile())
+            paths << info.absoluteFilePath();
+    }
+    if (!paths.isEmpty()) {
+        event->acceptProposedAction();
+        openFilesFromCommandLine(paths);
+    }
+}
+
+void MainWindow::setupHelpMenu()
+{
+    QMenu* menuHelp = menuBar()->addMenu(tr("&Help"));
+
+    QAction* helpAction = menuHelp->addAction(tr("Quick Help"));
+    helpAction->setShortcut(QKeySequence::HelpContents); // F1
+    connect(helpAction, &QAction::triggered, this, &MainWindow::showHelp);
+
+    menuHelp->addSeparator();
+
+    QAction* updatesAction = menuHelp->addAction(tr("Check for Updates..."));
+    connect(updatesAction, &QAction::triggered,
+            this, [this]() { checkForUpdates(/*interactive=*/true); });
+
+    QAction* aboutAction = menuHelp->addAction(tr("About DendroLog"));
+    connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
+
+    // Тихая проверка обновлений не чаще раза в неделю, с задержкой после
+    // старта, чтобы не задерживать открытие файлов из командной строки.
+    QSettings s(settingsFilePath(), QSettings::IniFormat);
+    const QDate lastCheck =
+        QDate::fromString(s.value(QStringLiteral("Updates/lastCheckDate")).toString(),
+                          Qt::ISODate);
+    if (!lastCheck.isValid() || lastCheck.daysTo(QDate::currentDate()) >= 7)
+        QTimer::singleShot(3000, this, [this]() { checkForUpdates(/*interactive=*/false); });
+}
+
+void MainWindow::showHelp()
+{
+    if (!m_helpDialog) {
+        m_helpDialog = new QDialog(this);
+        m_helpDialog->setWindowTitle(tr("DendroLog — Help"));
+        auto* layout = new QVBoxLayout(m_helpDialog);
+        auto* browser = new QTextBrowser(m_helpDialog);
+        browser->setOpenExternalLinks(true);
+        const QString resource = QLocale().language() == QLocale::Russian
+            ? QStringLiteral(":/help/help_ru.md")
+            : QStringLiteral(":/help/help_en.md");
+        QFile f(resource);
+        if (f.open(QIODevice::ReadOnly))
+            browser->setMarkdown(QString::fromUtf8(f.readAll()));
+        layout->addWidget(browser);
+        m_helpDialog->resize(780, 640);
+    }
+    m_helpDialog->show();
+    m_helpDialog->raise();
+    m_helpDialog->activateWindow();
+}
+
+void MainWindow::showAbout()
+{
+    const QString text = tr(
+        "<h3>DendroLog %1</h3>"
+        "<p>A fast viewer for large log files: multi-file tabs, structured field "
+        "extraction, filtering, highlighting and live reload.</p>"
+        "<p><a href=\"%2\">%2</a></p>"
+        "<p>Copyright © 2026 Anton Petrov. Licensed under the MIT License.</p>"
+        "<p>Built with Qt %3 (dynamically linked, LGPLv3).</p>")
+        .arg(QApplication::applicationVersion(),
+             UpdateChecker::repoUrl(),
+             QString::fromLatin1(qVersion()));
+    QMessageBox::about(this, tr("About DendroLog"), text);
+}
+
+void MainWindow::checkForUpdates(bool interactive)
+{
+    if (!m_updateChecker) {
+        m_updateChecker = new UpdateChecker(this);
+
+        connect(m_updateChecker, &UpdateChecker::updateAvailable,
+                this, [this](const QString& version, const QString& url) {
+            QSettings s(settingsFilePath(), QSettings::IniFormat);
+            // Фоновая проверка напоминает об одной и той же версии только раз.
+            const QString notifiedKey = QStringLiteral("Updates/lastNotifiedVersion");
+            if (!m_updateCheckInteractive && s.value(notifiedKey).toString() == version)
+                return;
+            s.setValue(notifiedKey, version);
+
+            QMessageBox box(this);
+            box.setWindowTitle(tr("Update Available"));
+            box.setText(tr("DendroLog %1 is available (you have %2).")
+                            .arg(version, QApplication::applicationVersion()));
+            QPushButton* open = box.addButton(tr("Open Download Page"),
+                                              QMessageBox::AcceptRole);
+            box.addButton(QMessageBox::Close);
+            box.exec();
+            if (box.clickedButton() == open)
+                QDesktopServices::openUrl(QUrl(url));
+        });
+
+        connect(m_updateChecker, &UpdateChecker::upToDate, this, [this]() {
+            if (m_updateCheckInteractive)
+                QMessageBox::information(this, tr("Check for Updates"),
+                                         tr("You are running the latest version (%1).")
+                                             .arg(QApplication::applicationVersion()));
+        });
+
+        connect(m_updateChecker, &UpdateChecker::checkFailed,
+                this, [this](const QString& error) {
+            if (m_updateCheckInteractive)
+                QMessageBox::warning(this, tr("Check for Updates"),
+                                     tr("Could not check for updates:\n%1").arg(error));
+        });
+    }
+
+    m_updateCheckInteractive = interactive;
+    QSettings s(settingsFilePath(), QSettings::IniFormat);
+    s.setValue(QStringLiteral("Updates/lastCheckDate"),
+               QDate::currentDate().toString(Qt::ISODate));
+    m_updateChecker->check();
 }
 
 void MainWindow::saveSettings()
@@ -347,8 +503,8 @@ void MainWindow::saveSettings()
         s.setValue("fieldVisibleNames", selectedVisibleFieldNames());
     }
     s.setValue("conversionPattern", m_conversionPattern);
-    // Schemas themselves live as files in <exe>/patterns/ (see SchemaStore);
-    // the INI only remembers their display order, keyed by name.
+    // Schemas themselves live as files in <configDir>/patterns/ (see
+    // SchemaStore); the INI only remembers their display order, keyed by name.
     {
         QStringList order;
         order.reserve(m_patternList.size());

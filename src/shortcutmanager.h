@@ -13,7 +13,7 @@
 //   • Owns an ordered list of named commands, each with a human-readable label
 //     and a built-in default key sequence.
 //   • Stores per-command overrides chosen by the user and persists them in the
-//     shared LogViewer.ini ([Shortcuts] group).
+//     shared DendroLog.ini ([Shortcuts] group).
 //   • Emits shortcutsChanged() after the set is modified so the main window can
 //     re-apply the sequences to its QActions without a restart.
 //
@@ -48,8 +48,8 @@ public:
     // passing the default removes the override. Emits shortcutsChanged().
     void setSequence(const QString& id, const QKeySequence& seq);
 
-    void load();   // read overrides from LogViewer.ini
-    void save();   // write overrides to LogViewer.ini
+    void load();   // read overrides from DendroLog.ini
+    void save();   // write overrides to DendroLog.ini
 
 signals:
     void shortcutsChanged();

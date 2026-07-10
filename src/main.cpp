@@ -1,5 +1,7 @@
 #include "mainwindow.h"
+#include "singleinstance.h"
 #include <QApplication>
+#include <QIcon>
 #include <QStyle>
 #include <QStyleFactory>
 #include <QStyleHints>
@@ -60,6 +62,25 @@ int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
 
+    QApplication::setOrganizationName(QStringLiteral("DendroLog"));
+    QApplication::setApplicationName(QStringLiteral("DendroLog"));
+    QApplication::setApplicationVersion(QStringLiteral(DENDROLOG_VERSION));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/dendrolog.svg")));
+
+    // Разбираем аргументы: файлы логов + служебный флаг --new-instance,
+    // позволяющий принудительно открыть отдельное окно.
+    QStringList cliFiles = a.arguments().mid(1);
+    const bool forceNewInstance = cliFiles.removeAll(QStringLiteral("--new-instance")) > 0;
+
+    // Один экземпляр на пользователя: повторный запуск (например, двойной клик
+    // по ассоциированному .log) передаёт файлы в уже открытое окно и выходит.
+    SingleInstance guard(QStringLiteral("DendroLog"));
+    if (!forceNewInstance && guard.isSecondary()) {
+        if (guard.sendToPrimary(cliFiles))
+            return 0;
+        // Первичный экземпляр не ответил (завис/умер) — продолжаем как обычно.
+    }
+
     // Fusion honours the QPalette consistently on every platform, unlike the
     // native Windows styles which (on Windows 10) ignore the dark colour scheme.
     QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
@@ -74,8 +95,17 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
+    // Файлы от вторичных экземпляров: открыть и поднять окно поверх остальных.
+    QObject::connect(&guard, &SingleInstance::filesReceived,
+                     &w, [&w](const QStringList& files) {
+        if (!files.isEmpty())
+            w.openFilesFromCommandLine(files);
+        w.setWindowState((w.windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+        w.raise();
+        w.activateWindow();
+    });
+
     // Файлы, переданные аргументами командной строки, открываются как обычные.
-    const QStringList cliFiles = a.arguments().mid(1);
     if (!cliFiles.isEmpty())
         w.openFilesFromCommandLine(cliFiles);
 

@@ -8,10 +8,19 @@
 //
 // Responsibilities:
 //   • Owns every preference that can be changed via the Settings dialog.
-//   • Persists to the same INI file that MainWindow uses (LogViewer.ini),
+//   • Persists to the same INI file that MainWindow uses (DendroLog.ini),
 //     under its own [App] group so there is no key-name collision.
 //   • Emits settingsChanged() after any setter so interested objects can
 //     react without polling or knowing which field was modified.
+//
+// Where the INI lives (configDir()):
+//   • Portable mode — рядом с exe, если там лежит файл-маркер "portable"
+//     либо уже существующий DendroLog.ini / LogViewer.ini (наследие старых
+//     версий). Так работает portable-ZIP и dev-сборка.
+//   • Иначе — стандартный пользовательский каталог настроек
+//     (QStandardPaths::AppConfigLocation, например %LOCALAPPDATA%/DendroLog):
+//     установленное в Program Files приложение не имеет прав писать рядом
+//     с собой.
 //
 // Lifetime / thread safety:
 //   • Must be used from the main thread only (same as all QObject children).
@@ -30,6 +39,11 @@ class AppSettings : public QObject
 
 public:
     static AppSettings& instance();
+
+    // Каталог пользовательских данных приложения (см. комментарий класса):
+    // либо каталог exe (portable), либо AppConfigLocation. Здесь живут
+    // DendroLog.ini и подкаталог patterns/ со схемами полей.
+    static QString configDir();
 
     // Path of the shared INI file (also used by MainWindow and the
     // pattern editor for presets / sample text).

@@ -1,0 +1,16 @@
+# Build output
+build*/
+out/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+CMakeUserPresets.json
+
+# Local settings created next to the exe in portable/dev runs
+DendroLog.ini
+LogViewer.ini
+
+# Python
+__pycache__/

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(LogViewer LANGUAGES CXX)
+project(DendroLog VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,7 +11,7 @@ set(CMAKE_AUTORCC ON)    # Для обработки .qrc файлов
 set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если они есть)
 
 # Найти Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Core5Compat Gui Concurrent Svg)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Core5Compat Gui Concurrent Svg Network)
 
 # Добавить исходные файлы
 set(PROJECT_SOURCES
@@ -19,10 +19,10 @@ set(PROJECT_SOURCES
     src/mainwindow.h
     src/mainwindow.cpp
     src/mainwindow.ui
-    
+
     src/logviewwidget.h
     src/logviewwidget.cpp
-    
+
     src/logentry.h
     src/logfield.h
     src/logfile.h
@@ -94,8 +94,23 @@ set(PROJECT_SOURCES
     src/statisticspanel.cpp
     src/timelinehistogramwidget.h
     src/timelinehistogramwidget.cpp
+
+    src/singleinstance.h
+    src/singleinstance.cpp
+    src/updatechecker.h
+    src/updatechecker.cpp
+
     resources/resources.qrc
 )
+
+# Иконка и метаданные версии для проводника Windows. Версия подставляется
+# из project(VERSION), поэтому .rc генерируется при конфигурации.
+if(WIN32)
+    set(DENDROLOG_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/dendrolog.ico")
+    configure_file(resources/windows/dendrolog.rc.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc @ONLY)
+    list(APPEND PROJECT_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc)
+endif()
 
 qt_add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
 
@@ -107,6 +122,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Gui
     Qt6::Concurrent
     Qt6::Svg
+    Qt6::Network
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE src)
+
+# Версия приложения — единственный источник правды здесь, в project(VERSION).
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    DENDROLOG_VERSION="${PROJECT_VERSION}"
+)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests/pattern_smoke)
+endif()

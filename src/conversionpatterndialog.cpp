@@ -140,12 +140,12 @@ field column — useful for session IDs and other noise you never analyse.</p>
 <ul>
   <li><b>Suggest schema</b> builds a draft schema from the first preview line.</li>
   <li><b>Presets</b> replace the blocks with a ready-made layout; your own schemas can be
-      saved as presets too (stored in <code>LogViewer.ini</code>).</li>
+      saved as presets too (stored in <code>DendroLog.ini</code>).</li>
   <li><b>Grok…</b> imports Logstash patterns such as
       <code>%{TIMESTAMP_ISO8601:time} %{LOGLEVEL:level} %{GREEDYDATA:msg}</code>.</li>
   <li><b>Import / Export.</b> Every schema is stored as a separate
-      <code>.json</code> file in the <code>patterns</code> folder next to the
-      executable. <b>Export</b> writes the selected schema to a file you can
+      <code>.json</code> file in the <code>patterns</code> folder inside the
+      application's settings directory. <b>Export</b> writes the selected schema to a file you can
       share; <b>Import</b> copies a file into that folder. Files dropped into
       the folder by hand are picked up automatically. Use the <code>📁</code>
       button to open the folder.</li>

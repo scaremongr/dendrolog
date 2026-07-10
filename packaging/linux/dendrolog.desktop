@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DendroLog
+GenericName=Log Viewer
+Comment=Fast viewer for log files with filtering and field extraction
+Exec=DendroLog %F
+Icon=dendrolog
+Terminal=false
+Categories=Development;Utility;
+MimeType=text/plain;text/x-log;
