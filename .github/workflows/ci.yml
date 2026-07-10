@@ -1,3 +1,8 @@
+# CI на каждый push/PR: сборка, тесты и упаковка через переиспользуемый
+# build.yml. Установщик, portable ZIP и AppImage доступны как артефакты
+# запуска (вкладка Actions → выбранный run → Artifacts), хранятся 30 дней.
+# Версия dev-сборок помечается номером запуска: DendroLog-dev-57-setup.exe.
+
 name: CI
 
 on:
@@ -7,33 +12,6 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.*'
-          cache: true
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev
-
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+    uses: ./.github/workflows/build.yml
+    with:
+      version: dev-${{ github.run_number }}

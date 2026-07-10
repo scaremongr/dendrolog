@@ -1,0 +1,127 @@
+# Переиспользуемый workflow сборки и упаковки. Сам по себе не запускается —
+# его вызывают ci.yml (каждый push/PR) и release.yml (пуш тега vX.Y.Z),
+# поэтому упаковка описана ровно один раз.
+#
+# Артефакты каждого запуска:
+#   windows: DendroLog-<version>-setup.exe + DendroLog-<version>-win64-portable.zip
+#   linux:   DendroLog-<version>-x86_64.AppImage
+
+name: Build & Package
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Метка версии в именах файлов (0.1.0 для релиза, dev-NN для CI)'
+        required: true
+        type: string
+      numeric-version:
+        description: 'Числовая X.Y.Z для VERSIONINFO установщика; релиз передаёт настоящую версию'
+        required: false
+        type: string
+        default: '0.0.0'
+
+env:
+  QT_VERSION: '6.8.*'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage with Qt runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory build\stage | Out-Null
+          Copy-Item build\Release\DendroLog.exe build\stage\
+          Copy-Item LICENSE,README.md,CHANGELOG.md build\stage\
+          windeployqt --release --no-translations build\stage\DendroLog.exe
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          iscc /DAppVersion=$env:VERSION `
+               /DNumericVersion=${{ inputs.numeric-version }} `
+               /DStagingDir=..\..\build\stage `
+               /O"dist" packaging\windows\dendrolog.iss
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          # Маркер portable: настройки будут храниться рядом с exe.
+          New-Item -ItemType File build\stage\portable | Out-Null
+          Compress-Archive -Path build\stage\* `
+            -DestinationPath "dist\DendroLog-$env:VERSION-win64-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev \
+            libxcb-cursor0 libfuse2
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Build AppImage
+        run: |
+          curl -fLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-*.AppImage
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            -e build/DendroLog \
+            -d packaging/linux/dendrolog.desktop \
+            -i packaging/linux/dendrolog.png \
+            --plugin qt --output appimage
+          mkdir dist
+          mv DendroLog-*.AppImage "dist/DendroLog-$VERSION-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

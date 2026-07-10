@@ -7,6 +7,12 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; VERSIONINFO установщика требует строго числовую X.Y.Z; AppVersion у
+; dev-сборок CI содержит суффикс (dev-57), поэтому числовая версия задаётся
+; отдельным define — релизный workflow передаёт настоящую.
+#ifndef NumericVersion
+  #define NumericVersion "0.0.0"
+#endif
 #ifndef StagingDir
   #define StagingDir "..\..\build\stage"
 #endif
@@ -16,6 +22,7 @@ AppId={{8F4C1D7A-2B3E-4A5D-9C6F-D1E8A7B4C302}
 AppName=DendroLog
 AppVersion={#AppVersion}
 AppVerName=DendroLog {#AppVersion}
+VersionInfoVersion={#NumericVersion}
 AppPublisher=Anton Petrov
 AppPublisherURL=https://github.com/scaremongr/dendrolog
 AppSupportURL=https://github.com/scaremongr/dendrolog/issues
