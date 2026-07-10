@@ -1,12 +1,18 @@
 #include "filterpanelwidget.h"
 #include "highlightpalette.h"
+#include "toggleswitch.h"
 
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
+#include <QMenu>
+#include <QMessageBox>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -61,10 +67,13 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     m_gearButton->setCheckable(true);
     headerRow->addWidget(m_gearButton);
 
-    m_colorButton = makeToolButton(QString(),
-        tr("Match highlight colour (click to change)"));
+    // Единый образец цвета: левый клик = выбрать цвет, правый клик = вкл/выкл
+    // раскраску совпадений правила. Залит цветом (вкл) или полый (выкл).
+    m_highlightEnabled = rule.highlightEnabled;
+    m_colorButton = makeToolButton(QString(), QString());
     m_colorButton->setFixedSize(22, 22);
     m_colorButton->setAutoRaise(false);
+    m_colorButton->setContextMenuPolicy(Qt::CustomContextMenu);
     headerRow->addWidget(m_colorButton);
 
     m_removeButton = makeToolButton(QStringLiteral("✕"), tr("Remove this rule"));
@@ -103,6 +112,8 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
         m_advancedRow->setVisible(on);
     });
     connect(m_colorButton, &QToolButton::clicked, this, &FilterRuleCard::chooseColor);
+    connect(m_colorButton, &QToolButton::customContextMenuRequested,
+            this, [this]() { toggleHighlightEnabled(); });
     connect(m_removeButton, &QToolButton::clicked, this, &FilterRuleCard::removeRequested);
     connect(m_caseSensitiveCheckBox, &QCheckBox::toggled, this, [this]() { updateGearHighlight(); });
     connect(m_regexCheckBox, &QCheckBox::toggled, this, [this]() { updateGearHighlight(); });
@@ -123,14 +134,15 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
 FilterRule FilterRuleCard::rule() const
 {
     FilterRule rule;
-    rule.enabled        = m_enabledCheckBox->isChecked();
-    rule.action         = static_cast<FilterRule::Action>(m_actionCombo->currentData().toInt());
-    rule.connector      = static_cast<FilterRule::Connector>(m_connectorCombo->currentData().toInt());
-    rule.text           = m_textEdit->text();
-    rule.fieldName      = m_fieldCombo->currentData().toString();
-    rule.caseSensitive  = m_caseSensitiveCheckBox->isChecked();
-    rule.isRegex        = m_regexCheckBox->isChecked();
-    rule.highlightColor = m_color;
+    rule.enabled          = m_enabledCheckBox->isChecked();
+    rule.action           = static_cast<FilterRule::Action>(m_actionCombo->currentData().toInt());
+    rule.connector        = static_cast<FilterRule::Connector>(m_connectorCombo->currentData().toInt());
+    rule.text             = m_textEdit->text();
+    rule.fieldName        = m_fieldCombo->currentData().toString();
+    rule.caseSensitive    = m_caseSensitiveCheckBox->isChecked();
+    rule.isRegex          = m_regexCheckBox->isChecked();
+    rule.highlightColor   = m_color;
+    rule.highlightEnabled = m_highlightEnabled;
     return rule;
 }
 
@@ -182,11 +194,29 @@ void FilterRuleCard::chooseColor()
     }
 }
 
+void FilterRuleCard::toggleHighlightEnabled()
+{
+    m_highlightEnabled = !m_highlightEnabled;
+    updateColorButton();
+}
+
 void FilterRuleCard::updateColorButton()
 {
-    m_colorButton->setStyleSheet(
-        QStringLiteral("QToolButton { background-color: %1; border: 1px solid palette(mid); border-radius: 3px; }")
-            .arg(m_color.name()));
+    if (m_highlightEnabled) {
+        // Подсветка вкл — образец залит цветом правила.
+        m_colorButton->setStyleSheet(
+            QStringLiteral("QToolButton { background-color: %1; border: 1px solid palette(mid); border-radius: 3px; }")
+                .arg(m_color.name()));
+        m_colorButton->setToolTip(tr("Highlighting this rule's matches.\n"
+                                     "Left-click: choose colour.  Right-click: turn off."));
+    } else {
+        // Подсветка выкл — полый образец (кольцо цвета на нейтральном фоне).
+        m_colorButton->setStyleSheet(
+            QStringLiteral("QToolButton { background-color: palette(base); border: 2px solid %1; border-radius: 3px; }")
+                .arg(m_color.name()));
+        m_colorButton->setToolTip(tr("Not highlighting this rule's matches.\n"
+                                     "Left-click: choose colour.  Right-click: turn on."));
+    }
 }
 
 void FilterRuleCard::updateGearHighlight()
@@ -209,33 +239,136 @@ FilterPanelWidget::FilterPanelWidget(QWidget* parent)
     rootLayout->setContentsMargins(5, 5, 5, 5);
     rootLayout->setSpacing(5);
 
-    auto* controlsLayout = new QHBoxLayout();
-    m_addButton = new QPushButton(tr("+ Add rule"), this);
-    m_addButton->setToolTip(tr("Add a filter rule"));
-    connect(m_addButton, &QPushButton::clicked, this, &FilterPanelWidget::onAddRuleClicked);
-    controlsLayout->addWidget(m_addButton);
+    // ================= Компактный блок настроек (CardFrame) =============== //
+    // Профиль, режим и действия собраны в один аккуратный блок с плоскими
+    // tool-кнопками — вместо россыпи крупных текстовых кнопок.
+    m_settingsCard = new CardFrame(this);
+    m_settingsCard->setAccentColor(palette().color(QPalette::Mid)); // нейтральный акцент
+    QVBoxLayout* cardRows = m_settingsCard->rowsLayout();
+    cardRows->setSpacing(4);
 
-    m_applyButton = new QPushButton(tr("Apply"), this);
-    m_applyButton->setToolTip(tr("Apply the rules to the CURRENT document"));
-    m_applyButton->setDefault(true);
-    connect(m_applyButton, &QPushButton::clicked, this, &FilterPanelWidget::applyRequested);
-    controlsLayout->addWidget(m_applyButton);
+    // ---- Ряд 1: профиль + меню действий ------------------------------- //
+    auto* profileRow = new QHBoxLayout();
+    profileRow->setSpacing(4);
+    profileRow->addWidget(new QLabel(tr("Profile:"), m_settingsCard));
+    m_profileCombo = new QComboBox(m_settingsCard);
+    m_profileCombo->setToolTip(tr("Saved filter profiles"));
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::activated),
+            this, &FilterPanelWidget::onProfileSelected);
+    profileRow->addWidget(m_profileCombo, /*stretch=*/1);
+    m_profileMenuButton = m_settingsCard->makeToolButton(QStringLiteral("⋯"),
+        tr("Profile actions: save, save as new, rename, delete"));
+    m_profileMenuButton->setPopupMode(QToolButton::InstantPopup);
+    buildProfileMenu();
+    profileRow->addWidget(m_profileMenuButton);
+    cardRows->addLayout(profileRow);
 
-    m_resetButton = new QPushButton(tr("Reset"), this);
-    m_resetButton->setToolTip(tr("Remove all filters from the CURRENT document.\n"
-                                 "The rules stay in the panel for re-applying."));
-    connect(m_resetButton, &QPushButton::clicked, this, &FilterPanelWidget::resetRequested);
-    controlsLayout->addWidget(m_resetButton);
+    // ---- Ряд 2: режим (toggle switch) + подсветка в одну строку ------- //
+    // Порядок как у чекбокса: сам переключатель слева, подпись справа.
+    auto* modeRow = new QHBoxLayout();
+    modeRow->setSpacing(6);
+    m_modeSwitch = new ToggleSwitch(m_settingsCard); // off = Filter, on = Search
+    const QString modeTip = tr("On — non-destructive search: keep all rows; matches go to\n"
+                               "the Search Results panel (click one to jump there).\n"
+                               "Off — filter: hide non-matching rows in the main view.");
+    m_modeSwitch->setToolTip(modeTip);
+    connect(m_modeSwitch, &ToggleSwitch::toggled, this, [this]() {
+        updateModeDependentUi();
+        emit modeChanged(mode());
+    });
+    modeRow->addWidget(m_modeSwitch);
+    auto* modeLabel = new QLabel(tr("Non-destructive search"), m_settingsCard);
+    modeLabel->setToolTip(modeTip);
+    modeRow->addWidget(modeLabel);
+    modeRow->addStretch(1);
 
-    controlsLayout->addStretch();
-    rootLayout->addLayout(controlsLayout);
+    // Галочка подсветки — теперь всегда в этой же строке (шестерёнка не нужна);
+    // действует в обоих режимах, поэтому вёрстка не «скачет».
+    m_highlightMainCheckBox = new QCheckBox(tr("Highlight in main view"), m_settingsCard);
+    m_highlightMainCheckBox->setChecked(true);
+    m_highlightMainCheckBox->setToolTip(tr("Highlight the matched text in the main view.\n"
+                                           "Applies in both modes (no rows are hidden by it).\n"
+                                           "In Search mode the results panel always highlights matches."));
+    connect(m_highlightMainCheckBox, &QCheckBox::toggled,
+            this, &FilterPanelWidget::highlightInMainViewChanged);
+    modeRow->addWidget(m_highlightMainCheckBox);
+    cardRows->addLayout(modeRow);
 
+    // ---- Ряд 3: действия ---------------------------------------------- //
+    auto* actionRow = new QHBoxLayout();
+    actionRow->setSpacing(4);
+    m_addButton = m_settingsCard->makeToolButton(QStringLiteral("＋ Add rule"),
+        tr("Add a filter rule"));
+    connect(m_addButton, &QToolButton::clicked, this, &FilterPanelWidget::onAddRuleClicked);
+    actionRow->addWidget(m_addButton);
+    actionRow->addStretch(1);
+    m_resetButton = m_settingsCard->makeToolButton(QStringLiteral("⟲ Reset"), QString());
+    connect(m_resetButton, &QToolButton::clicked, this, &FilterPanelWidget::resetRequested);
+    actionRow->addWidget(m_resetButton);
+    m_applyButton = m_settingsCard->makeToolButton(QString(), QString());
+    connect(m_applyButton, &QToolButton::clicked, this, &FilterPanelWidget::applyRequested);
+    actionRow->addWidget(m_applyButton);
+    cardRows->addLayout(actionRow);
+
+    rootLayout->addWidget(m_settingsCard);
+
+    // ================= Список правил ===================================== //
     m_rulesLayout = new QVBoxLayout();
     m_rulesLayout->setSpacing(4);
     rootLayout->addLayout(m_rulesLayout);
     rootLayout->addStretch(1);
 
-    addRule(FilterRule{}); // панель всегда начинается с одной пустой карточки
+    // Стартовый профиль «Default» + одна пустая карточка правила.
+    ensureAtLeastOneProfile();
+    refreshProfileCombo();
+    addRule(FilterRule{});
+    updateModeDependentUi();
+}
+
+FilterPanelWidget::Mode FilterPanelWidget::mode() const
+{
+    return m_modeSwitch->isChecked() ? Mode::Search : Mode::Filter;
+}
+
+void FilterPanelWidget::setMode(Mode mode)
+{
+    // Тихая установка (восстановление настроек): не эмитим modeChanged.
+    // Сигналы заблокированы → анимация не сработает, поэтому позицию кружка
+    // выставляем явно под новое состояние.
+    m_modeSwitch->blockSignals(true);
+    m_modeSwitch->setChecked(mode == Mode::Search);
+    m_modeSwitch->blockSignals(false);
+    m_modeSwitch->setKnobPosition(mode == Mode::Search ? 1.0 : 0.0);
+    updateModeDependentUi();
+}
+
+bool FilterPanelWidget::highlightInMainView() const
+{
+    return m_highlightMainCheckBox->isChecked();
+}
+
+void FilterPanelWidget::setHighlightInMainView(bool on)
+{
+    m_highlightMainCheckBox->blockSignals(true);
+    m_highlightMainCheckBox->setChecked(on);
+    m_highlightMainCheckBox->blockSignals(false);
+}
+
+void FilterPanelWidget::updateModeDependentUi()
+{
+    const bool search = (mode() == Mode::Search);
+
+    // Подпись переключателя постоянная; меняется только основная кнопка действия.
+    m_applyButton->setText(search ? tr("▶ Search") : tr("▶ Apply"));
+    m_applyButton->setToolTip(search
+        ? tr("Search the CURRENT document; list matches in the results panel\n"
+             "without hiding any rows.")
+        : tr("Apply the rules to the CURRENT document"));
+    m_resetButton->setToolTip(search
+        ? tr("Clear the results panel.\n"
+             "The rules stay in the panel for re-searching.")
+        : tr("Remove all filters from the CURRENT document.\n"
+             "The rules stay in the panel for re-applying."));
 }
 
 FilterRuleSet FilterPanelWidget::ruleSet() const
@@ -265,6 +398,184 @@ void FilterPanelWidget::setFieldNames(const QStringList& fieldNames, bool fieldS
     m_fieldScopeEnabled = fieldScopeEnabled;
     for (auto* card : m_cards)
         card->setFieldNames(fieldNames, fieldScopeEnabled);
+}
+
+// ===========================================================================
+// FilterPanelWidget — профили фильтрации
+// ===========================================================================
+
+void FilterPanelWidget::ensureAtLeastOneProfile()
+{
+    if (m_profiles.isEmpty())
+        m_profiles.append(Profile{tr("Default"), FilterRuleSet{}});
+    m_activeProfileIndex = qBound(0, m_activeProfileIndex, m_profiles.size() - 1);
+}
+
+void FilterPanelWidget::buildProfileMenu()
+{
+    auto* menu = new QMenu(m_profileMenuButton);
+    menu->addAction(tr("Save"),          this, &FilterPanelWidget::saveActiveProfile);
+    menu->addAction(tr("Save as new…"),  this, &FilterPanelWidget::saveAsNewProfile);
+    menu->addSeparator();
+    menu->addAction(tr("Rename…"),       this, &FilterPanelWidget::renameActiveProfile);
+    menu->addAction(tr("Delete"),        this, &FilterPanelWidget::deleteActiveProfile);
+    m_profileMenuButton->setMenu(menu);
+}
+
+void FilterPanelWidget::refreshProfileCombo()
+{
+    m_profileCombo->blockSignals(true);
+    m_profileCombo->clear();
+    for (const auto& p : m_profiles)
+        m_profileCombo->addItem(p.name);
+    m_profileCombo->setCurrentIndex(m_activeProfileIndex);
+    m_profileCombo->blockSignals(false);
+}
+
+bool FilterPanelWidget::currentRulesAreDirty() const
+{
+    if (m_activeProfileIndex < 0 || m_activeProfileIndex >= m_profiles.size())
+        return false;
+    return !(ruleSet() == m_profiles[m_activeProfileIndex].ruleSet);
+}
+
+QString FilterPanelWidget::uniqueProfileName(const QString& base, int skipIndex) const
+{
+    QString candidate = base.trimmed();
+    if (candidate.isEmpty())
+        candidate = tr("Profile");
+    const auto taken = [this, skipIndex](const QString& name) {
+        for (int i = 0; i < m_profiles.size(); ++i)
+            if (i != skipIndex && m_profiles[i].name.compare(name, Qt::CaseInsensitive) == 0)
+                return true;
+        return false;
+    };
+    if (!taken(candidate))
+        return candidate;
+    for (int n = 2; ; ++n) {
+        const QString numbered = QStringLiteral("%1 %2").arg(candidate).arg(n);
+        if (!taken(numbered))
+            return numbered;
+    }
+}
+
+void FilterPanelWidget::onProfileSelected(int index)
+{
+    if (index < 0 || index >= m_profiles.size() || index == m_activeProfileIndex)
+        return;
+
+    // Несохранённые правки текущего профиля — спросить перед переключением.
+    if (currentRulesAreDirty()) {
+        const auto answer = QMessageBox::question(this, tr("Unsaved changes"),
+            tr("Profile \"%1\" has unsaved changes. Save them before switching?")
+                .arg(m_profiles[m_activeProfileIndex].name),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (answer == QMessageBox::Cancel) {
+            refreshProfileCombo(); // вернуть комбо на активный профиль
+            return;
+        }
+        if (answer == QMessageBox::Save)
+            m_profiles[m_activeProfileIndex].ruleSet = ruleSet();
+    }
+
+    m_activeProfileIndex = index;
+    setRuleSet(m_profiles[index].ruleSet);
+    refreshProfileCombo();
+    emit profilesChanged();
+}
+
+void FilterPanelWidget::saveActiveProfile()
+{
+    ensureAtLeastOneProfile();
+    m_profiles[m_activeProfileIndex].ruleSet = ruleSet();
+    emit profilesChanged();
+}
+
+void FilterPanelWidget::saveAsNewProfile()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Save as new profile"),
+        tr("Profile name:"), QLineEdit::Normal, tr("New profile"), &ok);
+    if (!ok)
+        return;
+    m_profiles.append(Profile{uniqueProfileName(name), ruleSet()});
+    m_activeProfileIndex = m_profiles.size() - 1;
+    refreshProfileCombo();
+    emit profilesChanged();
+}
+
+void FilterPanelWidget::renameActiveProfile()
+{
+    ensureAtLeastOneProfile();
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Rename profile"),
+        tr("Profile name:"), QLineEdit::Normal,
+        m_profiles[m_activeProfileIndex].name, &ok);
+    if (!ok || name.trimmed().isEmpty())
+        return;
+    m_profiles[m_activeProfileIndex].name = uniqueProfileName(name, m_activeProfileIndex);
+    refreshProfileCombo();
+    emit profilesChanged();
+}
+
+void FilterPanelWidget::deleteActiveProfile()
+{
+    ensureAtLeastOneProfile();
+    if (m_profiles.size() == 1) {
+        // Последний профиль не удаляем — сбрасываем его в пустой «Default».
+        m_profiles[0] = Profile{tr("Default"), FilterRuleSet{}};
+        m_activeProfileIndex = 0;
+    } else {
+        m_profiles.removeAt(m_activeProfileIndex);
+        m_activeProfileIndex = qBound(0, m_activeProfileIndex, m_profiles.size() - 1);
+    }
+    setRuleSet(m_profiles[m_activeProfileIndex].ruleSet);
+    refreshProfileCombo();
+    emit profilesChanged();
+}
+
+QJsonObject FilterPanelWidget::profilesToJson() const
+{
+    // Активные (несохранённые) правки карточек фиксируем в активный профиль,
+    // чтобы при выходе не потерять текущую конфигурацию.
+    QVector<Profile> profiles = m_profiles;
+    if (m_activeProfileIndex >= 0 && m_activeProfileIndex < profiles.size())
+        profiles[m_activeProfileIndex].ruleSet = ruleSet();
+
+    QJsonArray arr;
+    for (const auto& p : profiles) {
+        QJsonObject o;
+        o[QStringLiteral("name")]    = p.name;
+        o[QStringLiteral("ruleSet")] = p.ruleSet.toJson();
+        arr.append(o);
+    }
+    QJsonObject json;
+    json[QStringLiteral("profiles")] = arr;
+    json[QStringLiteral("active")]   = (m_activeProfileIndex >= 0 && m_activeProfileIndex < profiles.size())
+        ? profiles[m_activeProfileIndex].name : QString();
+    return json;
+}
+
+void FilterPanelWidget::profilesFromJson(const QJsonObject& json)
+{
+    const QJsonArray arr = json[QStringLiteral("profiles")].toArray();
+    m_profiles.clear();
+    for (const auto& v : arr) {
+        const QJsonObject o = v.toObject();
+        m_profiles.append(Profile{
+            o[QStringLiteral("name")].toString(),
+            FilterRuleSet::fromJson(o[QStringLiteral("ruleSet")].toObject())});
+    }
+    ensureAtLeastOneProfile();
+
+    const QString active = json[QStringLiteral("active")].toString();
+    m_activeProfileIndex = 0;
+    for (int i = 0; i < m_profiles.size(); ++i)
+        if (m_profiles[i].name == active) { m_activeProfileIndex = i; break; }
+
+    setRuleSet(m_profiles[m_activeProfileIndex].ruleSet);
+    refreshProfileCombo();
 }
 
 void FilterPanelWidget::onAddRuleClicked()

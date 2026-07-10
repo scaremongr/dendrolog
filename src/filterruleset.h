@@ -57,6 +57,9 @@ struct FilterRule {
     bool      caseSensitive = false;
     bool      isRegex       = false;
     QColor    highlightColor;                 // цвет подсветки совпадений этого правила
+    // Раскрашивать ли совпадения этого правила (основной view + результаты).
+    // Отдельный тогл-«глаз» в карточке; фильтрацию/поиск не затрагивает.
+    bool      highlightEnabled = true;
 
     // Участвует ли правило в вычислениях (включено и имеет текст).
     bool isActive() const { return enabled && !text.isEmpty(); }

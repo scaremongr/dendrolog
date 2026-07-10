@@ -37,6 +37,15 @@ struct LogEntry {
         , sourceFile(sFile)
     {}
 
+    // Строка «свободного текста»: парсер не извлёк ни таймстампа, ни уровня,
+    // ни структурных полей. У continuation-строк настоящей записи таймстамп и
+    // уровень унаследованы от её первой строки, поэтому true возможен только
+    // там, где группировка в логические записи номинальна (не-лог файл целиком
+    // слипается в запись #0; преамбула до первой настоящей записи — туда же).
+    bool isPlainText() const {
+        return !timestamp.isValid() && level == LogLevel::Unknown && fields.isEmpty();
+    }
+
     bool operator<(const LogEntry& other) const {
         // 1. Сравнение по времени логической записи
         if (timestamp.isValid() && other.timestamp.isValid()) {

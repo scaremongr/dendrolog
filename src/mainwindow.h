@@ -37,8 +37,12 @@ class QWidget;
 class FilterPanelWidget;
 class MarkerPanelWidget;
 class TimelineHistogramWidget;
+class EntryDetailsPanel;
+class StatisticsPanel;
 class LogModel;
+class LogListView;
 class LogPattern;
+class QModelIndex;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -147,6 +151,34 @@ private:
     TimelineHistogramWidget* m_timelinePanel = nullptr;
     QDockWidget* m_timelineDockWidget = nullptr;
 
+    // Панель деталей записи (док, создаётся в коде): выбранная строка целиком —
+    // метаданные, извлечённые поля, полный текст логической записи и найденные
+    // в нём JSON-фрагменты в отформатированном виде.
+    EntryDetailsPanel* m_detailsPanel = nullptr;
+    QDockWidget* m_detailsDockWidget = nullptr;
+
+    // Панель статистики по документу (док, создаётся в коде): сводка, уровни,
+    // топ повторяющихся сообщений, темп записей и эвристики-аномалии.
+    StatisticsPanel* m_statsPanel = nullptr;
+    QDockWidget* m_statsDockWidget = nullptr;
+
+    // Панель результатов неразрушающего поиска (нижний док, создаётся в коде).
+    // Вторая пара LogModel+LogListView поверх тех же LogEntry активной вкладки:
+    // в режиме Search сюда выводятся совпадения, клик прыгает в основном view.
+    QDockWidget* m_searchResultsDockWidget = nullptr;
+    LogListView* m_searchResultsView = nullptr;
+    LogModel*    m_searchResultsModel = nullptr;
+    QLabel*      m_searchResultsStatusLabel = nullptr;
+    // Дебаунс живого обновления результатов при дозагрузке строк (tail reload).
+    QTimer*      m_searchRefreshTimer = nullptr;
+    // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
+    // меняется программно (reset модели при пересборке результатов).
+    bool         m_suppressResultNavigation = false;
+    // Соединения с моделью активной вкладки для живого обновления результатов;
+    // рвутся в disconnectFromLogView (иначе старая модель дёргала бы рефреш).
+    QMetaObject::Connection m_searchModelInsertConn;
+    QMetaObject::Connection m_searchModelResetConn;
+
     // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
     // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной
     // вкладке, Fields — глобально). Отжать = Reset этого фильтра,
@@ -219,6 +251,9 @@ private:
     void setupTextFilterDockContents();
     void setupRowMarkerDock();          // Док Row Highlighters
     void setupTimelineDock();           // Док Timeline (гистограмма по времени)
+    void setupSearchResultsDock();      // Док результатов неразрушающего поиска
+    void setupEntryDetailsDock();       // Док Entry Details (текущая запись целиком)
+    void setupStatisticsDock();         // Док Statistics (сводка по документу)
     void setupFilterStatusToolbar();    // Тулбар «Filters» (индикаторы-кнопки фильтров)
     void setupDirectoryScanner();
     void setupFieldVisibilityDock();    // New: Log Fields panel
@@ -248,6 +283,22 @@ private:
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.
     void applyTextFiltersToActiveView();
+    // ---- Режим «Неразрушающий поиск» ---------------------------------------
+    // Пересобрать панель результатов из активной вкладки (поиск над её
+    // filteredEntries): заполнить m_searchResultsModel и подсветку.
+    void runSearchIntoResults();
+    // Опустошить панель результатов (модель + подпись). Док не прячется —
+    // это обычная панель, видимостью управляет пользователь через меню View.
+    void clearSearchResults();
+    // Реакция на смену режима Filter/Search в панели фильтров.
+    void onFilterModeChanged();
+    // Реакция на переключение галочки «подсвечивать в основном view».
+    void onHighlightInMainViewChanged();
+    // Клик/навигация по строке в панели результатов → прыжок в основном view.
+    void onSearchResultActivated(const QModelIndex& current);
+    // Запустить дебаунс пересборки результатов, если активен режим Search
+    // и док результатов видим (иначе no-op).
+    void scheduleSearchRefresh();
     // Применить row-маркеры к активной вкладке.
     void applyRowMarkersToActiveView();
     // Перепривязать УЖЕ применённые правила каждой вкладки к новой схеме

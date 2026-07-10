@@ -20,6 +20,7 @@ QJsonObject FilterRule::toJson() const
     json[QStringLiteral("regex")]         = isRegex;
     json[QStringLiteral("color")]         = highlightColor.isValid() ? highlightColor.name(QColor::HexArgb)
                                                                      : QString();
+    json[QStringLiteral("highlight")]     = highlightEnabled;
     return json;
 }
 
@@ -38,6 +39,7 @@ FilterRule FilterRule::fromJson(const QJsonObject& json)
     const QString colorName = json[QStringLiteral("color")].toString();
     if (!colorName.isEmpty())
         rule.highlightColor = QColor(colorName);
+    rule.highlightEnabled = json[QStringLiteral("highlight")].toBool(true);
     return rule;
 }
 
@@ -146,7 +148,8 @@ QVector<HighlightPattern> FilterRuleSet::highlightPatterns() const
 {
     QVector<HighlightPattern> patterns;
     for (const auto& rule : rules) {
-        if (!rule.isActive() || rule.action != FilterRule::Action::Include)
+        if (!rule.isActive() || rule.action != FilterRule::Action::Include
+            || !rule.highlightEnabled)
             continue;
         HighlightPattern p;
         p.text            = rule.text;
@@ -199,7 +202,8 @@ bool FilterRuleSet::operator==(const FilterRuleSet& other) const
         if (a.enabled != b.enabled || a.action != b.action || a.connector != b.connector
             || a.text != b.text || a.fieldName != b.fieldName
             || a.caseSensitive != b.caseSensitive || a.isRegex != b.isRegex
-            || a.highlightColor != b.highlightColor)
+            || a.highlightColor != b.highlightColor
+            || a.highlightEnabled != b.highlightEnabled)
             return false;
     }
     return true;
