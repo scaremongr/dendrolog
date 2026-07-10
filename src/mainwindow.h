@@ -264,6 +264,12 @@ private:
     UpdateChecker* m_updateChecker = nullptr;
     bool           m_updateCheckInteractive = false;
 
+    // Дефолтная раскладка панелей: правые — одной вкладочной группой,
+    // таймлайн и результаты поиска — снизу во всю ширину, всё скрыто.
+    // Применяется при первом запуске (нет сохранённого состояния окна)
+    // и по команде View → Reset Panel Layout.
+    void applyDefaultPanelLayout();
+
     // Setup methods
     void setupStatusBar();
     void setupTimeFilterDockContents(); // New method to set up the new dock

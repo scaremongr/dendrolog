@@ -186,6 +186,15 @@ MainWindow::MainWindow(QWidget *parent)
 
     setupHelpMenu();
 
+    // В конец меню View — сброс раскладки панелей к дефолтной. Док-переключатели
+    // вставляются перед ПЕРВЫМ сепаратором меню, так что этот блок им не мешает.
+    if (ui->menuView) {
+        ui->menuView->addSeparator();
+        QAction* resetLayout = ui->menuView->addAction(tr("Reset Panel Layout"));
+        connect(resetLayout, &QAction::triggered,
+                this, &MainWindow::applyDefaultPanelLayout);
+    }
+
     // Файлы можно бросать в окно из проводника.
     setAcceptDrops(true);
 
@@ -367,6 +376,66 @@ void MainWindow::dropEvent(QDropEvent* event)
     if (!paths.isEmpty()) {
         event->acceptProposedAction();
         openFilesFromCommandLine(paths);
+    }
+}
+
+void MainWindow::applyDefaultPanelLayout()
+{
+    // Нижняя зона занимает всю ширину окна: таймлайн — шкала времени, ей
+    // нужна длина; правая колонка живёт между тулбарами и нижней зоной.
+    setCorner(Qt::BottomLeftCorner,  Qt::BottomDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+
+    const QList<QDockWidget*> sideDocks {
+        ui->textFilterDockWidget,
+        ui->timeFilterDockWidget,
+        ui->fieldVisibilityDockWidget,
+        m_markerDockWidget,
+        m_statsDockWidget,
+        ui->directoryScannerDockWidget,
+    };
+    const QList<QDockWidget*> bottomDocks {
+        m_timelineDockWidget,
+        m_searchResultsDockWidget,
+        m_detailsDockWidget,
+    };
+
+    // Стартовое состояние — только список логов. Панели включаются по мере
+    // надобности (меню View / Ctrl+F1…) и появляются уже на местах,
+    // расставленных ниже: скрытый док запоминает позицию и вкладочную группу.
+    for (const auto& docks : { sideDocks, bottomDocks })
+        for (QDockWidget* d : docks)
+            if (d) {
+                d->setFloating(false);
+                d->hide();
+            }
+
+    // Правая колонка: все панели одной вкладочной группой — сколько бы их ни
+    // включили, они делят одно место, а не сжимают друг друга по вертикали.
+    QDockWidget* prev = nullptr;
+    for (QDockWidget* d : sideDocks) {
+        if (!d)
+            continue;
+        addDockWidget(Qt::RightDockWidgetArea, d);
+        if (prev)
+            tabifyDockWidget(prev, d);
+        prev = d;
+    }
+
+    // Низ: таймлайн во всю ширину; под ним — результаты поиска; Entry Details
+    // вкладкой при результатах (обе — «инспекция» текущей позиции).
+    if (m_timelineDockWidget)
+        addDockWidget(Qt::BottomDockWidgetArea, m_timelineDockWidget);
+    if (m_searchResultsDockWidget) {
+        addDockWidget(Qt::BottomDockWidgetArea, m_searchResultsDockWidget);
+        if (m_timelineDockWidget)
+            splitDockWidget(m_timelineDockWidget, m_searchResultsDockWidget,
+                            Qt::Vertical);
+    }
+    if (m_detailsDockWidget) {
+        addDockWidget(Qt::BottomDockWidgetArea, m_detailsDockWidget);
+        if (m_searchResultsDockWidget)
+            tabifyDockWidget(m_searchResultsDockWidget, m_detailsDockWidget);
     }
 }
 
@@ -553,6 +622,10 @@ void MainWindow::loadSettings()
         restoreGeometry(geometry);
     if (!state.isEmpty())
         restoreState(state);
+    else
+        // Первый запуск (или удалённый ini): вместо сырой Qt-раскладки —
+        // аккуратная дефолтная, со скрытыми панелями.
+        applyDefaultPanelLayout();
 
     // Layout, сохранённый версией без таймлайн-дока, оставляет новому доку
     // нулевую высоту. До show() resizeDocks игнорируется, поэтому проверка
