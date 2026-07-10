@@ -49,7 +49,7 @@
 
 ## Build from source
 
-Requires CMake 3.16+ and Qt 6.5+ (Widgets, Core5Compat, Concurrent, Svg, Network).
+Requires CMake 3.16+ and Qt 6.5+ (Widgets, Concurrent, Svg, Network).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

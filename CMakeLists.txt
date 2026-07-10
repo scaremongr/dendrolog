@@ -11,7 +11,7 @@ set(CMAKE_AUTORCC ON)    # Для обработки .qrc файлов
 set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если они есть)
 
 # Найти Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Core5Compat Gui Concurrent Svg Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Concurrent Svg Network)
 
 # Добавить исходные файлы
 set(PROJECT_SOURCES
@@ -118,7 +118,6 @@ qt_add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Widgets
     Qt6::Core
-    Qt6::Core5Compat
     Qt6::Gui
     Qt6::Concurrent
     Qt6::Svg
