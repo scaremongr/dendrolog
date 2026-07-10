@@ -10,6 +10,8 @@
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
 #include "timelinehistogramwidget.h"
+#include "entrydetailspanel.h"
+#include "statisticspanel.h"
 #include "schemastore.h"
 #include "apptheme.h"
 
@@ -42,8 +44,10 @@
 #include <QComboBox>
 #include <QToolButton>
 #include <QMouseEvent>
+#include <QItemSelectionModel>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTextStream>
 #include <QFile>
 #include <QIcon>
@@ -95,6 +99,9 @@ MainWindow::MainWindow(QWidget *parent)
     setupTextFilterDockContents();
     setupRowMarkerDock();
     setupTimelineDock();
+    setupSearchResultsDock();
+    setupEntryDetailsDock();
+    setupStatisticsDock();
     setupDirectoryScanner();
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
@@ -353,8 +360,11 @@ void MainWindow::saveSettings()
 
     s.beginGroup("Filters");
     if (m_filterPanel) {
-        const QJsonDocument doc(m_filterPanel->ruleSet().toJson());
-        s.setValue("textFilterRules", QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+        const QJsonDocument doc(m_filterPanel->profilesToJson());
+        s.setValue("textFilterProfiles", QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+        s.remove("textFilterRules"); // legacy одиночный набор больше не пишем
+        s.setValue("textFilterMode", static_cast<int>(m_filterPanel->mode()));
+        s.setValue("highlightInMainView", m_filterPanel->highlightInMainView());
     }
     if (m_markerPanel) {
         const QJsonDocument doc(QJsonObject{
@@ -483,12 +493,26 @@ void MainWindow::loadSettings()
 
     s.beginGroup("Filters");
     if (m_filterPanel) {
-        const QByteArray rulesJson = s.value("textFilterRules").toString().toUtf8();
-        if (!rulesJson.isEmpty()) {
-            const QJsonDocument doc = QJsonDocument::fromJson(rulesJson);
+        const QByteArray profilesJson = s.value("textFilterProfiles").toString().toUtf8();
+        if (!profilesJson.isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(profilesJson);
             if (doc.isObject())
-                m_filterPanel->setRuleSet(FilterRuleSet::fromJson(doc.object()));
+                m_filterPanel->profilesFromJson(doc.object());
+        } else {
+            // Миграция старого формата: одиночный textFilterRules → профиль «Default».
+            const QByteArray rulesJson = s.value("textFilterRules").toString().toUtf8();
+            if (!rulesJson.isEmpty()) {
+                const QJsonDocument doc = QJsonDocument::fromJson(rulesJson);
+                if (doc.isObject())
+                    m_filterPanel->setRuleSet(FilterRuleSet::fromJson(doc.object()));
+            }
         }
+        // Режим и галочка восстанавливаются тихо (setMode/setHighlightInMainView
+        // блокируют сигналы) — видимость самого дока восстановит restoreState.
+        m_filterPanel->setHighlightInMainView(
+            s.value("highlightInMainView", true).toBool());
+        m_filterPanel->setMode(static_cast<FilterPanelWidget::Mode>(
+            s.value("textFilterMode", static_cast<int>(FilterPanelWidget::Mode::Filter)).toInt()));
     }
     if (m_markerPanel) {
         const QByteArray markersJson = s.value("rowMarkers").toString().toUtf8();
@@ -1065,6 +1089,10 @@ void MainWindow::setupTextFilterDockContents()
             this, &MainWindow::onApplyAllTextFiltersClicked);
     connect(m_filterPanel, &FilterPanelWidget::resetRequested,
             this, &MainWindow::onResetTextFiltersClicked);
+    connect(m_filterPanel, &FilterPanelWidget::modeChanged,
+            this, [this]() { onFilterModeChanged(); });
+    connect(m_filterPanel, &FilterPanelWidget::highlightInMainViewChanged,
+            this, [this]() { onHighlightInMainViewChanged(); });
 
     // Allow the dock widget to expand vertically as its content grows.
     ui->textFilterDockWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
@@ -1143,6 +1171,172 @@ void MainWindow::setupTimelineDock()
         else
             ui->menuView->addAction(toggle);
         m_shortcutActions.insert(QStringLiteral("panelTimeline"), toggle);
+    }
+}
+
+void MainWindow::setupSearchResultsDock()
+{
+    m_searchResultsDockWidget = new QDockWidget(tr("Search Results"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_searchResultsDockWidget->setObjectName(QStringLiteral("searchResultsDockWidget"));
+    // Список совпадений — горизонтальная лента строк, логичнее внизу/вверху.
+    m_searchResultsDockWidget->setAllowedAreas(Qt::TopDockWidgetArea | Qt::BottomDockWidgetArea);
+
+    auto* container = new QWidget(m_searchResultsDockWidget);
+    auto* vbox = new QVBoxLayout(container);
+    vbox->setContentsMargins(0, 0, 0, 0);
+    vbox->setSpacing(0);
+
+    m_searchResultsStatusLabel = new QLabel(tr("No search active."), container);
+    m_searchResultsStatusLabel->setContentsMargins(6, 3, 6, 3);
+    vbox->addWidget(m_searchResultsStatusLabel);
+
+    // Вторая LogListView поверх отдельной LogModel: та же отрисовка/подсветка,
+    // что и в основном view, но со своим (отфильтрованным) набором записей.
+    m_searchResultsModel = new LogModel(this);
+    m_searchResultsView = new LogListView(container);
+    // Однострочный режим (klogg-style): word-wrap НЕ включаем.
+    m_searchResultsView->setModel(m_searchResultsModel);
+
+    // Тот же шрифт, что и у основных view — ради консистентности.
+    {
+        QFont f(AppSettings::instance().fontFamily());
+        f.setPointSize(AppSettings::instance().fontSize());
+        f.setWeight(QFont::Medium);
+        m_searchResultsView->setFont(f);
+    }
+    vbox->addWidget(m_searchResultsView, /*stretch=*/1);
+
+    m_searchResultsDockWidget->setWidget(container);
+    addDockWidget(Qt::BottomDockWidgetArea, m_searchResultsDockWidget);
+    // Обычная панель: её видимость не меняется при переключении режима — только
+    // содержимое (пусто, если режим не Search). Управляется пользователем через
+    // меню View; после первого запуска состояние восстановит restoreState.
+    // Открыли панель в режиме Search — сразу подтянуть актуальные результаты.
+    connect(m_searchResultsDockWidget, &QDockWidget::visibilityChanged,
+            this, [this](bool visible) { if (visible) scheduleSearchRefresh(); });
+
+    // Выбор строки в результатах (мышь или клавиатура) → прыжок в основном view.
+    if (m_searchResultsView->selectionModel())
+        connect(m_searchResultsView->selectionModel(), &QItemSelectionModel::currentRowChanged,
+                this, [this](const QModelIndex& current, const QModelIndex&) {
+                    onSearchResultActivated(current);
+                });
+
+    // Пересчёт счётчика совпадений после (в т.ч. асинхронной) фильтрации.
+    connect(m_searchResultsModel, &LogModel::modelFiltered, this, [this](int count) {
+        if (m_searchResultsStatusLabel)
+            m_searchResultsStatusLabel->setText(tr("%n match(es)", "", count));
+    });
+
+    // Дебаунс живого обновления результатов (tail auto-reload / рефильтрация).
+    m_searchRefreshTimer = new QTimer(this);
+    m_searchRefreshTimer->setSingleShot(true);
+    m_searchRefreshTimer->setInterval(200);
+    connect(m_searchRefreshTimer, &QTimer::timeout, this, [this]() { runSearchIntoResults(); });
+
+    if (ui->menuView) {
+        QAction* toggle = m_searchResultsDockWidget->toggleViewAction();
+        toggle->setText(tr("Search Results Panel"));
+        // Сгруппировать с прочими переключателями панелей (до первого сепаратора).
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelSearchResults"), toggle);
+    }
+}
+
+void MainWindow::setupEntryDetailsDock()
+{
+    m_detailsDockWidget = new QDockWidget(tr("Entry Details"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_detailsDockWidget->setObjectName(QStringLiteral("entryDetailsDockWidget"));
+
+    m_detailsPanel = new EntryDetailsPanel(m_detailsDockWidget);
+    m_detailsDockWidget->setWidget(m_detailsPanel);
+    addDockWidget(Qt::BottomDockWidgetArea, m_detailsDockWidget);
+    // Панель по требованию: по умолчанию скрыта (View → Entry Details Panel,
+    // Ctrl+F8). Дальше открытость/позицию переживает saveState/restoreState.
+    // Пока док скрыт, HTML не строится — панель лишь запоминает текущую запись.
+    m_detailsDockWidget->hide();
+
+    if (ui->menuView) {
+        QAction* toggle = m_detailsDockWidget->toggleViewAction();
+        toggle->setText(tr("Entry Details Panel"));
+        // Сгруппировать с прочими переключателями панелей (до первого сепаратора).
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelEntryDetails"), toggle);
+    }
+}
+
+void MainWindow::setupStatisticsDock()
+{
+    m_statsDockWidget = new QDockWidget(tr("Statistics"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_statsDockWidget->setObjectName(QStringLiteral("statisticsDockWidget"));
+
+    m_statsPanel = new StatisticsPanel(m_statsDockWidget);
+    m_statsDockWidget->setWidget(m_statsPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_statsDockWidget);
+    // Панель по требованию: по умолчанию скрыта (View → Statistics Panel,
+    // Ctrl+F9). Пока док скрыт, сбор статистики не запускается — данные
+    // помечаются dirty и пересчитываются при показе.
+    m_statsDockWidget->hide();
+
+    // Клик по времени всплеска/паузы — переход к моменту (по дорожке ошибок —
+    // к ближайшей ошибке), та же логика, что и клик по таймлайну.
+    connect(m_statsPanel, &StatisticsPanel::jumpToTimeRequested,
+            this, &MainWindow::onTimelineTimeClicked);
+    // Клик по шаблону сообщения — переход к его первому вхождению.
+    connect(m_statsPanel, &StatisticsPanel::jumpToEntryRequested,
+            this, [this](int logicalEntryId, const LogFilePtr& file) {
+                if (!m_activeLogView || !m_activeLogView->model()
+                    || !m_activeLogView->view())
+                    return;
+                const int row = m_activeLogView->model()->nearestVisibleRow(
+                    logicalEntryId, file.get());
+                if (row < 0)
+                    return;
+                const QModelIndex idx = m_activeLogView->model()->index(row, 0);
+                m_activeLogView->view()->setCurrentIndex(idx);
+                m_activeLogView->view()->scrollTo(idx,
+                                                  QAbstractItemView::PositionAtCenter);
+            });
+
+    if (ui->menuView) {
+        QAction* toggle = m_statsDockWidget->toggleViewAction();
+        toggle->setText(tr("Statistics Panel"));
+        // Сгруппировать с прочими переключателями панелей (до первого сепаратора).
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelStatistics"), toggle);
     }
 }
 
@@ -1313,6 +1507,19 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     if (m_timelinePanel)
         m_timelinePanel->setModel(logView->model());
 
+    // Панель статистики — тоже (сама пересоберётся, если видима).
+    if (m_statsPanel)
+        m_statsPanel->setModel(logView->model());
+
+    // Живое обновление панели результатов: дозагрузка строк (rowsInserted) или
+    // полная перестройка (modelReset) активной вкладки → дебаунс-пересборка.
+    if (m_searchRefreshTimer && logView->model()) {
+        m_searchModelInsertConn = connect(logView->model(), &QAbstractItemModel::rowsInserted,
+            this, [this](const QModelIndex&, int, int) { scheduleSearchRefresh(); });
+        m_searchModelResetConn = connect(logView->model(), &QAbstractItemModel::modelReset,
+            this, [this]() { scheduleSearchRefresh(); });
+    }
+
     if (m_activeLogView && m_activeLogView->model() && m_activeLogView->view())
     {
         int totalRows = m_activeLogView->model()->rowCount();
@@ -1323,6 +1530,12 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     syncReloadButton();
     updateFilterInputsFromModel();
     updateFilterStatusButtons();
+
+    // Смена вкладки в режиме поиска: результаты старой вкладки указывали бы на
+    // чужие записи — пересобираем под новую активную вкладку (если док видим).
+    if (m_filterPanel && m_filterPanel->mode() == FilterPanelWidget::Mode::Search
+        && m_searchResultsDockWidget && m_searchResultsDockWidget->isVisible())
+        runSearchIntoResults();
 }
 
 void MainWindow::disconnectFromLogView(LogViewWidget *logView)
@@ -1345,6 +1558,13 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     if (m_timelinePanel)
         m_timelinePanel->setModel(nullptr);
 
+    if (m_statsPanel)
+        m_statsPanel->setModel(nullptr);
+
+    // Рвём соединения живого обновления с моделью уходящей вкладки.
+    disconnect(m_searchModelInsertConn);
+    disconnect(m_searchModelResetConn);
+
     if (m_activeLogView == logView)
     {
         m_activeLogView = nullptr;
@@ -1366,6 +1586,9 @@ void MainWindow::onCurrentTabChanged(int index)
     else
     {
         m_activeLogView = nullptr;
+        // Вкладок не осталось — очистить счётчик строк, маркер таймлайна
+        // и панель деталей (иначе они показывали бы закрытый документ).
+        updateLineInfoLabel(-1, 0);
     }
     updateStatusBarDefaultText();
     updateLogLevelFilterButtons();
@@ -1551,7 +1774,13 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
         return;
     m_statusLabel->setText(tr("Finished parsing: %1 (%2 entries)").arg(logFile->shortName()).arg(totalEntries));
     m_progressBar->hide();
-    
+
+    // Основная обработка файла закончена — пнуть сбор статистики. Страхует
+    // редкий случай, когда слитый батч целиком скрыт активным фильтром и
+    // модельные сигналы (rowsInserted/modelReset) не приходили.
+    if (m_statsPanel)
+        m_statsPanel->scheduleRefresh();
+
     // Update tab text to reflect the loaded file
     for (int i = 0; i < ui->tabWidget->count(); ++i) {
         auto *view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
@@ -1646,6 +1875,45 @@ void MainWindow::updateStatusBarDefaultText()
     m_progressBar->hide();
 }
 
+// Все строки логической записи, которой принадлежит entry (включая её саму),
+// в порядке следования в файле. m_allEntries отсортирован logEntryPtrLess, а
+// строки одной логической записи делят timestamp/sourceFile/logicalEntryId —
+// значит, лежат в векторе подряд: lower_bound + расширение в обе стороны.
+static QVector<std::shared_ptr<LogEntry>> logicalEntryLines(
+    const LogModel* model, const std::shared_ptr<LogEntry>& entry)
+{
+    // Защита панели деталей от патологических записей на сотни тысяч строк.
+    constexpr int kMaxLogicalLines = 2000;
+
+    if (!model || !entry)
+        return {};
+
+    // Свободный текст (не-лог файл или преамбула до первой настоящей записи):
+    // «логическая запись» тут номинальна — весь файл слипся в запись #0, и
+    // панель деталей печатала бы его целиком. Единица показа — сама строка.
+    if (entry->isPlainText())
+        return { entry };
+
+    const auto& all = model->allEntries();
+    const auto sameLogicalEntry = [&entry](const std::shared_ptr<LogEntry>& e) {
+        return e && e->logicalEntryId == entry->logicalEntryId
+            && e->sourceFile == entry->sourceFile;
+    };
+
+    auto it = std::lower_bound(all.constBegin(), all.constEnd(), entry, logEntryPtrLess);
+    if (it == all.constEnd() || !sameLogicalEntry(*it))
+        return { entry }; // страховка: запись не нашлась на ожидаемом месте
+
+    while (it != all.constBegin() && sameLogicalEntry(*(it - 1)))
+        --it;
+
+    QVector<std::shared_ptr<LogEntry>> lines;
+    for (; it != all.constEnd() && sameLogicalEntry(*it)
+           && lines.size() < kMaxLogicalLines; ++it)
+        lines.append(*it);
+    return lines;
+}
+
 void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
 {
     if (totalRows > 0 && currentRow >= 0)
@@ -1661,17 +1929,31 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
         m_lineInfoLabel->setText("-");
     }
 
+    // Текущая запись в отфильтрованном списке активной вкладки (если есть).
+    std::shared_ptr<LogEntry> currentEntry;
+    LogModel* model = m_activeLogView ? m_activeLogView->model() : nullptr;
+    if (currentRow >= 0 && model)
+    {
+        const auto& entries = model->filteredEntries();
+        if (currentRow < entries.size())
+            currentEntry = entries[currentRow];
+    }
+
     // Маркер позиции текущей строки на таймлайн-гистограмме.
     if (m_timelinePanel)
+        m_timelinePanel->setCurrentTime(currentEntry ? currentEntry->timestamp
+                                                     : QDateTime());
+
+    // Панель деталей следует за текущей строкой. Скармливаем запись всегда:
+    // пока док скрыт, панель лишь запоминает её и строит HTML при показе.
+    if (m_detailsPanel)
     {
-        QDateTime markerTime;
-        if (currentRow >= 0 && m_activeLogView && m_activeLogView->model())
-        {
-            const auto& entries = m_activeLogView->model()->filteredEntries();
-            if (currentRow < entries.size() && entries[currentRow])
-                markerTime = entries[currentRow]->timestamp;
-        }
-        m_timelinePanel->setCurrentTime(markerTime);
+        if (currentEntry)
+            m_detailsPanel->showEntry(currentEntry,
+                                      logicalEntryLines(model, currentEntry),
+                                      model->availableFields());
+        else
+            m_detailsPanel->clearEntry();
     }
 }
 
@@ -1944,10 +2226,20 @@ void MainWindow::onApplyAllTextFiltersClicked()
 
 void MainWindow::onResetTextFiltersClicked()
 {
-    // Снять фильтры и подсветку с активного документа; правила в панели
-    // остаются и могут быть применены заново.
     if (!m_activeLogView)
         return;
+
+    if (m_filterPanel && m_filterPanel->mode() == FilterPanelWidget::Mode::Search) {
+        // Режим поиска: основной view и так не был отфильтрован. Очищаем панель
+        // результатов и снимаем подсветку совпадений; правила в панели остаются.
+        clearSearchResults();
+        if (m_activeLogView->view())
+            m_activeLogView->view()->setTextHighlightPatterns({});
+        return;
+    }
+
+    // Режим фильтра: снять фильтры и подсветку с активного документа; правила
+    // в панели остаются и могут быть применены заново.
     if (m_activeLogView->model())
         m_activeLogView->model()->setFilterRules(FilterRuleSet{});
     if (m_activeLogView->view())
@@ -1976,6 +2268,19 @@ void MainWindow::applyTextFiltersToActiveView()
     if (!m_filterPanel || !m_activeLogView)
         return;
 
+    // Режим поиска: основной view не фильтруем — совпадения уходят в панель
+    // результатов, main остаётся полным (только опциональная подсветка).
+    if (m_filterPanel->mode() == FilterPanelWidget::Mode::Search) {
+        if (m_activeLogView->model())
+            m_activeLogView->model()->setFilterRules(FilterRuleSet{});
+        runSearchIntoResults();
+        // Явное нажатие «Search» поднимает панель результатов, если она скрыта
+        // (в отличие от простой смены режима, которая её не трогает).
+        if (m_searchResultsDockWidget && !m_searchResultsDockWidget->isVisible())
+            m_searchResultsDockWidget->show();
+        return;
+    }
+
     // Фильтрация пер-вкладочная: Apply действует только на текущий документ.
     // Остальные документы сохраняют свои (или никакие) фильтры.
     FilterRuleSet rules = m_filterPanel->ruleSet();
@@ -1984,8 +2289,149 @@ void MainWindow::applyTextFiltersToActiveView()
 
     if (m_activeLogView->model())
         m_activeLogView->model()->setFilterRules(rules);
+    // Подсветка совпадений в основном view — по галочке (работает в обоих режимах).
     if (m_activeLogView->view())
-        m_activeLogView->view()->setTextHighlightPatterns(rules.highlightPatterns());
+        m_activeLogView->view()->setTextHighlightPatterns(
+            m_filterPanel->highlightInMainView() ? rules.highlightPatterns()
+                                                 : QVector<HighlightPattern>{});
+}
+
+void MainWindow::runSearchIntoResults()
+{
+    if (!m_filterPanel || !m_searchResultsModel || !m_activeLogView
+        || !m_activeLogView->model()
+        || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
+        return;
+
+    LogModel* active = m_activeLogView->model();
+
+    FilterRuleSet rules = m_filterPanel->ruleSet();
+    // Пустой запрос в режиме поиска = нет результатов (а не «пропустить всё»,
+    // как трактует пустой набор фильтр). Иначе панель заполнилась бы всем логом.
+    if (!rules.isActive()) {
+        clearSearchResults();
+        if (m_activeLogView->view())
+            m_activeLogView->view()->setTextHighlightPatterns({});
+        return;
+    }
+
+    // Поиск ведём над текущим ВИДИМЫМ набором активной вкладки (после Time/Level/
+    // Fields-фильтров) — тогда любой результат гарантированно виден в main и клик
+    // всегда попадает точно на строку.
+    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+    rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+
+    // Зеркалим отображение полей активной модели, чтобы текст строк совпадал.
+    m_searchResultsModel->setAvailableFields(active->availableFields());
+    m_searchResultsModel->setFieldDisplaySelection(active->fieldDisplayFilterEnabled(),
+                                                   active->visibleFieldIndexes());
+
+    // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
+    m_suppressResultNavigation = true;
+    m_searchResultsModel->setEntries(active->filteredEntries());
+    m_searchResultsModel->setFilterRules(rules);
+    m_suppressResultNavigation = false;
+
+    // Подсветка совпадений: всегда в панели результатов; в основном view — по галочке.
+    m_searchResultsView->setTextHighlightPatterns(rules.highlightPatterns());
+    if (m_activeLogView->view())
+        m_activeLogView->view()->setTextHighlightPatterns(
+            m_filterPanel->highlightInMainView() ? rules.highlightPatterns()
+                                                 : QVector<HighlightPattern>{});
+
+    // На малых логах setFilterRules фильтрует синхронно и modelFiltered мог
+    // прийти ДО setEntries-контента — обновим счётчик явно.
+    if (m_searchResultsStatusLabel)
+        m_searchResultsStatusLabel->setText(
+            tr("%n match(es)", "", m_searchResultsModel->filteredEntries().size()));
+}
+
+void MainWindow::clearSearchResults()
+{
+    if (m_searchRefreshTimer)
+        m_searchRefreshTimer->stop();
+    if (!m_searchResultsModel)
+        return;
+    // Reset модели дёрнет currentRowChanged — не даём ему прыгнуть в main.
+    m_suppressResultNavigation = true;
+    m_searchResultsModel->setEntries({});
+    m_suppressResultNavigation = false;
+    if (m_searchResultsStatusLabel)
+        m_searchResultsStatusLabel->setText(tr("No search active."));
+}
+
+void MainWindow::onFilterModeChanged()
+{
+    if (!m_filterPanel)
+        return;
+
+    const bool search = (m_filterPanel->mode() == FilterPanelWidget::Mode::Search);
+
+    if (search) {
+        // Входим в режим поиска: снимаем скрывающий фильтр (строки возвращаются).
+        // Док НЕ показываем принудительно — это обычная панель (меню View).
+        // runSearchIntoResults сам заполнит результаты или очистит их, если
+        // запрос пуст.
+        if (m_activeLogView && m_activeLogView->model())
+            m_activeLogView->model()->setFilterRules(FilterRuleSet{});
+        runSearchIntoResults();
+    } else {
+        // Возврат в режим фильтра: панель результатов просто пустеет (не
+        // прячется), снимаем подсветку поиска. Скрывающий фильтр НЕ применяем
+        // автоматически (без сюрпризов).
+        clearSearchResults();
+        if (m_activeLogView && m_activeLogView->view())
+            m_activeLogView->view()->setTextHighlightPatterns({});
+    }
+    updateFilterStatusButtons();
+}
+
+void MainWindow::onHighlightInMainViewChanged()
+{
+    // Галочка подсветки работает в ОБОИХ режимах (Filter и Search).
+    if (!m_filterPanel || !m_activeLogView || !m_activeLogView->view())
+        return;
+
+    FilterRuleSet rules = m_filterPanel->ruleSet();
+    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+    rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+    m_activeLogView->view()->setTextHighlightPatterns(
+        m_filterPanel->highlightInMainView() ? rules.highlightPatterns()
+                                             : QVector<HighlightPattern>{});
+}
+
+void MainWindow::onSearchResultActivated(const QModelIndex& current)
+{
+    if (m_suppressResultNavigation || !current.isValid()
+        || !m_activeLogView || !m_activeLogView->model() || !m_activeLogView->view())
+        return;
+
+    const auto& results = m_searchResultsModel->filteredEntries();
+    const int row = current.row();
+    if (row < 0 || row >= results.size() || !results[row])
+        return;
+
+    const LogEntry& entry = *results[row];
+    const int mainRow = m_activeLogView->model()->nearestVisibleRow(
+        entry.logicalEntryId, entry.sourceFile.get());
+    if (mainRow < 0)
+        return;
+
+    const QModelIndex idx = m_activeLogView->model()->index(mainRow, 0);
+    // Двигаем текущую строку и центрируем — фокус остаётся на панели результатов,
+    // так что стрелками можно продолжать листать совпадения.
+    m_activeLogView->view()->setCurrentIndex(idx);
+    m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+}
+
+void MainWindow::scheduleSearchRefresh()
+{
+    if (!m_filterPanel || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
+        return;
+    if (!m_searchResultsDockWidget || !m_searchResultsDockWidget->isVisible())
+        return;
+    if (m_searchRefreshTimer)
+        m_searchRefreshTimer->start();
 }
 
 void MainWindow::applyRowMarkersToActiveView()
@@ -2071,6 +2517,9 @@ void MainWindow::handleModelFiltered()
     // Любая перефильтрация (Apply/Reset из панелей, зум таймлайна, уровни)
     // могла изменить состояние фильтров — обновить кнопки-индикаторы.
     updateFilterStatusButtons();
+    // Видимый набор активной вкладки изменился — в режиме поиска пересобрать
+    // результаты (мы ищем над filteredEntries активной модели).
+    scheduleSearchRefresh();
 }
 
 void MainWindow::onScanDirectoryClicked()

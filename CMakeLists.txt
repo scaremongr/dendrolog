@@ -77,6 +77,8 @@ set(PROJECT_SOURCES
 
     src/cardframe.h
     src/cardframe.cpp
+    src/toggleswitch.h
+    src/toggleswitch.cpp
     src/textmatchhighlighter.h
     src/textmatchhighlighter.cpp
     src/filterruleset.h
@@ -86,6 +88,10 @@ set(PROJECT_SOURCES
     src/filterpanelwidget.cpp
     src/markerpanelwidget.h
     src/markerpanelwidget.cpp
+    src/entrydetailspanel.h
+    src/entrydetailspanel.cpp
+    src/statisticspanel.h
+    src/statisticspanel.cpp
     src/timelinehistogramwidget.h
     src/timelinehistogramwidget.cpp
     resources/resources.qrc
