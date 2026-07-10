@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- DendroLog: спил бревна с годичными кольцами; одно кольцо подсвечено —
+       как найденная запись в логе. Кольца слегка смещены друг относительно
+       друга, чтобы срез выглядел живым деревом, а не мишенью. -->
+  <rect width="256" height="256" rx="56" fill="#4E342E"/>
+  <g fill="none" stroke="#EAD9C0" stroke-linecap="round">
+    <circle cx="122" cy="134" r="86" stroke-width="11"/>
+    <circle cx="125" cy="131" r="62" stroke-width="12"/>
+    <circle cx="127" cy="129" r="40" stroke="#4DC9A2" stroke-width="13"/>
+    <circle cx="129" cy="127" r="20" stroke-width="11"/>
+  </g>
+  <circle cx="130" cy="126" r="7" fill="#EAD9C0"/>
+</svg>

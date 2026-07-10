@@ -43,6 +43,10 @@ class LogModel;
 class LogListView;
 class LogPattern;
 class QModelIndex;
+class QDialog;
+class QDragEnterEvent;
+class QDropEvent;
+class UpdateChecker;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -56,12 +60,15 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    // Открыть файлы, переданные в командной строке (LogViewer.exe a.log b.log).
+    // Открыть файлы, переданные в командной строке (DendroLog.exe a.log b.log).
     void openFilesFromCommandLine(const QStringList& paths);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    // Перетаскивание лог-файлов из проводника прямо в окно.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private slots:
     // Slots connected by objectName in .ui file (or via connectSlotsByName)
@@ -244,6 +251,18 @@ private:
     // Builds the file dialog filter string ("Log files (*.log *.txt);;All files (*)")
     // from the shared scan-extension list so Open and Save use the same set.
     QString logFileDialogFilter() const;
+
+    // ---- Help menu -------------------------------------------------------
+    // Встроенная справка (docs/help_*.md из ресурсов), About и проверка
+    // обновлений. Тихая проверка запускается при старте не чаще раза в
+    // неделю; ручная (из меню) всегда показывает результат диалогом.
+    void setupHelpMenu();
+    void showHelp();
+    void showAbout();
+    void checkForUpdates(bool interactive);
+    QDialog*       m_helpDialog = nullptr;
+    UpdateChecker* m_updateChecker = nullptr;
+    bool           m_updateCheckInteractive = false;
 
     // Setup methods
     void setupStatusBar();

@@ -1,4 +1,4 @@
-# LogViewer — Quick Help
+# DendroLog — Quick Help
 
 A fast viewer for large log files: multi-file tabs, structured field extraction,
 filtering, highlighting and live reload.

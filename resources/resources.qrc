@@ -2,5 +2,10 @@
     <qresource>
         <file>icons/reload.svg</file>
         <file>icons/wordwrap.svg</file>
+        <file>icons/dendrolog.svg</file>
+    </qresource>
+    <qresource prefix="/help">
+        <file alias="help_en.md">../docs/help_en.md</file>
+        <file alias="help_ru.md">../docs/help_ru.md</file>
     </qresource>
 </RCC>

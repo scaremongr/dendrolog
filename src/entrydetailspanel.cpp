@@ -53,7 +53,8 @@ QString jsonEscape(const QString& s)
         case u'\t': out += QLatin1String("\\t");  break;
         default:
             if (c.unicode() < 0x20)
-                out += QStringLiteral("\\u%1").arg(c.unicode(), 4, 16, QLatin1Char('0'));
+                // int-каст обязателен: у Qt 6.11 нет перегрузки arg(char16_t).
+                out += QStringLiteral("\\u%1").arg(int(c.unicode()), 4, 16, QLatin1Char('0'));
             else
                 out += c;
         }

@@ -2,8 +2,17 @@
 #include "apptheme.h"
 
 #include <QApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QSettings>
+#include <QStandardPaths>
+
+namespace {
+const QLatin1String kIniName("DendroLog.ini");
+const QLatin1String kLegacyIniName("LogViewer.ini"); // имя до переименования проекта
+}
 
 // ---------------------------------------------------------------------------
 AppSettings& AppSettings::instance()
@@ -13,9 +22,35 @@ AppSettings& AppSettings::instance()
 }
 
 // ---------------------------------------------------------------------------
+QString AppSettings::configDir()
+{
+    static const QString dir = []() -> QString {
+        const QDir exeDir(QApplication::applicationDirPath());
+        // Portable mode: явный маркер или ini, уже живущий рядом с exe.
+        if (exeDir.exists(QStringLiteral("portable")) ||
+            exeDir.exists(kIniName) ||
+            exeDir.exists(kLegacyIniName))
+            return exeDir.absolutePath();
+
+        const QString appData =
+            QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+        QDir().mkpath(appData);
+        return appData;
+    }();
+    return dir;
+}
+
+// ---------------------------------------------------------------------------
 QString AppSettings::iniFilePath()
 {
-    return QApplication::applicationDirPath() + "/LogViewer.ini";
+    const QString path = configDir() + QLatin1Char('/') + kIniName;
+    // Одноразовая миграция настроек со старого имени файла.
+    if (!QFileInfo::exists(path)) {
+        const QString legacy = configDir() + QLatin1Char('/') + kLegacyIniName;
+        if (QFileInfo::exists(legacy))
+            QFile::copy(legacy, path);
+    }
+    return path;
 }
 
 // ---------------------------------------------------------------------------

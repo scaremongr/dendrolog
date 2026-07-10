@@ -1,5 +1,6 @@
 #include "schemastore.h"
 
+#include "appsettings.h"
 #include "logpattern.h"
 
 #include <QCoreApplication>
@@ -98,10 +99,22 @@ namespace SchemaStore {
 
 QString patternsDir()
 {
-    const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/patterns");
+    const QString path = AppSettings::configDir() + QStringLiteral("/patterns");
     QDir dir(path);
     if (!dir.exists() && !dir.mkpath(QStringLiteral(".")))
         return QString();
+
+    // Одноразовая миграция схем из старого расположения <exe>/patterns
+    // (до v0.1 схемы всегда жили рядом с исполняемым файлом). В portable-
+    // режиме старый и новый каталоги совпадают — цикл ничего не копирует.
+    const QDir legacy(QCoreApplication::applicationDirPath() + QStringLiteral("/patterns"));
+    if (legacy.exists() && legacy.absolutePath() != dir.absolutePath()) {
+        const QStringList jsons = legacy.entryList({QStringLiteral("*.json")}, QDir::Files);
+        for (const QString& name : jsons) {
+            if (!dir.exists(name))
+                QFile::copy(legacy.absoluteFilePath(name), dir.absoluteFilePath(name));
+        }
+    }
     return path;
 }
 
