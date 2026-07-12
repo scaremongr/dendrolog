@@ -15,6 +15,7 @@
 #include "schemastore.h"
 #include "apptheme.h"
 #include "updatechecker.h"
+#include "stdinspooler.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -31,6 +32,7 @@
 #include <QDockWidget>
 #include <QTreeWidget>
 #include <QHeaderView>
+#include <QDir>
 #include <QDirIterator>
 #include <QtConcurrent>
 #include <QFutureWatcher>
@@ -151,6 +153,24 @@ MainWindow::MainWindow(QWidget *parent)
     m_autoReloadTimer->setSingleShot(false);
     connect(m_autoReloadTimer, &QTimer::timeout, this, &MainWindow::onAutoReloadTimerTick);
 
+    // Env-gated замер отзывчивости GUI: DENDRO_UI_TRACE=<файл> — таймер 100 мс
+    // пишет монотонные метки времени; разрывы между соседними метками = фризы
+    // event loop. В обычных запусках недостижимо.
+    if (const QString tracePath = qEnvironmentVariable("DENDRO_UI_TRACE");
+        !tracePath.isEmpty()) {
+        auto* traceFile = new QFile(tracePath, this);
+        if (traceFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            auto clock = std::make_shared<QElapsedTimer>();
+            clock->start();
+            auto* hb = new QTimer(this);
+            connect(hb, &QTimer::timeout, this, [traceFile, clock]() {
+                traceFile->write(QByteArray::number(qlonglong(clock->elapsed())) + '\n');
+                traceFile->flush();
+            });
+            hb->start(100);
+        }
+    }
+
     // --- Reload toolbar button (icon + checkable) ---
     // actionReloadFile keeps the F5 shortcut and menu entry; the toolbar shows a
     // custom QToolButton so we can distinguish left-click (manual) from right-click
@@ -177,6 +197,24 @@ MainWindow::MainWindow(QWidget *parent)
         wwBtn->setFixedSize(26, 26);
         wwBtn->setToolTip(tr("Toggle word wrap"));
     }
+
+    // --- Follow-tail toolbar toggle (автопрокрутка к концу растущего лога) ---
+    m_followTailAction = new QAction(QStringLiteral("⤓"), this);
+    m_followTailAction->setCheckable(true);
+    m_followTailAction->setToolTip(
+        tr("Follow tail: auto-scroll to new lines (Shift+F5).\n"
+           "Scrolling up turns it off."));
+    m_followTailAction->setShortcut(QKeySequence(QStringLiteral("Shift+F5")));
+    ui->toolBar->addAction(m_followTailAction);
+    if (QToolButton* ftBtn = qobject_cast<QToolButton*>(ui->toolBar->widgetForAction(m_followTailAction))) {
+        ftBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        ftBtn->setFixedSize(26, 26);
+    }
+    connect(m_followTailAction, &QAction::toggled, this, [this](bool on) {
+        if (m_activeLogView && m_activeLogView->view()
+            && m_activeLogView->view()->followTail() != on)
+            m_activeLogView->view()->setFollowTail(on);
+    });
 
     // "Tools" menu with Settings action.
     QMenu* menuTools = menuBar()->addMenu(tr("&Tools"));
@@ -1010,16 +1048,8 @@ void MainWindow::onManagePatterns()
     // Offer first lines of the active log as live-preview samples.
     QStringList sampleLines;
     if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) {
-        if (lv->model()) {
-            const auto& entries = lv->model()->allEntries();
-            for (const auto& entry : entries) {
-                if (!entry || entry->message.trimmed().isEmpty())
-                    continue;
-                sampleLines.append(entry->message);
-                if (sampleLines.size() >= 8)
-                    break;
-            }
-        }
+        if (lv->model())
+            sampleLines = lv->model()->sampleMessages(8);
     }
 
     ConversionPatternDialog dlg(m_patternList, this, sampleLines, m_conversionPattern);
@@ -1068,7 +1098,7 @@ void MainWindow::cancelFieldExtraction()
     if (!m_fieldWatcher)
         return;
     // Detach our slots first so the cancelled run does not finalize, then
-    // wait for the worker threads to actually stop touching entry->fields.
+    // wait for the worker threads to actually stop touching entry->fields().
     m_fieldWatcher->disconnect(this);
     m_fieldWatcher->cancel();
     m_fieldWatcher->waitForFinished();
@@ -1102,15 +1132,22 @@ void MainWindow::applyPatternToAllViews()
         lv->setParserPattern(m_conversionPattern);
         lv->setExtractionEnabled(filterEnabled);
 
-        if (lv->model()) {
-            for (const auto& entry : lv->model()->allEntries()) {
-                if (!entry)
-                    continue;
-                if (doExtract)
-                    entries.append(entry);
-                else
-                    entry->fields = LogEntryFields();
-            }
+        if (!lv->model())
+            continue;
+
+        // Индексный бэкенд: спаны полей не хранятся — извлечение идёт по
+        // требованию новым паттерном (он уже передан через setParserPattern).
+        // Мутировать нечего; отображение обновит finishPatternApplication().
+        if (lv->model()->isIndexedBackend())
+            continue;
+
+        for (const auto& entry : lv->model()->residentEntriesForFieldMutation()) {
+            if (!entry)
+                continue;
+            if (doExtract)
+                entries.append(entry);
+            else
+                entry->setFields(LogEntryFields());
         }
     }
 
@@ -1119,14 +1156,14 @@ void MainWindow::applyPatternToAllViews()
     constexpr int kAsyncThreshold = 4000;
     if (!doExtract || entries.size() < kAsyncThreshold) {
         for (const auto& entry : entries)
-            entry->fields = pattern->extractFields(entry->message);
+            entry->setFields(pattern->extractFields(entry->message()));
         finishPatternApplication();
         return;
     }
 
     // Large batch: re-extract in the background and show the same status-bar
     // progress as file loading. While it runs we turn OFF field display so
-    // formatDisplayMessage never reads entry->fields concurrently with the
+    // formatDisplayMessage never reads entry->fields() concurrently with the
     // workers that overwrite them (it falls back to the raw message text).
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
@@ -1153,7 +1190,7 @@ void MainWindow::applyPatternToAllViews()
     m_progressBar->setValue(0);
     m_progressBar->show();
 
-    // Воркеры ниже перезаписывают entry->fields, а фоновая перефильтрация
+    // Воркеры ниже перезаписывают entry->fields(), а фоновая перефильтрация
     // модели эти поля читает — останавливаем фильтр-джобы всех вкладок
     // (с ожиданием) до старта. Фильтры переприменятся по завершении схемы
     // в finishPatternApplication().
@@ -1165,7 +1202,7 @@ void MainWindow::applyPatternToAllViews()
 
     auto worker = [pattern](const std::shared_ptr<LogEntry>& entry) {
         if (entry)
-            entry->fields = pattern->extractFields(entry->message);
+            entry->setFields(pattern->extractFields(entry->message()));
     };
     m_fieldWatcher->setFuture(QtConcurrent::map(m_pendingFieldEntries, worker));
 }
@@ -1728,9 +1765,20 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
     connect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
 
-    if (logView->view())
+    if (logView->view()) {
         connect(logView->view(), &LogListView::timeFilterBoundRequested,
                 this, &MainWindow::onTimeFilterBoundRequested);
+
+        // Синхронизация тогла follow-tail с активной вкладкой (в т.ч.
+        // автоматическое выключение при уходе пользователя от низа).
+        m_followTailConn = connect(logView->view(), &LogListView::followTailChanged,
+                                   this, [this](bool on) {
+            if (m_followTailAction && m_followTailAction->isChecked() != on)
+                m_followTailAction->setChecked(on);
+        });
+        if (m_followTailAction)
+            m_followTailAction->setChecked(logView->view()->followTail());
+    }
 
     // Таймлайн следит за моделью активной вкладки.
     if (m_timelinePanel)
@@ -1783,6 +1831,8 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     if (logView->view())
         disconnect(logView->view(), &LogListView::timeFilterBoundRequested,
                    this, &MainWindow::onTimeFilterBoundRequested);
+
+    disconnect(m_followTailConn);
 
     if (m_timelinePanel)
         m_timelinePanel->setModel(nullptr);
@@ -2011,7 +2061,10 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
         m_statsPanel->scheduleRefresh();
 
     // Update tab text to reflect the loaded file
-    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+    // (вкладка спула stdin сохраняет своё имя — файл там технический).
+    const bool isStdinSpool = m_stdinSpooler
+        && logFile->filePath == m_stdinSpooler->spoolFilePath();
+    for (int i = 0; i < ui->tabWidget->count() && !isStdinSpool; ++i) {
         auto *view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
         if (view && view->loadedFiles().contains(logFile)) {
             int count = view->fileCount();
@@ -2035,6 +2088,110 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
         if (m_progressBar->isHidden()) {
             updateStatusBarDefaultText();
         } });
+
+    maybeStartBaselineDump();
+}
+
+// ---------------------------------------------------------------------------
+// Env-gated хук верификации: DENDRO_BASELINE_DUMP=<каталог> — после окончания
+// парсинга первого файла прогоняет фиксированную последовательность фильтров
+// над активной моделью, дампит счётчики и видимый текст в файлы и завершает
+// приложение. Использует только стабильные интерфейсы модели (rowCount/data/
+// сеттеры фильтров), поэтому результат не зависит от способа хранения записей
+// и служит байтовым базлайном при рефакторингах хранилища.
+// ---------------------------------------------------------------------------
+void MainWindow::maybeStartBaselineDump()
+{
+    static bool started = false;
+    const QString outDir = qEnvironmentVariable("DENDRO_BASELINE_DUMP");
+    if (outDir.isEmpty() || started || !m_activeLogView)
+        return;
+    started = true;
+
+    LogModel* model = m_activeLogView->model();
+    auto json = std::make_shared<QJsonObject>();
+
+    auto record = [model, json](const QString& key) {
+        QJsonObject step;
+        const int rows = model->rowCount();
+        step["rows"] = rows;
+        if (rows > 0) {
+            step["first"] = model->data(model->index(0, 0), Qt::DisplayRole).toString();
+            step["mid"] = model->data(model->index(rows / 2, 0), Qt::DisplayRole).toString();
+            step["last"] = model->data(model->index(rows - 1, 0), Qt::DisplayRole).toString();
+            step["midLen"] = model->displayTextLength(rows / 2);
+        }
+        (*json)[key] = step;
+    };
+
+    (*json)["backend"] = model->isIndexedBackend() ? QStringLiteral("indexed")
+                                                   : QStringLiteral("resident");
+    record(QStringLiteral("unfiltered"));
+    const QModelIndex hit =
+        model->findNextOccurrence(QStringLiteral("Checksum"), 0, Qt::CaseInsensitive);
+    (*json)["findChecksum"] = hit.isValid() ? hit.row() : -1;
+    const QModelIndex hitBack =
+        model->findPreviousOccurrence(QStringLiteral("переполнен"), 5, Qt::CaseSensitive);
+    (*json)["findBackCyrillic"] = hitBack.isValid() ? hitBack.row() : -1;
+
+    auto finish = [this, model, json, outDir]() {
+        QFile view(QDir(outDir).filePath(QStringLiteral("baseline_view.txt")));
+        if (view.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+            QTextStream stream(&view);
+            stream.setEncoding(QStringConverter::Utf8);
+            const int rows = model->rowCount();
+            for (int r = 0; r < rows; ++r)
+                stream << model->data(model->index(r, 0), Qt::DisplayRole).toString() << '\n';
+        }
+        QFile out(QDir(outDir).filePath(QStringLiteral("baseline.json")));
+        if (out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            out.write(QJsonDocument(*json).toJson(QJsonDocument::Indented));
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+    };
+
+    // Каждый сеттер фильтра завершается ровно одним modelFiltered (синхронно
+    // или из фонового джоба), поэтому шаги строго чередуются «мутация→сигнал».
+    auto step = std::make_shared<int>(0);
+    connect(model, &LogModel::modelFiltered, this,
+            [model, record, finish, step](int) {
+        switch (++(*step)) {
+        case 1:
+            record(QStringLiteral("levelErrorFatal"));
+            model->setTimeRangeFilter(
+                QDateTime(QDate(2026, 7, 10), QTime(9, 10, 0)),
+                QDateTime(QDate(2026, 7, 10), QTime(9, 20, 0)));
+            break;
+        case 2:
+            record(QStringLiteral("levelPlusTime"));
+            model->setTimeRangeFilter(QDateTime(), QDateTime());
+            break;
+        case 3:
+            record(QStringLiteral("levelAfterTimeReset"));
+            model->setLogLevelFilter({});
+            break;
+        case 4: {
+            record(QStringLiteral("unfilteredAgain"));
+            FilterRuleSet rules;
+            FilterRule inc1;
+            inc1.text = QStringLiteral("Timeout");
+            FilterRule inc2;
+            inc2.text = QStringLiteral("Ошибка");
+            inc2.connector = FilterRule::Connector::Or;
+            rules.rules = {inc1, inc2};
+            rules.bindFields({}, false);
+            model->setFilterRules(rules);
+            break;
+        }
+        case 5:
+            record(QStringLiteral("textTimeoutOrCyrillic"));
+            finish();
+            break;
+        default:
+            break;
+        }
+    });
+
+    model->setLogLevelFilter({LogLevel::Error, LogLevel::Fatal});
 }
 
 void MainWindow::handleFileParsingFailed(const LogFilePtr &logFile)
@@ -2104,45 +2261,6 @@ void MainWindow::updateStatusBarDefaultText()
     m_progressBar->hide();
 }
 
-// Все строки логической записи, которой принадлежит entry (включая её саму),
-// в порядке следования в файле. m_allEntries отсортирован logEntryPtrLess, а
-// строки одной логической записи делят timestamp/sourceFile/logicalEntryId —
-// значит, лежат в векторе подряд: lower_bound + расширение в обе стороны.
-static QVector<std::shared_ptr<LogEntry>> logicalEntryLines(
-    const LogModel* model, const std::shared_ptr<LogEntry>& entry)
-{
-    // Защита панели деталей от патологических записей на сотни тысяч строк.
-    constexpr int kMaxLogicalLines = 2000;
-
-    if (!model || !entry)
-        return {};
-
-    // Свободный текст (не-лог файл или преамбула до первой настоящей записи):
-    // «логическая запись» тут номинальна — весь файл слипся в запись #0, и
-    // панель деталей печатала бы его целиком. Единица показа — сама строка.
-    if (entry->isPlainText())
-        return { entry };
-
-    const auto& all = model->allEntries();
-    const auto sameLogicalEntry = [&entry](const std::shared_ptr<LogEntry>& e) {
-        return e && e->logicalEntryId == entry->logicalEntryId
-            && e->sourceFile == entry->sourceFile;
-    };
-
-    auto it = std::lower_bound(all.constBegin(), all.constEnd(), entry, logEntryPtrLess);
-    if (it == all.constEnd() || !sameLogicalEntry(*it))
-        return { entry }; // страховка: запись не нашлась на ожидаемом месте
-
-    while (it != all.constBegin() && sameLogicalEntry(*(it - 1)))
-        --it;
-
-    QVector<std::shared_ptr<LogEntry>> lines;
-    for (; it != all.constEnd() && sameLogicalEntry(*it)
-           && lines.size() < kMaxLogicalLines; ++it)
-        lines.append(*it);
-    return lines;
-}
-
 void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
 {
     if (totalRows > 0 && currentRow >= 0)
@@ -2162,15 +2280,11 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
     std::shared_ptr<LogEntry> currentEntry;
     LogModel* model = m_activeLogView ? m_activeLogView->model() : nullptr;
     if (currentRow >= 0 && model)
-    {
-        const auto& entries = model->filteredEntries();
-        if (currentRow < entries.size())
-            currentEntry = entries[currentRow];
-    }
+        currentEntry = model->entryAt(currentRow);
 
     // Маркер позиции текущей строки на таймлайн-гистограмме.
     if (m_timelinePanel)
-        m_timelinePanel->setCurrentTime(currentEntry ? currentEntry->timestamp
+        m_timelinePanel->setCurrentTime(currentEntry ? currentEntry->timestamp()
                                                      : QDateTime());
 
     // Панель деталей следует за текущей строкой. Скармливаем запись всегда:
@@ -2179,7 +2293,7 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
     {
         if (currentEntry)
             m_detailsPanel->showEntry(currentEntry,
-                                      logicalEntryLines(model, currentEntry),
+                                      model->logicalRecordLines(currentEntry),
                                       model->availableFields());
         else
             m_detailsPanel->clearEntry();
@@ -2364,33 +2478,29 @@ void MainWindow::onTimelineTimeClicked(const QDateTime& time, bool preferErrors)
         return;
 
     LogModel* model = m_activeLogView->model();
-    const auto& entries = model->filteredEntries();
-    if (entries.isEmpty())
+    const int visibleRows = model->rowCount();
+    if (visibleRows == 0)
         return;
 
     // Первая строка с timestamp >= time. Список отсортирован по времени,
     // строки без валидной метки — в конце и считаются «больше» любого времени.
-    const auto it = std::lower_bound(
-        entries.constBegin(), entries.constEnd(), time,
-        [](const std::shared_ptr<LogEntry>& e, const QDateTime& t) {
-            return e && e->timestamp.isValid() && e->timestamp < t;
-        });
-    int row = qMin(int(it - entries.constBegin()), int(entries.size()) - 1);
+    int row = qMin(model->firstVisibleRowAtOrAfter(time), visibleRows - 1);
 
     if (preferErrors) {
         // Клик в дорожке ошибок — ближайшая по времени строка Warn/Error/Fatal.
-        const auto isError = [](const std::shared_ptr<LogEntry>& e) {
-            return e && (e->level == LogLevel::Warn || e->level == LogLevel::Error
-                         || e->level == LogLevel::Fatal);
+        const auto isError = [model](int i) {
+            const LogLevel lvl = model->visibleLevelAt(i);
+            return lvl == LogLevel::Warn || lvl == LogLevel::Error
+                || lvl == LogLevel::Fatal;
         };
         int before = -1, after = -1;
         for (int i = row; i >= 0; --i)
-            if (isError(entries[i])) { before = i; break; }
-        for (int i = row + 1; i < entries.size(); ++i)
-            if (isError(entries[i])) { after = i; break; }
+            if (isError(i)) { before = i; break; }
+        for (int i = row + 1; i < visibleRows; ++i)
+            if (isError(i)) { after = i; break; }
 
-        const auto distanceMs = [&entries, &time](int i) {
-            const QDateTime& ts = entries[i]->timestamp;
+        const auto distanceMs = [model, &time](int i) {
+            const QDateTime ts = model->visibleTimestampAt(i);
             return ts.isValid() ? qAbs(ts.msecsTo(time))
                                 : std::numeric_limits<qint64>::max();
         };
@@ -2423,16 +2533,9 @@ void MainWindow::onTimelineRangeSelected(const QDateTime& from, const QDateTime&
 
     // Интервал покрывает весь файл (zoom-out «до упора») — честнее снять
     // фильтр по времени совсем, чем держать фильтр шире данных.
-    const auto& all = m_activeLogView->model()->allEntries();
-    int allEnd = all.size();
-    while (allEnd > 0) {
-        const auto& e = all[allEnd - 1];
-        if (e && e->timestamp.isValid())
-            break;
-        --allEnd;
-    }
-    if (allEnd > 0 && all.first() && all.first()->timestamp.isValid()
-        && from <= all.first()->timestamp && to >= all[allEnd - 1]->timestamp)
+    const auto fullRange = m_activeLogView->model()->fullTimeRange();
+    if (fullRange.first.isValid()
+        && from <= fullRange.first && to >= fullRange.second)
     {
         m_activeLogView->model()->setTimeRangeFilter(QDateTime(), QDateTime());
         if (m_applyTimeFilterButton)
@@ -2557,7 +2660,7 @@ void MainWindow::runSearchIntoResults()
 
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
     m_suppressResultNavigation = true;
-    m_searchResultsModel->setEntries(active->filteredEntries());
+    m_searchResultsModel->seedFromVisible(*active);
     m_searchResultsModel->setFilterRules(rules);
     m_suppressResultNavigation = false;
 
@@ -2572,7 +2675,7 @@ void MainWindow::runSearchIntoResults()
     // прийти ДО setEntries-контента — обновим счётчик явно.
     if (m_searchResultsStatusLabel)
         m_searchResultsStatusLabel->setText(
-            tr("%n match(es)", "", m_searchResultsModel->filteredEntries().size()));
+            tr("%n match(es)", "", m_searchResultsModel->rowCount()));
 }
 
 void MainWindow::clearSearchResults()
@@ -2635,14 +2738,12 @@ void MainWindow::onSearchResultActivated(const QModelIndex& current)
         || !m_activeLogView || !m_activeLogView->model() || !m_activeLogView->view())
         return;
 
-    const auto& results = m_searchResultsModel->filteredEntries();
-    const int row = current.row();
-    if (row < 0 || row >= results.size() || !results[row])
+    const LogModel::EntryKey key = m_searchResultsModel->keyForRow(current.row());
+    if (key.logicalEntryId < 0)
         return;
 
-    const LogEntry& entry = *results[row];
     const int mainRow = m_activeLogView->model()->nearestVisibleRow(
-        entry.logicalEntryId, entry.sourceFile.get());
+        key.logicalEntryId, key.sourceFile);
     if (mainRow < 0)
         return;
 
@@ -2915,6 +3016,45 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths)
         if (fi.isFile())
             openRecentFile(fi.absoluteFilePath());
     }
+}
+
+void MainWindow::openStdinStream()
+{
+    if (m_stdinSpooler)
+        return;
+    m_stdinSpooler = new StdinSpooler(this);
+    if (!m_stdinSpooler->startSpooling()) {
+        QMessageBox::warning(this, tr("stdin"),
+            tr("Could not create a spool file for standard input."));
+        m_stdinSpooler->deleteLater();
+        m_stdinSpooler = nullptr;
+        return;
+    }
+
+    const QString path = m_stdinSpooler->spoolFilePath();
+    openRecentFile(path);
+
+    auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
+    if (!lv)
+        return;
+
+    // Живой поток: авто-догрузка + автопрокрутка к новым строкам.
+    lv->setAutoReload(true);
+    updateAutoReloadTimer();
+    if (lv->view())
+        lv->view()->setFollowTail(true);
+
+    const int idx = ui->tabWidget->indexOf(lv);
+    if (idx >= 0) {
+        ui->tabWidget->setTabText(idx, tr("stdin"));
+        ui->tabWidget->setTabToolTip(idx,
+            tr("Standard input (spooled to %1)").arg(path));
+    }
+
+    // Пинки от спулера — сверх обычного поллинга, чтобы хвост подтягивался
+    // живо (спулер сигналит не чаще ~3 раз в секунду).
+    connect(m_stdinSpooler, &StdinSpooler::bytesAppended, lv,
+            [lv](qint64) { lv->reloadChangedFiles(); });
 }
 
 void MainWindow::openRecentFile(const QString& filePath)

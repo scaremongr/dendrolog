@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
 
     buildColorsTab();
     buildShortcutsTab();
+    buildPerformanceControls();
     loadFromSettings();
 
     // Live font preview.
@@ -198,6 +200,50 @@ void SettingsDialog::buildShortcutsTab()
 }
 
 // ---------------------------------------------------------------------------
+// buildPerformanceControls
+//
+// Настройки индексного бэкенда больших файлов. Добавляются в код (рядом с
+// контролами auto-reload), чтобы не редактировать .ui: если разметка General
+// не форма — заворачиваются в собственный QGroupBox.
+// ---------------------------------------------------------------------------
+void SettingsDialog::buildPerformanceControls()
+{
+    QWidget* page = ui->autoReloadIntervalSpinBox
+        ? ui->autoReloadIntervalSpinBox->parentWidget() : nullptr;
+    if (!page)
+        return;
+
+    m_indexedThresholdSpinBox = new QSpinBox(page);
+    m_indexedThresholdSpinBox->setRange(0, 1 << 20);
+    m_indexedThresholdSpinBox->setSuffix(tr(" MB"));
+    m_indexedThresholdSpinBox->setSpecialValueText(tr("always"));
+    m_indexedThresholdSpinBox->setToolTip(
+        tr("Files at or above this size open through the on-disk line index\n"
+           "(text stays on disk, memory usage stays flat). 0 = always.\n"
+           "Applies to files opened after the change."));
+
+    m_textCacheSpinBox = new QSpinBox(page);
+    m_textCacheSpinBox->setRange(64, 2048);
+    m_textCacheSpinBox->setSuffix(tr(" MB"));
+    m_textCacheSpinBox->setToolTip(
+        tr("Memory budget for cached text of indexed files."));
+
+    auto* thresholdLabel = new QLabel(tr("Index files larger than:"), page);
+    auto* cacheLabel = new QLabel(tr("Indexed text cache:"), page);
+
+    if (auto* form = qobject_cast<QFormLayout*>(page->layout())) {
+        form->addRow(thresholdLabel, m_indexedThresholdSpinBox);
+        form->addRow(cacheLabel, m_textCacheSpinBox);
+    } else if (QLayout* layout = page->layout()) {
+        auto* group = new QGroupBox(tr("Large files"), page);
+        auto* groupForm = new QFormLayout(group);
+        groupForm->addRow(thresholdLabel, m_indexedThresholdSpinBox);
+        groupForm->addRow(cacheLabel, m_textCacheSpinBox);
+        layout->addWidget(group);
+    }
+}
+
+// ---------------------------------------------------------------------------
 void SettingsDialog::resetShortcutsToDefaults()
 {
     const ShortcutManager& mgr = ShortcutManager::instance();
@@ -228,6 +274,12 @@ void SettingsDialog::loadFromSettings()
     // --- General tab: reload ---
     ui->autoReloadCheckBox->setChecked(s.autoReload());
     ui->autoReloadIntervalSpinBox->setValue(s.autoReloadIntervalSecs());
+
+    // --- Performance (большие файлы) ---
+    if (m_indexedThresholdSpinBox)
+        m_indexedThresholdSpinBox->setValue(s.indexedThresholdMB());
+    if (m_textCacheSpinBox)
+        m_textCacheSpinBox->setValue(s.textCacheBudgetMB());
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +322,12 @@ void SettingsDialog::applyToSettings()
     // ---- General tab: reload --------------------------------------------- //
     s.setAutoReload(ui->autoReloadCheckBox->isChecked());
     s.setAutoReloadIntervalSecs(ui->autoReloadIntervalSpinBox->value());
+
+    // ---- Performance (большие файлы) -------------------------------------- //
+    if (m_indexedThresholdSpinBox)
+        s.setIndexedThresholdMB(m_indexedThresholdSpinBox->value());
+    if (m_textCacheSpinBox)
+        s.setTextCacheBudgetMB(m_textCacheSpinBox->value());
 
     // ---- Shortcuts tab ---------------------------------------------------- //
     ShortcutManager& sm = ShortcutManager::instance();

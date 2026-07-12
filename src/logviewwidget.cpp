@@ -1,6 +1,7 @@
 // logviewwidget.cpp
 #include "logviewwidget.h"
 #include "appsettings.h"
+#include "indexedlogstore.h"
 #include <QVBoxLayout>
 #include <QFileInfo>
 #include <QDebug>
@@ -50,6 +51,13 @@ LogViewWidget::LogViewWidget(QWidget *parent)
 
     // Пробрасываем сигнал фильтрации модели
     connect(m_model, &LogModel::modelFiltered, this, &LogViewWidget::handleModelFilteredRelay);
+
+    // Живое применение бюджета кэша текста индексного бэкенда из настроек.
+    connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
+        if (auto* store = m_model->indexedOrNull())
+            store->setTextCacheBudget(
+                qint64(AppSettings::instance().textCacheBudgetMB()) * 1024 * 1024);
+    });
 }
 
 LogViewWidget::~LogViewWidget()
@@ -62,14 +70,23 @@ void LogViewWidget::setParserPattern(const QString& pattern)
 {
     m_logParser->setPattern(pattern);
     m_reloadParser->setPattern(pattern);
+    if (m_indexer)
+        m_indexer->setPattern(pattern);
+    if (auto* store = m_model ? m_model->indexedOrNull() : nullptr)
+        store->setFieldPattern(pattern, m_extractionEnabled);
     if (m_model)
         m_model->setAvailableFields(m_logParser->pattern().fieldNames());
 }
 
 void LogViewWidget::setExtractionEnabled(bool enabled)
 {
+    m_extractionEnabled = enabled;
     m_logParser->setExtractionEnabled(enabled);
     m_reloadParser->setExtractionEnabled(enabled);
+    if (m_indexer)
+        m_indexer->setExtractionEnabled(enabled);
+    if (auto* store = m_model ? m_model->indexedOrNull() : nullptr)
+        store->setFieldPattern(m_logParser->pattern().patternString(), enabled);
 }
 
 QString LogViewWidget::parserPattern() const
@@ -91,11 +108,143 @@ void LogViewWidget::addLogFile(const QString &filePath)
 
     auto logFile = std::make_shared<LogFile>(filePath);
     m_loadedFiles.append(logFile);
-    
+
+    // Выбор бэкенда: большие файлы идут через индекс (текст остаётся на
+    // диске); один бэкенд на вкладку — большой файл в резидентной вкладке
+    // конвертирует её целиком (все файлы перечитываются через индексатор).
+    const qint64 size = QFileInfo(filePath).size();
+    const bool wantIndexed = m_model->isIndexedBackend()
+        || size >= AppSettings::instance().indexedThresholdBytes();
+
+    if (wantIndexed) {
+        if (!m_model->isIndexedBackend()) {
+            auto* store = m_model->convertToIndexedBackend();
+            store->setTextCacheBudget(
+                qint64(AppSettings::instance().textCacheBudgetMB()) * 1024 * 1024);
+            m_fileReloadStates.clear();
+            // Вкладка могла уже держать резидентные файлы — перечитываем все.
+            for (const auto& lf : m_loadedFiles)
+                startIndexedLoad(lf);
+            qDebug() << "LogViewWidget: Indexed backend enabled for tab,"
+                     << m_loadedFiles.size() << "file(s)";
+            return;
+        }
+        startIndexedLoad(logFile);
+        qDebug() << "LogViewWidget: Started indexing for" << filePath;
+        return;
+    }
+
     // Запускаем асинхронный парсинг
     m_logParser->startParsing(logFile);
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
+}
+
+void LogViewWidget::ensureIndexer()
+{
+    if (m_indexer)
+        return;
+    m_indexer = new LogIndexer(this);
+    m_indexer->setPattern(m_logParser->pattern().patternString());
+    m_indexer->setExtractionEnabled(m_extractionEnabled);
+    connect(m_indexer, &LogIndexer::indexingStarted, this,
+            [this](const LogFilePtr& f) { emit fileParsingStarted(f); });
+    connect(m_indexer, &LogIndexer::indexingProgress, this,
+            [this](int p, const LogFilePtr& f) { emit fileParsingProgress(f, p); });
+    connect(m_indexer, &LogIndexer::indexBatchReady,
+            this, &LogViewWidget::handleIndexBatchReady);
+    connect(m_indexer, &LogIndexer::indexingFinished,
+            this, &LogViewWidget::handleIndexingFinished);
+    connect(m_indexer, &LogIndexer::indexingFailed,
+            this, &LogViewWidget::handleIndexingFailed);
+    connect(m_indexer, &LogIndexer::needsResidentFallback,
+            this, &LogViewWidget::handleResidentFallback);
+}
+
+void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile)
+{
+    ensureIndexer();
+    auto* store = m_model->indexedOrNull();
+    if (!store || !logFile)
+        return;
+    store->setFieldPattern(m_logParser->pattern().patternString(), m_extractionEnabled);
+    auto index = std::make_shared<LineIndex>();
+    store->attachFile(logFile, index);
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    st.initialLoadDone = false;
+    st.indexingInFlight = true;
+    m_indexer->startIndexing(logFile, index);
+}
+
+void LogViewWidget::handleIndexBatchReady(const LogFilePtr& logFile,
+                                          qint64 firstLine, qint64 count)
+{
+    auto* store = m_model->indexedOrNull();
+    if (!store || !logFile)
+        return;
+    // Порции первичной индексации — обычные строки; порции дозаписи (после
+    // initialLoadDone) помечаются «новыми» (зелёный маркер гаттера).
+    const bool tailAppend =
+        m_fileReloadStates.value(logFile->filePath).initialLoadDone;
+    store->appendIndexedRows(logFile, firstLine, count, tailAppend);
+    emit totalRowCountChanged(m_model->rowCount());
+    const QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
+}
+
+void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return;
+    auto* store = m_model->indexedOrNull();
+    const auto index = store ? store->indexForFile(logFile->filePath) : nullptr;
+
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    const bool wasInitial = !st.initialLoadDone;
+    // Якорь — по концу проиндексированных байт (включая предварительный
+    // хвост): следующая дозапись начнётся с index->endOffset().
+    const qint64 anchorOffset = index ? index->endOffset()
+                                      : QFileInfo(logFile->filePath).size();
+    st.anchor = FileChangeDetector::capture(logFile->filePath, anchorOffset);
+    st.initialLoadDone = true;
+    st.indexingInFlight = false;
+
+    if (wasInitial)
+        emit fileParsingFinished(logFile,
+                                 int(qMin<qint64>(newLines, INT_MAX)));
+    else
+        emit reloadFinished(int(qMin<qint64>(newLines, INT_MAX)));
+    emit totalRowCountChanged(m_model->rowCount());
+    const QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
+}
+
+void LogViewWidget::handleIndexingFailed(const LogFilePtr& logFile)
+{
+    if (logFile)
+        m_fileReloadStates[logFile->filePath].indexingInFlight = false;
+    emit fileParsingFailed(logFile);
+}
+
+void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
+                                           const QString& reason)
+{
+    if (!logFile)
+        return;
+    qWarning() << "LogViewWidget: indexed backend fallback for"
+               << logFile->filePath << "-" << reason;
+    m_fileReloadStates[logFile->filePath].indexingInFlight = false;
+
+    // Индексный путь понимает только UTF-8: файл ведём через резидентный
+    // парсер. Смешивать бэкенды в одной вкладке нельзя — откат возможен,
+    // только пока этот файл в ней единственный.
+    if (m_loadedFiles.size() == 1) {
+        m_model->convertToResidentBackend();
+        m_fileReloadStates.remove(logFile->filePath);
+        m_logParser->startParsing(logFile);
+        return;
+    }
+    emit fileParsingFailed(logFile);
 }
 
 void LogViewWidget::handleEntriesParsed(
@@ -112,7 +261,7 @@ void LogViewWidget::handleEntriesParsed(
     if (parsedLogFile) {
         int& nextId = m_fileReloadStates[parsedLogFile->filePath].nextLogicalEntryId;
         for (const auto& e : sortedBatch)
-            if (e) nextId = qMax(nextId, e->logicalEntryId + 1);
+            if (e) nextId = qMax(nextId, e->logicalEntryId() + 1);
     }
 
     // Слияние в модель без reset: выделение и позиция скролла сохраняются,
@@ -156,18 +305,56 @@ void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
 
 bool LogViewWidget::reloadChangedFiles()
 {
+    // Растущий файл (типично — спул stdin) пересёк порог индексного бэкенда:
+    // конвертируем вкладку, дальше хвост дочитывает индексатор. Возможные
+    // хвостовые батчи резидентного парсера в полёте модель молча отбросит.
+    if (!m_model->isIndexedBackend() && m_loadedFiles.size() == 1
+        && m_loadedFiles[0]) {
+        const qint64 size = QFileInfo(m_loadedFiles[0]->filePath).size();
+        if (size >= AppSettings::instance().indexedThresholdBytes()) {
+            auto* store = m_model->convertToIndexedBackend();
+            store->setTextCacheBudget(
+                qint64(AppSettings::instance().textCacheBudgetMB()) * 1024 * 1024);
+            m_fileReloadStates.clear();
+            startIndexedLoad(m_loadedFiles[0]);
+            return true;
+        }
+    }
+
     bool anyChanged = false;
+    IndexedLogStore* indexedStore = m_model->indexedOrNull();
+
     for (const auto& logFile : m_loadedFiles) {
         if (!logFile) continue;
 
         FileReloadState& st = m_fileReloadStates[logFile->filePath];
         if (!st.initialLoadDone) continue; // Still doing the initial parse
+        // Индекс — single-writer: пока предыдущая (до)индексация не
+        // завершилась, вторую по тому же файлу не запускаем.
+        if (indexedStore && st.indexingInFlight) continue;
 
         switch (FileChangeDetector::classify(logFile->filePath, st.anchor)) {
         case FileChangeDetector::Change::Unchanged:
             break;
 
         case FileChangeDetector::Change::Appended: {
+            if (indexedStore) {
+                // Дозапись через индексатор: смещение он берёт сам из
+                // index->endOffset(); предварительный хвост без '\n'
+                // переиндексируется от своего начала.
+                if (auto index = indexedStore->indexForFile(logFile->filePath)) {
+                    ensureIndexer();
+                    st.indexingInFlight = true;
+                    m_indexer->startIndexingFrom(logFile, index,
+                                                 index->lastLineProvisional());
+                    // Re-anchor: следующий тик поллинга не должен снова
+                    // классифицировать этот же диапазон как дозапись.
+                    const qint64 newSize = QFileInfo(logFile->filePath).size();
+                    st.anchor = FileChangeDetector::capture(logFile->filePath, newSize);
+                    anyChanged = true;
+                }
+                break;
+            }
             // Prefix is intact and the file grew — read only the new tail and
             // append it, preserving selection and scroll position.
             m_reloadParser->setPattern(m_logParser->pattern().patternString());
@@ -180,6 +367,18 @@ bool LogViewWidget::reloadChangedFiles()
         }
 
         case FileChangeDetector::Change::Replaced: {
+            if (indexedStore) {
+                // Файл заменён: сброс его строк и индексация заново в свежий
+                // LineIndex (store сам чистит кэш текста и refs).
+                ensureIndexer();
+                auto fresh = std::make_shared<LineIndex>();
+                indexedStore->resetFileIndex(logFile, fresh);
+                st = FileReloadState{};
+                st.indexingInFlight = true;
+                m_indexer->startIndexing(logFile, fresh);
+                anyChanged = true;
+                break;
+            }
             // File was truncated or overwritten with different content. Discard the
             // now-stale entries for this file and re-parse it from scratch; state is
             // rebuilt by handleParsingFinished. Other files' entries are untouched.
@@ -203,7 +402,7 @@ void LogViewWidget::handleIncrementalEntriesParsed(
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     for (const auto& e : batch) {
         if (e)
-            st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId + 1);
+            st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
     }
 
     // Append entries directly — no model reset, selection preserved.

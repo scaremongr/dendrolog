@@ -2,12 +2,17 @@
 #define TIMELINEHISTOGRAMWIDGET_H
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QPixmap>
 #include <QPoint>
 #include <QVector>
 #include <QWidget>
 
+#include <atomic>
+#include <memory>
+
 class LogModel;
+class LogScanSnapshot;
 class QTimer;
 enum class LogLevel;
 
@@ -24,15 +29,21 @@ enum class LogLevel;
 // ошибок просит перейти к ближайшей ошибке). setCurrentTime() рисует
 // маркер позиции текущей строки списка.
 //
-// Данные берутся из filteredEntries() модели активной вкладки, поэтому
-// гистограмма всегда соответствует видимому списку. Список отсортирован
-// по времени (строки без метки — в конце): min/max берутся с краёв, а
-// получатель клика может искать строку через lower_bound.
+// Данные берутся из видимых строк модели активной вкладки (обход
+// метаданных scanSnapshot(true), без текста), поэтому гистограмма всегда
+// соответствует видимому списку. Список отсортирован по времени (строки
+// без метки — в конце): min/max берутся с краёв, а получатель клика
+// ищет строку через LogModel::firstVisibleRowAtOrAfter.
 // Сборка: один проход по записям → kBins корзин + префикс-суммы
 // (O(1) на пиксельную колонку при отрисовке, независимо от ширины).
 // Перестройка дебаунсится таймером (rowsInserted при слиянии батчей
 // приходит сериями); статичная картинка кэшируется в QPixmap, при
 // ховере/смене маркера перерисовываются только оверлеи.
+//
+// Большие логи: проход по метаданным миллионов строк стоит сотни мс,
+// поэтому выше порога биннинг уезжает в QtConcurrent-воркер поверх
+// LogScanSnapshot (поколение отсекает устаревшие результаты, cancel
+// останавливает воркер); малые модели считаются синхронно, как раньше.
 // ============================================================
 
 class TimelineHistogramWidget : public QWidget
@@ -40,6 +51,7 @@ class TimelineHistogramWidget : public QWidget
     Q_OBJECT
 public:
     explicit TimelineHistogramWidget(QWidget* parent = nullptr);
+    ~TimelineHistogramWidget() override;
 
     // Модель активной вкладки; nullptr — вкладок нет. Виджет подписывается
     // на изменения данных/фильтра и перестраивает гистограмму сам.
@@ -93,6 +105,24 @@ private:
     void scheduleRebuild();
     void rebuildHistogram();
 
+    // Результат биннинга: префикс-суммы корзин + границы шкалы.
+    struct HistogramData {
+        QVector<quint32> totalPrefix, warnPrefix, errorPrefix, fatalPrefix;
+        qint64 tMin = 0, tMax = 0;
+        bool   hasData = false;
+    };
+    // Чистый расчёт по снапшоту — безопасен в воркере. filter*Ms — активный
+    // фильтр по времени (расширяет шкалу); cancel — кооперативная отмена
+    // (обрезанный результат отбрасывается проверкой поколения).
+    static HistogramData buildHistogram(const LogScanSnapshot& snap,
+                                        qint64 filterMinMs, qint64 filterMaxMs,
+                                        bool filterValid,
+                                        const std::atomic_bool* cancel);
+    void applyHistogram(HistogramData&& h);
+    void startRebuildJob(qint64 filterMinMs, qint64 filterMaxMs, bool filterValid);
+    // Обесценить полётный джоб (поколение++, cancel-флаг воркеру).
+    void cancelRebuildJob();
+
     // Диапазон корзин [b0, b1) пиксельной колонки x (0..plotW-1).
     void columnBins(int x, int plotW, int& b0, int& b1) const;
     static quint32 rangeCount(const QVector<quint32>& prefix, int b0, int b1)
@@ -116,6 +146,18 @@ private:
 
     LogModel* m_model = nullptr;
     QTimer*   m_rebuildTimer = nullptr;
+    // Самотроттлинг асинхронных пересборок: пока данные растут (загрузка),
+    // джобы стартуют не чаще раза в полторы секунды — иначе воркер сканирует
+    // метаданные непрерывно.
+    QElapsedTimer m_lastRebuild;
+
+    // Асинхронный биннинг: поколение отсекает устаревшие результаты (смена
+    // вкладки/новый джоб), again — запрос пришёл во время полёта
+    // (пересборка перезапустится по завершении текущей).
+    int  m_rebuildGeneration = 0;
+    bool m_rebuildJobActive = false;
+    bool m_rebuildAgain = false;
+    std::shared_ptr<std::atomic_bool> m_rebuildCancel;
 
     static constexpr int kBins = 4096;
 

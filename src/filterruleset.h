@@ -84,6 +84,9 @@ public:
 
     // Проходит ли запись фильтр. Реализация без аллокаций.
     bool matches(const LogEntry& entry) const;
+    // То же по «сырой» строке и её полям — для индексного бэкенда, где
+    // LogEntry не материализуется (view валиден только на время вызова).
+    bool matchesLine(QStringView message, const LogEntryFields& fields) const;
 
     // Активные Include-правила как паттерны для TextMatchHighlighter —
     // визуализация того, что именно оставило строку в выдаче.
@@ -95,7 +98,8 @@ public:
     bool operator==(const FilterRuleSet& other) const;
 
 private:
-    bool ruleMatches(int ruleIndex, const LogEntry& entry) const;
+    bool ruleMatches(int ruleIndex, QStringView message,
+                     const LogEntryFields& fields) const;
 
     // Производное состояние (заполняется bindFields, не сериализуется):
     QVector<int> m_boundFieldIndexes;            // индекс колонки (-1 = вся строка)

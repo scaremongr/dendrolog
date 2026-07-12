@@ -6,7 +6,7 @@
 #include <QWidget>
 #include <memory>
 
-struct LogEntry;
+class LogEntry;
 class QTextBrowser;
 class QShowEvent;
 

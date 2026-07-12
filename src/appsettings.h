@@ -89,6 +89,18 @@ public:
     int  fontSize() const;
     void setFontSize(int size);
 
+    // ---- Performance (большие файлы) ------------------------------------ //
+
+    // Порог индексного бэкенда, МБ: файлы >= порога открываются через
+    // LineIndex (текст на диске). 0 — индексировать всегда (для тестов).
+    int  indexedThresholdMB() const;
+    void setIndexedThresholdMB(int mb);
+    qint64 indexedThresholdBytes() const;
+
+    // Бюджет кэша текста индексного бэкенда, МБ (64–2048).
+    int  textCacheBudgetMB() const;
+    void setTextCacheBudgetMB(int mb);
+
 signals:
     // Emitted after any call to a set*() method, so consumers (e.g. the
     // directory scanner) can update themselves without each class needing
@@ -107,4 +119,6 @@ private:
     int         m_autoReloadIntervalSecs { 2 };
     QString     m_fontFamily;
     int         m_fontSize        { 10 };
+    int         m_indexedThresholdMB { 512 };
+    int         m_textCacheBudgetMB { 256 };
 };

@@ -29,6 +29,24 @@ set(PROJECT_SOURCES
     src/logfile.cpp
     src/logmodel.h
     src/logmodel.cpp
+    src/logstore.h
+    src/residentlogstore.h
+    src/residentlogstore.cpp
+    src/indexedlogstore.h
+    src/indexedlogstore.cpp
+    src/textchunkcache.h
+    src/textchunkcache.cpp
+    src/sequentiallinereader.h
+    src/stdinspooler.h
+    src/stdinspooler.cpp
+    src/logscan.h
+    src/logscan.cpp
+    src/lineclassifier.h
+    src/lineclassifier.cpp
+    src/lineindex.h
+    src/lineindex.cpp
+    src/logindexer.h
+    src/logindexer.cpp
     src/logparser.h
     src/logparser.cpp
     src/filechangedetector.h
@@ -134,4 +152,5 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests/pattern_smoke)
+    add_subdirectory(tests/lineindex_smoke)
 endif()

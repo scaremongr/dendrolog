@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 #include "logmodel.h"
 #include "logparser.h"
+#include "logindexer.h"
 #include <QVector>
 #include "logfile.h"
 #include "LogListView.h"
@@ -70,8 +71,18 @@ private slots:
     // Incremental reload: append new entries without model reset
     void handleIncrementalEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr& logFile);
     void handleIncrementalParsingFinished(int totalEntries, const LogFilePtr& logFile);
+    // Индексный бэкенд: приём опубликованных порций строк и завершения.
+    void handleIndexBatchReady(const LogFilePtr& logFile, qint64 firstLine, qint64 count);
+    void handleIndexingFinished(qint64 newLines, const LogFilePtr& logFile);
+    void handleIndexingFailed(const LogFilePtr& logFile);
+    void handleResidentFallback(const LogFilePtr& logFile, const QString& reason);
 
 private:
+    // Ленивая инициализация LogIndexer с подключением сигналов.
+    void ensureIndexer();
+    // Запуск полной индексации файла (store уже индексный).
+    void startIndexedLoad(const LogFilePtr& logFile);
+
     LogListView *m_view;
     LogModel    *m_model;
     QVector<LogFilePtr> m_loadedFiles;  // Список загруженных файлов
@@ -84,12 +95,20 @@ private:
         FileChangeDetector::Anchor anchor;        // prefix size + boundary fingerprint
         int    nextLogicalEntryId = 0;
         bool   initialLoadDone = false;           // false = still doing the initial parse
+        // Индексация файла в полёте: не запускать вторую по тому же индексу
+        // (LineIndex — single-writer).
+        bool   indexingInFlight = false;
     };
     QHash<QString, FileReloadState> m_fileReloadStates; // key = filePath
 
     // Parser used exclusively for incremental reads (so it doesn't interfere with
     // the initial parse that uses m_logParser).
     LogParser* m_reloadParser = nullptr;
+
+    // Индексатор больших файлов (ленивый: создаётся при первом индексном файле).
+    LogIndexer* m_indexer = nullptr;
+    // Зеркало флага извлечения полей (для индексатора/индексного store).
+    bool m_extractionEnabled = false;
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.
     bool m_autoReload = false;

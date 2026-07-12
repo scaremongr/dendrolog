@@ -8,21 +8,10 @@
 #include <QDebug>       // Для qWarning()
 
 LogParser::LogParser(QObject* parent)
-    : QObject(parent),
-      // Canonical token patterns live in PatternHeuristics so that line
-      // classification and the schema editor never drift apart.
-      m_timestampRegex(PatternHeuristics::isoTimestampDetectPattern()),
-      m_levelRegex(QRegularExpression(PatternHeuristics::levelDetectPattern(),
-                                      QRegularExpression::CaseInsensitiveOption))
+    : QObject(parent)
+    // Классификация строк (таймстамп/уровень/primary) делегируется
+    // LineClassifier — общему с LogIndexer источнику истины.
 {
-    m_timeFormats = {
-        "yyyy-MM-dd HH:mm:ss,zzz",
-        "yyyy-MM-dd HH:mm:ss.zzz",
-        "yyyy-MM-dd HH:mm:ss",
-        "dd/MM/yyyy HH:mm:ss",
-        "MM/dd/yyyy HH:mm:ss",
-        "dd.MM.yyyy HH:mm:ss"
-    };
 }
 
 LogParser::~LogParser()
@@ -34,135 +23,6 @@ LogParser::~LogParser()
     m_abort.store(true);
     m_pool.clear();
     m_pool.waitForDone();
-}
-
-bool LogParser::detectTimestamp(const QString &line, QDateTime &ts)
-{
-    auto match = m_timestampRegex.match(line);
-
-    if (match.hasMatch()) {
-        const auto dateTimePartRef = match.capturedView(1); // "YYYY-MM-DD HH:MM:SS"
-        const auto millisPartRef = match.capturedView(2);   // "[.,]ddd" или пустая
-
-        bool ok = true;
-        int year = dateTimePartRef.mid(0, 4).toInt(&ok);
-        if (!ok) return false;
-        int month = dateTimePartRef.mid(5, 2).toInt(&ok);
-        if (!ok) return false;
-        int day = dateTimePartRef.mid(8, 2).toInt(&ok);
-        if (!ok) return false;
-        int hour = dateTimePartRef.mid(11, 2).toInt(&ok);
-        if (!ok) return false;
-        int minute = dateTimePartRef.mid(14, 2).toInt(&ok);
-        if (!ok) return false;
-        int second = dateTimePartRef.mid(17, 2).toInt(&ok);
-        if (!ok) return false;
-        
-        int millis = 0;
-        if (!millisPartRef.isEmpty()) {
-            millis = millisPartRef.mid(1).toInt(&ok); // Пропускаем '.' или ','
-            if (!ok) return false;
-        }
-
-        if (QDate::isValid(year, month, day) && QTime::isValid(hour, minute, second, millis)) {
-            ts.setDate(QDate(year, month, day));
-            ts.setTime(QTime(hour, minute, second, millis));
-            // Какой формат был использован, здесь уже не так важно для m_timeFormats.move, 
-            // т.к. мы его определили напрямую и успешно.
-            // Можно для консистентности переместить один из "yyyy-MM-dd..." форматов наверх, если хочется.
-            // Например, определить, был ли millisPart с запятой, точкой или отсутствовал,
-            // и переместить соответствующий из m_timeFormats.at(0), .at(1) или .at(2).
-            // Но основной выигрыш уже получен.
-            return true;
-        }
-        return false; // Невалидная дата/время, несмотря на совпадение с regex
-    } else {
-        // m_timestampRegex не нашел совпадения. Пробуем другие форматы вручную.
-        // Используем QStringView для line для эффективности
-        const QStringView lineRef{line};
-        bool convOk = true;
-
-        // Порядок m_timeFormats важен для проверки.
-        // Он должен соответствовать списку в конструкторе.
-        // "dd/MM/yyyy HH:mm:ss" 
-        // "MM/dd/yyyy HH:mm:ss"
-        // "dd.MM.yyyy HH:mm:ss"
-
-        for (const QString& formatString : m_timeFormats) { // Проходим по всем форматам
-            if (formatString.startsWith(QStringLiteral("yyyy-MM-dd"))) {
-                continue; // Эти должны были быть пойманы regex
-            }
-
-            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
-            convOk = true; 
-
-            if (formatString == QLatin1String("dd/MM/yyyy HH:mm:ss")) {
-                if (lineRef.length() < 19) continue; // Минимальная длина
-                if (lineRef.at(2) != QLatin1Char('/') || lineRef.at(5) != QLatin1Char('/') || 
-                    lineRef.at(10) != QLatin1Char(' ') || lineRef.at(13) != QLatin1Char(':') || lineRef.at(16) != QLatin1Char(':')) {
-                    continue;
-                }
-                day    = lineRef.mid(0, 2).toInt(&convOk); if (!convOk) continue;
-                month  = lineRef.mid(3, 2).toInt(&convOk); if (!convOk) continue;
-                year   = lineRef.mid(6, 4).toInt(&convOk); if (!convOk) continue;
-                hour   = lineRef.mid(11, 2).toInt(&convOk); if (!convOk) continue;
-                minute = lineRef.mid(14, 2).toInt(&convOk); if (!convOk) continue;
-                second = lineRef.mid(17, 2).toInt(&convOk); if (!convOk) continue;
-                // Миллисекунды не предусмотрены этим форматом в m_timeFormats
-            } else if (formatString == QLatin1String("MM/dd/yyyy HH:mm:ss")) {
-                if (lineRef.length() < 19) continue;
-                if (lineRef.at(2) != QLatin1Char('/') || lineRef.at(5) != QLatin1Char('/') || 
-                    lineRef.at(10) != QLatin1Char(' ') || lineRef.at(13) != QLatin1Char(':') || lineRef.at(16) != QLatin1Char(':')) {
-                    continue;
-                }
-                month  = lineRef.mid(0, 2).toInt(&convOk); if (!convOk) continue;
-                day    = lineRef.mid(3, 2).toInt(&convOk); if (!convOk) continue;
-                year   = lineRef.mid(6, 4).toInt(&convOk); if (!convOk) continue;
-                hour   = lineRef.mid(11, 2).toInt(&convOk); if (!convOk) continue;
-                minute = lineRef.mid(14, 2).toInt(&convOk); if (!convOk) continue;
-                second = lineRef.mid(17, 2).toInt(&convOk); if (!convOk) continue;
-            } else if (formatString == QLatin1String("dd.MM.yyyy HH:mm:ss")) {
-                if (lineRef.length() < 19) continue;
-                 if (lineRef.at(2) != QLatin1Char('.') || lineRef.at(5) != QLatin1Char('.') || 
-                    lineRef.at(10) != QLatin1Char(' ') || lineRef.at(13) != QLatin1Char(':') || lineRef.at(16) != QLatin1Char(':')) {
-                    continue;
-                }
-                day    = lineRef.mid(0, 2).toInt(&convOk); if (!convOk) continue;
-                month  = lineRef.mid(3, 2).toInt(&convOk); if (!convOk) continue;
-                year   = lineRef.mid(6, 4).toInt(&convOk); if (!convOk) continue;
-                hour   = lineRef.mid(11, 2).toInt(&convOk); if (!convOk) continue;
-                minute = lineRef.mid(14, 2).toInt(&convOk); if (!convOk) continue;
-                second = lineRef.mid(17, 2).toInt(&convOk); if (!convOk) continue;
-            } else {
-                // Неизвестный формат для ручного парсинга, или формат yyyy-MM-dd (который должен был быть пойман regex)
-                // В качестве крайнего средства, можно использовать QDateTime::fromString,
-                // но это то, от чего мы пытаемся уйти.
-                // Если все форматы в m_timeFormats покрыты выше, этот else не нужен.
-                // Для безопасности, если какой-то формат не yyyy-MM-dd и не один из трех выше,
-                // он здесь не будет обработан.
-                continue; // Пропускаем формат, для которого нет ручного парсера
-            }
-
-            if (convOk && QDate::isValid(year, month, day) && QTime::isValid(hour, minute, second, millis)) {
-                ts.setDate(QDate(year, month, day));
-                ts.setTime(QTime(hour, minute, second, millis));
-                return true;
-            }
-        }
-    }
-
-    ts = QDateTime(); 
-    return false;
-}
-
-bool LogParser::detectLogLevel(const QString &line, LogLevel &level) const
-{
-    auto match = m_levelRegex.match(line);
-    if (match.hasMatch()) {
-        level = StrToLevel(match.captured(1).toUpper());
-        return true;
-    }
-    return false;
 }
 
 void LogParser::startParsing(const LogFilePtr& logFile)
@@ -233,21 +93,21 @@ void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int s
         QDateTime lineTs;
         LogLevel lineLevel = LogLevel::Unknown;
 
-        bool hasTimestamp = detectTimestamp(line, lineTs);
-        bool hasLevel = detectLogLevel(line, lineLevel);
+        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs);
+        bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
         const bool schemaMatched = (extraction && pattern.isValid())
             ? !(extractedFields = pattern.extractFields(line)).isEmpty()
             : false;
 
         std::shared_ptr<LogEntry> currentEntry;
-        if (schemaMatched || (hasTimestamp && hasLevel)) {
+        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, hasLevel)) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
                 currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            currentEntry->fields = extractedFields;
+            currentEntry->setFields(extractedFields);
         } else {
             if (currentLogicalEntryId < startLogicalEntryId) {
                 // No primary line yet — treat as its own entry
@@ -325,20 +185,20 @@ void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bo
         QDateTime lineTs;
         LogLevel lineLevel = LogLevel::Unknown;
 
-        bool hasTimestamp = detectTimestamp(line, lineTs);
-        bool hasLevel = detectLogLevel(line, lineLevel);
+        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs);
+        bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
         const bool schemaMatched = (extraction && pattern.isValid())
             ? !(extractedFields = pattern.extractFields(line)).isEmpty()
             : false;
 
         std::shared_ptr<LogEntry> currentEntry;
-        if (schemaMatched || (hasTimestamp && hasLevel)) {
+        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, hasLevel)) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber, currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            currentEntry->fields = extractedFields;
+            currentEntry->setFields(extractedFields);
         } else {
             if (currentLogicalEntryId == -1) { 
                 currentLogicalEntryId = logicalEntryIdCounter++;
@@ -402,7 +262,7 @@ LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath)
         line = in.readLine();
         stats.totalEntries++; // Count each line as a potential entry for simplicity in stats
 
-        if (detectTimestamp(line, currentTs)) {
+        if (m_classifier.detectTimestamp(line, currentTs)) {
             if (!firstTsFound) {
                 stats.firstEntryTimestamp = currentTs;
                 firstTsFound = true;
@@ -410,7 +270,7 @@ LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath)
             stats.lastEntryTimestamp = currentTs; // Keep updating last timestamp
         }
 
-        if (detectLogLevel(line, currentLevel)) {
+        if (m_classifier.detectLogLevel(line, currentLevel)) {
             switch (currentLevel) {
             case LogLevel::Warn:
                 stats.warnCount++;

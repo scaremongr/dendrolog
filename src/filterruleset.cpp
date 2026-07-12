@@ -79,7 +79,8 @@ bool FilterRuleSet::isActive() const
     return false;
 }
 
-bool FilterRuleSet::ruleMatches(int ruleIndex, const LogEntry& entry) const
+bool FilterRuleSet::ruleMatches(int ruleIndex, QStringView message,
+                                const LogEntryFields& fields) const
 {
     const FilterRule& rule = rules[ruleIndex];
     const int fieldIndex = (ruleIndex < m_boundFieldIndexes.size())
@@ -90,10 +91,10 @@ bool FilterRuleSet::ruleMatches(int ruleIndex, const LogEntry& entry) const
     QStringView scope;
     bool scopeAvailable = true;
     if (m_fieldScopeActive && fieldIndex >= 0) {
-        scope = entry.fields.get(fieldIndex, entry.message);
+        scope = fields.get(fieldIndex, message);
         scopeAvailable = !scope.isEmpty();
     } else {
-        scope = QStringView(entry.message);
+        scope = message;
     }
 
     bool contains = false;
@@ -110,6 +111,11 @@ bool FilterRuleSet::ruleMatches(int ruleIndex, const LogEntry& entry) const
 }
 
 bool FilterRuleSet::matches(const LogEntry& entry) const
+{
+    return matchesLine(QStringView(entry.message()), entry.fields());
+}
+
+bool FilterRuleSet::matchesLine(QStringView message, const LogEntryFields& fields) const
 {
     // AND связывает сильнее OR: правила разбиваются OR-коннекторами на
     // AND-группы; запись проходит, если истинна хотя бы одна группа.
@@ -133,7 +139,7 @@ bool FilterRuleSet::matches(const LogEntry& entry) const
         }
 
         if (groupResult)
-            groupResult = ruleMatches(i, entry);
+            groupResult = ruleMatches(i, message, fields);
         // groupResult == false: группа уже провалена — правила до следующего
         // OR можно не вычислять (short-circuit), но пропускать их всё равно
         // нужно через цикл, чтобы найти OR-границу.

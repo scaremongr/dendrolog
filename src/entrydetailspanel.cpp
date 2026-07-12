@@ -336,32 +336,32 @@ QString EntryDetailsPanel::buildHtml() const
     {
         const AppTheme& t = AppTheme::instance();
         QString head;
-        if (m_line->level != LogLevel::Unknown)
-            head += colorSpan(t.forLevel(m_line->level), LevelToStr(m_line->level),
+        if (m_line->level() != LogLevel::Unknown)
+            head += colorSpan(t.forLevel(m_line->level()), LevelToStr(m_line->level()),
                               /*bold=*/true)
                   + QLatin1String("&nbsp;&nbsp;");
-        if (m_line->timestamp.isValid())
+        if (m_line->timestamp().isValid())
             head += QStringLiteral("<b>%1</b>")
-                        .arg(m_line->timestamp
+                        .arg(m_line->timestamp()
                                  .toString(QStringLiteral("dd.MM.yyyy HH:mm:ss.zzz")));
         else
             head += colorSpan(muted, tr("no timestamp"));
         html += QStringLiteral("<div>%1</div>").arg(head);
 
         QStringList location;
-        if (m_line->sourceFile)
-            location << m_line->sourceFile->filePath;
+        if (m_line->sourceFile())
+            location << m_line->sourceFile()->filePath;
         if (m_logicalLines.size() > 1)
             location << tr("lines %1–%2 (%3)")
-                            .arg(m_logicalLines.first()->originalLineNumber)
-                            .arg(m_logicalLines.last()->originalLineNumber)
+                            .arg(m_logicalLines.first()->originalLineNumber())
+                            .arg(m_logicalLines.last()->originalLineNumber())
                             .arg(m_logicalLines.size());
         else
-            location << tr("line %1").arg(m_line->originalLineNumber);
+            location << tr("line %1").arg(m_line->originalLineNumber());
         // У свободного текста id логической записи номинален (весь файл —
         // «запись #0»), не показываем его, чтобы не путать.
         if (!m_line->isPlainText())
-            location << tr("entry #%1").arg(m_line->logicalEntryId);
+            location << tr("entry #%1").arg(m_line->logicalEntryId());
         html += QStringLiteral("<div style=\"color:%1;\">%2</div>")
                     .arg(muted.name(), location.join(QStringLiteral(" · ")).toHtmlEscaped());
     }
@@ -375,7 +375,7 @@ QString EntryDetailsPanel::buildHtml() const
     if (!m_fieldNames.isEmpty() && !m_line->isPlainText()) {
         const LogEntry* fieldsSource = nullptr;
         for (const auto& e : m_logicalLines) {
-            if (e && !e->fields.isEmpty()) {
+            if (e && !e->fields().isEmpty()) {
                 fieldsSource = e.get();
                 break;
             }
@@ -384,11 +384,11 @@ QString EntryDetailsPanel::buildHtml() const
         if (fieldsSource) {
             html += QLatin1String("<table cellspacing=\"0\" cellpadding=\"2\">");
             const int count = int(qMin(m_fieldNames.size(),
-                                       qsizetype(fieldsSource->fields.size())));
+                                       qsizetype(fieldsSource->fields().size())));
             for (int i = 0; i < count; ++i) {
                 QString value;
-                if (fieldsSource->fields.has(i)) {
-                    value = fieldsSource->fields.get(i, fieldsSource->message).toString();
+                if (fieldsSource->fields().has(i)) {
+                    value = fieldsSource->fields().get(i, fieldsSource->message()).toString();
                     if (value.size() > kMaxFieldValueChars)
                         value = value.left(kMaxFieldValueChars) + QStringLiteral("…");
                     value = value.toHtmlEscaped();
@@ -416,7 +416,7 @@ QString EntryDetailsPanel::buildHtml() const
         parts.reserve(m_logicalLines.size());
         for (const auto& e : m_logicalLines)
             if (e)
-                parts << e->message;
+                parts << e->message();
         message = parts.join(QLatin1Char('\n'));
     }
     const bool messageTruncated = message.size() > kMaxMessageChars;

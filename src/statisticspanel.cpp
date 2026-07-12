@@ -114,7 +114,7 @@ QString shortRangeText(qint64 fromMs, qint64 toMs)
 // числа, таймстампы (#-#-# #:#:#.#), IP (#.#.#.#), hex-идентификаторы, GUID —
 // и оставляет неизменным словесный костяк сообщения.
 // ---------------------------------------------------------------------------
-QString normalizeMessage(const QString& msg)
+QString normalizeMessage(QStringView msg)
 {
     const int n = int(qMin<qsizetype>(msg.size(), kNormInputCap));
     QString out;
@@ -127,7 +127,7 @@ QString normalizeMessage(const QString& msg)
         if (runHasDigit)
             out += QLatin1Char('#');
         else
-            out += QStringView(msg).mid(runStart, end - runStart);
+            out += msg.mid(runStart, end - runStart);
         runStart = -1;
         runHasDigit = false;
     };
@@ -202,13 +202,18 @@ QVector<BinRun> runsAboveThreshold(const QVector<quint32>& bins, double threshol
 // fields может конкурентно переписываться переизвлечением схемы полей.
 // ---------------------------------------------------------------------------
 struct TemplateAgg {
-    int             count = 0;
-    LogLevel        level = LogLevel::Unknown;
-    qint64          firstMs = -1, lastMs = -1;
-    const LogEntry* firstEntry = nullptr; // жив, пока жив снапшот
+    int      count = 0;
+    LogLevel level = LogLevel::Unknown;
+    qint64   firstMs = -1, lastMs = -1;
+    // Захвачено жадно при вставке шаблона: снапшот (и текст его строк) может
+    // не пережить показ результата, а индексному бэкенду и вовсе нечего
+    // будет разыменовать.
+    QString    example;
+    int        firstEntryId = 0;
+    LogFilePtr firstFile;
 };
 
-DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& snapshot,
+DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
                                    const std::shared_ptr<std::atomic_bool>& cancel,
                                    int generation)
 {
@@ -218,22 +223,17 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
     DocumentStats s;
     s.generation = generation;
     s.valid = true;
-    s.rows = int(snapshot.size());
+    s.rows = int(snapshot.rowCount());
 
     // Диапазон времени: список отсортирован по времени, записи без валидной
     // метки — в конце (как на таймлайне).
-    int validEnd = int(snapshot.size());
-    while (validEnd > 0) {
-        const auto& e = snapshot[validEnd - 1];
-        if (e && e->timestamp.isValid())
-            break;
+    qint64 validEnd = snapshot.rowCount();
+    while (validEnd > 0 && snapshot.metaAt(validEnd - 1).timestampMs < 0)
         --validEnd;
-    }
-    const bool hasTime = validEnd > 0 && snapshot.first()
-                      && snapshot.first()->timestamp.isValid();
+    const bool hasTime = validEnd > 0 && snapshot.metaAt(0).timestampMs >= 0;
     if (hasTime) {
-        s.tMinMs = snapshot.first()->timestamp.toMSecsSinceEpoch();
-        s.tMaxMs = snapshot[validEnd - 1]->timestamp.toMSecsSinceEpoch();
+        s.tMinMs = snapshot.metaAt(0).timestampMs;
+        s.tMaxMs = snapshot.metaAt(validEnd - 1).timestampMs;
     }
     const qint64 spanMs   = hasTime ? qMax<qint64>(0, s.tMaxMs - s.tMinMs) : 0;
     const double bucketMs = spanMs > 0 ? double(spanMs) / kBins : 0.0;
@@ -251,47 +251,45 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
     const LogFile* prevFile = nullptr;
     bool firstRow = true;
     qint64 prevTsMs = -1;
+    bool scanCancelled = false;
 
-    for (int i = 0; i < snapshot.size(); ++i) {
+    snapshot.forEachLine(0, [&](qint64 i, const LogEntryMeta& m,
+                                QStringView text) -> bool {
         if ((i & kCancelMask) == 0 && cancel
             && cancel->load(std::memory_order_relaxed)) {
-            s.cancelled = true;
-            return s;
+            scanCancelled = true;
+            return false;
         }
-        const LogEntry* e = snapshot[i].get();
-        if (!e)
-            continue;
 
-        const LogFile* file = e->sourceFile.get();
+        const LogFile* file = m.sourceFile;
         // Свободный текст (не-лог файл, преамбула) слипается в запись #0
         // номинально — единицей статистики там служит каждая строка.
-        const bool newRecord = e->isPlainText() || firstRow
-                            || e->logicalEntryId != prevId || file != prevFile;
+        const bool newRecord = m.isPlainText || firstRow
+                            || m.logicalEntryId != prevId || file != prevFile;
         firstRow = false;
-        prevId = e->logicalEntryId;
+        prevId = m.logicalEntryId;
         prevFile = file;
 
         DocumentStats::FileStat& fs = fileStats[file];
-        if (!fs.file && e->sourceFile)
-            fs.file = e->sourceFile;
+        if (!fs.file)
+            fs.file = snapshot.sourceFilePtrAt(i);
         ++fs.lines;
 
         if (!newRecord)
-            continue; // continuation-строка: только счётчик строк
+            return true; // continuation-строка: только счётчик строк
 
         ++s.records;
         ++fs.records;
-        ++s.levelCounts[qBound(0, int(e->level), 6)];
-        switch (e->level) {
+        ++s.levelCounts[qBound(0, int(m.level), 6)];
+        switch (m.level) {
         case LogLevel::Warn:  ++fs.warn;  break;
         case LogLevel::Error: ++fs.error; break;
         case LogLevel::Fatal: ++fs.fatal; break;
         default: break;
         }
 
-        qint64 tsMs = -1;
-        if (e->timestamp.isValid()) {
-            tsMs = e->timestamp.toMSecsSinceEpoch();
+        const qint64 tsMs = m.timestampMs;
+        if (tsMs >= 0) {
             ++s.recordsWithTs;
             if (fs.firstMs < 0)
                 fs.firstMs = tsMs;
@@ -300,7 +298,7 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
             if (bucketMs > 0) {
                 const int b = qBound(0, int((tsMs - s.tMinMs) / bucketMs), kBins - 1);
                 ++totalBins[b];
-                if (e->level == LogLevel::Error || e->level == LogLevel::Fatal)
+                if (m.level == LogLevel::Error || m.level == LogLevel::Fatal)
                     ++errorBins[b];
             }
 
@@ -323,7 +321,7 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
             prevTsMs = tsMs;
         }
 
-        const QString key = normalizeMessage(e->message);
+        const QString key = normalizeMessage(text);
         const auto it = templates.find(key);
         if (it != templates.end()) {
             ++it->count;
@@ -337,14 +335,17 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
         } else {
             TemplateAgg agg;
             agg.count = 1;
-            agg.level = e->level;
+            agg.level = m.level;
             agg.firstMs = agg.lastMs = tsMs;
-            agg.firstEntry = e;
+            agg.example = text.left(kExampleCap).toString();
+            agg.firstEntryId = m.logicalEntryId;
+            agg.firstFile = snapshot.sourceFilePtrAt(i);
             templates.insert(key, agg);
         }
-    }
+        return true;
+    });
 
-    if (cancel && cancel->load(std::memory_order_relaxed)) {
+    if (scanCancelled || (cancel && cancel->load(std::memory_order_relaxed))) {
         s.cancelled = true;
         return s;
     }
@@ -390,11 +391,9 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
         t.level = r.agg->level;
         t.firstMs = r.agg->firstMs;
         t.lastMs = r.agg->lastMs;
-        if (const LogEntry* fe = r.agg->firstEntry) {
-            t.example = fe->message.left(kExampleCap);
-            t.firstEntryId = fe->logicalEntryId;
-            t.firstFile = fe->sourceFile;
-        }
+        t.example = r.agg->example;
+        t.firstEntryId = r.agg->firstEntryId;
+        t.firstFile = r.agg->firstFile;
         return t;
     };
     {
@@ -506,10 +505,8 @@ DocumentStats collectDocumentStats(const QVector<std::shared_ptr<LogEntry>>& sna
             in.share = double(agg->count) / s.records;
             const QString& tpl = *spam[i].key;
             in.snippet = tpl.mid(displayStart(tpl));
-            if (const LogEntry* fe = agg->firstEntry) {
-                in.entryId = fe->logicalEntryId;
-                in.file = fe->sourceFile;
-            }
+            in.entryId = agg->firstEntryId;
+            in.file = agg->firstFile;
             in.magnitude = double(agg->count);
             insights.append(in);
         }
@@ -739,11 +736,10 @@ void StatisticsPanel::startCollection()
         return;
     }
 
-    // COW-копия вектора shared_ptr: воркер владеет данными независимо от
-    // дальнейшей судьбы модели/вкладки.
-    const QVector<std::shared_ptr<LogEntry>> snapshot =
-        m_filteredSwitch->isChecked() ? m_model->filteredEntries()
-                                      : m_model->allEntries();
+    // Снапшот хранилища: воркер владеет данными независимо от дальнейшей
+    // судьбы модели/вкладки (для резидентного бэкенда — COW-копия вектора).
+    const LogScanSnapshot snapshot =
+        m_model->scanSnapshot(m_filteredSwitch->isChecked());
     if (snapshot.isEmpty()) {
         m_stats = DocumentStats();
         renderPlaceholder(tr("The document is empty."));

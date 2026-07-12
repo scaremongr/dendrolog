@@ -8,6 +8,7 @@
 // Forward declarations
 class QPushButton;
 class QKeySequenceEdit;
+class QSpinBox;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class SettingsDialog; }
@@ -61,6 +62,7 @@ private:
     void buildColorsTab();
     void updateColorButton(ColorEntry& entry);
     void buildShortcutsTab();
+    void buildPerformanceControls();
     void resetShortcutsToDefaults();
 
     // ---- Init / finalise ---------------------------------------------------
@@ -70,4 +72,8 @@ private:
     Ui::SettingsDialog* ui;
     QVector<ColorEntry>  m_colorEntries;
     QVector<ShortcutRow> m_shortcutRows;
+
+    // ---- Performance (большие файлы; создаются в коде, не в .ui) ----------
+    QSpinBox* m_indexedThresholdSpinBox = nullptr;
+    QSpinBox* m_textCacheSpinBox = nullptr;
 };

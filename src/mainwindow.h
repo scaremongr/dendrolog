@@ -131,8 +131,19 @@ private slots:
     void onPatternComboChanged(int index);
     void onManagePatterns();
 
+public:
+    // Приём потокового ввода (`program | DendroLog -`): спулит stdin во
+    // временный файл и открывает его вкладкой-растущим логом с follow-tail.
+    void openStdinStream();
+
 private:
     Ui::MainWindow *ui; // Pointer to the UI class generated from mainwindow.ui
+
+    // Env-gated хук верификации (DENDRO_BASELINE_DUMP=<каталог>): фиксированная
+    // последовательность фильтров над активной моделью с дампом результатов в
+    // файлы и выходом. Байтовый базлайн для рефакторингов хранилища; в обычных
+    // запусках недостижим. Вызывается из handleFileParsingFinished.
+    void maybeStartBaselineDump();
 
     // Widgets not fully managed by .ui (e.g. added to statusbar or dynamic content)
     QProgressBar* m_progressBar;
@@ -185,6 +196,13 @@ private:
     // рвутся в disconnectFromLogView (иначе старая модель дёргала бы рефреш).
     QMetaObject::Connection m_searchModelInsertConn;
     QMetaObject::Connection m_searchModelResetConn;
+
+    // Follow-tail: тогл в тулбаре + синхронизация с view активной вкладки.
+    QAction* m_followTailAction = nullptr;
+    QMetaObject::Connection m_followTailConn;
+
+    // Спулер потокового ввода (`DendroLog -`); nullptr, если stdin не читаем.
+    class StdinSpooler* m_stdinSpooler = nullptr;
 
     // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
     // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной

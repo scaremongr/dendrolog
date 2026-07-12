@@ -70,6 +70,8 @@ void AppSettings::load()
     m_fontSize               = s.value(QStringLiteral("fontSize"), 10).toInt();
     m_autoReload             = s.value(QStringLiteral("autoReload"), false).toBool();
     m_autoReloadIntervalSecs = s.value(QStringLiteral("autoReloadIntervalSecs"), 2).toInt();
+    m_indexedThresholdMB     = qBound(0, s.value(QStringLiteral("indexedThresholdMB"), 512).toInt(), 1 << 20);
+    m_textCacheBudgetMB      = qBound(64, s.value(QStringLiteral("textCacheBudgetMB"), 256).toInt(), 2048);
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -121,6 +123,8 @@ void AppSettings::save()
     s.setValue(QStringLiteral("autoReloadIntervalSecs"), m_autoReloadIntervalSecs);
     s.setValue(QStringLiteral("fontFamily"),             m_fontFamily);
     s.setValue(QStringLiteral("fontSize"),               m_fontSize);
+    s.setValue(QStringLiteral("indexedThresholdMB"),     m_indexedThresholdMB);
+    s.setValue(QStringLiteral("textCacheBudgetMB"),      m_textCacheBudgetMB);
     s.endGroup();
 
     // Save theme colors.
@@ -180,6 +184,40 @@ void AppSettings::setFontSize(int size)
     if (m_fontSize == size)
         return;
     m_fontSize = size;
+    emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+int AppSettings::indexedThresholdMB() const
+{
+    return m_indexedThresholdMB;
+}
+
+void AppSettings::setIndexedThresholdMB(int mb)
+{
+    const int clamped = qBound(0, mb, 1 << 20);
+    if (m_indexedThresholdMB == clamped)
+        return;
+    m_indexedThresholdMB = clamped;
+    emit settingsChanged();
+}
+
+qint64 AppSettings::indexedThresholdBytes() const
+{
+    return qint64(m_indexedThresholdMB) * 1024 * 1024;
+}
+
+int AppSettings::textCacheBudgetMB() const
+{
+    return m_textCacheBudgetMB;
+}
+
+void AppSettings::setTextCacheBudgetMB(int mb)
+{
+    const int clamped = qBound(64, mb, 2048);
+    if (m_textCacheBudgetMB == clamped)
+        return;
+    m_textCacheBudgetMB = clamped;
     emit settingsChanged();
 }
 

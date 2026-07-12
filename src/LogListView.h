@@ -173,8 +173,19 @@ public:
     void showSearchMatch(int row, const QString& term, bool caseSensitive);
     void clearSearchMatch();
 
+    // ---- Follow-tail --------------------------------------------------------
+    // Автопрокрутка к концу при догрузке строк (живые логи, stdin). Уход
+    // пользователя от низа (колесо вверх, drag скроллбара, Up/PgUp/Home)
+    // выключает режим; программные вставки строк — нет.
+    void setFollowTail(bool enabled);
+    bool followTail() const { return m_followTail; }
+
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
+
+    // Режим follow-tail включён/выключен (в т.ч. автоматически при уходе
+    // пользователя от низа) — для синхронизации тогла в тулбаре.
+    void followTailChanged(bool enabled);
 
     // Пользователь выбрал «использовать таймстамп как границу фильтра по времени»
     // из контекстного меню. isStart == true → нижняя граница (From), иначе верхняя (To).
@@ -189,6 +200,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     int sizeHintForRow(int row) const override;  // фиксированная высота — предотвращает O(N) в базовом QListView
@@ -198,6 +210,15 @@ protected:
     void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
     void updateGeometries() override;
     void changeEvent(QEvent* event) override;
+    // Нейтрализация внутренней раскладки QListView (flowPositions): она O(N)
+    // по строкам на каждый rowsInserted/reset — сотни мс на десятках миллионов
+    // строк при каждом батче загрузки. Вся геометрия строк у view своя
+    // (rowAtY/rowYOffset/prefix-суммы), базовые visualRect/indexAt не
+    // используются нигде; единственный их потребитель — базовый moveCursor —
+    // замещён собственным.
+    void doItemsLayout() override;
+    QModelIndex moveCursor(CursorAction cursorAction,
+                           Qt::KeyboardModifiers modifiers) override;
 
 private:
     // ========== Подсветка парных скобок ======================================
@@ -437,9 +458,32 @@ private:
     // Hit-testing
     bool hitTestBadge(const QList<BadgeLayout>& layouts, const QPoint& pos, int& badgeIndex) const;
     
-    // Определяет, развернута ли строка относительно глобального WordWrap (m_wordWrapEnabled XOR toggled)
-    bool isRowMultiLine(int row) const { 
-        return m_wordWrapEnabled != m_toggledRows.contains(row); 
+    // ---- Follow-tail ---------------------------------------------------------
+    bool m_followTail = false;
+    void scrollToBottomFollow();
+
+    // «Огромный режим»: выше порога строк плотные пер-строчные кэши
+    // (m_rowHeights/m_rowPrefixY/m_rowTextLengths — гигабайты на сотнях
+    // миллионов строк) не ведутся: высоты принудительно uniform (wrap и
+    // точечные развороты отключены), длины запрашиваются у модели напрямую.
+    // Индексная вкладка — huge С ПЕРВОЙ СТРОКИ: иначе, пока загрузка не
+    // пересекла порог, view на каждый батч строит плотные кэши (O(батч) на
+    // GUI-потоке — сотни мс при быстрой индексации), а на пороге выбрасывает
+    // их целиком. Флаг кэшируется в setModel/modelReset — смена бэкенда
+    // всегда сопровождается reset модели.
+    static constexpr int kHugeRowCountThreshold = 2000000;
+    bool m_indexedBackendModel = false;
+    bool hugeRowMode() const {
+        return model() && (m_indexedBackendModel
+                           || model()->rowCount() > kHugeRowCountThreshold);
+    }
+
+    // Определяет, развернута ли строка относительно глобального WordWrap
+    // (effective wrap XOR toggled); в огромном режиме всегда однострочно.
+    bool isRowMultiLine(int row) const {
+        if (hugeRowMode())
+            return false;
+        return m_wordWrapEnabled != m_toggledRows.contains(row);
     }
     void toggleRowMultiLine(int row);
 

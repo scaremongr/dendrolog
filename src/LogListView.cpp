@@ -50,6 +50,13 @@ LogListView::LogListView(QWidget *parent)
         viewport()->update();
     });
 
+    // Перетаскивание ползунка вверх снимает follow-tail (пользователь ушёл
+    // от низа). Программные setValue sliderMoved не эмитят.
+    connect(verticalScrollBar(), &QScrollBar::sliderMoved, this, [this](int value) {
+        if (m_followTail && value < verticalScrollBar()->maximum())
+            setFollowTail(false);
+    });
+
     // Таймер для отложенного пересчёта высот/prefix-сумм. Два режима:
     // кэш высот актуален (ленивое уточнение при отрисовке) — только prefix-суммы;
     // кэш помечен грязным (точечная инвалидация) — полный пересчёт высот.
@@ -154,6 +161,10 @@ void LogListView::setModel(QAbstractItemModel *model) {
     m_persistentSelection.clear();
     m_resetViewportAnchor.clear();
     m_resetViewportOffset = 0;
+    {
+        auto* logModel = qobject_cast<LogModel*>(model);
+        m_indexedBackendModel = logModel && logModel->isIndexedBackend();
+    }
     invalidateRowState();
     if (model) {
         // Полная инвалидация при сбросе модели (фильтрация, setEntries и т.п.)
@@ -166,12 +177,13 @@ void LogListView::setModel(QAbstractItemModel *model) {
             m_resetViewportOffset = 0;
             auto* logModel = qobject_cast<LogModel*>(this->model());
             if (!logModel) return;
-            const auto& entries = logModel->filteredEntries();
-            if (entries.isEmpty()) return;
+            const int total = logModel->rowCount();
+            if (total <= 0) return;
             const qint64 scrollY = scrollContentY();
-            const int row = qBound(0, rowAtY(scrollY), (int)entries.size() - 1);
-            m_resetViewportAnchor.logicalEntryId = entries[row]->logicalEntryId;
-            m_resetViewportAnchor.sourceFile = entries[row]->sourceFile.get();
+            const int row = qBound(0, rowAtY(scrollY), total - 1);
+            const LogModel::EntryKey key = logModel->keyForRow(row);
+            m_resetViewportAnchor.logicalEntryId = key.logicalEntryId;
+            m_resetViewportAnchor.sourceFile = key.sourceFile;
             m_resetViewportOffset = int(scrollY - rowYOffset(row));
         });
 
@@ -181,10 +193,13 @@ void LogListView::setModel(QAbstractItemModel *model) {
             // индексы невалидны.
             m_searchMatchRow = -1;
             m_searchHighlighter.setPatterns({});
-            invalidateRowState();
-            rebuildHeightCache();
 
             auto* logModel = qobject_cast<LogModel*>(this->model());
+            // Смена бэкенда (конверсия вкладки) приходит только через reset —
+            // освежаем ДО пересчёта кэшей: hugeRowMode() читает флаг.
+            m_indexedBackendModel = logModel && logModel->isIndexedBackend();
+            invalidateRowState();
+            rebuildHeightCache();
 
             // 1) Выделенная запись видна в новом наборе строк — восстанавливаем
             //    выделение и центрируем на ней.
@@ -475,10 +490,15 @@ void LogListView::handleRowsInserted(int first, int last)
         return;
     }
 
+    // Follow-tail: дозагрузка в конец прокручивает вьюпорт к последней строке
+    // (после обновления высот/скроллбара ниже).
+    const bool followScrollAfterAppend = m_followTail;
+
     // --- Append: инкрементальное расширение кэшей ---
 
     // Кэш длин: досчитываем только новые строки (O(1) на строку, без model()->data()).
-    if (auto* logModel = qobject_cast<LogModel*>(model())) {
+    // В огромном режиме плотный кэш не ведётся вовсе (см. hugeRowMode()).
+    if (auto* logModel = qobject_cast<LogModel*>(model()); logModel && !hugeRowMode()) {
         if (m_rowTextLengths.size() < rows) {
             const int oldSize = m_rowTextLengths.size();
             m_rowTextLengths.resize(rows);
@@ -488,7 +508,7 @@ void LogListView::handleRowsInserted(int first, int last)
             m_rowTextLengths[i] = logModel->displayTextLength(i);
     }
 
-    if (!m_wordWrapEnabled && m_toggledRows.isEmpty()) {
+    if (hugeRowMode() || (!m_wordWrapEnabled && m_toggledRows.isEmpty())) {
         // Однострочный режим: rebuildHeightCache — это O(1) fast path
         rebuildHeightCache();
     } else if (!m_heightsDirty && m_rowHeights.size() == first
@@ -512,6 +532,8 @@ void LogListView::handleRowsInserted(int first, int last)
     }
 
     updateScrollbar();
+    if (followScrollAfterAppend)
+        scrollToBottomFollow();
     viewport()->update();
 }
 
@@ -580,6 +602,7 @@ void LogListView::invalidateRowState(int row, bool preserveTextLengths) {
 // расширяя его до размера модели (новые ячейки — «неизвестно»).
 void LogListView::cacheTextLength(int row, int length) const {
     if (row < 0) return;
+    if (hugeRowMode()) return; // плотный кэш длин в огромном режиме не ведётся
     if (row >= m_rowTextLengths.size()) {
         const int oldSize = m_rowTextLengths.size();
         const int rows = model() ? model()->rowCount() : 0;
@@ -791,11 +814,17 @@ void LogListView::rebuildHeightCache() {
     const int singleRowH = singleRowHeight();
 
     // БЫСТРЫЙ ПУТЬ: При выключенном WordWrap (и если нет локально развернутых строк)
-    // общая высота - это просто (количество строк * высоту 1 строки). 
+    // общая высота - это просто (количество строк * высоту 1 строки).
     // Выполняется за O(1), без выделения памяти и прохождения циклов.
-    if (!m_wordWrapEnabled && m_toggledRows.isEmpty()) {
+    // Огромный режим форсирует этот путь всегда: плотные массивы высот на
+    // сотнях миллионов строк — гигабайты (см. hugeRowMode()).
+    if (hugeRowMode() || (!m_wordWrapEnabled && m_toggledRows.isEmpty())) {
         m_rowHeights.clear();
         m_rowPrefixY.clear();
+        if (hugeRowMode()) {
+            m_rowTextLengths.clear();
+            m_rowTextLengths.squeeze();
+        }
         m_totalHeight = qint64(singleRowH) * rows;
         m_uniformHeights = true;
         m_heightsDirty = false;
@@ -1521,6 +1550,7 @@ void LogListView::updateBracketMatch()
         case '(': openChar = '('; closeChar = ')'; searchForward = true;  break;
         case '{': openChar = '{'; closeChar = '}'; searchForward = true;  break;
         case '<': openChar = '<'; closeChar = '>'; searchForward = true;  break;
+        
         case '[': openChar = '['; closeChar = ']'; searchForward = true;  break;
         case ')': openChar = '('; closeChar = ')'; searchForward = false; break;
         case '}': openChar = '{'; closeChar = '}'; searchForward = false; break;
@@ -1673,6 +1703,9 @@ QPixmap LogListView::getRowPixmap(int row, const RowState& state) {
 
 void LogListView::toggleRowMultiLine(int row) {
     if (row < 0) return;
+    // Огромный режим: высоты принудительно uniform, точечные развороты
+    // потребовали бы плотного массива высот на весь файл.
+    if (hugeRowMode()) return;
 
     int preservedViewportOffset = 0;
     const bool keepRowAnchor = captureVisibleRowOffset(row, preservedViewportOffset);
@@ -2224,7 +2257,46 @@ bool LogListView::rowHasWrapToggle(int row) const {
 
 // Обработка нажатия клавиш (копирование выделенного текста; пробел —
 // раскрытие/сворачивание текущей строки, как клик по плашке справа).
+// ---------------------------------------------------------------------------
+// Follow-tail: автопрокрутка к концу при догрузке строк.
+// ---------------------------------------------------------------------------
+
+void LogListView::setFollowTail(bool enabled)
+{
+    if (m_followTail == enabled)
+        return;
+    m_followTail = enabled;
+    emit followTailChanged(enabled);
+    if (enabled)
+        scrollToBottomFollow();
+}
+
+void LogListView::scrollToBottomFollow()
+{
+    verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+}
+
+void LogListView::wheelEvent(QWheelEvent *event)
+{
+    // Пользователь листает вверх — он хочет читать историю, а не хвост.
+    if (m_followTail && event->angleDelta().y() > 0)
+        setFollowTail(false);
+    QListView::wheelEvent(event);
+}
+
 void LogListView::keyPressEvent(QKeyEvent *event) {
+    if (m_followTail) {
+        switch (event->key()) {
+        case Qt::Key_Up:
+        case Qt::Key_PageUp:
+        case Qt::Key_Home:
+            setFollowTail(false); // навигация вверх снимает автопрокрутку
+            break;
+        default:
+            break;
+        }
+    }
+
     if (event->matches(QKeySequence::Copy) && !m_selection.isEmpty()) {
         copySelectionToClipboard();
         return;
@@ -2357,7 +2429,7 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
         }
     }
 
-    if (haveRow && rowHasWrapToggle(row)) {
+    if (haveRow && rowHasWrapToggle(row) && !hugeRowMode()) {
         menu.addSeparator();
         QAction* wrapAct = menu.addAction(tr("Word Wrap (this line)"));
         wrapAct->setCheckable(true);
@@ -2376,10 +2448,10 @@ void LogListView::currentChanged(const QModelIndex &current, const QModelIndex &
     // именно он позволит восстановить выделение после смены фильтра.
     if (current.isValid()) {
         if (auto* logModel = qobject_cast<LogModel*>(model())) {
-            const auto& entries = logModel->filteredEntries();
-            if (current.row() >= 0 && current.row() < entries.size()) {
-                m_persistentSelection.logicalEntryId = entries[current.row()]->logicalEntryId;
-                m_persistentSelection.sourceFile = entries[current.row()]->sourceFile.get();
+            const LogModel::EntryKey key = logModel->keyForRow(current.row());
+            if (key.logicalEntryId >= 0) {
+                m_persistentSelection.logicalEntryId = key.logicalEntryId;
+                m_persistentSelection.sourceFile = key.sourceFile;
             }
         }
     }
@@ -2405,6 +2477,69 @@ void LogListView::updateGeometries() {
     verticalScrollBar()->setValue(qBound(0, savedScrollY, verticalScrollBar()->maximum()));
 
     m_inUpdateGeometries = false;
+}
+
+// НЕ зовём QListView::doItemsLayout: он перестраивает внутренние
+// flowPositions базовой раскладки по каждой строке — O(N) на КАЖДЫЙ батч
+// rowsInserted (база планирует полную перераскладку) и на каждый reset.
+// На десятках миллионов строк это сотни мс GUI-фриза за батч, при том что
+// результат раскладки view нигде не использует. База QAbstractItemView
+// лишь снимает флаг отложенной раскладки и обновляет геометрию/viewport.
+void LogListView::doItemsLayout()
+{
+    QAbstractItemView::doItemsLayout();
+}
+
+// Замена базового QListView::moveCursor — единственного потребителя базовой
+// раскладки (rectForIndex/flowPositions): навигация по собственной геометрии
+// строк. Вызывается из QAbstractItemView::keyPressEvent; возвращённый индекс
+// база делает текущим и прокручивает нашим scrollTo.
+QModelIndex LogListView::moveCursor(CursorAction cursorAction,
+                                    Qt::KeyboardModifiers /*modifiers*/)
+{
+    if (!model())
+        return QModelIndex();
+    const int rows = model()->rowCount();
+    if (rows <= 0)
+        return QModelIndex();
+
+    const QModelIndex cur = currentIndex();
+    const int curRow = cur.isValid() ? qBound(0, cur.row(), rows - 1) : 0;
+    int row = curRow;
+
+    switch (cursorAction) {
+    case MoveUp:
+    case MovePrevious:
+        row = qMax(0, curRow - 1);
+        break;
+    case MoveDown:
+    case MoveNext:
+        row = qMin(rows - 1, curRow + 1);
+        break;
+    case MovePageUp:
+        row = qBound(0, rowAtY(rowYOffset(curRow) - qMax(1, viewport()->height() - singleRowHeight())),
+                     rows - 1);
+        if (row == curRow && curRow > 0)
+            row = curRow - 1; // страница из одной высокой строки — не застревать
+        break;
+    case MovePageDown:
+        row = qBound(0, rowAtY(rowYOffset(curRow) + qMax(1, viewport()->height() - singleRowHeight())),
+                     rows - 1);
+        if (row == curRow && curRow < rows - 1)
+            row = curRow + 1;
+        break;
+    case MoveHome:
+        row = 0;
+        break;
+    case MoveEnd:
+        row = rows - 1;
+        break;
+    case MoveLeft:
+    case MoveRight:
+    default:
+        break; // плоский список: горизонтальных перемещений нет
+    }
+    return model()->index(row, 0);
 }
 
 // Предотвращаем исчезновение текста при наведении курсора

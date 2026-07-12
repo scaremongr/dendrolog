@@ -1,12 +1,50 @@
 #include "mainwindow.h"
 #include "singleinstance.h"
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QIcon>
 #include <QStyle>
 #include <QStyleFactory>
 #include <QStyleHints>
 #include <QPalette>
 #include <QColor>
+#include <QThread>
+
+#include <cstdio>
+
+// ---------------------------------------------------------------------------
+// Env-gated атрибуция фризов GUI: DENDRO_SLOW_EVENTS=<файл> — каждая доставка
+// события на GUI-потоке дольше 100 мс пишется строкой «ms;класс;тип события».
+// Меряется только внешняя доставка (вложенные sendEvent входят во время
+// родителя) — атрибуция указывает на конкретного получателя-блокировщика.
+// В обычных запусках недостижимо (env не задан — нулевые накладные расходы).
+// ---------------------------------------------------------------------------
+class TracingApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    FILE* slowEventLog = nullptr;
+
+    bool notify(QObject* receiver, QEvent* event) override
+    {
+        if (!slowEventLog || QThread::currentThread() != thread())
+            return QApplication::notify(receiver, event);
+        static thread_local int depth = 0;
+        if (depth > 0)
+            return QApplication::notify(receiver, event);
+        ++depth;
+        QElapsedTimer t;
+        t.start();
+        const bool res = QApplication::notify(receiver, event);
+        const qint64 ms = t.elapsed();
+        --depth;
+        if (ms >= 100) {
+            std::fprintf(slowEventLog, "%lld;%s;%d\n", static_cast<long long>(ms),
+                         receiver->metaObject()->className(), int(event->type()));
+            std::fflush(slowEventLog);
+        }
+        return res;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Windows (especially Windows 10) does not propagate the system dark theme to
@@ -60,7 +98,9 @@ static void applyColorScheme(Qt::ColorScheme scheme)
 
 int main(int argc, char *argv[])
 {
-    QApplication a(argc, argv);
+    TracingApplication a(argc, argv);
+    if (const QByteArray slowLog = qgetenv("DENDRO_SLOW_EVENTS"); !slowLog.isEmpty())
+        a.slowEventLog = std::fopen(slowLog.constData(), "w");
 
     QApplication::setOrganizationName(QStringLiteral("DendroLog"));
     QApplication::setApplicationName(QStringLiteral("DendroLog"));
@@ -68,14 +108,18 @@ int main(int argc, char *argv[])
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/dendrolog.svg")));
 
     // Разбираем аргументы: файлы логов + служебный флаг --new-instance,
-    // позволяющий принудительно открыть отдельное окно.
+    // позволяющий принудительно открыть отдельное окно, и «-»/«--stdin» —
+    // чтение потокового ввода (program | DendroLog -).
     QStringList cliFiles = a.arguments().mid(1);
     const bool forceNewInstance = cliFiles.removeAll(QStringLiteral("--new-instance")) > 0;
+    const bool readStdin = (cliFiles.removeAll(QStringLiteral("-"))
+                            + cliFiles.removeAll(QStringLiteral("--stdin"))) > 0;
 
     // Один экземпляр на пользователя: повторный запуск (например, двойной клик
     // по ассоциированному .log) передаёт файлы в уже открытое окно и выходит.
+    // Пайп stdin передать нельзя — при «-» всегда открываем своё окно.
     SingleInstance guard(QStringLiteral("DendroLog"));
-    if (!forceNewInstance && guard.isSecondary()) {
+    if (!forceNewInstance && !readStdin && guard.isSecondary()) {
         if (guard.sendToPrimary(cliFiles))
             return 0;
         // Первичный экземпляр не ответил (завис/умер) — продолжаем как обычно.
@@ -108,6 +152,11 @@ int main(int argc, char *argv[])
     // Файлы, переданные аргументами командной строки, открываются как обычные.
     if (!cliFiles.isEmpty())
         w.openFilesFromCommandLine(cliFiles);
+
+    // Потоковый ввод: stdin спулится во временный файл и открывается
+    // вкладкой-растущим логом (auto-reload + follow-tail).
+    if (readStdin)
+        w.openStdinStream();
 
     return a.exec();
 }

@@ -16,26 +16,38 @@ enum class LogLevel {
     Fatal
 };
 
-struct LogEntry {
-    int logicalEntryId;      // ID логической записи (группирует многострочные сообщения)
-    int originalLineNumber;  // Порядковый номер строки в исходном файле
-    QDateTime timestamp;     // Время записи (первой строки логической записи)
-    LogLevel level;         // Уровень логирования (первой строки логической записи)
-    QString message;        // Текст этой конкретной строки
-    LogFilePtr sourceFile;  // Источник (файл)
+// Одна физическая строка лога. Доступ к данным — только через аксессоры:
+// это шов, за которым хранилище сможет стать нерезидентным (индекс + чтение
+// текста с диска по требованию), не ломая потребителей.
+class LogEntry {
+public:
+    LogEntry(int lId, int lineNum, const QDateTime &ts, LogLevel lvl, const QString &msg, LogFilePtr sFile)
+        : m_logicalEntryId(lId)
+        , m_originalLineNumber(lineNum)
+        , m_timestamp(ts)
+        , m_level(lvl)
+        , m_message(msg)
+        , m_sourceFile(sFile)
+    {}
+
+    // ID логической записи (группирует многострочные сообщения)
+    int logicalEntryId() const { return m_logicalEntryId; }
+    // Порядковый номер строки в исходном файле
+    int originalLineNumber() const { return m_originalLineNumber; }
+    // Время записи (первой строки логической записи)
+    const QDateTime& timestamp() const { return m_timestamp; }
+    // Уровень логирования (первой строки логической записи)
+    LogLevel level() const { return m_level; }
+    // Текст этой конкретной строки
+    const QString& message() const { return m_message; }
+    // Источник (файл)
+    const LogFilePtr& sourceFile() const { return m_sourceFile; }
 
     // Structured fields extracted from message by LogPattern::extractFields().
-    // Offsets are into `message`; isEmpty() == true for continuation lines.
-    LogEntryFields fields;
-
-    LogEntry(int lId, int lineNum, const QDateTime &ts, LogLevel lvl, const QString &msg, LogFilePtr sFile)
-        : logicalEntryId(lId)
-        , originalLineNumber(lineNum)
-        , timestamp(ts)
-        , level(lvl)
-        , message(msg)
-        , sourceFile(sFile)
-    {}
+    // Offsets are into `message()`; isEmpty() == true for continuation lines.
+    const LogEntryFields& fields() const { return m_fields; }
+    // Единственный мутатор: переизвлечение полей при смене схемы.
+    void setFields(LogEntryFields fields) { m_fields = std::move(fields); }
 
     // Строка «свободного текста»: парсер не извлёк ни таймстампа, ни уровня,
     // ни структурных полей. У continuation-строк настоящей записи таймстамп и
@@ -43,44 +55,53 @@ struct LogEntry {
     // там, где группировка в логические записи номинальна (не-лог файл целиком
     // слипается в запись #0; преамбула до первой настоящей записи — туда же).
     bool isPlainText() const {
-        return !timestamp.isValid() && level == LogLevel::Unknown && fields.isEmpty();
+        return !m_timestamp.isValid() && m_level == LogLevel::Unknown && m_fields.isEmpty();
     }
 
     bool operator<(const LogEntry& other) const {
         // 1. Сравнение по времени логической записи
-        if (timestamp.isValid() && other.timestamp.isValid()) {
-            if (timestamp != other.timestamp) {
-                return timestamp < other.timestamp;
+        if (m_timestamp.isValid() && other.m_timestamp.isValid()) {
+            if (m_timestamp != other.m_timestamp) {
+                return m_timestamp < other.m_timestamp;
             }
-        } else if (timestamp.isValid()) { // this валиден, other нет
+        } else if (m_timestamp.isValid()) { // this валиден, other нет
             return true;
-        } else if (other.timestamp.isValid()) { // other валиден, this нет
+        } else if (other.m_timestamp.isValid()) { // other валиден, this нет
             return false;
         }
         // Временные метки "равны" (или обе невалидны)
 
         // 2. Сравнение по файлу источнику для стабильности
-        if (sourceFile && other.sourceFile && sourceFile != other.sourceFile) {
+        if (m_sourceFile && other.m_sourceFile && m_sourceFile != other.m_sourceFile) {
             // Сравниваем по пути к файлу для детерминированного порядка
-            if (sourceFile->filePath != other.sourceFile->filePath) {
-                return sourceFile->filePath < other.sourceFile->filePath;
+            if (m_sourceFile->filePath != other.m_sourceFile->filePath) {
+                return m_sourceFile->filePath < other.m_sourceFile->filePath;
             }
-        } else if (sourceFile && !other.sourceFile) { // Только у this есть sourceFile
+        } else if (m_sourceFile && !other.m_sourceFile) { // Только у this есть sourceFile
             return true;
-        } else if (!sourceFile && other.sourceFile) { // Только у other есть sourceFile
+        } else if (!m_sourceFile && other.m_sourceFile) { // Только у other есть sourceFile
             return false;
         }
         // Временные метки "равны" И sourceFile "равны" (или оба nullptr)
 
         // 3. Сравнение по ID логической записи (внутри одного файла или для записей с одинаковым временем из разных файлов)
-        if (logicalEntryId != other.logicalEntryId) {
-            return logicalEntryId < other.logicalEntryId;
+        if (m_logicalEntryId != other.m_logicalEntryId) {
+            return m_logicalEntryId < other.m_logicalEntryId;
         }
         // Временные метки, sourceFile и logicalEntryId "равны"
 
         // 4. Сравнение по исходному номеру строки для сохранения порядка внутри логической записи или файла
-        return originalLineNumber < other.originalLineNumber;
+        return m_originalLineNumber < other.m_originalLineNumber;
     }
+
+private:
+    int m_logicalEntryId;
+    int m_originalLineNumber;
+    QDateTime m_timestamp;
+    LogLevel m_level;
+    QString m_message;
+    LogFilePtr m_sourceFile;
+    LogEntryFields m_fields;
 };
 
 

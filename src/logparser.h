@@ -3,10 +3,10 @@
 
 #include "logentry.h"
 #include "logpattern.h"
+#include "lineclassifier.h"
 #include <QVector>
 #include <QString>
 #include <QDateTime>
-#include <QRegularExpression>
 #include <QThreadPool>
 #include <atomic>
 #include <memory>
@@ -57,9 +57,6 @@ signals:
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
 
 private:
-    bool detectTimestamp(const QString &line, QDateTime &ts);
-    bool detectLogLevel(const QString &line, LogLevel &level) const;
-
     // The worker methods receive an immutable snapshot of the schema and the
     // extraction flag taken on the GUI thread at launch time. They never read
     // the mutable m_pattern / m_extractionEnabled members, so reconfiguring
@@ -68,9 +65,9 @@ private:
     void doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId,
                      const LogPattern& pattern, bool extraction);
 
-    const QRegularExpression m_timestampRegex;
-    QStringList m_timeFormats;
-    const QRegularExpression m_levelRegex;
+    // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
+    // безопасно читается воркерами пула (см. LineClassifier).
+    const LineClassifier m_classifier;
     LogPattern m_pattern; // Optional block schema for structured field extraction
     bool m_extractionEnabled = false; // Only extract fields when filter is active
 

@@ -2,17 +2,29 @@
 #define LOGMODEL_H
 
 #include "logentry.h"
+#include "logscan.h"
 #include "filterruleset.h"
 #include "textmatchhighlighter.h"
 #include <QAbstractListModel>
 #include <QColor>
 #include <QDateTime>
-#include <QFuture>
 #include <QHash>
 #include <QSet>
-#include <atomic>
 #include <memory>
 
+class LogStore;
+class ResidentLogStore;
+class IndexedLogStore;
+
+// ============================================================================
+// LogModel — фасад QAbstractListModel над хранилищем записей (LogStore).
+// Сам держит только презентационное состояние (настройки фильтров, выбор
+// полей, маркеры, цвета файлов); данные и фильтрация живут в бэкенде:
+//   • ResidentLogStore — прежний резидентный путь (по умолчанию);
+//   • IndexedLogStore — блочный индекс для очень больших файлов.
+// Вся сигнальная хореография (beginInsertRows/reset/modelFiltered) остаётся
+// на GUI-потоке; store дёргает её через дружественный доступ.
+// ============================================================================
 class LogModel : public QAbstractListModel {
     Q_OBJECT
 
@@ -20,6 +32,7 @@ public:
     explicit LogModel(QObject* parent = nullptr);
     ~LogModel() override;
 
+    // ---- Мутации резидентного бэкенда (путь LogParser) -----------------------
     void setEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
     // Обновление без reset модели для tail-догрузки (auto-reload): сливает батч
     // в данные (как mergeEntries) и помечает его записи «новыми» — IsNewRole,
@@ -29,49 +42,94 @@ public:
     // видимые строки вставляются через beginInsertRows, поэтому выделение и
     // позиция скролла сохраняются самим view. Записи могут вставать в середину
     // (слияние нескольких файлов по времени). Батч должен быть отсортирован
-    // компаратором logEntryPtrLess. В отличие от appendEntries() не помечает
-    // записи «новыми» (IsNewRole) — это путь первичной загрузки, а не tail-append.
+    // компаратором logEntryPtrLess.
     void mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
-    // Drop every entry sourced from `filePath` and reset the view. Used when a
-    // watched file is replaced/truncated and must be re-parsed from scratch,
-    // without disturbing entries that belong to other files in the same tab.
+    // Drop every entry sourced from `filePath` and reset the view.
     void removeEntriesForFile(const QString& filePath);
-    const QVector<std::shared_ptr<LogEntry>>& allEntries() const { return m_allEntries; }
-    const QVector<std::shared_ptr<LogEntry>>& filteredEntries() const { return m_filteredEntries; }
+
+    // ---- Доступ к данным (шов хранилища) --------------------------------------
+    // Запись видимой (отфильтрованной) строки; nullptr при выходе за границы.
+    std::shared_ptr<LogEntry> entryAt(int visibleRow) const;
+
+    // Идентичность записи видимой строки: пара (logicalEntryId, sourceFile) —
+    // id уникален только внутри одного файла. Вне границ — {-1, nullptr}.
+    struct EntryKey {
+        int logicalEntryId = -1;
+        const LogFile* sourceFile = nullptr;
+    };
+    EntryKey keyForRow(int visibleRow) const;
+
+    // Метаданные видимой строки без обращения к тексту; O(1).
+    QDateTime visibleTimestampAt(int row) const;
+    LogLevel visibleLevelAt(int row) const;
+
+    // Первая видимая строка с timestamp >= t (список отсортирован по времени,
+    // строки без валидной метки — в конце). Может вернуть rowCount().
+    int firstVisibleRowAtOrAfter(const QDateTime& t) const;
+
+    // Диапазон валидных таймстампов по ВСЕМ записям (не только видимым).
+    QPair<QDateTime, QDateTime> fullTimeRange() const;
+
+    // Первые maxCount непустых строк лога — сэмплы для эвристики схемы.
+    QStringList sampleMessages(int maxCount) const;
+
+    // Все строки логической записи, которой принадлежит line (включая её саму).
+    QVector<std::shared_ptr<LogEntry>> logicalRecordLines(
+        const std::shared_ptr<LogEntry>& line, int maxLines = 2000) const;
+
+    // Полная замена данных содержимым ВИДИМОГО списка source (посев панели
+    // результатов поиска текущей выдачей активной вкладки).
+    void seedFromVisible(const LogModel& source);
+
+    // Снапшот для последовательного скана в воркере (статистика, таймлайн).
+    LogScanSnapshot scanSnapshot(bool filteredOnly) const;
+
+    // ЕДИНСТВЕННЫЙ легальный доступ к записям как к мутируемому набору —
+    // для переизвлечения полей схемы (MainWindow::applyPatternToAllViews).
+    // Осмыслен только для резидентного бэкенда.
+    QVector<std::shared_ptr<LogEntry>> residentEntriesForFieldMutation() const;
+
+    // ---- Бэкенды ---------------------------------------------------------------
+    // Резидентный (по умолчанию) или индексный (очень большие файлы).
+    bool isIndexedBackend() const;
+    // Заменить хранилище индексным (данные текущего отбрасываются — вкладка
+    // перезагружает файлы через LogIndexer). Возвращает store для привязки
+    // файлов; повторный вызов возвращает существующий.
+    IndexedLogStore* convertToIndexedBackend();
+    // Текущий индексный бэкенд; nullptr для резидентного.
+    IndexedLogStore* indexedOrNull() const;
+    // Вернуться к резидентному хранилищу (fallback UTF-16/32: индексный
+    // бэкенд не декодирует эти кодировки). Данные отбрасываются — файл
+    // перечитывается через LogParser.
+    void convertToResidentBackend();
+    // --------------------------------------------------------------------------
+
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role) const override;
 
     // Длина текста, который вернёт DisplayRole для строки row, БЕЗ построения
-    // самой строки: O(1) в fast path, O(число видимых полей) при field-фильтре.
-    // Используется view для быстрой оценки высот строк в wrap-режиме — оценка
-    // обязана считаться по отображаемому тексту, а не по сырому message.
+    // самой строки. Для индексного бэкенда — оценка по байтовой длине (view
+    // уточняет высоты лениво при отрисовке).
     int displayTextLength(int row) const;
 
     enum Roles {
         // Возвращает QVariantMap{"text": QString, "color": QColor} для Info-плашки.
         // Возвращает QVariant() (invalid) если загружен только один файл.
-        // Вся логика "показывать/не показывать" и цвет хранятся здесь — в модели.
         FileBadgeRole = Qt::UserRole + 1,
         // true для записей из последнего батча appendEntries(); подсветка живёт
-        // до следующего батча или до полного reset (setEntries/removeEntriesForFile).
-        // Used by LogListView to paint the gutter marker green for newly loaded rows.
+        // до следующего батча или до полного reset.
         IsNewRole,
         // Цвет фона строки от недеструктивного row-маркера (Row Highlighters).
-        // QColor если строка совпала с одним из маркеров, иначе invalid QVariant.
         RowMarkerColorRole
     };
 
     // ---- Dynamic field-visibility control -----------------------------------
-    // The parser provides an ordered list of available field names. The model
-    // stores the active list and the subset selected by the UI when field
-    // filtering is enabled.
     void setAvailableFields(const QStringList& fieldNames);
     QStringList availableFields() const { return m_availableFieldNames; }
     void setFieldDisplaySelection(bool enabled, const QVector<int>& visibleIndexes);
     bool fieldDisplayFilterEnabled() const noexcept { return m_fieldFilterEnabled; }
     QVector<int> visibleFieldIndexes() const { return m_visibleFieldIndexes; }
-    /// Force a display refresh without changing the schema or selection — call
-    /// after re-extracting structured fields on already-loaded entries.
+    /// Force a display refresh without changing the schema or selection.
     void refreshDisplay();
     // -------------------------------------------------------------------------
 
@@ -83,25 +141,15 @@ public:
     QDateTime endTimeFilter() const { return m_filterEndTime; }
 
     // ---- Текстовая фильтрация (Include/Exclude + AND/OR + колонки) ----------
-    // Набор должен прийти уже привязанным к схеме (FilterRuleSet::bindFields).
     void setFilterRules(const FilterRuleSet& rules);
     const FilterRuleSet& filterRules() const { return m_filterRules; }
 
     // ---- Недеструктивные row-маркеры ----------------------------------------
-    // Строки не скрываются — совпавшие получают цвет фона через
-    // RowMarkerColorRole. Смена маркеров не перефильтровывает модель.
     void setRowMarkers(const QVector<HighlightPattern>& markers);
     QVector<HighlightPattern> rowMarkers() const { return m_rowMarkers.patterns(); }
 
     // ---- Поиск записи в отфильтрованном представлении -----------------------
-    // Идентификация записи — пара (logicalEntryId, sourceFile): logicalEntryId
-    // уникален только внутри одного файла.
-    // Точная строка записи в текущем отфильтрованном виде; -1 если запись
-    // скрыта фильтром или отсутствует.
     int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const;
-    // Ближайшая к записи видимая строка (сама запись может быть скрыта
-    // фильтром). Возвращает -1, только если записи нет в m_allEntries или
-    // отфильтрованный список пуст.
     int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const;
 
     // Search methods
@@ -110,7 +158,7 @@ public:
 
     // Отменяет фоновую перефильтрацию, если она идёт. wait=true — дождаться
     // фактической остановки воркера; обязательно перед конкурентной мутацией
-    // LogEntry::fields (переизвлечение полей в MainWindow), т.к. воркер их читает.
+    // LogEntry::fields (переизвлечение полей в MainWindow).
     void cancelPendingFilter(bool wait = false);
     // Перефильтровать, если отмена фонового джоба оставила видимый список
     // не соответствующим текущим настройкам фильтров.
@@ -118,24 +166,26 @@ public:
 
 signals:
     void modelFiltered(int totalRowsAfterFilter);
+    // Прогресс асинхронной фильтрации индексного бэкенда (он читает диск и
+    // может занимать секунды); 100 — фильтр применён.
+    void filterProgress(int progressPercentage);
 
 private:
+    // Хранилища ведут сигнальную хореографию модели и читают настройки
+    // фильтров через дружественный доступ.
+    friend class ResidentLogStore;
+    friend class IndexedLogStore;
+
+    // Текущий бэкенд как резидентный; assert при несоответствии.
+    ResidentLogStore* resident() const;
+    // Как resident(), но nullptr вместо assert — для мутаций, которые могут
+    // прилететь от устаревшего резидентного парсера после смены бэкенда.
+    ResidentLogStore* residentOrNull() const;
+
     void applyFilter();
-    // Запускает пересчёт m_filteredEntries в пуле потоков; результат приедет
-    // queued-вызовом и применится, если поколение не устарело.
-    void startFilterJob();
-    bool passesFilters(const std::shared_ptr<LogEntry>& entry) const;
-    void rebuildFilteredEntries();
-    // Общее ядро appendEntries()/mergeEntries(): слияние отсортированного батча
-    // в m_allEntries и вставка прошедших фильтр строк в m_filteredEntries.
-    void mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
-    // Вставка отсортированного списка записей в отсортированный m_filteredEntries
-    // сериями (run) с beginInsertRows на каждую серию.
-    void insertFilteredSorted(const QVector<std::shared_ptr<LogEntry>>& passing);
-    // Назначает файлу следующий цвет из палитры, если у него ещё нет цвета.
     void ensureFileColor(const QString& filePath);
+    void resetFileColors();
     QColor getColorForFile(const QString& filePath) const;
-    int uniqueSourceFileCount() const;
     // Отбрасывает индексы вне диапазона схемы и дубликаты, сохраняя порядок.
     QVector<int> sanitizeFieldIndexes(const QVector<int>& indexes) const;
     // Уведомляет view о смене отображаемого текста всех строк.
@@ -143,11 +193,10 @@ private:
 
     // Returns the message text to display for entry, applying the active field
     // selection when field filtering is enabled.
-    // Returns entry.message directly (no allocation) when no filtering needed.
     QString formatDisplayMessage(const LogEntry& entry) const;
 
-    QVector<std::shared_ptr<LogEntry>> m_allEntries;
-    QVector<std::shared_ptr<LogEntry>> m_filteredEntries;
+    std::unique_ptr<LogStore> m_store;
+
     QSet<LogLevel> m_activeLogLevels;
     QDateTime m_filterStartTime;
     QDateTime m_filterEndTime;
@@ -158,30 +207,9 @@ private:
     QVector<QColor> m_predefinedFileColors;
     int m_nextColorIndex;
 
-    mutable int m_cachedUniqueSourceFileCount = -1; // Кэш для количества уникальных файлов
-
     QStringList m_availableFieldNames;
     QVector<int> m_visibleFieldIndexes;
     bool m_fieldFilterEnabled = false;
-
-    // Записи из последнего батча appendEntries() — подсвечиваются зелёным
-    // маркером в гаттере (IsNewRole). Идентичность — по адресу LogEntry:
-    // logicalEntryId уникален только внутри одного файла и для этого не годится.
-    // Очищается при setEntries()/removeEntriesForFile() и на каждом новом батче.
-    QSet<const LogEntry*> m_newEntries;
-
-    // ---- Фоновая фильтрация --------------------------------------------------
-    // До порога фильтр применяется синхронно (мгновенно и без мерцания);
-    // выше — в пуле потоков, чтобы не замораживать GUI на больших логах.
-    // Воркер работает со снапшотами (COW-копиями) данных и настроек фильтра
-    // и никогда не трогает члены модели. Поколение защищает от применения
-    // устаревшего результата; cancel-флаг обрывает ненужный воркер досрочно.
-    static constexpr int kAsyncFilterThreshold = 100000;
-    int m_filterGeneration = 0;                        // текущее поколение настроек/данных
-    bool m_filterJobActive = false;                    // есть ли актуальный джоб в полёте
-    bool m_filteredListStale = false;                  // список ещё не догнал настройки
-    std::shared_ptr<std::atomic_bool> m_filterJobCancel; // флаг отмены текущего джоба
-    QFuture<QVector<std::shared_ptr<LogEntry>>> m_filterJobFuture; // для cancelPendingFilter(wait)
 };
 
 #endif // LOGMODEL_H

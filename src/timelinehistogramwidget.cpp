@@ -1,8 +1,10 @@
 #include "timelinehistogramwidget.h"
 #include "apptheme.h"
 #include "logmodel.h"
+#include "logscan.h"
 
 #include <QContextMenuEvent>
+#include <QFutureWatcher>
 #include <QLocale>
 #include <QMenu>
 #include <QMouseEvent>
@@ -10,8 +12,17 @@
 #include <QPolygon>
 #include <QTimer>
 #include <QWheelEvent>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <cmath>
+
+namespace {
+// Порог асинхронной пересборки: ниже — синхронно на GUI-потоке (мгновенно и
+// без промежуточного кадра «Building…»), выше — в воркере.
+constexpr int kAsyncRebuildThresholdRows = 200000;
+// Пока данные растут, асинхронные джобы стартуют не чаще этого интервала.
+constexpr qint64 kMinRebuildGapMs = 1500;
+} // namespace
 
 // «6 d 06 h», «1 h 05 min», «4 min 30 s», «12 s», «350 ms» — для плашек.
 static QString durationText(qint64 ms)
@@ -81,6 +92,13 @@ TimelineHistogramWidget::TimelineHistogramWidget(QWidget* parent)
     });
 }
 
+TimelineHistogramWidget::~TimelineHistogramWidget()
+{
+    // Воркер добежит по cancel-флагу; снапшот самодостаточен, результат
+    // никому не нужен (watcher умирает вместе с виджетом).
+    cancelRebuildJob();
+}
+
 void TimelineHistogramWidget::setModel(LogModel* model)
 {
     if (m_model == model)
@@ -111,10 +129,16 @@ void TimelineHistogramWidget::setModel(LogModel* model)
     }
 
     // Смена вкладки — перестроить сразу, без дебаунса; недокоммиченный
-    // зум прежней модели больше не имеет смысла.
+    // зум прежней модели больше не имеет смысла. Гистограмму прежней вкладки
+    // не показываем, пока воркер строит новую (малые модели пересоберутся
+    // синхронно тут же).
     m_zoomPending = false;
     m_zoomCommitTimer->stop();
     m_rebuildTimer->stop();
+    cancelRebuildJob();
+    m_hasData = false;
+    m_cacheDirty = true;
+    m_lastRebuild.invalidate(); // смена вкладки не троттлится
     rebuildHistogram();
     update();
 }
@@ -134,23 +158,125 @@ void TimelineHistogramWidget::scheduleRebuild()
 
 void TimelineHistogramWidget::rebuildHistogram()
 {
-    m_totalPrefix.fill(0);
-    m_warnPrefix.fill(0);
-    m_errorPrefix.fill(0);
-    m_fatalPrefix.fill(0);
-    m_hasData = false;
+    // Диапазон активного фильтра по времени читается на GUI-потоке и
+    // передаётся в расчёт значениями (воркер модель не трогает).
+    qint64 fMin = 0, fMax = 0;
+    bool fValid = false;
+    if (m_model) {
+        const QDateTime fs = m_model->startTimeFilter();
+        const QDateTime fe = m_model->endTimeFilter();
+        if (fs.isValid() && fe.isValid() && fs < fe) {
+            fValid = true;
+            fMin = fs.toMSecsSinceEpoch();
+            fMax = fe.toMSecsSinceEpoch();
+        }
+    }
 
-    const QVector<std::shared_ptr<LogEntry>>* entriesPtr =
-        m_model ? &m_model->filteredEntries() : nullptr;
+    const int rows = m_model ? m_model->rowCount() : 0;
+    if (rows <= kAsyncRebuildThresholdRows) {
+        // Малые логи: синхронно, поведение прежнее.
+        cancelRebuildJob();
+        applyHistogram(buildHistogram(
+            m_model ? m_model->scanSnapshot(/*filteredOnly=*/true)
+                    : LogScanSnapshot(),
+            fMin, fMax, fValid, nullptr));
+        return;
+    }
+
+    // Большие логи: биннинг в воркере, один джоб в полёте. Запрос во время
+    // полёта не теряется — пересборка перезапустится по завершении (данные
+    // снапшота к тому моменту уже устарели).
+    if (m_rebuildJobActive) {
+        m_rebuildAgain = true;
+        return;
+    }
+    if (m_lastRebuild.isValid() && m_lastRebuild.elapsed() < kMinRebuildGapMs) {
+        m_rebuildTimer->start(int(kMinRebuildGapMs - m_lastRebuild.elapsed()));
+        return;
+    }
+    startRebuildJob(fMin, fMax, fValid);
+}
+
+void TimelineHistogramWidget::startRebuildJob(qint64 filterMinMs,
+                                              qint64 filterMaxMs, bool filterValid)
+{
+    m_rebuildJobActive = true;
+    m_rebuildAgain = false;
+    m_lastRebuild.start();
+
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_rebuildCancel = cancel;
+    const int generation = ++m_rebuildGeneration;
+
+    // Снапшот дёшев (COW-копии векторов) и держит данные живыми сам.
+    const LogScanSnapshot snap = m_model->scanSnapshot(/*filteredOnly=*/true);
+
+    if (!m_hasData)
+        m_cacheDirty = true; // показать «Building timeline…» вместо «No entries»
+
+    auto* watcher = new QFutureWatcher<HistogramData>(this);
+    connect(watcher, &QFutureWatcher<HistogramData>::finished, this,
+            [this, watcher, generation]() {
+                watcher->deleteLater();
+                if (generation != m_rebuildGeneration)
+                    return; // смена вкладки/новый джоб — результат устарел
+                m_rebuildJobActive = false;
+                m_rebuildCancel.reset();
+                applyHistogram(watcher->result());
+                update();
+                if (m_rebuildAgain) {
+                    m_rebuildAgain = false;
+                    scheduleRebuild(); // дебаунс слепит запросы, пришедшие в полёте
+                }
+            });
+    watcher->setFuture(QtConcurrent::run(
+        [snap, filterMinMs, filterMaxMs, filterValid, cancel]() {
+            return buildHistogram(snap, filterMinMs, filterMaxMs, filterValid,
+                                  cancel.get());
+        }));
+}
+
+void TimelineHistogramWidget::cancelRebuildJob()
+{
+    ++m_rebuildGeneration;
+    m_rebuildJobActive = false;
+    m_rebuildAgain = false;
+    if (m_rebuildCancel) {
+        m_rebuildCancel->store(true);
+        m_rebuildCancel.reset();
+    }
+}
+
+void TimelineHistogramWidget::applyHistogram(HistogramData&& h)
+{
+    m_totalPrefix = std::move(h.totalPrefix);
+    m_warnPrefix  = std::move(h.warnPrefix);
+    m_errorPrefix = std::move(h.errorPrefix);
+    m_fatalPrefix = std::move(h.fatalPrefix);
+    m_tMin = h.tMin;
+    m_tMax = h.tMax;
+    m_hasData = h.hasData;
+    m_cacheDirty = true;
+}
+
+TimelineHistogramWidget::HistogramData TimelineHistogramWidget::buildHistogram(
+    const LogScanSnapshot& snap, qint64 filterMinMs, qint64 filterMaxMs,
+    bool filterValid, const std::atomic_bool* cancel)
+{
+    HistogramData h;
+    h.totalPrefix = QVector<quint32>(kBins + 1, 0);
+    h.warnPrefix  = QVector<quint32>(kBins + 1, 0);
+    h.errorPrefix = QVector<quint32>(kBins + 1, 0);
+    h.fatalPrefix = QVector<quint32>(kBins + 1, 0);
 
     // Список отсортирован по времени, записи без валидной метки — в конце:
     // min — первая запись, max — последняя валидная с конца.
-    int validEnd = entriesPtr ? entriesPtr->size() : 0;
-    while (validEnd > 0) {
-        const auto& e = (*entriesPtr)[validEnd - 1];
-        if (e && e->timestamp.isValid())
-            break;
+    qint64 validEnd = snap.rowCount();
+    while (validEnd > 0 && snap.metaAt(validEnd - 1).timestampMs < 0) {
         --validEnd;
+        if (cancel && (validEnd & 0x3FFF) == 0
+            && cancel->load(std::memory_order_relaxed))
+            return h;
     }
 
     // Диапазон шкалы: границы данных, РАСШИРЕННЫЕ до границ активного
@@ -158,73 +284,69 @@ void TimelineHistogramWidget::rebuildHistogram()
     // как пустые поля по краям (иначе шкала прижимается к данным и отдаление
     // «не применяется» визуально), а зум в пустой промежуток не блокирует
     // дальнейшую работу колеса.
-    const bool haveEntries = validEnd > 0 && entriesPtr->first()
-                          && entriesPtr->first()->timestamp.isValid();
+    const bool haveEntries = validEnd > 0 && snap.metaAt(0).timestampMs >= 0;
     qint64 viewMin = 0, viewMax = 0;
     if (haveEntries) {
-        viewMin = entriesPtr->first()->timestamp.toMSecsSinceEpoch();
-        viewMax = (*entriesPtr)[validEnd - 1]->timestamp.toMSecsSinceEpoch();
+        viewMin = snap.metaAt(0).timestampMs;
+        viewMax = snap.metaAt(validEnd - 1).timestampMs;
     }
-    if (m_model) {
-        const QDateTime fs = m_model->startTimeFilter();
-        const QDateTime fe = m_model->endTimeFilter();
-        if (fs.isValid() && fe.isValid() && fs < fe) {
-            if (haveEntries) {
-                viewMin = qMin(viewMin, fs.toMSecsSinceEpoch());
-                viewMax = qMax(viewMax, fe.toMSecsSinceEpoch());
-            } else {
-                viewMin = fs.toMSecsSinceEpoch();
-                viewMax = fe.toMSecsSinceEpoch();
-            }
-            m_hasData = true; // пустое окно фильтра — шкала и зум живут
+    if (filterValid) {
+        if (haveEntries) {
+            viewMin = qMin(viewMin, filterMinMs);
+            viewMax = qMax(viewMax, filterMaxMs);
+        } else {
+            viewMin = filterMinMs;
+            viewMax = filterMaxMs;
         }
+        h.hasData = true; // пустое окно фильтра — шкала и зум живут
     }
 
-    if (haveEntries || m_hasData) {
-        const QVector<std::shared_ptr<LogEntry>>& entries = *entriesPtr;
-        m_tMin = viewMin;
-        m_tMax = viewMax;
-        const qint64 span = qMax<qint64>(1, m_tMax - m_tMin);
-        m_hasData = true;
+    if (!haveEntries && !h.hasData)
+        return h;
 
-        // Считаем логические записи, а не строки: у многострочного сообщения
-        // все строки несут время/уровень первой строки и идут в списке подряд,
-        // иначе одно длинное исключение выглядело бы как всплеск плотности.
-        int prevId = 0;
-        const LogFile* prevFile = nullptr;
-        bool firstRow = true;
-        for (int i = 0; i < validEnd; ++i) {
-            const LogEntry* e = entries[i].get();
-            if (!e)
-                continue;
-            const LogFile* file = e->sourceFile.get();
-            if (!firstRow && e->logicalEntryId == prevId && file == prevFile)
-                continue;
-            firstRow = false;
-            prevId = e->logicalEntryId;
-            prevFile = file;
+    h.tMin = viewMin;
+    h.tMax = viewMax;
+    h.hasData = true;
+    const qint64 span = qMax<qint64>(1, h.tMax - h.tMin);
 
-            const qint64 ms = e->timestamp.toMSecsSinceEpoch();
-            const int bin = qBound(0, int((ms - m_tMin) * kBins / span), kBins - 1);
-            ++m_totalPrefix[bin + 1];
-            switch (e->level) {
-                case LogLevel::Warn:  ++m_warnPrefix[bin + 1];  break;
-                case LogLevel::Error: ++m_errorPrefix[bin + 1]; break;
-                case LogLevel::Fatal: ++m_fatalPrefix[bin + 1]; break;
-                default: break;
-            }
+    // Считаем логические записи, а не строки: у многострочного сообщения
+    // все строки несут время/уровень первой строки и идут в списке подряд,
+    // иначе одно длинное исключение выглядело бы как всплеск плотности.
+    int prevId = 0;
+    const LogFile* prevFile = nullptr;
+    bool firstRow = true;
+    snap.forEachMeta(0, [&](qint64 i, const LogEntryMeta& m) -> bool {
+        if (i >= validEnd)
+            return false;
+        if (cancel && (i & 0x3FFF) == 0
+            && cancel->load(std::memory_order_relaxed))
+            return false;
+        if (!firstRow && m.logicalEntryId == prevId && m.sourceFile == prevFile)
+            return true;
+        firstRow = false;
+        prevId = m.logicalEntryId;
+        prevFile = m.sourceFile;
+
+        const int bin = qBound(0, int((m.timestampMs - h.tMin) * kBins / span),
+                               kBins - 1);
+        ++h.totalPrefix[bin + 1];
+        switch (m.level) {
+            case LogLevel::Warn:  ++h.warnPrefix[bin + 1];  break;
+            case LogLevel::Error: ++h.errorPrefix[bin + 1]; break;
+            case LogLevel::Fatal: ++h.fatalPrefix[bin + 1]; break;
+            default: break;
         }
+        return true;
+    });
 
-        // Счётчики корзин → префикс-суммы (in place).
-        for (int b = 1; b <= kBins; ++b) {
-            m_totalPrefix[b] += m_totalPrefix[b - 1];
-            m_warnPrefix[b]  += m_warnPrefix[b - 1];
-            m_errorPrefix[b] += m_errorPrefix[b - 1];
-            m_fatalPrefix[b] += m_fatalPrefix[b - 1];
-        }
+    // Счётчики корзин → префикс-суммы (in place).
+    for (int b = 1; b <= kBins; ++b) {
+        h.totalPrefix[b] += h.totalPrefix[b - 1];
+        h.warnPrefix[b]  += h.warnPrefix[b - 1];
+        h.errorPrefix[b] += h.errorPrefix[b - 1];
+        h.fatalPrefix[b] += h.fatalPrefix[b - 1];
     }
-
-    m_cacheDirty = true;
+    return h;
 }
 
 QColor TimelineHistogramWidget::levelBarColor(LogLevel level) const
@@ -298,7 +420,9 @@ void TimelineHistogramWidget::renderCache()
 
     if (!m_hasData) {
         p.setPen(mutedInk);
-        p.drawText(rect(), Qt::AlignCenter, tr("No timestamped entries"));
+        p.drawText(rect(), Qt::AlignCenter,
+                   m_rebuildJobActive ? tr("Building timeline…")
+                                      : tr("No timestamped entries"));
         m_cacheDirty = false;
         return;
     }
@@ -788,17 +912,10 @@ void TimelineHistogramWidget::wheelEvent(QWheelEvent* event)
     // фильтр вплоть до целого файла и останавливается на его границах.
     qint64 fullMin = curMin, fullMax = curMax;
     if (m_model) {
-        const auto& all = m_model->allEntries();
-        int end = all.size();
-        while (end > 0) {
-            const auto& e = all[end - 1];
-            if (e && e->timestamp.isValid())
-                break;
-            --end;
-        }
-        if (end > 0 && all.first() && all.first()->timestamp.isValid()) {
-            fullMin = qMin(fullMin, all.first()->timestamp.toMSecsSinceEpoch());
-            fullMax = qMax(fullMax, all[end - 1]->timestamp.toMSecsSinceEpoch());
+        const auto range = m_model->fullTimeRange();
+        if (range.first.isValid()) {
+            fullMin = qMin(fullMin, range.first.toMSecsSinceEpoch());
+            fullMax = qMax(fullMax, range.second.toMSecsSinceEpoch());
         }
     }
 

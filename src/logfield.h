@@ -24,6 +24,10 @@ struct FieldSpan {
     QStringView view(const QString& msg) const noexcept {
         return isValid() ? QStringView(msg).mid(start, length) : QStringView{};
     }
+    /// То же для текста, доступного только как view (индексный бэкенд).
+    QStringView view(QStringView msg) const noexcept {
+        return isValid() ? msg.mid(start, length) : QStringView{};
+    }
 };
 
 // ============================================================
@@ -52,6 +56,10 @@ struct LogEntryFields {
 
     /// Returns the view for field index \a i into \a msg.
     QStringView get(int i, const QString& msg) const noexcept {
+        return (i >= 0 && i < spans.size()) ? spans[i].view(msg) : QStringView{};
+    }
+    /// То же для текста, доступного только как view (индексный бэкенд).
+    QStringView get(int i, QStringView msg) const noexcept {
         return (i >= 0 && i < spans.size()) ? spans[i].view(msg) : QStringView{};
     }
 

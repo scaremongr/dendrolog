@@ -14,3 +14,6 @@ LogViewer.ini
 
 # Python
 __pycache__/
+
+# Generated test fixtures (scripts/generate_test_log.py)
+testdata/
