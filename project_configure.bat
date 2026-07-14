@@ -1,9 +1,23 @@
 @echo off
-REM Скрипт для настройки переменных окружения и запуска CMake
-REM Путь к Qt, при необходимости измените на ваш путь установки Qt
-set QT_PATH=C:\Qt\6.8.3\msvc2022_64
+REM Скрипт для настройки переменных окружения и запуска CMake.
+REM Путь к Qt определяется автоматически (см. scripts\find-qt.ps1).
+REM Для нестандартной установки задайте переменную окружения QT_PATH вручную:
+REM     set QT_PATH=C:\Qt\6.11.1\msvc2022_64
 
-echo Настройка переменных окружения для Qt...
+if defined QT_PATH goto :qt_found
+
+echo Поиск установленного Qt...
+for /f "usebackq delims=" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\find-qt.ps1"`) do set "QT_PATH=%%p"
+
+if not defined QT_PATH (
+    echo Не удалось найти установку Qt6 ^(кит MSVC x64^).
+    echo Установите Qt либо задайте переменную окружения QT_PATH вручную, например:
+    echo     set QT_PATH=C:\Qt\6.11.1\msvc2022_64
+    pause
+    exit /b 1
+)
+
+:qt_found
 set CMAKE_PREFIX_PATH=%QT_PATH%
 echo Путь к Qt установлен: %CMAKE_PREFIX_PATH%
 
