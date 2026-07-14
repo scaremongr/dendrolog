@@ -12,7 +12,6 @@ enum class TokenType {
     Word,
     Whitespace,
     Punctuation,
-    QuotedString,
     Url,
     FilePath,
     HexLiteral,

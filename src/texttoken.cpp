@@ -11,7 +11,7 @@
 // Каждая функция возвращает {start, end} при успехе или {-1, -1} при промахе.
 // "end" — позиция за последним символом (полуоткрытый интервал, как в Qt).
 //
-// Приоритет: quoted-string > URL > file-path > hex-literal > IPv4 >
+// Приоритет: timestamp > URL > file-path > hex-literal > IPv4 >
 //            simple-filename > decimal-number > word (fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
@@ -30,31 +30,6 @@ std::pair<int,int> expandFromPos(const QString& text, int pos, Pred pred)
     while (start > 0             && pred(text[start - 1])) --start;
     while (end   < text.length() && pred(text[end]))       ++end;
     return {start, end};
-}
-
-// ── Строка в кавычках: "..." или '...' (включая сами кавычки) ───────────────
-std::pair<int,int> detectQuotedString(const QString& text, int pos)
-{
-    if (pos >= text.length()) return {-1, -1};
-
-    const auto findClosing = [&](int open, QChar q) -> std::pair<int,int> {
-        for (int i = open + 1; i < text.length(); ++i) {
-            if (text[i] == q && (i == 0 || text[i - 1] != '\\')) return {open, i + 1};
-            if (text[i] == '\n') break;
-        }
-        return {-1, -1};
-    };
-
-    const QChar ch = text[pos];
-    if (ch == '"' || ch == '\'') return findClosing(pos, ch);
-
-    // Поиск открывающей кавычки влево (в пределах строки)
-    for (int i = pos - 1; i >= 0; --i) {
-        const QChar c = text[i];
-        if (c == '\n') break;
-        if (c == '"' || c == '\'') return findClosing(i, c);
-    }
-    return {-1, -1};
 }
 
 // ── URL: произвольная схема вида  scheme://… ─────────────────────────────────
@@ -266,7 +241,6 @@ Token findDoubleClickToken(const QString& text, int pos)
 {
     pos = std::clamp(pos, 0, static_cast<int>(text.length()));
     std::pair<int,int> r;
-    if ((r = detectQuotedString  (text, pos)).first >= 0) return { r.first, r.second, TokenType::QuotedString  };
     if ((r = detectTimestamp     (text, pos)).first >= 0) return { r.first, r.second, TokenType::Timestamp      };
     if ((r = detectUrl           (text, pos)).first >= 0) return { r.first, r.second, TokenType::Url            };
     if ((r = detectFilePath      (text, pos)).first >= 0) return { r.first, r.second, TokenType::FilePath       };
