@@ -21,6 +21,12 @@
 ## Features
 
 - **Multi-file tabs** — open several files into one tab, merged by timestamp.
+- **Huge files** — multi-gigabyte logs open without being loaded into RAM: a
+  compact line index (~10 bytes per line) keeps scrolling, filtering and
+  search responsive while the text stays on disk.
+- **Directory scanner** — scan a whole folder of logs into a sortable tree:
+  per-file entry counts, time ranges, warn/error/fatal counts and sizes;
+  narrow it down by content or date range and open files right from the results.
 - **Field schemas** — split entries into structured fields (timestamp, level,
   thread, message…); auto-detect from a sample line or import a **Grok** expression.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
