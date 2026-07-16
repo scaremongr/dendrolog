@@ -1,15 +1,28 @@
 #include "entrydetailspanel.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include "cardframe.h"
 #include "logentry.h"
 
+#include <QAbstractTextDocumentLayout>
+#include <QApplication>
+#include <QClipboard>
+#include <QCursor>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QJsonValue>
+#include <QLabel>
+#include <QScrollBar>
+#include <QSettings>
 #include <QShowEvent>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QToolButton>
+#include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -24,6 +37,9 @@ constexpr int kMaxJsonScanChars     = 256 * 1024; // сканируем на JSO
 constexpr int kMaxJsonCandidates    = 64;         // попыток разбора кандидатов на запись
 constexpr int kMaxJsonBlocks        = 3;          // показываемых JSON-фрагментов
 constexpr int kMaxJsonHtmlChars     = 128 * 1024; // бюджет HTML на один JSON-фрагмент
+
+// Группа настроек панели в общем DendroLog.ini (см. AppSettings::iniFilePath).
+const QLatin1String kSettingsGroup("EntryDetailsPanel");
 
 QColor mixColors(const QColor& a, const QColor& b, qreal weightB)
 {
@@ -260,15 +276,58 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
     : QWidget(parent)
 {
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+    layout->setContentsMargins(3, 3, 3, 0);
+    layout->setSpacing(3);
+
+    // ---- Шапка: какие секции показывать (стиль Text Filters: CardFrame
+    // с плоскими tool-кнопками; включённая секция тонируется highlight'ом).
+    auto* card = new CardFrame(this);
+    card->setAccentColor(palette().color(QPalette::Mid)); // нейтральный акцент
+    auto* toggleRow = new QHBoxLayout();
+    toggleRow->setSpacing(2);
+    toggleRow->addWidget(new QLabel(tr("Show:"), card));
+
+    const QColor hl = palette().color(QPalette::Highlight);
+    const QString toggleStyle = QStringLiteral(
+        "QToolButton { padding: 1px 7px; border: 1px solid transparent; border-radius: 3px; }"
+        "QToolButton:hover { background-color: rgba(%1,%2,%3,30); }"
+        "QToolButton:checked { background-color: rgba(%1,%2,%3,60);"
+        " border: 1px solid rgba(%1,%2,%3,120); }")
+        .arg(hl.red()).arg(hl.green()).arg(hl.blue());
+    const auto makeToggle = [&](const QString& text, const QString& toolTip) {
+        QToolButton* btn = card->makeToolButton(text, toolTip);
+        btn->setCheckable(true);
+        btn->setChecked(true);
+        btn->setStyleSheet(toggleStyle);
+        connect(btn, &QToolButton::toggled, this, [this]() {
+            saveSectionSettings();
+            scheduleRebuild();
+        });
+        toggleRow->addWidget(btn);
+        return btn;
+    };
+    m_headerButton  = makeToggle(tr("Header"),
+        tr("Level, timestamp, source file and line numbers"));
+    m_fieldsButton  = makeToggle(tr("Fields"),
+        tr("Fields extracted by the active schema"));
+    m_messageButton = makeToggle(tr("Message"),
+        tr("Full text of the logical entry (all its lines)"));
+    m_jsonButton    = makeToggle(tr("JSON"),
+        tr("Pretty-printed JSON fragments found in the entry text"));
+    toggleRow->addStretch(1);
+    card->rowsLayout()->addLayout(toggleRow);
+    layout->addWidget(card);
 
     m_browser = new QTextBrowser(this);
     m_browser->setOpenLinks(false);
     m_browser->setFrameShape(QFrame::NoFrame);
     m_browser->document()->setDocumentMargin(8);
-    layout->addWidget(m_browser);
+    // Ссылки "copy:*" в заголовках секций — копирование в буфер обмена.
+    connect(m_browser, &QTextBrowser::anchorClicked,
+            this, &EntryDetailsPanel::onAnchorClicked);
+    layout->addWidget(m_browser, 1);
 
+    loadSectionSettings();
     clearEntry();
 }
 
@@ -293,10 +352,8 @@ void EntryDetailsPanel::clearEntry()
 void EntryDetailsPanel::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
-    if (m_dirty) {
-        m_browser->setHtml(buildHtml());
-        m_dirty = false;
-    }
+    if (m_dirty)
+        rebuildNow();
 }
 
 void EntryDetailsPanel::scheduleRebuild()
@@ -305,11 +362,207 @@ void EntryDetailsPanel::scheduleRebuild()
         m_dirty = true;
         return;
     }
-    m_browser->setHtml(buildHtml());
-    m_dirty = false;
+    rebuildNow();
 }
 
-QString EntryDetailsPanel::buildHtml() const
+// ---------------------------------------------------------------------------
+// Персист выбора секций: общий DendroLog.ini, группа [EntryDetailsPanel].
+// Пишем сразу по клику — переключение секций редкое, а состояние не должно
+// теряться при аварийном завершении.
+// ---------------------------------------------------------------------------
+
+void EntryDetailsPanel::loadSectionSettings()
+{
+    QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+    s.beginGroup(kSettingsGroup);
+    const auto restore = [&s](QToolButton* btn, const char* key) {
+        btn->blockSignals(true); // без save/rebuild на каждую кнопку
+        btn->setChecked(s.value(QLatin1String(key), true).toBool());
+        btn->blockSignals(false);
+    };
+    restore(m_headerButton,  "showHeader");
+    restore(m_fieldsButton,  "showFields");
+    restore(m_messageButton, "showMessage");
+    restore(m_jsonButton,    "showJson");
+    const QStringList collapsed =
+        s.value(QStringLiteral("collapsedFields")).toStringList();
+    m_collapsedFields = QSet<QString>(collapsed.begin(), collapsed.end());
+    s.endGroup();
+}
+
+void EntryDetailsPanel::saveSectionSettings() const
+{
+    QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+    s.beginGroup(kSettingsGroup);
+    s.setValue(QStringLiteral("showHeader"),  m_headerButton->isChecked());
+    s.setValue(QStringLiteral("showFields"),  m_fieldsButton->isChecked());
+    s.setValue(QStringLiteral("showMessage"), m_messageButton->isChecked());
+    s.setValue(QStringLiteral("showJson"),    m_jsonButton->isChecked());
+    s.setValue(QStringLiteral("collapsedFields"),
+               QStringList(m_collapsedFields.begin(), m_collapsedFields.end()));
+    s.endGroup();
+}
+
+// ---------------------------------------------------------------------------
+// Перестроение с сохранением позиции чтения.
+//
+// Прокрутка запоминается не в пикселях, а как «секция в верху вьюпорта +
+// смещение внутри неё»: высота секций от записи к записи меняется, а вот
+// сам интерес пользователя («я смотрю JSON») — нет. Если прежней секции в
+// новой записи не оказалось (например, JSON #2), откатываемся к ближайшей
+// предыдущей по каноническому порядку.
+// ---------------------------------------------------------------------------
+
+void EntryDetailsPanel::rebuildNow()
+{
+    QScrollBar* vbar = m_browser->verticalScrollBar();
+
+    QString topSection;
+    int offsetInSection = 0;
+    if (m_hadEntry && m_line) { // переход запись→запись — сохраняем позицию
+        const int oldY = vbar->value();
+        const QVector<SectionAnchor> anchors = collectSectionAnchors();
+        for (const SectionAnchor& a : anchors) {
+            if (a.y > oldY)
+                break;
+            topSection = a.name;
+            offsetInSection = oldY - a.y;
+        }
+    }
+
+    m_browser->setHtml(buildHtml());
+    m_dirty = false;
+    const bool hasEntry = (m_line != nullptr);
+
+    if (hasEntry && !topSection.isEmpty()) {
+        const QVector<SectionAnchor> anchors = collectSectionAnchors();
+        const auto findY = [&anchors](const QString& name) {
+            for (const SectionAnchor& a : anchors)
+                if (a.name == name)
+                    return a.y;
+            return -1;
+        };
+        static const QStringList kOrder = {
+            QStringLiteral("sec-header"), QStringLiteral("sec-fields"),
+            QStringLiteral("sec-message"), QStringLiteral("sec-json0"),
+            QStringLiteral("sec-json1"), QStringLiteral("sec-json2"),
+        };
+        int y = findY(topSection);
+        int delta = offsetInSection;
+        if (y < 0) {
+            delta = 0; // смещение внутри исчезнувшей секции не имеет смысла
+            for (int i = int(kOrder.indexOf(topSection)) - 1; i >= 0 && y < 0; --i)
+                y = findY(kOrder.at(i));
+        }
+        if (y >= 0) {
+            int target = y + delta;
+            // Секция в новой записи короче прежней — не заезжаем в следующую.
+            for (const SectionAnchor& a : anchors) {
+                if (a.y > y) {
+                    target = qMin(target, a.y - 1);
+                    break;
+                }
+            }
+            vbar->setValue(qBound(0, target, vbar->maximum()));
+        }
+    }
+    m_hadEntry = hasEntry;
+}
+
+QVector<EntryDetailsPanel::SectionAnchor> EntryDetailsPanel::collectSectionAnchors() const
+{
+    QVector<SectionAnchor> anchors;
+    const QTextDocument* doc = m_browser->document();
+    QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QStringList names = it.fragment().charFormat().anchorNames();
+            if (names.isEmpty() || !names.first().startsWith(QLatin1String("sec-")))
+                continue;
+            // Якорь может быть размазан по нескольким фрагментам (вложенные
+            // span'ы внутри <a name>) — берём только первое вхождение.
+            if (!anchors.isEmpty() && anchors.last().name == names.first())
+                continue;
+            anchors.append({ names.first(),
+                             int(docLayout->blockBoundingRect(block).top()) });
+        }
+    }
+    return anchors;
+}
+
+// ---------------------------------------------------------------------------
+
+const LogEntry* EntryDetailsPanel::fieldsSource() const
+{
+    // У continuation-строк fields пуст — берём их с первой строки логической
+    // записи, у которой они извлеклись (обычно это первая строка).
+    for (const auto& e : m_logicalLines)
+        if (e && !e->fields().isEmpty())
+            return e.get();
+    return nullptr;
+}
+
+QString EntryDetailsPanel::joinedMessage() const
+{
+    QStringList parts;
+    parts.reserve(m_logicalLines.size());
+    for (const auto& e : m_logicalLines)
+        if (e)
+            parts << e->message();
+    return parts.join(QLatin1Char('\n'));
+}
+
+void EntryDetailsPanel::onAnchorClicked(const QUrl& url)
+{
+    const QString link = url.toString();
+
+    // Свернуть/развернуть поле секции Fields. В ссылке — индекс поля (имена
+    // могут содержать что угодно), в наборе — имя (переживает смену схемы).
+    if (link.startsWith(QLatin1String("fold:"))) {
+        const int idx = link.mid(5).toInt();
+        if (idx >= 0 && idx < m_fieldNames.size()) {
+            const QString& name = m_fieldNames.at(idx);
+            if (!m_collapsedFields.remove(name))
+                m_collapsedFields.insert(name);
+            saveSectionSettings();
+            scheduleRebuild();
+        }
+        return;
+    }
+
+    if (!link.startsWith(QLatin1String("copy:")) || !m_line)
+        return;
+    const QString what = link.mid(5);
+
+    QString text;
+    if (what == QLatin1String("message")) {
+        text = joinedMessage(); // полный, без обрезки для отображения
+    } else if (what == QLatin1String("fields")) {
+        if (const LogEntry* src = fieldsSource()) {
+            QStringList rows;
+            const int count = int(qMin(m_fieldNames.size(),
+                                       qsizetype(src->fields().size())));
+            for (int i = 0; i < count; ++i)
+                if (src->fields().has(i))
+                    rows << m_fieldNames.at(i) + QLatin1Char('\t')
+                            + src->fields().get(i, src->message()).toString();
+            text = rows.join(QLatin1Char('\n'));
+        }
+    } else if (what.startsWith(QLatin1String("json"))) {
+        const int idx = what.mid(4).toInt();
+        if (idx >= 0 && idx < m_jsonBlocks.size())
+            text = QString::fromUtf8(m_jsonBlocks.at(idx).toJson(QJsonDocument::Indented));
+    }
+    if (text.isNull())
+        return;
+
+    QApplication::clipboard()->setText(text);
+    QToolTip::showText(QCursor::pos(), tr("Copied"), m_browser);
+}
+
+// ---------------------------------------------------------------------------
+
+QString EntryDetailsPanel::buildHtml()
 {
     const QPalette pal = m_browser->palette();
     const QColor textColor = pal.color(QPalette::Text);
@@ -318,22 +571,40 @@ QString EntryDetailsPanel::buildHtml() const
         QStringLiteral("font-family:'%1'; white-space:pre-wrap;")
             .arg(AppSettings::instance().fontFamily());
 
-    const auto sectionHeader = [&muted](const QString& title) {
-        return QStringLiteral(
-                   "<div style=\"color:%1;font-weight:bold;margin-top:12px;\">%2</div>")
-            .arg(muted.name(), title);
+    // Заголовок секции: якорь sec-<id> для восстановления прокрутки и
+    // (опционально) ссылка ⧉ copy:<copyId> для копирования содержимого.
+    const auto sectionHeader = [&muted](const QString& title, const QString& id,
+                                        const QString& copyId = QString()) {
+        QString h = QStringLiteral(
+                        "<div style=\"color:%1;font-weight:bold;margin-top:12px;\">"
+                        "<a name=\"sec-%2\">%3</a>")
+                        .arg(muted.name(), id, title);
+        if (!copyId.isEmpty())
+            h += QStringLiteral("&nbsp;&nbsp;<a href=\"copy:%1\" "
+                                "style=\"color:%2;text-decoration:none;\">⧉</a>")
+                     .arg(copyId, muted.name());
+        h += QLatin1String("</div>");
+        return h;
+    };
+    const auto mutedDiv = [&muted](const QString& escapedText) {
+        return QStringLiteral("<div style=\"color:%1;\">%2</div>")
+            .arg(muted.name(), escapedText);
     };
 
-    if (!m_line) {
-        return QStringLiteral("<div style=\"color:%1;\">%2</div>")
-            .arg(muted.name(),
-                 tr("Select a row in the log view to see its details."));
-    }
+    m_jsonBlocks.clear();
+
+    if (!m_line)
+        return mutedDiv(tr("Select a row in the log view to see its details."));
+
+    const bool showHeader  = m_headerButton->isChecked();
+    const bool showFields  = m_fieldsButton->isChecked();
+    const bool showMessage = m_messageButton->isChecked();
+    const bool showJson    = m_jsonButton->isChecked();
 
     QString html;
 
-    // ---- Шапка: уровень, таймстамп, файл и позиция -------------------------
-    {
+    // ---- Header: уровень, таймстамп, файл и позиция -------------------------
+    if (showHeader) {
         const AppTheme& t = AppTheme::instance();
         QString head;
         if (m_line->level() != LogLevel::Unknown)
@@ -346,7 +617,7 @@ QString EntryDetailsPanel::buildHtml() const
                                  .toString(QStringLiteral("dd.MM.yyyy HH:mm:ss.zzz")));
         else
             head += colorSpan(muted, tr("no timestamp"));
-        html += QStringLiteral("<div>%1</div>").arg(head);
+        html += QStringLiteral("<div><a name=\"sec-header\">%1</a></div>").arg(head);
 
         QStringList location;
         if (m_line->sourceFile())
@@ -362,85 +633,95 @@ QString EntryDetailsPanel::buildHtml() const
         // «запись #0»), не показываем его, чтобы не путать.
         if (!m_line->isPlainText())
             location << tr("entry #%1").arg(m_line->logicalEntryId());
-        html += QStringLiteral("<div style=\"color:%1;\">%2</div>")
-                    .arg(muted.name(), location.join(QStringLiteral(" · ")).toHtmlEscaped());
+        html += mutedDiv(location.join(QStringLiteral(" · ")).toHtmlEscaped());
     }
 
     // ---- Извлечённые поля ---------------------------------------------------
-    // У continuation-строк fields пуст — берём их с первой строки логической
-    // записи, у которой они извлеклись (обычно это первая строка). Для строк
-    // свободного текста секцию не показываем вовсе: полей там нет по
+    // Для строк свободного текста секцию не показываем вовсе: полей там нет по
     // определению, а примечание «не совпало со схемой» на каждой строке
     // не-лог файла — только шум.
-    if (!m_fieldNames.isEmpty() && !m_line->isPlainText()) {
-        const LogEntry* fieldsSource = nullptr;
-        for (const auto& e : m_logicalLines) {
-            if (e && !e->fields().isEmpty()) {
-                fieldsSource = e.get();
-                break;
-            }
-        }
-        html += sectionHeader(tr("Fields"));
-        if (fieldsSource) {
+    if (showFields && !m_fieldNames.isEmpty() && !m_line->isPlainText()) {
+        const LogEntry* src = fieldsSource();
+        html += sectionHeader(tr("Fields"), QStringLiteral("fields"),
+                              src ? QStringLiteral("fields") : QString());
+        if (src) {
             html += QLatin1String("<table cellspacing=\"0\" cellpadding=\"2\">");
             const int count = int(qMin(m_fieldNames.size(),
-                                       qsizetype(fieldsSource->fields().size())));
+                                       qsizetype(src->fields().size())));
             for (int i = 0; i < count; ++i) {
+                // Имя поля со стрелкой ▾/▸ — ссылка сворачивания (как узел
+                // tree view); у свёрнутого поля вместо значения «…».
+                const bool collapsed = m_collapsedFields.contains(m_fieldNames.at(i));
                 QString value;
-                if (fieldsSource->fields().has(i)) {
-                    value = fieldsSource->fields().get(i, fieldsSource->message()).toString();
+                if (!src->fields().has(i)) {
+                    value = colorSpan(muted, QStringLiteral("—"));
+                } else if (collapsed) {
+                    value = colorSpan(muted, QStringLiteral("…"));
+                } else {
+                    value = src->fields().get(i, src->message()).toString();
                     if (value.size() > kMaxFieldValueChars)
                         value = value.left(kMaxFieldValueChars) + QStringLiteral("…");
                     value = value.toHtmlEscaped();
-                } else {
-                    value = colorSpan(muted, QStringLiteral("—"));
                 }
                 html += QStringLiteral(
-                            "<tr><td style=\"color:%1;\">%2&nbsp;&nbsp;</td>"
-                            "<td style=\"%3\">%4</td></tr>")
-                            .arg(muted.name(), m_fieldNames.at(i).toHtmlEscaped(),
+                            "<tr><td><a href=\"fold:%1\" style=\"color:%2;"
+                            "text-decoration:none;\">%3&nbsp;%4</a>&nbsp;&nbsp;</td>"
+                            "<td style=\"%5\">%6</td></tr>")
+                            .arg(QString::number(i), muted.name(),
+                                 collapsed ? QStringLiteral("▸") : QStringLiteral("▾"),
+                                 m_fieldNames.at(i).toHtmlEscaped(),
                                  monoStyle, value);
             }
             html += QLatin1String("</table>");
         } else {
-            html += QStringLiteral("<div style=\"color:%1;\">%2</div>")
-                        .arg(muted.name(),
-                             tr("The line does not match the extraction schema."));
+            html += mutedDiv(tr("The line does not match the extraction schema."));
         }
     }
 
-    // ---- Полный текст логической записи -------------------------------------
+    // Текст записи собирается даже при скрытой секции Message: по нему же
+    // ищутся JSON-фрагменты.
     QString message;
-    {
-        QStringList parts;
-        parts.reserve(m_logicalLines.size());
-        for (const auto& e : m_logicalLines)
-            if (e)
-                parts << e->message();
-        message = parts.join(QLatin1Char('\n'));
+    bool messageTruncated = false;
+    if (showMessage || showJson) {
+        message = joinedMessage();
+        messageTruncated = message.size() > kMaxMessageChars;
+        if (messageTruncated)
+            message.truncate(kMaxMessageChars);
     }
-    const bool messageTruncated = message.size() > kMaxMessageChars;
-    if (messageTruncated)
-        message.truncate(kMaxMessageChars);
 
-    html += sectionHeader(m_logicalLines.size() > 1 ? tr("Message (%1 lines)")
-                                                          .arg(m_logicalLines.size())
-                                                    : tr("Message"));
-    html += QStringLiteral("<div style=\"%1\">%2</div>")
-                .arg(monoStyle, message.toHtmlEscaped());
-    if (messageTruncated)
-        html += QStringLiteral("<div style=\"color:%1;\">%2</div>")
-                    .arg(muted.name(), tr("… message truncated for display"));
+    // ---- Полный текст логической записи -------------------------------------
+    if (showMessage) {
+        html += sectionHeader(m_logicalLines.size() > 1
+                                  ? tr("Message (%1 lines)").arg(m_logicalLines.size())
+                                  : tr("Message"),
+                              QStringLiteral("message"), QStringLiteral("message"));
+        html += QStringLiteral("<div style=\"%1\">%2</div>")
+                    .arg(monoStyle, message.toHtmlEscaped());
+        if (messageTruncated)
+            html += mutedDiv(tr("… message truncated for display"));
+    }
 
     // ---- Эвристика: JSON-фрагменты в тексте записи --------------------------
-    const QVector<QJsonDocument> jsonBlocks = detectJsonBlocks(message);
-    JsonHtmlWriter writer;
-    for (int i = 0; i < jsonBlocks.size(); ++i) {
-        html += sectionHeader(jsonBlocks.size() > 1 ? tr("JSON #%1").arg(i + 1)
-                                                    : tr("JSON"));
-        html += QStringLiteral("<div style=\"%1\">%2</div>")
-                    .arg(monoStyle, writer.toHtml(jsonBlocks.at(i), muted));
+    if (showJson) {
+        m_jsonBlocks = detectJsonBlocks(message);
+        JsonHtmlWriter writer;
+        for (int i = 0; i < m_jsonBlocks.size(); ++i) {
+            html += sectionHeader(m_jsonBlocks.size() > 1 ? tr("JSON #%1").arg(i + 1)
+                                                          : tr("JSON"),
+                                  QStringLiteral("json%1").arg(i),
+                                  QStringLiteral("json%1").arg(i));
+            html += QStringLiteral("<div style=\"%1\">%2</div>")
+                        .arg(monoStyle, writer.toHtml(m_jsonBlocks.at(i), muted));
+        }
     }
 
+    // ---- Заглушки: запись есть, а показывать нечего --------------------------
+    if (html.isEmpty()) {
+        if (!showHeader && !showFields && !showMessage && !showJson)
+            return mutedDiv(tr("All sections are hidden — enable them on the bar above."));
+        if (showJson && !showHeader && !showFields && !showMessage)
+            return mutedDiv(tr("No JSON found in this entry."));
+        return mutedDiv(tr("Nothing to show for this entry."));
+    }
     return html;
 }
