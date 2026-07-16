@@ -2542,6 +2542,60 @@ QModelIndex LogListView::moveCursor(CursorAction cursorAction,
     return model()->index(row, 0);
 }
 
+// Экранный прямоугольник строки по собственной геометрии (координаты
+// viewport). Для строк далеко за пределами вьюпорта возвращаем пустой rect —
+// база использует visualRect только для точечных update/hit-test видимого.
+QRect LogListView::visualRect(const QModelIndex& index) const
+{
+    if (!index.isValid() || !model() || index.row() < 0
+        || index.row() >= model()->rowCount())
+        return QRect();
+    const qint64 y = rowYOffset(index.row()) - scrollContentY();
+    if (qAbs(y) > (qint64(1) << 30))
+        return QRect(); // за пределами разумного экранного диапазона int
+    return QRect(0, int(y), viewport()->width(), getRowHeight(index.row()));
+}
+
+// Строка под точкой вьюпорта; за пределами контента — invalid.
+QModelIndex LogListView::indexAt(const QPoint& point) const
+{
+    if (!model())
+        return QModelIndex();
+    int row = -1;
+    qint64 rowTop = 0;
+    if (!getRowAtContentY(point.y() + scrollContentY(), row, rowTop))
+        return QModelIndex();
+    return model()->index(row, 0);
+}
+
+// Замена базового QListView::setSelection, читающего внутреннюю раскладку
+// (здесь она пуста — см. doItemsLayout). Критично для клавиатурной навигации:
+// QAbstractItemView::keyPressEvent после selectionModel()->setCurrentIndex
+// зовёт setSelection(rect 1×1 в центре новой текущей строки, ClearAndSelect) —
+// базовая реализация не находила строку и стирала выделение. Пустая область
+// (ниже контента) по-прежнему даёт пустой QItemSelection: ClearAndSelect
+// снимает выделение, как и в базовом поведении.
+void LogListView::setSelection(const QRect& rect,
+                               QItemSelectionModel::SelectionFlags command)
+{
+    if (!selectionModel() || !model())
+        return;
+    QItemSelection selection;
+    const QRect r = rect.normalized();
+    const qint64 top    = qMax<qint64>(0, r.top() + scrollContentY());
+    const qint64 bottom = r.bottom() + scrollContentY();
+    int firstRow = -1;
+    qint64 firstTop = 0;
+    // getRowAtContentY отвергает точки ниже конца контента; rowAtY для нижней
+    // границы клампится к последней строке. Обе — O(log N) по prefix-суммам.
+    if (bottom >= 0 && getRowAtContentY(top, firstRow, firstTop)) {
+        const int last = rowAtY(bottom);
+        selection.select(model()->index(firstRow, 0),
+                         model()->index(qMax(firstRow, last), 0));
+    }
+    selectionModel()->select(selection, command);
+}
+
 // Предотвращаем исчезновение текста при наведении курсора
 bool LogListView::viewportEvent(QEvent *event)
 {

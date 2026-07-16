@@ -157,6 +157,11 @@ public:
     bool isWordWrap() const { return m_wordWrapEnabled; }
     void setModel(QAbstractItemModel *model) override;
     void scrollTo(const QModelIndex& index, ScrollHint hint = EnsureVisible) override;
+    // Геометрия по собственным prefix-суммам (см. комментарий у doItemsLayout):
+    // базовые реализации QListView читают его внутреннюю раскладку, которая
+    // здесь намеренно не строится, и возвращают мусор/пустоту.
+    QRect visualRect(const QModelIndex& index) const override;
+    QModelIndex indexAt(const QPoint& point) const override;
 
     // ---- Inline-подсветка совпадений (универсальная) ----------------------
     // Источник паттернов внешний (фильтры, поиск, любой модуль) — view лишь
@@ -213,12 +218,17 @@ protected:
     // Нейтрализация внутренней раскладки QListView (flowPositions): она O(N)
     // по строкам на каждый rowsInserted/reset — сотни мс на десятках миллионов
     // строк при каждом батче загрузки. Вся геометрия строк у view своя
-    // (rowAtY/rowYOffset/prefix-суммы), базовые visualRect/indexAt не
-    // используются нигде; единственный их потребитель — базовый moveCursor —
-    // замещён собственным.
+    // (rowAtY/rowYOffset/prefix-суммы), поэтому ВСЕ базовые виртуалки, читающие
+    // внутреннюю раскладку, замещены собственными: moveCursor, visualRect,
+    // indexAt и setSelection. Последний критичен для клавиатурной навигации:
+    // QAbstractItemView::keyPressEvent после setCurrentIndex зовёт
+    // setSelection(rect 1×1, ClearAndSelect), и базовая реализация, не найдя
+    // строку в пустой раскладке, СТИРАЛА только что сделанное выделение.
     void doItemsLayout() override;
     QModelIndex moveCursor(CursorAction cursorAction,
                            Qt::KeyboardModifiers modifiers) override;
+    void setSelection(const QRect& rect,
+                      QItemSelectionModel::SelectionFlags command) override;
 
 private:
     // ========== Подсветка парных скобок ======================================
