@@ -6,6 +6,25 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-17
+
+### Added
+- Large-file support: an indexed log store keeps multi-gigabyte logs on disk
+  (~10 bytes of RAM per line) while scrolling, filtering and search stay
+  responsive.
+- Entry Details panel is now configurable and stateful: choose which sections
+  to show (Header / Fields / Message / JSON); the choice persists.
+- `project_configure.bat` auto-detects the installed Qt (override with
+  `QT_PATH`).
+- README: screenshot, directory scanner and large-file documentation.
+
+### Changed
+- Improved Log Fields parsing and reworked the schema editor.
+- Double-click selection no longer treats quoted strings as a single token.
+
+### Fixed
+- Keyboard-navigation selection in the log list.
+
 ## [0.1.0] — 2026-07-10
 
 First public release under the new name **DendroLog** (previously an unnamed
