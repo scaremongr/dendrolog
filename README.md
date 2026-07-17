@@ -6,8 +6,7 @@
 
 <p align="center">
   <b>A fast desktop viewer for log files</b> — multi-file tabs, structured field
-  extraction, filtering, highlighting and live reload.<br/>
-  <i>Dendrochronology reads time from tree rings; DendroLog reads it from your logs.</i>
+  extraction, filtering, highlighting and live reload. For Windows and Linux.
 </p>
 
 <p align="center">
@@ -16,7 +15,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"/></a>
 </p>
 
-<!-- TODO: screenshot/GIF — docs/screenshot.png -->
+<p align="center">
+  <img src="docs/screenshot.png" alt="DendroLog main window: log entries with structured fields, timeline histogram and filter panel" width="850"/>
+</p>
 
 ## Features
 
@@ -71,6 +72,12 @@ DendroLog stores settings in the user profile
 (`%LOCALAPPDATA%/DendroLog` on Windows, `~/.config/DendroLog` on Linux).
 If a file named `portable` (or an existing `DendroLog.ini`) sits next to the
 executable, settings are kept there instead.
+
+## Feedback
+
+Bug reports and feature requests are welcome —
+[open an issue](https://github.com/scaremongr/dendrolog/issues).
+If DendroLog is useful to you, a ⭐ helps others find it.
 
 ## License
 
