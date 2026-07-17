@@ -48,6 +48,20 @@ public:
     /// стиль — подсказка «внутри ⚙ есть настройки».
     void tintToolButton(QToolButton* button, bool hasContent) const;
 
+    // ---- Палитро-зависимые «приглушённые» цвета -------------------------
+    // QSS palette(mid) на тёмных палитрах почти сливается с фоном, поэтому
+    // весь неяркий «хром» (рамки, глифы-связки, подписи) смешивается из
+    // WindowText и Window в коде. t = доля второго цвета (0 → a, 1 → b).
+
+    static QColor mixedColor(const QColor& a, const QColor& b, qreal t);
+    /// Рамки и разделители: 35% текста / 65% фона.
+    static QColor mutedBorderColor(const QPalette& palette);
+    /// Вторичные глифы и подписи: 65% текста / 35% фона.
+    static QColor mutedTextColor(const QPalette& palette);
+
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
     void applyFrameStyle();
 

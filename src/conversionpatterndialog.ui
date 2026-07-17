@@ -15,8 +15,8 @@
   </property>
   <property name="minimumSize">
    <size>
-    <width>980</width>
-    <height>620</height>
+    <width>780</width>
+    <height>560</height>
    </size>
   </property>
   <layout class="QVBoxLayout" name="mainLayout">
@@ -104,22 +104,15 @@
            </widget>
           </item>
           <item>
-           <widget class="QPushButton" name="importSchemaBtn">
+           <widget class="QToolButton" name="moreSchemaBtn">
             <property name="text">
-             <string>Import…</string>
+             <string>⋯</string>
+            </property>
+            <property name="popupMode">
+             <enum>QToolButton::InstantPopup</enum>
             </property>
             <property name="toolTip">
-             <string>Import a schema file (*.json) — it is copied into the patterns folder.</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="exportSchemaBtn">
-            <property name="text">
-             <string>Export…</string>
-            </property>
-            <property name="toolTip">
-             <string>Export the selected schema to a *.json file you can share.</string>
+             <string>Import / export schemas and open the patterns folder.</string>
             </property>
            </widget>
           </item>
@@ -135,16 +128,6 @@
              </size>
             </property>
            </spacer>
-          </item>
-          <item>
-           <widget class="QToolButton" name="openFolderBtn">
-            <property name="text">
-             <string>📁</string>
-            </property>
-            <property name="toolTip">
-             <string>Open the patterns folder, where every schema is stored as a separate file.</string>
-            </property>
-           </widget>
           </item>
           <item>
            <widget class="QPushButton" name="moveSchemaUpBtn">

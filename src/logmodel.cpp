@@ -196,6 +196,11 @@ QStringList LogModel::sampleMessages(int maxCount) const
     return m_store->sampleMessages(maxCount);
 }
 
+QString LogModel::messageAt(int visibleRow) const
+{
+    return m_store->messageAt(visibleRow);
+}
+
 QVector<std::shared_ptr<LogEntry>> LogModel::logicalRecordLines(
     const std::shared_ptr<LogEntry>& line, int maxLines) const
 {

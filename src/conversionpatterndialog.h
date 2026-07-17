@@ -12,7 +12,7 @@
 
 class PatternBlockCard;
 class SeparatorNode;
-class QCloseEvent;
+class QAction;
 class QTimer;
 class QVBoxLayout;
 
@@ -54,8 +54,10 @@ public:
     /// Index of the chosen entry inside resultPatterns() (-1 if none chosen).
     int     chosenResultIndex() const { return m_chosenResultIndex; }
 
-protected:
-    void closeEvent(QCloseEvent* event) override;
+public slots:
+    /// Esc / X / Close all behave identically: per-schema edits are handled
+    /// by Apply/Revert, the (possibly reordered) schema list is committed.
+    void reject() override;
 
 private slots:
     void onAddSchema();
@@ -113,7 +115,7 @@ private:
 
     QStringList previewLines() const;
 
-    QStringList   m_fileSampleLines; ///< First lines of the active log, for the "reload sample" button.
+    QStringList   m_fileSampleLines; ///< Log lines at the current view position, for the "reload sample" button.
 
     QVector<PatternBlockCard*> m_cards;
     QVector<SeparatorNode*>    m_separators; ///< Links between cards: m_separators[i] sits after m_cards[i].
@@ -128,6 +130,10 @@ private:
     int           m_chosenResultIndex = -1;
     bool          m_syncing = false;
     bool          m_dirty = false;   ///< Editor changes not yet applied to the schema row.
+
+    QAction*      m_importAction = nullptr;     ///< Items of the "⋯" schema-list menu.
+    QAction*      m_exportAction = nullptr;
+    QAction*      m_openFolderAction = nullptr;
 
     Ui::ConversionPatternDialog* ui = nullptr;
 };

@@ -3,6 +3,8 @@
 
 #include <QWidget>
 
+class QFrame;
+class QLabel;
 class QLineEdit;
 class QStackedWidget;
 class QToolButton;
@@ -43,15 +45,23 @@ public:
 signals:
     void edited();
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
     void showAutoState();
     void showEditState(bool focus);
+    /// Palette-blended colours for the tie glyphs / chip border — QSS
+    /// palette(mid) is nearly invisible on dark palettes.
+    void applyMutedStyles();
 
     QStackedWidget* m_stack    = nullptr;
     QToolButton*    m_autoBtn  = nullptr;
     QLineEdit*      m_edit     = nullptr;
     QToolButton*    m_rxBtn    = nullptr;
     QToolButton*    m_resetBtn = nullptr;
+    QList<QLabel*>  m_ties;             ///< "─" glyphs before the node.
+    QFrame*         m_chip     = nullptr;
 };
 
 #endif // SEPARATORNODE_H

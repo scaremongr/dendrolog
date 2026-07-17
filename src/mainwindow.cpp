@@ -1045,11 +1045,24 @@ void MainWindow::onManagePatterns()
         m_patternList = SchemaStore::loadAll(order);
     }
 
-    // Offer first lines of the active log as live-preview samples.
+    // Offer log lines as live-preview samples, starting from the row the
+    // user is currently looking at (top of the log when nothing is
+    // selected) — schema problems usually live at the current position.
     QStringList sampleLines;
     if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) {
-        if (lv->model())
-            sampleLines = lv->model()->sampleMessages(8);
+        if (LogModel* model = lv->model()) {
+            const int total = model->rowCount();
+            int row = lv->view() ? lv->view()->currentIndex().row() : -1;
+            if (row < 0)
+                row = 0;
+            for (; row < total && sampleLines.size() < 8; ++row) {
+                const QString text = model->messageAt(row);
+                if (!text.trimmed().isEmpty())
+                    sampleLines.append(text);
+            }
+            if (sampleLines.isEmpty())
+                sampleLines = model->sampleMessages(8);
+        }
     }
 
     ConversionPatternDialog dlg(m_patternList, this, sampleLines, m_conversionPattern);

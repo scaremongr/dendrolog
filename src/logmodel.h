@@ -73,6 +73,9 @@ public:
     // Первые maxCount непустых строк лога — сэмплы для эвристики схемы.
     QStringList sampleMessages(int maxCount) const;
 
+    // Сырой текст видимой строки (прокси к LogStore::messageAt).
+    QString messageAt(int visibleRow) const;
+
     // Все строки логической записи, которой принадлежит line (включая её саму).
     QVector<std::shared_ptr<LogEntry>> logicalRecordLines(
         const std::shared_ptr<LogEntry>& line, int maxLines = 2000) const;

@@ -1,5 +1,8 @@
 #include "separatornode.h"
 
+#include "cardframe.h"
+
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -30,13 +33,12 @@ SeparatorNode::SeparatorNode(QWidget* parent)
         layout->setSpacing(2);
 
         auto* tie = new QLabel(QStringLiteral("─"), page);
-        tie->setStyleSheet(QStringLiteral("color: palette(mid); border: none;"));
+        m_ties.append(tie);
 
         m_autoBtn = new QToolButton(page);
         m_autoBtn->setText(QStringLiteral("· · ·"));
         m_autoBtn->setAutoRaise(true);
         m_autoBtn->setCursor(Qt::PointingHandCursor);
-        m_autoBtn->setStyleSheet(QStringLiteral("QToolButton { color: palette(mid); border: none; }"));
         m_autoBtn->setToolTip(tr("Auto separator: any spaces or tabs before the next block.\n"
                                  "Click to set an explicit separator (literal text or regex)."));
         layout->addWidget(tie);
@@ -53,15 +55,14 @@ SeparatorNode::SeparatorNode(QWidget* parent)
         layout->setSpacing(2);
 
         auto* tie = new QLabel(QStringLiteral("─"), page);
-        tie->setStyleSheet(QStringLiteral("color: palette(mid); border: none;"));
+        m_ties.append(tie);
 
         // The chip frame visually groups the separator controls, so its
         // own ✕ cannot be confused with the card's remove button.
         auto* chip = new QFrame(page);
         chip->setObjectName(QStringLiteral("glueChip"));
-        chip->setStyleSheet(QStringLiteral(
-            "QFrame#glueChip { border: 1px solid palette(mid); border-radius: 9px; }"));
         chip->setToolTip(tr("Separator before the next block."));
+        m_chip = chip;
         auto* chipLayout = new QHBoxLayout(chip);
         chipLayout->setContentsMargins(6, 1, 4, 1);
         chipLayout->setSpacing(2);
@@ -112,7 +113,31 @@ SeparatorNode::SeparatorNode(QWidget* parent)
             showAutoState();
     });
 
+    applyMutedStyles();
     showAutoState();
+}
+
+void SeparatorNode::applyMutedStyles()
+{
+    // Blended from the palette in code: QSS palette(mid) is nearly
+    // invisible on dark palettes ("─" ties and the "· · ·" auto button
+    // used to disappear there).
+    const QString glyph = CardFrame::mutedTextColor(palette()).name();
+    const QString border = CardFrame::mutedBorderColor(palette()).name();
+
+    for (QLabel* tie : m_ties)
+        tie->setStyleSheet(QStringLiteral("color: %1; border: none;").arg(glyph));
+    m_autoBtn->setStyleSheet(
+        QStringLiteral("QToolButton { color: %1; border: none; }").arg(glyph));
+    m_chip->setStyleSheet(QStringLiteral(
+        "QFrame#glueChip { border: 1px solid %1; border-radius: 9px; }").arg(border));
+}
+
+void SeparatorNode::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        applyMutedStyles();
 }
 
 void SeparatorNode::setSeparator(const QString& text, bool isRegex)

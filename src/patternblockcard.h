@@ -64,6 +64,9 @@ signals:
     void moveDownRequested();
     void removeRequested();
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 private slots:
     void onKindChanged();
 
@@ -71,6 +74,9 @@ private:
     void refreshFieldStates();
     void updateGearHighlight();
     void applyFrameStyle();
+    /// Palette-blended colour for the advanced-row labels (QSS
+    /// palette(mid) is nearly invisible on dark palettes).
+    void applyMutedLabelStyles();
 
     QComboBox*   m_kindCombo    = nullptr;
     QLineEdit*   m_nameEdit     = nullptr;

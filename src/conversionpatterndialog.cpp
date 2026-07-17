@@ -2,12 +2,13 @@
 #include "ui_conversionpatterndialog.h"
 
 #include "appsettings.h"
+#include "cardframe.h"
 #include "patternblockcard.h"
 #include "patternheuristics.h"
 #include "schemastore.h"
 #include "separatornode.h"
 
-#include <QCloseEvent>
+#include <QAction>
 #include <QDesktopServices>
 #include <QDir>
 #include <QEventLoop>
@@ -72,16 +73,18 @@ QColor highlightColorForIndex(int index)
     return color;
 }
 
+// Palette placeholders (dark-theme safe): %1 = code background, %2 = muted
+// border. Text colours are inherited from the browser palette.
 static const char* kHelpHtml = R"HTML(
 <html>
 <head><style>
   body  { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10pt; margin: 6px 8px; }
-  h3    { margin: 10px 0 3px 0; color: #333; }
+  h3    { margin: 10px 0 3px 0; }
   table { border-collapse: collapse; }
   td, th { padding: 3px 8px 3px 2px; vertical-align: top; }
-  th    { text-align: left; border-bottom: 1px solid #ccc; color: #555; }
+  th    { text-align: left; border-bottom: 1px solid %2; }
   code  { font-family: Consolas, 'Courier New', monospace;
-          background: #f0f0f0; padding: 0 3px; border-radius: 2px; font-size: 9.5pt; }
+          background: %1; padding: 0 3px; border-radius: 2px; font-size: 9.5pt; }
   ul    { margin: 3px 0; padding-left: 16px; }
   li    { margin-bottom: 3px; }
 </style></head>
@@ -113,6 +116,10 @@ the colour of its card while you edit.</p>
       are found even when unexpected text precedes them, and they need no separator
       after them — these tokens are distinctive on their own. Two blocks may stand
       back-to-back when one of them is an anchor.</li>
+  <li><b>Skipping broken blocks.</b> When the separator or brackets of a plain-text
+      block are missing from a line, the parser skips the block and re-synchronizes
+      at the next anchor. Skipped fields stay empty; the leftover text is routed
+      into the first skipped free-text field and shown in red in the preview.</li>
   <li><b>Whitespace collapses.</b> Extra spaces and tabs between blocks are ignored
       automatically; you do not need separators for padding.</li>
 </ul>
@@ -246,7 +253,13 @@ bool probeMatchesWithinTimeout(const LogPattern& pattern,
             pattern.matchLine(line);
     }));
     timer.start(timeoutMs);
-    loop.exec();
+    // No user input while waiting: re-entering the dialog (a second "Use
+    // Selected" click, closing it) mid-probe would nest event loops over
+    // a stack-owned watcher. NB: on timeout the worker cannot be cancelled
+    // (QRegularExpression is not interruptible) — the pool thread stays
+    // busy until the pathological match finishes; the schema is refused,
+    // so this remains a one-off cost.
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
     return watcher.isFinished();
 }
 
@@ -282,19 +295,29 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     ui->sampleEdit->setTabChangesFocus(true);
 
     // Small rounded tool button (same flat style as the block-card buttons)
-    // that refills the preview with the first lines of the active log on
-    // demand — the sample text otherwise persists between sessions and only
-    // auto-fills the very first time it is empty.
+    // that refills the preview with log lines taken at the current log-view
+    // position — the sample text otherwise persists between sessions and
+    // only auto-fills the very first time it is empty.
     auto* reloadSampleBtn = new QToolButton(this);
     reloadSampleBtn->setIcon(QIcon(QStringLiteral(":/icons/reload.svg")));
     reloadSampleBtn->setAutoRaise(true);
     reloadSampleBtn->setToolTip(
-        tr("Reload sample — replace the preview text with the first lines of the current log file."));
+        tr("Reload sample — replace the preview text with log lines taken\n"
+           "from the current position in the log view."));
     reloadSampleBtn->setEnabled(!m_fileSampleLines.isEmpty());
-    reloadSampleBtn->setStyleSheet(QStringLiteral(
-        "QToolButton { border: 1px solid palette(mid); border-radius: 4px; padding: 3px; }"
-        "QToolButton:hover { background-color: palette(midlight); }"
-        "QToolButton:disabled { border-color: palette(window); }"));
+    // palette(mid) is nearly invisible on dark palettes — blend the border
+    // and hover colours from the palette in code instead.
+    {
+        const QColor border = CardFrame::mutedBorderColor(palette());
+        QColor hover = palette().color(QPalette::WindowText);
+        hover.setAlpha(28);
+        reloadSampleBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { border: 1px solid %1; border-radius: 4px; padding: 3px; }"
+            "QToolButton:hover { background-color: rgba(%2,%3,%4,%5); }"
+            "QToolButton:disabled { border-color: palette(window); }")
+                .arg(border.name())
+                .arg(hover.red()).arg(hover.green()).arg(hover.blue()).arg(hover.alpha()));
+    }
     connect(reloadSampleBtn, &QToolButton::clicked, this, [this]() {
         if (m_fileSampleLines.isEmpty())
             return;
@@ -308,12 +331,20 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     reloadRow->addWidget(reloadSampleBtn);
     ui->previewLayout->insertLayout(0, reloadRow);
 
-    // Help
-    ui->helpBrowser->setHtml(QString::fromLatin1(kHelpHtml));
+    // Help (colours are blended from the palette so the text stays
+    // readable on dark themes).
+    {
+        const QColor codeBg = CardFrame::mixedColor(
+            palette().color(QPalette::Text), palette().color(QPalette::Base), 0.92);
+        const QColor border = CardFrame::mutedBorderColor(palette());
+        ui->helpBrowser->setHtml(
+            QString::fromLatin1(kHelpHtml).arg(codeBg.name(), border.name()));
+    }
 
     // Splitter proportions
     ui->mainSplitter->setStretchFactor(0, 2);
     ui->mainSplitter->setStretchFactor(1, 5);
+    ui->mainSplitter->setSizes({300, 880});
     ui->vSplitter->setStretchFactor(0, 4);
     ui->vSplitter->setStretchFactor(1, 1);
 
@@ -337,12 +368,31 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
             tr("Preview is taking too long — the schema looks pathologically slow. Simplify custom regexes."));
     });
 
+    // Import/Export/folder live in a compact "⋯" menu: a row of full-size
+    // push buttons dictated the minimum width of the whole left panel and
+    // kept the splitter from shrinking it.
+    {
+        auto* moreMenu = new QMenu(ui->moreSchemaBtn);
+        m_importAction = moreMenu->addAction(tr("Import…"),
+            this, &ConversionPatternDialog::onImportSchema);
+        m_importAction->setToolTip(
+            tr("Import a schema file (*.json) — it is copied into the patterns folder."));
+        m_exportAction = moreMenu->addAction(tr("Export…"),
+            this, &ConversionPatternDialog::onExportSchema);
+        m_exportAction->setToolTip(
+            tr("Export the selected schema to a *.json file you can share."));
+        moreMenu->addSeparator();
+        m_openFolderAction = moreMenu->addAction(tr("Open patterns folder"),
+            this, &ConversionPatternDialog::onOpenFolder);
+        m_openFolderAction->setToolTip(
+            tr("Every schema is stored as a separate file in this folder."));
+        moreMenu->setToolTipsVisible(true);
+        ui->moreSchemaBtn->setMenu(moreMenu);
+    }
+
     // Signals
     connect(ui->addSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onAddSchema);
     connect(ui->removeSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onRemoveSchema);
-    connect(ui->importSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onImportSchema);
-    connect(ui->exportSchemaBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onExportSchema);
-    connect(ui->openFolderBtn, &QToolButton::clicked, this, &ConversionPatternDialog::onOpenFolder);
     connect(ui->moveSchemaUpBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onMoveSchemaUp);
     connect(ui->moveSchemaDownBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onMoveSchemaDown);
     connect(ui->schemaTable, &QTableWidget::currentCellChanged,
@@ -904,12 +954,14 @@ QStringList ConversionPatternDialog::previewLines() const
 
 void ConversionPatternDialog::schedulePreviewUpdate()
 {
+    // Bump the generation at *schedule* time: a job started before this
+    // edit must never apply its highlight spans to the changed text.
+    ++m_previewGeneration;
     m_previewTimer->start();
 }
 
 void ConversionPatternDialog::startPreviewJob()
 {
-    ++m_previewGeneration;
     const int generation = m_previewGeneration;
 
     // Preview follows the live editor state (including unapplied edits),
@@ -924,6 +976,10 @@ void ConversionPatternDialog::startPreviewJob()
 
     if (!pattern.isValid() || lines.isEmpty()
             || ui->sampleEdit->toPlainText().trimmed().isEmpty()) {
+        // A watchdog armed for a previous (now stale) job must not fire a
+        // false "too slow" warning while nothing is being matched.
+        m_previewWatchdog->stop();
+        m_previewSlow = false;
         ui->sampleEdit->setExtraSelections({});
         ui->previewStatusLabel->setStyleSheet(QString());
         ui->previewStatusLabel->setText(!pattern.isValid()
@@ -978,7 +1034,10 @@ void ConversionPatternDialog::onPreviewReady()
             sel.cursor = QTextCursor(textBlock);
             sel.cursor.setPosition(basePos);
             sel.cursor.setPosition(basePos + textBlock.length() - 1, QTextCursor::KeepAnchor);
-            sel.format.setBackground(QColor(0, 0, 0, 25));
+            // Palette-derived dim: a black veil is invisible on dark themes.
+            QColor failBg = ui->sampleEdit->palette().color(QPalette::Text);
+            failBg.setAlpha(25);
+            sel.format.setBackground(failBg);
             selections.append(sel);
             continue;
         }
@@ -994,19 +1053,31 @@ void ConversionPatternDialog::onPreviewReady()
             selections.append(sel);
         }
 
-        if (match.unparsedStart >= 0 && match.unparsedStart < lineText.size()) {
-            ++partialCount;
+        auto markUnparsed = [&](int from, int to) {
             QTextEdit::ExtraSelection sel;
             sel.cursor = QTextCursor(textBlock);
-            sel.cursor.setPosition(basePos + match.unparsedStart);
-            sel.cursor.setPosition(basePos + textBlock.length() - 1, QTextCursor::KeepAnchor);
+            sel.cursor.setPosition(basePos + from);
+            sel.cursor.setPosition(basePos + to, QTextCursor::KeepAnchor);
             sel.format.setBackground(QColor(0xC0, 0x39, 0x2B, 60));
             sel.format.setFontUnderline(true);
             sel.format.setUnderlineColor(QColor(0xC0, 0x39, 0x2B));
             selections.append(sel);
-        } else {
-            ++fullCount;
+        };
+
+        bool partial = false;
+        // Re-sync hole: text where skipped blocks should have been.
+        if (match.holeStart >= 0 && match.holeStart < lineText.size()) {
+            markUnparsed(match.holeStart, qMin(match.holeEnd, int(lineText.size())));
+            partial = true;
         }
+        if (match.unparsedStart >= 0 && match.unparsedStart < lineText.size()) {
+            markUnparsed(match.unparsedStart, textBlock.length() - 1);
+            partial = true;
+        }
+        if (partial)
+            ++partialCount;
+        else
+            ++fullCount;
     }
 
     ui->sampleEdit->setExtraSelections(selections);
@@ -1014,7 +1085,7 @@ void ConversionPatternDialog::onPreviewReady()
     QStringList statusParts;
     statusParts << tr("%1 matched").arg(fullCount);
     if (partialCount > 0)
-        statusParts << tr("%1 partial (red tail goes to the last text field)").arg(partialCount);
+        statusParts << tr("%1 partial (red text is unparsed, routed into free-text fields)").arg(partialCount);
     if (failedCount > 0)
         statusParts << tr("%1 not recognized").arg(failedCount);
     ui->previewStatusLabel->setStyleSheet(
@@ -1054,7 +1125,8 @@ void ConversionPatternDialog::updateButtonStates()
     const bool hasSchema = schemaRow >= 0;
 
     ui->removeSchemaBtn->setEnabled(hasSchema);
-    ui->exportSchemaBtn->setEnabled(hasSchema);
+    if (m_exportAction)
+        m_exportAction->setEnabled(hasSchema);
     ui->moveSchemaUpBtn->setEnabled(schemaRow > 0);
     ui->moveSchemaDownBtn->setEnabled(hasSchema && schemaRow < ui->schemaTable->rowCount() - 1);
     ui->useBtn->setEnabled(hasSchema);
@@ -1321,11 +1393,12 @@ void ConversionPatternDialog::onUseSelected()
     accept();
 }
 
-void ConversionPatternDialog::closeEvent(QCloseEvent* event)
+void ConversionPatternDialog::reject()
 {
-    // Same as the Close button: offer to apply unapplied edits first.
+    // Esc and the window's X both land here. The dialog manages a list —
+    // per-schema edits are committed or discarded via Apply/Revert and the
+    // dirty prompt — so every close path accepts the (possibly reordered)
+    // list. Previously Esc silently dropped all changes while X kept them.
     resolveDirtyState(ui->schemaTable->currentRow());
-
-    QDialog::accept();   // set result = Accepted, emit finished(Accepted)
-    event->accept();     // let Qt proceed with closing
+    QDialog::accept();
 }

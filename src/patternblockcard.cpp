@@ -3,6 +3,7 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -111,7 +112,6 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     wrapLayout->setSpacing(5);
 
     m_patternLabel = new QLabel(tr("Text"), m_wrapRow);
-    m_patternLabel->setStyleSheet(QStringLiteral("color: palette(mid); border: none;"));
     wrapLayout->addWidget(m_patternLabel);
 
     m_patternEdit = new QLineEdit(m_wrapRow);
@@ -119,7 +119,6 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     wrapLayout->addWidget(m_patternEdit, 1);
 
     m_wrapLabel = new QLabel(tr("Enclosed by"), m_wrapRow);
-    m_wrapLabel->setStyleSheet(QStringLiteral("color: palette(mid); border: none;"));
     wrapLayout->addWidget(m_wrapLabel);
 
     m_openEdit = new QLineEdit(m_wrapRow);
@@ -130,7 +129,6 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     wrapLayout->addWidget(m_openEdit);
 
     m_andLabel = new QLabel(tr("and"), m_wrapRow);
-    m_andLabel->setStyleSheet(QStringLiteral("color: palette(mid); border: none;"));
     wrapLayout->addWidget(m_andLabel);
 
     m_closeEdit = new QLineEdit(m_wrapRow);
@@ -166,7 +164,24 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     connect(m_downBtn,   &QToolButton::clicked, this, &PatternBlockCard::moveDownRequested);
     connect(m_removeBtn, &QToolButton::clicked, this, &PatternBlockCard::removeRequested);
 
+    applyMutedLabelStyles();
     refreshFieldStates();
+}
+
+void PatternBlockCard::applyMutedLabelStyles()
+{
+    const QString style = QStringLiteral("color: %1; border: none;")
+        .arg(mutedTextColor(palette()).name());
+    m_patternLabel->setStyleSheet(style);
+    m_wrapLabel->setStyleSheet(style);
+    m_andLabel->setStyleSheet(style);
+}
+
+void PatternBlockCard::changeEvent(QEvent* event)
+{
+    CardFrame::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        applyMutedLabelStyles();
 }
 
 void PatternBlockCard::setBlock(const PatternBlock& block)

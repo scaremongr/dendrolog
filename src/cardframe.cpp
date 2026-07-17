@@ -1,5 +1,6 @@
 #include "cardframe.h"
 
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -63,19 +64,47 @@ void CardFrame::tintToolButton(QToolButton* button, bool hasContent) const
     }
 }
 
+QColor CardFrame::mixedColor(const QColor& a, const QColor& b, qreal t)
+{
+    t = qBound<qreal>(0.0, t, 1.0);
+    return QColor(int(a.red()   * (1.0 - t) + b.red()   * t),
+                  int(a.green() * (1.0 - t) + b.green() * t),
+                  int(a.blue()  * (1.0 - t) + b.blue()  * t));
+}
+
+QColor CardFrame::mutedBorderColor(const QPalette& palette)
+{
+    return mixedColor(palette.color(QPalette::WindowText),
+                      palette.color(QPalette::Window), 0.65);
+}
+
+QColor CardFrame::mutedTextColor(const QPalette& palette)
+{
+    return mixedColor(palette.color(QPalette::WindowText),
+                      palette.color(QPalette::Window), 0.35);
+}
+
+void CardFrame::changeEvent(QEvent* event)
+{
+    QFrame::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        applyFrameStyle();
+}
+
 void CardFrame::applyFrameStyle()
 {
     // Селектор по имени типа действует и на наследников (FilterRuleCard и
     // т.п.), при этом не задевает дочерние виджеты карточки.
+    const QString neutral = mutedBorderColor(palette()).name();
     const QString border = m_accentBorder && m_accent.isValid()
         ? QStringLiteral("2px solid %1").arg(m_accent.name())
-        : QStringLiteral("1px solid palette(mid)");
+        : QStringLiteral("1px solid %1").arg(neutral);
     setStyleSheet(QStringLiteral(
         "CardFrame { border: %1; border-radius: 4px; }").arg(border));
 
     if (m_stripe) {
         m_stripe->setStyleSheet(QStringLiteral(
             "background-color: %1; border: none; border-radius: 2px;")
-                .arg(m_accent.isValid() ? m_accent.name() : QStringLiteral("palette(mid)")));
+                .arg(m_accent.isValid() ? m_accent.name() : neutral));
     }
 }

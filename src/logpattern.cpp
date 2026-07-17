@@ -6,11 +6,18 @@
 #include <QJsonObject>
 #include <QSet>
 
+#include <algorithm>
+
 namespace {
 
-// Hard cap on the number of compiled fallback variants so that a very
+// Hard caps on the number of compiled fallback variants so that a very
 // long schema cannot turn every unmatched line into dozens of matches.
 constexpr int kMaxPrefixVariants = 8;
+constexpr int kMaxResyncVariants = 8;
+
+// Named capture for the re-sync hole (the text where skipped blocks
+// should have been). Block captures are "lv<index>", so no collision.
+const QString kSkipCaptureName = QStringLiteral("lvskip");
 
 QString matchKindToString(PatternBlock::MatchKind kind)
 {
@@ -238,16 +245,45 @@ bool isFreeTextKind(PatternBlock::MatchKind kind)
 
 } // namespace
 
-// Literals that any line matched by the first \a blockCount blocks must
-// contain. Used as a cheap necessary-condition pre-filter before running
-// the regex: when a required literal is missing the regex cannot match, so
-// we skip it and avoid catastrophic backtracking while it proves non-match.
-//
-// Soundness rule: only collect literals the generator emits unconditionally
-// (see buildRegexSource). Optional glue after a self-delimiting block, a
-// regex separator, and whitespace-only boundaries contribute nothing.
-QStringList LogPattern::requiredLiteralsForPrefix(const PatternDefinition& def,
-                                                  int blockCount)
+namespace {
+
+// Literals the generator emits unconditionally for one block (see
+// buildRegexSource). Optional glue after a self-delimiting block, a regex
+// separator, and whitespace-only boundaries contribute nothing.
+void appendBlockLiterals(const PatternBlock& block, QStringList* literals)
+{
+    const QString lead = block.leadingText.trimmed();
+    if (!lead.isEmpty())
+        literals->append(lead);
+
+    if (block.matchKind == PatternBlock::MatchKind::ConstantText
+            && !block.customRegex.isEmpty())
+        literals->append(block.customRegex);
+
+    const QString close = block.closingText.trimmed();
+    if (!close.isEmpty())
+        literals->append(close);
+
+    // The glue separator is a mandatory literal only when it is a plain
+    // literal and the block does not delimit itself (otherwise the
+    // generator wraps it in an optional "(?:…)?" group).
+    if (!block.separator.isEmpty()
+            && !block.separatorIsRegex
+            && !LogPattern::blockIsSelfDelimiting(block)) {
+        const QString sep = block.separator.trimmed();
+        if (!sep.isEmpty())
+            literals->append(sep);
+    }
+}
+
+} // namespace
+
+// Literals that any line matched by this variant must contain. Used as a
+// cheap necessary-condition pre-filter before running the regex: when a
+// required literal is missing the regex cannot match, so we skip it and
+// avoid catastrophic backtracking while it proves non-match.
+QStringList LogPattern::requiredLiteralsForVariant(const PatternDefinition& def,
+                                                   int prefixCount, int resumeAt)
 {
     QStringList literals;
 
@@ -255,31 +291,11 @@ QStringList LogPattern::requiredLiteralsForPrefix(const PatternDefinition& def,
     if (!prefix.isEmpty())
         literals.append(prefix);
 
-    for (int i = 0; i < blockCount && i < def.blocks.size(); ++i) {
-        const PatternBlock& block = def.blocks[i];
-
-        const QString lead = block.leadingText.trimmed();
-        if (!lead.isEmpty())
-            literals.append(lead);
-
-        if (block.matchKind == PatternBlock::MatchKind::ConstantText
-                && !block.customRegex.isEmpty())
-            literals.append(block.customRegex);
-
-        const QString close = block.closingText.trimmed();
-        if (!close.isEmpty())
-            literals.append(close);
-
-        // The glue separator is a mandatory literal only when it is a plain
-        // literal and the block does not delimit itself (otherwise the
-        // generator wraps it in an optional "(?:…)?" group).
-        if (!block.separator.isEmpty()
-                && !block.separatorIsRegex
-                && !blockIsSelfDelimiting(block)) {
-            const QString sep = block.separator.trimmed();
-            if (!sep.isEmpty())
-                literals.append(sep);
-        }
+    for (int i = 0; i < prefixCount && i < def.blocks.size(); ++i)
+        appendBlockLiterals(def.blocks[i], &literals);
+    if (resumeAt >= 0) {
+        for (int i = resumeAt; i < def.blocks.size(); ++i)
+            appendBlockLiterals(def.blocks[i], &literals);
     }
 
     return literals;
@@ -299,6 +315,16 @@ bool LogPattern::isAnchorKind(PatternBlock::MatchKind kind)
         return true;
     default:
         return false;
+    }
+}
+
+int LogPattern::anchorProbeSlot(PatternBlock::MatchKind kind)
+{
+    switch (kind) {
+    case PatternBlock::MatchKind::Timestamp: return 0;
+    case PatternBlock::MatchKind::Level:     return 1;
+    case PatternBlock::MatchKind::IpAddress: return 2;
+    default:                                 return -1;
     }
 }
 
@@ -379,6 +405,12 @@ bool LogPattern::deserializeDefinition(const QString& text,
     if (error.error == QJsonParseError::NoError && doc.isObject()) {
         PatternDefinition parsed;
         const QJsonObject root = doc.object();
+
+        // Refuse documents from a future format version instead of silently
+        // misparsing them (serializeDefinition currently writes version 3).
+        if (root.value(QStringLiteral("version")).toInt(0) > 3)
+            return false;
+
         parsed.linePrefix = root.value(QStringLiteral("linePrefix")).toString();
 
         const QJsonArray blocksJson = root.value(QStringLiteral("blocks")).toArray();
@@ -570,7 +602,7 @@ bool LogPattern::setPattern(const QString& pattern)
     m_patternString = pattern;
     m_definition = PatternDefinition();
     m_fullRegex = QRegularExpression();
-    m_prefixVariants.clear();
+    m_variants.clear();
     m_fieldIndexOfBlock.clear();
     m_fieldCount = 0;
     m_tailFieldBlockIndex = -1;
@@ -595,14 +627,14 @@ QStringList LogPattern::fieldNames() const
     return names;
 }
 
-QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
+QString LogPattern::buildRegexSource(int prefixCount, bool anchorEnd, int resumeAt) const
 {
     const QVector<PatternBlock>& blocks = m_definition.blocks;
     QString regex = QStringLiteral("^");
     if (!m_definition.linePrefix.isEmpty())
         regex += QRegularExpression::escape(m_definition.linePrefix);
 
-    for (int i = 0; i < blockCount; ++i) {
+    auto appendBlock = [&](int i, bool skipGapBefore) {
         const PatternBlock& block = blocks[i];
         const bool isLastOfSchema = (i == blocks.size() - 1);
 
@@ -615,8 +647,12 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
         // token is *found*; everything else just collapses extra spaces.
         // After a lazy free-text block the skip is pointless (the text
         // itself absorbs anything) and would only shrink the field value.
+        // A re-sync hole captures the skipped text so matchLine can report
+        // it (preview marking, routing into a skipped free-text field).
         const bool prevIsFreeText = i > 0 && isFreeTextKind(blocks[i - 1].matchKind);
-        if (isAnchorKind(block.matchKind) && !prevIsFreeText)
+        if (skipGapBefore)
+            seg += QStringLiteral("(?<") + kSkipCaptureName + QStringLiteral(">.*?)[ \\t]*");
+        else if (isAnchorKind(block.matchKind) && !prevIsFreeText)
             seg += QStringLiteral(".*?");
         else
             seg += QStringLiteral("[ \\t]*");
@@ -625,7 +661,7 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
 
         const QString value = valueRegexForBlock(block, isLastOfSchema && anchorEnd);
         if (value.isEmpty())
-            return QString();
+            return false;
         seg += QStringLiteral("(?<") + captureNameForIndex(i) + QStringLiteral(">")
                + value + QStringLiteral(")");
 
@@ -675,6 +711,18 @@ QString LogPattern::buildRegexSource(int blockCount, bool anchorEnd) const
             regex += QStringLiteral("(?>") + seg + QStringLiteral(")");
         else
             regex += seg;
+        return true;
+    };
+
+    for (int i = 0; i < prefixCount; ++i) {
+        if (!appendBlock(i, false))
+            return QString();
+    }
+    if (resumeAt >= 0) {
+        for (int i = resumeAt; i < blocks.size(); ++i) {
+            if (!appendBlock(i, i == resumeAt))
+                return QString();
+        }
     }
 
     if (anchorEnd)
@@ -686,7 +734,9 @@ void LogPattern::buildExtractRegexes()
 {
     m_fullRegex = QRegularExpression();
     m_fullRequiredLiterals.clear();
-    m_prefixVariants.clear();
+    m_variants.clear();
+    for (QRegularExpression& probe : m_anchorProbes)
+        probe = QRegularExpression();
     m_fieldIndexOfBlock.clear();
     m_fieldCount = 0;
     m_tailFieldBlockIndex = -1;
@@ -712,10 +762,11 @@ void LogPattern::buildExtractRegexes()
     m_fullRegex = QRegularExpression(fullSource);
     if (!m_fullRegex.isValid())
         return;
-    m_fullRequiredLiterals = requiredLiteralsForPrefix(m_definition, blockCount);
+    m_fullRequiredLiterals = requiredLiteralsForVariant(m_definition, blockCount, -1);
 
-    // Fallback cascade: prefixes ending after a "solid" block, longest first.
-    for (int i = blockCount - 2; i >= 0 && m_prefixVariants.size() < kMaxPrefixVariants; --i) {
+    // Prefix cascade: prefixes ending after a "solid" block, longest first.
+    int prefixVariants = 0;
+    for (int i = blockCount - 2; i >= 0 && prefixVariants < kMaxPrefixVariants; --i) {
         if (!isSolidBlock(m_definition.blocks[i]))
             continue;
 
@@ -731,11 +782,72 @@ void LogPattern::buildExtractRegexes()
         variant.regex = QRegularExpression(buildRegexSource(i + 1, false));
         if (!variant.regex.isValid())
             continue;
-        variant.blockCount = i + 1;
-        variant.hasEvidence = hasEvidence;
-        variant.requiredLiterals = requiredLiteralsForPrefix(m_definition, i + 1);
-        m_prefixVariants.append(variant);
+        variant.prefixCount = i + 1;
+        variant.resumeAt = -1;
+        variant.requiredLiterals = requiredLiteralsForVariant(m_definition, i + 1, -1);
+        m_variants.append(variant);
+        ++prefixVariants;
     }
+
+    // Re-sync cascade: skip one contiguous run of weak (non-evidence) blocks
+    // whose structure may be absent from the line, and re-find the schema at
+    // the next anchor. The whole tail after the anchor must match to the end
+    // of the line, so these variants are strong despite the hole. The anchor
+    // itself is always an evidence block, so no separate evidence gate is
+    // needed. Fewest skipped blocks are generated first per anchor.
+    int resyncVariants = 0;
+    for (int k = 1; k < blockCount && resyncVariants < kMaxResyncVariants; ++k) {
+        if (!isAnchorKind(m_definition.blocks[k].matchKind))
+            continue;
+        for (int p = k - 1; p >= 0; --p) {
+            // Evidence blocks are never skipped: their absence means the
+            // line genuinely has another format. Shorter prefixes would
+            // skip this block too, so stop entirely.
+            if (isEvidenceBlock(m_definition.blocks[p]))
+                break;
+            // Like the prefix cascade, the matched prefix must end after a
+            // solid block; otherwise its trailing lazy free-text value
+            // would always lose its content to the hole.
+            if (p > 0 && !isSolidBlock(m_definition.blocks[p - 1]))
+                continue;
+
+            CompiledVariant variant;
+            variant.regex = QRegularExpression(buildRegexSource(p, true, k));
+            if (!variant.regex.isValid())
+                continue;
+            variant.prefixCount = p;
+            variant.resumeAt = k;
+            variant.resumeKind = m_definition.blocks[k].matchKind;
+            variant.requiredLiterals = requiredLiteralsForVariant(m_definition, p, k);
+            m_variants.append(variant);
+
+            // Compile the token probe for this anchor kind once: it is the
+            // pre-filter for re-sync variants, whose literal list is often
+            // empty (nothing else in the tail is mandatory).
+            const int slot = anchorProbeSlot(variant.resumeKind);
+            if (slot >= 0 && m_anchorProbes[slot].pattern().isEmpty()) {
+                m_anchorProbes[slot] = QRegularExpression(
+                    valueRegexForBlock(m_definition.blocks[k], false));
+            }
+
+            if (++resyncVariants >= kMaxResyncVariants)
+                break;
+        }
+    }
+
+    // Most matched blocks first; prefix variants win ties as the more
+    // conservative interpretation (no hole in the middle of the line).
+    const auto matchedBlocks = [blockCount](const CompiledVariant& v) {
+        return v.prefixCount + (v.resumeAt >= 0 ? blockCount - v.resumeAt : 0);
+    };
+    std::stable_sort(m_variants.begin(), m_variants.end(),
+                     [&matchedBlocks](const CompiledVariant& a, const CompiledVariant& b) {
+        const int ma = matchedBlocks(a);
+        const int mb = matchedBlocks(b);
+        if (ma != mb)
+            return ma > mb;
+        return a.resumeAt < 0 && b.resumeAt >= 0;
+    });
 
     m_valid = true;
 }
@@ -746,9 +858,9 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
     if (!m_valid)
         return result;
 
-    auto fillSpans = [&result](const QRegularExpressionMatch& match, int blockCount) {
-        result.spans.reserve(blockCount);
-        for (int i = 0; i < blockCount; ++i) {
+    auto fillSpans = [&result](const QRegularExpressionMatch& match, int from, int to) {
+        result.spans.reserve(result.spans.size() + (to - from));
+        for (int i = from; i < to; ++i) {
             const QString name = captureNameForIndex(i);
             const int start = match.capturedStart(name);
             if (start < 0)
@@ -759,7 +871,6 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
             span.length = match.capturedLength(name);
             result.spans.append(span);
         }
-        result.matchedBlockCount = blockCount;
     };
 
     // Cheap necessary-condition gate: a regex whose mandatory literals are
@@ -773,28 +884,72 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
         return true;
     };
 
+    const int blockCount = m_definition.blocks.size();
+
     if (lineHasAllLiterals(m_fullRequiredLiterals)) {
         const QRegularExpressionMatch full = m_fullRegex.match(line);
         if (full.hasMatch()) {
-            fillSpans(full, m_definition.blocks.size());
+            fillSpans(full, 0, blockCount);
+            result.matchedBlockCount = blockCount;
             result.unparsedStart = -1;
             result.ok = true;
             return result;
         }
     }
 
-    for (const CompiledVariant& variant : m_prefixVariants) {
+    // Lazily evaluated per anchor kind: is the anchor token present in the
+    // line at all? Re-sync variants often carry no required literals, so
+    // this single unanchored search replaces several full variant matches
+    // on lines that cannot re-sync anyway (e.g. free-form continuations).
+    int anchorProbeState[3] = { -1, -1, -1 }; // -1 unknown, 0 absent, 1 present
+
+    for (const CompiledVariant& variant : m_variants) {
+        if (variant.resumeAt >= 0) {
+            const int slot = anchorProbeSlot(variant.resumeKind);
+            if (slot >= 0) {
+                if (anchorProbeState[slot] < 0)
+                    anchorProbeState[slot] =
+                        m_anchorProbes[slot].match(line).hasMatch() ? 1 : 0;
+                if (anchorProbeState[slot] == 0)
+                    continue;
+            }
+        }
         if (!lineHasAllLiterals(variant.requiredLiterals))
             continue;
         const QRegularExpressionMatch match = variant.regex.match(line);
         if (!match.hasMatch())
             continue;
 
-        fillSpans(match, variant.blockCount);
-        int tail = match.capturedEnd(0);
-        while (tail < line.size() && line[tail].isSpace())
-            ++tail;
-        result.unparsedStart = (tail < line.size()) ? tail : -1;
+        fillSpans(match, 0, variant.prefixCount);
+        if (variant.resumeAt < 0) {
+            // Prefix variant: the unmatched tail is reported to the caller
+            // (extractFields routes it into the last free-text field).
+            result.matchedBlockCount = variant.prefixCount;
+            int tail = match.capturedEnd(0);
+            while (tail < line.size() && line[tail].isSpace())
+                ++tail;
+            result.unparsedStart = (tail < line.size()) ? tail : -1;
+        } else {
+            // Re-sync variant: the tail is anchored to the line end, the
+            // unmatched text is the hole where the skipped blocks were.
+            fillSpans(match, variant.resumeAt, blockCount);
+            result.matchedBlockCount =
+                variant.prefixCount + (blockCount - variant.resumeAt);
+            result.skippedFrom = variant.prefixCount;
+            result.skippedTo = variant.resumeAt;
+            result.unparsedStart = -1;
+
+            int holeStart = match.capturedStart(kSkipCaptureName);
+            int holeEnd = match.capturedEnd(kSkipCaptureName);
+            while (holeStart < holeEnd && line[holeStart].isSpace())
+                ++holeStart;
+            while (holeEnd > holeStart && line[holeEnd - 1].isSpace())
+                --holeEnd;
+            if (holeEnd > holeStart) {
+                result.holeStart = holeStart;
+                result.holeEnd = holeEnd;
+            }
+        }
         result.ok = true;
         return result;
     }
@@ -841,6 +996,24 @@ LogEntryFields LogPattern::extractFields(const QString& line) const
                 span.start = static_cast<int>(tail.begin() - lineView.begin());
                 span.length = static_cast<int>(tail.size());
             }
+        }
+    }
+
+    // Re-sync degradation: route the hole text into the first skipped
+    // free-text field so it is not silently dropped (best effort — the
+    // hole is by definition text that did not match the skipped blocks).
+    if (match.holeStart >= 0 && match.skippedFrom >= 0) {
+        for (int i = match.skippedFrom; i < match.skippedTo; ++i) {
+            const PatternBlock& block = m_definition.blocks[i];
+            if (!isFreeTextKind(block.matchKind) || !blockCreatesField(block))
+                continue;
+            const int fieldIndex = m_fieldIndexOfBlock.value(i, -1);
+            if (fieldIndex >= 0) {
+                FieldSpan& span = result.spans[fieldIndex];
+                span.start = match.holeStart;               // trimmed in matchLine
+                span.length = match.holeEnd - match.holeStart;
+            }
+            break;
         }
     }
 
