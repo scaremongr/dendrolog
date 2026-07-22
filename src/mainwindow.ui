@@ -16,7 +16,7 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout_2">
     <item>
-     <widget class="QTabWidget" name="tabWidget">
+     <widget class="LogTabWidget" name="tabWidget">
       <property name="tabsClosable">
        <bool>true</bool>
       </property>
@@ -277,6 +277,14 @@
    </property>
   </action>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>LogTabWidget</class>
+   <extends>QTabWidget</extends>
+   <header>logtabwidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections>
   <connection>

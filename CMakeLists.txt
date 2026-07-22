@@ -23,6 +23,11 @@ set(PROJECT_SOURCES
     src/logviewwidget.h
     src/logviewwidget.cpp
 
+    src/logtabbar.h
+    src/logtabbar.cpp
+    src/logtabwidget.h
+    src/logtabwidget.cpp
+
     src/logentry.h
     src/logfield.h
     src/logfile.h

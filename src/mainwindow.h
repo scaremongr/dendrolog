@@ -47,6 +47,7 @@ class QDialog;
 class QDragEnterEvent;
 class QDropEvent;
 class UpdateChecker;
+class QPoint;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -311,6 +312,27 @@ private:
 
     // Factory: creates a LogViewWidget with current global settings pre-applied
     LogViewWidget* createLogViewWidget();
+
+    // ---- Управление вкладками ------------------------------------------------
+    // Закрыть одну вкладку: отсоединить её view, снять со стека, удалить и
+    // обновить таймер авто-перезагрузки / статусбар. Общий путь для крестика,
+    // средней кнопки мыши и пунктов контекстного меню.
+    void closeTab(int index);
+    void closeOtherTabs(int keepIndex);   // закрыть все, кроме keepIndex
+    void closeTabsToRight(int index);     // закрыть вкладки правее index
+    void closeAllTabs();
+    // Слить файлы вкладки fromIndex в toIndex и закрыть источник (D&D-объединение).
+    void mergeTabs(int fromIndex, int toIndex);
+    // Слить в keepIndex файлы всех остальных вкладок и закрыть их.
+    void mergeAllTabsInto(int keepIndex);
+    // Показать файл вкладки в системном файловом менеджере (Explorer /select).
+    void revealTabFile(int index);
+    // Скопировать в буфер обмена полный путь(и) файлов вкладки.
+    void copyTabPath(int index);
+    // Пересчитать заголовок и подсказку вкладки по её текущему списку файлов.
+    void updateTabLabel(LogViewWidget* view);
+    // Построить и показать контекстное меню заголовка вкладки index.
+    void onTabContextMenu(int index, const QPoint& globalPos);
     // Apply current field-visibility mask to every open LogViewWidget's model
     void applyFieldVisibilityToAllViews();
     // Apply current pattern to every open LogViewWidget's parser

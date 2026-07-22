@@ -1,6 +1,7 @@
 ﻿#include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
+#include "logtabwidget.h"
 #include "conversionpatterndialog.h"
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
@@ -61,6 +62,8 @@
 #include <QTextBrowser>
 #include <QDialog>
 #include <QDesktopServices>
+#include <QProcess>
+#include <QClipboard>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -287,21 +290,18 @@ MainWindow::MainWindow(QWidget *parent)
 
     if (ui->tabWidget)
     {
-        connect(ui->tabWidget, &QTabWidget::tabCloseRequested, this, [this](int index)
-                {
-            QWidget *page = ui->tabWidget->widget(index);
-            LogViewWidget* logView = qobject_cast<LogViewWidget*>(page);
-            if (logView) {
-                disconnectFromLogView(logView);
-            }
-            ui->tabWidget->removeTab(index);
-            delete page;
-            // The closed tab may have had auto-reload on; update the timer.
-            updateAutoReloadTimer();
-            if (ui->tabWidget->count() == 0)
-                updateStatusBarDefaultText();
-            syncReloadButton(); });
-        connect(ui->tabWidget, &QTabWidget::currentChanged, this, &MainWindow::onCurrentTabChanged);
+        // Крестик вкладки и средняя кнопка мыши (LogTabBar эмитит тот же сигнал)
+        // идут через общий closeTab().
+        connect(ui->tabWidget, &QTabWidget::tabCloseRequested,
+                this, &MainWindow::closeTab);
+        connect(ui->tabWidget, &QTabWidget::currentChanged,
+                this, &MainWindow::onCurrentTabChanged);
+        // Правый клик по заголовку — контекстное меню; бросок вкладки на вкладку
+        // — объединение документов.
+        connect(ui->tabWidget, &LogTabWidget::tabContextMenuRequested,
+                this, &MainWindow::onTabContextMenu);
+        connect(ui->tabWidget, &LogTabWidget::mergeTabsRequested,
+                this, &MainWindow::mergeTabs);
 
         if (ui->tabWidget->count() > 0)
         {
@@ -1886,6 +1886,212 @@ void MainWindow::onCurrentTabChanged(int index)
     updateLogLevelFilterButtons();
     updateFilterInputsFromModel();
     updateFilterStatusButtons();
+}
+
+// =============================================================================
+// Управление вкладками: закрытие, объединение, контекстное меню
+// =============================================================================
+
+void MainWindow::closeTab(int index)
+{
+    QWidget* page = ui->tabWidget->widget(index);
+    if (!page)
+        return;
+    if (auto* logView = qobject_cast<LogViewWidget*>(page))
+        disconnectFromLogView(logView);
+    ui->tabWidget->removeTab(index);
+    delete page;
+    // Закрытая вкладка могла держать авто-перезагрузку — обновить таймер.
+    updateAutoReloadTimer();
+    if (ui->tabWidget->count() == 0)
+        updateStatusBarDefaultText();
+    syncReloadButton();
+}
+
+void MainWindow::closeOtherTabs(int keepIndex)
+{
+    QWidget* keep = ui->tabWidget->widget(keepIndex);
+    if (!keep)
+        return;
+    // Идём справа налево: closeTab сдвигает индексы правее удаляемого.
+    for (int i = ui->tabWidget->count() - 1; i >= 0; --i)
+        if (ui->tabWidget->widget(i) != keep)
+            closeTab(i);
+}
+
+void MainWindow::closeTabsToRight(int index)
+{
+    for (int i = ui->tabWidget->count() - 1; i > index; --i)
+        closeTab(i);
+}
+
+void MainWindow::closeAllTabs()
+{
+    for (int i = ui->tabWidget->count() - 1; i >= 0; --i)
+        closeTab(i);
+}
+
+void MainWindow::updateTabLabel(LogViewWidget* view)
+{
+    if (!view)
+        return;
+    const int idx = ui->tabWidget->indexOf(view);
+    if (idx < 0)
+        return;
+
+    const auto files = view->loadedFiles();
+    const int n = files.size();
+    QString text;
+    QString tip;
+    if (n == 1 && files.first()) {
+        text = files.first()->shortName();
+        tip  = files.first()->filePath;
+    } else if (n > 1) {
+        text = tr("Logs (%1)").arg(n);
+        QStringList paths;
+        for (const auto& lf : files)
+            if (lf)
+                paths << lf->filePath;
+        tip = paths.join(QLatin1Char('\n'));
+    } else {
+        text = tr("Logs");
+    }
+    ui->tabWidget->setTabText(idx, text);
+    ui->tabWidget->setTabToolTip(idx, tip);
+}
+
+void MainWindow::mergeTabs(int fromIndex, int toIndex)
+{
+    if (fromIndex == toIndex)
+        return;
+    auto* src = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(fromIndex));
+    auto* dst = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(toIndex));
+    if (!src || !dst)
+        return;
+
+    // Файлы источника перезагружаем в приёмник через штатный addLogFile —
+    // он сам выберет бэкенд (резидентный/индексный) и отсеет дубликаты.
+    QStringList paths;
+    for (const auto& lf : src->loadedFiles())
+        if (lf)
+            paths << lf->filePath;
+    for (const QString& p : paths)
+        dst->addLogFile(p);
+
+    updateTabLabel(dst);
+
+    // addLogFile вкладок не двигает — индекс источника ещё валиден.
+    closeTab(fromIndex);
+
+    // Индекс приёмника мог сдвинуться после закрытия источника.
+    const int dstIdx = ui->tabWidget->indexOf(dst);
+    if (dstIdx >= 0)
+        ui->tabWidget->setCurrentIndex(dstIdx);
+}
+
+void MainWindow::mergeAllTabsInto(int keepIndex)
+{
+    auto* dst = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(keepIndex));
+    if (!dst)
+        return;
+
+    QStringList paths;
+    for (int i = 0; i < ui->tabWidget->count(); ++i) {
+        if (i == keepIndex)
+            continue;
+        auto* v = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
+        if (!v)
+            continue;
+        for (const auto& lf : v->loadedFiles())
+            if (lf)
+                paths << lf->filePath;
+    }
+    for (const QString& p : paths)
+        dst->addLogFile(p);
+
+    updateTabLabel(dst);
+
+    for (int i = ui->tabWidget->count() - 1; i >= 0; --i)
+        if (ui->tabWidget->widget(i) != dst)
+            closeTab(i);
+
+    const int dstIdx = ui->tabWidget->indexOf(dst);
+    if (dstIdx >= 0)
+        ui->tabWidget->setCurrentIndex(dstIdx);
+}
+
+void MainWindow::revealTabFile(int index)
+{
+    auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(index));
+    if (!view)
+        return;
+    const auto files = view->loadedFiles();
+    if (files.isEmpty() || !files.first())
+        return;
+    const QString path = files.first()->filePath;
+
+#ifdef Q_OS_WIN
+    // Открыть Проводник с выделенным файлом.
+    QProcess::startDetached(QStringLiteral("explorer.exe"),
+        { QStringLiteral("/select,") + QDir::toNativeSeparators(path) });
+#else
+    // Прочие ОС — открыть содержащую папку.
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+#endif
+}
+
+void MainWindow::copyTabPath(int index)
+{
+    auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(index));
+    if (!view)
+        return;
+    QStringList paths;
+    for (const auto& lf : view->loadedFiles())
+        if (lf)
+            paths << QDir::toNativeSeparators(lf->filePath);
+    if (paths.isEmpty())
+        return;
+    QApplication::clipboard()->setText(paths.join(QLatin1Char('\n')));
+}
+
+void MainWindow::onTabContextMenu(int index, const QPoint& globalPos)
+{
+    if (index < 0 || index >= ui->tabWidget->count())
+        return;
+
+    const int total = ui->tabWidget->count();
+    auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(index));
+    const bool hasFile = view && !view->loadedFiles().isEmpty();
+
+    QMenu menu(this);
+    QAction* actClose       = menu.addAction(tr("Close"));
+    QAction* actCloseOthers = menu.addAction(tr("Close Others"));
+    QAction* actCloseRight  = menu.addAction(tr("Close Tabs to the Right"));
+    QAction* actCloseAll    = menu.addAction(tr("Close All"));
+    menu.addSeparator();
+    QAction* actReveal      = menu.addAction(tr("Open Containing Folder"));
+    QAction* actCopyPath    = menu.addAction(tr("Copy Full Path"));
+    QAction* actMergeAll    = nullptr;
+    if (total > 1) {
+        menu.addSeparator();
+        actMergeAll = menu.addAction(tr("Merge All Tabs Into This One"));
+    }
+
+    actCloseOthers->setEnabled(total > 1);
+    actCloseRight->setEnabled(index < total - 1);
+    actReveal->setEnabled(hasFile);
+    actCopyPath->setEnabled(hasFile);
+
+    QAction* chosen = menu.exec(globalPos);
+    if (!chosen)
+        return;
+    if (chosen == actClose)                          closeTab(index);
+    else if (chosen == actCloseOthers)               closeOtherTabs(index);
+    else if (chosen == actCloseRight)                closeTabsToRight(index);
+    else if (chosen == actCloseAll)                  closeAllTabs();
+    else if (chosen == actReveal)                    revealTabFile(index);
+    else if (chosen == actCopyPath)                  copyTabPath(index);
+    else if (actMergeAll && chosen == actMergeAll)   mergeAllTabsInto(index);
 }
 
 void MainWindow::on_actionOpen_triggered()
