@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- DendroLog: иконка ассоциированного .log-файла — лист документа с
+       эмблемой приложения в углу, чтобы файлы в проводнике не выглядели
+       ярлыками программы. Векторный оригинал для scripts/generate_icons.py
+       (растр рисуется там же на Pillow), геометрия соответствует размерам
+       48 px и выше; мелкие размеры теряют строки текста. -->
+  <g stroke="#A3ABBA" stroke-width="6" stroke-linejoin="round">
+    <path d="M42 14 H152 L208 70 V238 H42 Z" fill="#FFFFFF"/>
+    <path d="M152 14 L208 70 H152 Z" fill="#D6DDE7"/>
+  </g>
+  <g fill="#B0B8C5">
+    <rect x="66" y="90.5" width="116" height="11" rx="5.5"/>
+    <rect x="66" y="118.5" width="116" height="11" rx="5.5"/>
+    <rect x="66" y="146.5" width="86" height="11" rx="5.5"/>
+    <rect x="66" y="174.5" width="50" height="11" rx="5.5"/>
+    <rect x="66" y="202.5" width="54" height="11" rx="5.5"/>
+  </g>
+  <!-- Белый зазор, отделяющий эмблему от листа в месте наложения. -->
+  <rect x="134" y="134" width="122" height="122" rx="30" fill="#FFFFFF"/>
+  <g transform="translate(138 138) scale(0.4609)">
+    <rect width="256" height="256" rx="56" fill="#4E342E"/>
+    <g fill="none" stroke="#EAD9C0" stroke-linecap="round">
+      <circle cx="122" cy="134" r="86" stroke-width="11"/>
+      <circle cx="125" cy="131" r="62" stroke-width="12"/>
+      <circle cx="127" cy="129" r="40" stroke="#4DC9A2" stroke-width="13"/>
+      <circle cx="129" cy="127" r="20" stroke-width="11"/>
+    </g>
+    <circle cx="130" cy="126" r="7" fill="#EAD9C0"/>
+  </g>
+</svg>

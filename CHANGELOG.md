@@ -6,6 +6,16 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Associated `.log` files now show their own document icon — a sheet of paper
+  badged with the ring emblem — instead of the application icon, so log files
+  are no longer indistinguishable from the DendroLog shortcut in Explorer.
+
+### Fixed
+- The generated `.ico` files again contain the 20 and 40 px images (the shell
+  sizes used at 125 % display scaling); the ICO writer had been silently
+  dropping them.
+
 ## [0.2.0] — 2026-07-17
 
 ### Added

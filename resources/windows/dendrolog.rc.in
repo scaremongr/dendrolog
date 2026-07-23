@@ -1,7 +1,17 @@
 // Configured by CMake from dendrolog.rc.in — do not edit the generated file.
 #include <winver.h>
 
+// Иконка приложения. Имя ресурса — строка «IDI_ICON1» (не число): именно её
+// ищет через LoadImage платформенный плагин Qt при регистрации оконного класса.
 IDI_ICON1 ICON "@DENDROLOG_ICO_PATH@"
+
+// Иконка ассоциированных .log-файлов: лист документа с эмблемой в углу, чтобы
+// файлы в проводнике не выглядели ярлыками программы. ID числовой — в таблице
+// ресурсов PE именованные записи идут раньше числовых, поэтому иконкой самого
+// exe (индекс 0) остаётся IDI_ICON1, а эта доступна как индекс 1 / ID 2.
+// Индекс прописан в packaging/windows/dendrolog.iss (DefaultIcon).
+#define IDI_LOGFILE 2
+IDI_LOGFILE ICON "@DENDROLOG_DOC_ICO_PATH@"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0

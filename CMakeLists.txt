@@ -130,8 +130,12 @@ set(PROJECT_SOURCES
 # из project(VERSION), поэтому .rc генерируется при конфигурации.
 if(WIN32)
     set(DENDROLOG_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/dendrolog.ico")
+    set(DENDROLOG_DOC_ICO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/dendrolog-log.ico")
     configure_file(resources/windows/dendrolog.rc.in
                    ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc @ONLY)
+    # .rc не пересобирается сам при правке .ico — укажем их явной зависимостью.
+    set_property(SOURCE ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc APPEND PROPERTY
+                 OBJECT_DEPENDS "${DENDROLOG_ICO_PATH};${DENDROLOG_DOC_ICO_PATH}")
     list(APPEND PROJECT_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc)
 endif()
 

@@ -62,7 +62,9 @@ Name: "{autodesktop}\DendroLog"; Filename: "{app}\DendroLog.exe"; Tasks: desktop
 [Registry]
 Root: HKA; Subkey: "Software\Classes\.log\OpenWithProgids"; ValueType: string; ValueName: "DendroLog.log"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatelog
 Root: HKA; Subkey: "Software\Classes\DendroLog.log"; ValueType: string; ValueName: ""; ValueData: "Log file"; Flags: uninsdeletekey; Tasks: associatelog
-Root: HKA; Subkey: "Software\Classes\DendroLog.log\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\DendroLog.exe,0"; Tasks: associatelog
+; Индекс 1 — иконка документа (ресурс IDI_LOGFILE в dendrolog.rc.in), а не
+; иконка приложения: иначе .log-файлы в проводнике неотличимы от ярлыка exe.
+Root: HKA; Subkey: "Software\Classes\DendroLog.log\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\DendroLog.exe,1"; Tasks: associatelog
 Root: HKA; Subkey: "Software\Classes\DendroLog.log\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\DendroLog.exe"" ""%1"""; Tasks: associatelog
 
 [Run]
