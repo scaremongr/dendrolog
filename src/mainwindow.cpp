@@ -1882,6 +1882,10 @@ void MainWindow::onCurrentTabChanged(int index)
         // и панель деталей (иначе они показывали бы закрытый документ).
         updateLineInfoLabel(-1, 0);
     }
+    // Переключение на вкладку — тоже «фокус на view»: с авто-обновлением она
+    // должна показывать актуальные данные сразу, а не со следующего тика.
+    if (currentView && currentView->autoReload())
+        currentView->reloadChangedFiles();
     updateStatusBarDefaultText();
     updateLogLevelFilterButtons();
     updateFilterInputsFromModel();
@@ -3360,7 +3364,7 @@ void MainWindow::onReloadFileTriggered()
     // Manual one-shot reload of the active tab (F5 or left-click on the button).
     if (!m_activeLogView)
         return;
-    m_activeLogView->reloadChangedFiles();
+    m_activeLogView->reloadChangedFiles(/*force=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -3426,6 +3430,22 @@ void MainWindow::applyAutoReloadSettings()
     const int intervalMs = AppSettings::instance().autoReloadIntervalSecs() * 1000;
     m_autoReloadTimer->setInterval(intervalMs);
     updateAutoReloadTimer();
+}
+
+// ---------------------------------------------------------------------------
+// Окно снова стало активным (развернули из трея/панели задач, переключились
+// на него) — данные вкладок с авто-обновлением могли устареть, пока окно было
+// не в фокусе. Подтягиваем хвост сразу, не дожидаясь очередного тика таймера.
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+    if (!event)
+        return;
+    const auto type = event->type();
+    const bool activated = (type == QEvent::ActivationChange && isActiveWindow());
+    const bool restored  = (type == QEvent::WindowStateChange && !isMinimized());
+    if (activated || restored)
+        onAutoReloadTimerTick();
 }
 
 // ---------------------------------------------------------------------------

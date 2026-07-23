@@ -40,8 +40,6 @@ void TextChunkCache::invalidateFile(int fileId)
             ++it;
         }
     }
-    if (fileId >= 0 && fileId < int(m_files.size()))
-        m_files[size_t(fileId)].file.reset(); // переоткрыть при следующем чтении
 }
 
 const QByteArray* TextChunkCache::chunkAt(int fileId, qint64 chunkIndex) const
@@ -55,18 +53,17 @@ const QByteArray* TextChunkCache::chunkAt(int fileId, qint64 chunkIndex) const
 
     if (fileId < 0 || fileId >= int(m_files.size()))
         return nullptr;
-    const FileSlot& slot = m_files[size_t(fileId)];
-    if (!slot.file) {
-        slot.file = std::make_unique<QFile>(slot.path);
-        if (!slot.file->open(QIODevice::ReadOnly)) {
-            slot.file.reset();
-            return nullptr;
-        }
-    }
 
-    if (!slot.file->seek(chunkIndex * kChunkBytes))
+    // Ручку файла между чтениями НЕ держим: открытый QFile на Windows (без
+    // FILE_SHARE_DELETE) не даёт ни удалить, ни переименовать лог — ломались бы
+    // и ротация со стороны писателя, и пересоздание файла пользователем.
+    // Открытие на промах кэша — раз в 4 МБ, на фоне самого чтения незаметно.
+    QFile file(m_files[size_t(fileId)].path);
+    if (!file.open(QIODevice::ReadOnly))
         return nullptr;
-    QByteArray bytes = slot.file->read(kChunkBytes);
+    if (!file.seek(chunkIndex * kChunkBytes))
+        return nullptr;
+    QByteArray bytes = file.read(kChunkBytes);
     if (bytes.isEmpty())
         return nullptr;
 

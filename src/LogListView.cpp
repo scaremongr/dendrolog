@@ -482,17 +482,23 @@ void LogListView::handleRowsInserted(int first, int last)
     const int rows = model()->rowCount();
     const bool isAppend = (last == rows - 1);
 
+    // Прокрутить к новому концу после вставки, если включён явный follow-tail
+    // ЛИБО вьюпорт и так стоял на последней строке (тогда хвост «прилипает»:
+    // каждое обновление файла показывает свежие записи, пока пользователь не
+    // уйдёт вверх). Замер — ДО пересчёта высот и скроллбара, т.е. по старой
+    // геометрии: вопрос именно в том, где пользователь был до этого батча.
+    const bool followScrollAfterAppend = m_followTail || isScrolledToBottom();
+
     if (!isAppend) {
+        // Вставка в середину (слияние файлов по времени): полная инвалидация.
         invalidateRowState();
         rebuildHeightCache();
         updateScrollbar();
+        if (followScrollAfterAppend)
+            scrollToBottomFollow();
         viewport()->update();
         return;
     }
-
-    // Follow-tail: дозагрузка в конец прокручивает вьюпорт к последней строке
-    // (после обновления высот/скроллбара ниже).
-    const bool followScrollAfterAppend = m_followTail;
 
     // --- Append: инкрементальное расширение кэшей ---
 
@@ -2274,6 +2280,15 @@ void LogListView::setFollowTail(bool enabled)
 void LogListView::scrollToBottomFollow()
 {
     verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+}
+
+bool LogListView::isScrolledToBottom() const
+{
+    const QScrollBar* sb = verticalScrollBar();
+    const int maximum = sb->maximum();
+    if (maximum <= 0)
+        return false; // контент влезает целиком — прокручивать было нечего
+    return sb->value() >= maximum - qMax(1, sb->singleStep());
 }
 
 void LogListView::wheelEvent(QWheelEvent *event)

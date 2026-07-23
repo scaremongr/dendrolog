@@ -67,6 +67,8 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    // Возврат фокуса на окно — повод подтянуть хвост вкладок с авто-обновлением.
+    void changeEvent(QEvent* event) override;
     // Перетаскивание лог-файлов из проводника прямо в окно.
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;

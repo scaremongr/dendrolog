@@ -32,7 +32,9 @@ public:
 
     // Проверяет, изменились ли файлы на диске, и дочитывает новые данные.
     // Возвращает true если хотя бы один файл был обновлён.
-    bool reloadChangedFiles();
+    // force (ручной F5) дополнительно повторяет попытку по файлам, чью
+    // прошлую загрузку сорвало и на диске с тех пор ничего не изменилось.
+    bool reloadChangedFiles(bool force = false);
 
     // Per-tab auto-reload. Default is taken from AppSettings at construction time.
     bool autoReload() const { return m_autoReload; }
@@ -71,6 +73,7 @@ private slots:
     // Incremental reload: append new entries without model reset
     void handleIncrementalEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr& logFile);
     void handleIncrementalParsingFinished(int totalEntries, const LogFilePtr& logFile);
+    void handleIncrementalParsingFailed(const LogFilePtr& logFile);
     // Индексный бэкенд: приём опубликованных порций строк и завершения.
     void handleIndexBatchReady(const LogFilePtr& logFile, qint64 firstLine, qint64 count);
     void handleIndexingFinished(qint64 newLines, const LogFilePtr& logFile);
@@ -83,6 +86,26 @@ private:
     // Запуск полной индексации файла (store уже индексный).
     void startIndexedLoad(const LogFilePtr& logFile);
 
+    // Дешёвая подпись файла на диске: пара (размер, mtime). Нужна только
+    // чтобы понять «изменилось ли на диске хоть что-то» после неудачной
+    // загрузки — иначе нечитаемый (или всё ещё удалённый) файл перечитывался
+    // бы на каждый тик авто-обновления. size < 0 означает «файла нет».
+    struct DiskStamp {
+        qint64 size    = -1;
+        qint64 mtimeMs = -1;
+        bool exists() const { return size >= 0; }
+        bool operator==(const DiskStamp& o) const
+        { return size == o.size && mtimeMs == o.mtimeMs; }
+        static DiskStamp of(const QString& filePath);
+    };
+
+    // Сбрасывает уже показанные строки файла (файл исчез или переписан).
+    void dropRowsForFile(const LogFilePtr& logFile);
+    // Полная перезагрузка файла с нуля: строки сбрасываются и файл читается
+    // заново. Используется, когда файл переписан, обрезан или удалён и создан
+    // заново. Состояние файла обнуляется и помечается «загрузка в полёте».
+    void startFullReload(const LogFilePtr& logFile);
+
     LogListView *m_view;
     LogModel    *m_model;
     QVector<LogFilePtr> m_loadedFiles;  // Список загруженных файлов
@@ -91,13 +114,26 @@ private:
 
     // Per-file reload state: the anchor fingerprinting the already-consumed
     // prefix (used to tell appends from rewrites) and the next logicalEntryId.
+    //
+    // Инварианты (проверяются в reloadChangedFiles):
+    //   loadInFlight            — фоновый джоб пишет данные этого файла;
+    //                             второй по нему не запускаем;
+    //   !initialLoadDone && !loadInFlight — файла нет либо загрузка сорвалась;
+    //                             failedStamp хранит то, что мы видели на диске,
+    //                             и повтор случится, когда подпись изменится.
     struct FileReloadState {
         FileChangeDetector::Anchor anchor;        // prefix size + boundary fingerprint
         int    nextLogicalEntryId = 0;
-        bool   initialLoadDone = false;           // false = still doing the initial parse
-        // Индексация файла в полёте: не запускать вторую по тому же индексу
-        // (LineIndex — single-writer).
-        bool   indexingInFlight = false;
+        bool   initialLoadDone = false;           // файл успешно прочитан целиком
+        // Загрузка (полная или дозапись) в полёте: вторую по тому же файлу не
+        // запускаем — LineIndex single-writer, а резидентный ре-парс иначе
+        // продублировал бы записи.
+        bool   loadInFlight = false;
+        // Ни один бэкенд не тянет этот файл (например UTF-16 во вкладке с
+        // несколькими файлами) — повторять загрузку бессмысленно.
+        bool   unsupported = false;
+        // Подпись файла на момент исчезновения/неудачной загрузки.
+        DiskStamp failedStamp;
     };
     QHash<QString, FileReloadState> m_fileReloadStates; // key = filePath
 

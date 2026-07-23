@@ -48,8 +48,7 @@ private:
     };
     struct FileSlot {
         QString path;
-        // Ленивая ручка файла: открывается при первом чтении.
-        mutable std::unique_ptr<QFile> file;
+        // Ручка файла НЕ хранится: см. chunkAt() — лог не должен быть залочен.
     };
 
     const QByteArray* chunkAt(int fileId, qint64 chunkIndex) const;

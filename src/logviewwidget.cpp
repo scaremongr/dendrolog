@@ -3,6 +3,7 @@
 #include "appsettings.h"
 #include "indexedlogstore.h"
 #include <QVBoxLayout>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QDebug>
 #include <algorithm>
@@ -34,11 +35,14 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_logParser, &LogParser::parsingStarted,  this, [this](const LogFilePtr& f){ emit fileParsingStarted(f); });
     connect(m_logParser, &LogParser::parsingProgress, this, [this](int p, const LogFilePtr& f){ emit fileParsingProgress(f, p); });
     connect(m_logParser, &LogParser::parsingFinished, this, &LogViewWidget::handleParsingFinished);
-    connect(m_logParser, &LogParser::parsingFailed,   this, [this](const LogFilePtr& f){ emit fileParsingFailed(f); });
+    connect(m_logParser, &LogParser::parsingFailed,   this, &LogViewWidget::handleParsingFailed);
 
     // Соединяем сигналы reload-парсера (только для инкрементальных обновлений)
     connect(m_reloadParser, &LogParser::entriesParsed, this, &LogViewWidget::handleIncrementalEntriesParsed);
     connect(m_reloadParser, &LogParser::parsingFinished, this, &LogViewWidget::handleIncrementalParsingFinished);
+    // Обязательно: без этого сорвавшаяся дозапись оставила бы loadInFlight
+    // висеть, и файл больше никогда бы не обновлялся.
+    connect(m_reloadParser, &LogParser::parsingFailed, this, &LogViewWidget::handleIncrementalParsingFailed);
 
     // Соединяем сигнал изменения текущей строки
     connect(m_view->selectionModel(), &QItemSelectionModel::currentRowChanged,
@@ -134,10 +138,66 @@ void LogViewWidget::addLogFile(const QString &filePath)
         return;
     }
 
-    // Запускаем асинхронный парсинг
+    // Запускаем асинхронный парсинг. Состояние заводим здесь: пока полная
+    // загрузка в полёте, тик авто-обновления не должен запустить вторую.
+    FileReloadState& st = m_fileReloadStates[filePath];
+    st = FileReloadState{};
+    st.loadInFlight = true;
     m_logParser->startParsing(logFile);
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
+}
+
+LogViewWidget::DiskStamp LogViewWidget::DiskStamp::of(const QString& filePath)
+{
+    DiskStamp stamp;
+    const QFileInfo info(filePath);
+    if (info.exists()) {
+        stamp.size = info.size();
+        stamp.mtimeMs = info.lastModified().toMSecsSinceEpoch();
+    }
+    return stamp;
+}
+
+void LogViewWidget::dropRowsForFile(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return;
+    if (auto* store = m_model->indexedOrNull())
+        store->resetFileIndex(logFile, std::make_shared<LineIndex>());
+    else
+        m_model->removeEntriesForFile(logFile->filePath);
+    emit totalRowCountChanged(m_model->rowCount());
+    const QModelIndex cur = m_view->currentIndex();
+    emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
+}
+
+void LogViewWidget::startFullReload(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return;
+    // Ключ уже есть в хэше у всех вызывающих — вставки (и рехэша, который
+    // инвалидировал бы их ссылку на состояние) здесь не происходит.
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+
+    if (auto* store = m_model->indexedOrNull()) {
+        // Строки файла сбрасываются, индексация идёт в свежий LineIndex
+        // (store сам чистит кэш текста и refs).
+        ensureIndexer();
+        auto fresh = std::make_shared<LineIndex>();
+        store->resetFileIndex(logFile, fresh);
+        st = FileReloadState{};
+        st.loadInFlight = true;
+        m_indexer->startIndexing(logFile, fresh);
+        return;
+    }
+
+    // Резидентный бэкенд: выбрасываем устаревшие записи этого файла и читаем
+    // его с нуля. Записи остальных файлов вкладки не трогаем.
+    m_model->removeEntriesForFile(logFile->filePath);
+    st = FileReloadState{};
+    st.loadInFlight = true;
+    m_logParser->startParsing(logFile);
 }
 
 void LogViewWidget::ensureIndexer()
@@ -171,8 +231,8 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile)
     auto index = std::make_shared<LineIndex>();
     store->attachFile(logFile, index);
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
-    st.initialLoadDone = false;
-    st.indexingInFlight = true;
+    st = FileReloadState{};
+    st.loadInFlight = true;
     m_indexer->startIndexing(logFile, index);
 }
 
@@ -207,7 +267,8 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
                                       : QFileInfo(logFile->filePath).size();
     st.anchor = FileChangeDetector::capture(logFile->filePath, anchorOffset);
     st.initialLoadDone = true;
-    st.indexingInFlight = false;
+    st.loadInFlight = false;
+    st.failedStamp = DiskStamp{};
 
     if (wasInitial)
         emit fileParsingFinished(logFile,
@@ -221,8 +282,14 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
 
 void LogViewWidget::handleIndexingFailed(const LogFilePtr& logFile)
 {
-    if (logFile)
-        m_fileReloadStates[logFile->filePath].indexingInFlight = false;
+    if (logFile) {
+        // Индекс может остаться частичным — файл считается незагруженным и
+        // будет прочитан заново, как только изменится на диске.
+        FileReloadState& st = m_fileReloadStates[logFile->filePath];
+        st.loadInFlight = false;
+        st.initialLoadDone = false;
+        st.failedStamp = DiskStamp::of(logFile->filePath);
+    }
     emit fileParsingFailed(logFile);
 }
 
@@ -233,17 +300,23 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
         return;
     qWarning() << "LogViewWidget: indexed backend fallback for"
                << logFile->filePath << "-" << reason;
-    m_fileReloadStates[logFile->filePath].indexingInFlight = false;
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    st.loadInFlight = false;
 
     // Индексный путь понимает только UTF-8: файл ведём через резидентный
     // парсер. Смешивать бэкенды в одной вкладке нельзя — откат возможен,
     // только пока этот файл в ней единственный.
     if (m_loadedFiles.size() == 1) {
         m_model->convertToResidentBackend();
-        m_fileReloadStates.remove(logFile->filePath);
+        st = FileReloadState{};
+        st.loadInFlight = true;
         m_logParser->startParsing(logFile);
         return;
     }
+    // Отката нет: помечаем файл неподдерживаемым, чтобы авто-обновление не
+    // переиндексировало его впустую на каждое изменение.
+    st.initialLoadDone = false;
+    st.unsupported = true;
     emit fileParsingFailed(logFile);
 }
 
@@ -282,6 +355,8 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
         const qint64 size  = QFileInfo(parsedLogFile->filePath).size();
         st.anchor          = FileChangeDetector::capture(parsedLogFile->filePath, size);
         st.initialLoadDone = true;
+        st.loadInFlight    = false;
+        st.failedStamp     = DiskStamp{};
     }
 
     emit fileParsingFinished(parsedLogFile, totalEntries);
@@ -292,10 +367,19 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
 
 void LogViewWidget::handleParsingFailed(const LogFilePtr& parsedLogFile)
 {
+    if (!parsedLogFile)
+        return;
     qWarning() << "LogViewWidget: Failed parsing for" << parsedLogFile->filePath;
-    // Удалить parsedLogFile из m_loadedFiles, если он там есть и парсинг критичен
-    // m_loadedFiles.removeAll(parsedLogFile); // Если нужно
-    // Показать сообщение пользователю
+
+    // Файл не открылся (удалён, заблокирован писателем, нет прав). Снимаем
+    // «загрузку в полёте» и запоминаем подпись файла: без этого он остался бы
+    // навсегда незагруженным и F5 по нему больше ничего бы не делал. Повтор
+    // произойдёт, когда файл на диске изменится (в частности — появится снова).
+    FileReloadState& st = m_fileReloadStates[parsedLogFile->filePath];
+    st.loadInFlight = false;
+    st.initialLoadDone = false;
+    st.failedStamp = DiskStamp::of(parsedLogFile->filePath);
+    emit fileParsingFailed(parsedLogFile);
 }
 
 void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
@@ -303,13 +387,15 @@ void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
     emit modelFiltered(totalRowsAfterFilter);
 }
 
-bool LogViewWidget::reloadChangedFiles()
+bool LogViewWidget::reloadChangedFiles(bool force)
 {
     // Растущий файл (типично — спул stdin) пересёк порог индексного бэкенда:
-    // конвертируем вкладку, дальше хвост дочитывает индексатор. Возможные
-    // хвостовые батчи резидентного парсера в полёте модель молча отбросит.
+    // конвертируем вкладку, дальше хвост дочитывает индексатор. Конвертируем
+    // только когда по файлу нет джоба в полёте — иначе резидентный парсер
+    // дописал бы в состояние, которым уже владеет индексатор.
     if (!m_model->isIndexedBackend() && m_loadedFiles.size() == 1
-        && m_loadedFiles[0]) {
+        && m_loadedFiles[0]
+        && !m_fileReloadStates.value(m_loadedFiles[0]->filePath).loadInFlight) {
         const qint64 size = QFileInfo(m_loadedFiles[0]->filePath).size();
         if (size >= AppSettings::instance().indexedThresholdBytes()) {
             auto* store = m_model->convertToIndexedBackend();
@@ -328,10 +414,34 @@ bool LogViewWidget::reloadChangedFiles()
         if (!logFile) continue;
 
         FileReloadState& st = m_fileReloadStates[logFile->filePath];
-        if (!st.initialLoadDone) continue; // Still doing the initial parse
-        // Индекс — single-writer: пока предыдущая (до)индексация не
-        // завершилась, вторую по тому же файлу не запускаем.
-        if (indexedStore && st.indexingInFlight) continue;
+        // Фоновая загрузка ещё идёт — второй джоб по тому же файлу запускать
+        // нельзя (дубли записей / гонка за single-writer индексом).
+        if (st.loadInFlight || st.unsupported) continue;
+
+        const DiskStamp stamp = DiskStamp::of(logFile->filePath);
+
+        if (!stamp.exists()) {
+            // Файла нет на диске. Сбрасываем его строки (view пустеет) ровно
+            // один раз и ждём, пока он появится снова: обнулённое состояние
+            // хранит failedStamp «файла нет», и следующие тики сюда не зайдут.
+            if (st.initialLoadDone || st.failedStamp.exists()) {
+                dropRowsForFile(logFile);
+                st = FileReloadState{};
+                anyChanged = true;
+            }
+            continue;
+        }
+
+        if (!st.initialLoadDone) {
+            // Файл есть, но не загружен: либо создан заново после удаления,
+            // либо прошлая загрузка сорвалась. Сами по себе повторяем, только
+            // когда на диске что-то изменилось (иначе перечитывали бы
+            // недоступный файл на каждый тик); ручной F5 пробует всегда.
+            if (!force && stamp == st.failedStamp) continue;
+            startFullReload(logFile);
+            anyChanged = true;
+            continue;
+        }
 
         switch (FileChangeDetector::classify(logFile->filePath, st.anchor)) {
         case FileChangeDetector::Change::Unchanged:
@@ -344,7 +454,7 @@ bool LogViewWidget::reloadChangedFiles()
                 // переиндексируется от своего начала.
                 if (auto index = indexedStore->indexForFile(logFile->filePath)) {
                     ensureIndexer();
-                    st.indexingInFlight = true;
+                    st.loadInFlight = true;
                     m_indexer->startIndexingFrom(logFile, index,
                                                  index->lastLineProvisional());
                     // Re-anchor: следующий тик поллинга не должен снова
@@ -358,6 +468,7 @@ bool LogViewWidget::reloadChangedFiles()
             // Prefix is intact and the file grew — read only the new tail and
             // append it, preserving selection and scroll position.
             m_reloadParser->setPattern(m_logParser->pattern().patternString());
+            st.loadInFlight = true;
             m_reloadParser->startParsingFrom(logFile, st.anchor.consumedBytes, st.nextLogicalEntryId);
             // Re-anchor immediately so a concurrent poll won't re-read this range.
             const qint64 newSize = QFileInfo(logFile->filePath).size();
@@ -366,28 +477,13 @@ bool LogViewWidget::reloadChangedFiles()
             break;
         }
 
-        case FileChangeDetector::Change::Replaced: {
-            if (indexedStore) {
-                // Файл заменён: сброс его строк и индексация заново в свежий
-                // LineIndex (store сам чистит кэш текста и refs).
-                ensureIndexer();
-                auto fresh = std::make_shared<LineIndex>();
-                indexedStore->resetFileIndex(logFile, fresh);
-                st = FileReloadState{};
-                st.indexingInFlight = true;
-                m_indexer->startIndexing(logFile, fresh);
-                anyChanged = true;
-                break;
-            }
-            // File was truncated or overwritten with different content. Discard the
-            // now-stale entries for this file and re-parse it from scratch; state is
-            // rebuilt by handleParsingFinished. Other files' entries are untouched.
-            m_model->removeEntriesForFile(logFile->filePath);
-            m_fileReloadStates.remove(logFile->filePath); // invalidates `st`; do not reuse
-            m_logParser->startParsing(logFile);
+        case FileChangeDetector::Change::Replaced:
+            // Файл обрезан или переписан другим содержимым (в том числе удалён
+            // и создан заново): выбрасываем устаревшие строки и читаем заново.
+            // Состояние восстановится в handle*Finished.
+            startFullReload(logFile); // `st` переинициализирован — не переиспользовать
             anyChanged = true;
             break;
-        }
         }
     }
     return anyChanged;
@@ -409,12 +505,28 @@ void LogViewWidget::handleIncrementalEntriesParsed(
     m_model->appendEntries(batch);
 }
 
-void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& /*logFile*/)
+void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& logFile)
 {
+    if (logFile)
+        m_fileReloadStates[logFile->filePath].loadInFlight = false;
     emit totalRowCountChanged(m_model->rowCount());
     QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
     emit reloadFinished(newEntries);
+}
+
+void LogViewWidget::handleIncrementalParsingFailed(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return;
+    // Хвост дочитать не удалось (файл исчез или заблокирован), а якорь уже
+    // сдвинут на непрочитанные байты — доверять ему больше нельзя. Помечаем
+    // файл незагруженным: следующая проверка перечитает его целиком (или
+    // очистит, если файла нет).
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    st.loadInFlight = false;
+    st.initialLoadDone = false;
+    st.failedStamp = DiskStamp::of(logFile->filePath);
 }
 
 void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFilePtr& parsedLogFile)
