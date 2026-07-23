@@ -604,7 +604,7 @@ StatisticsPanel::StatisticsPanel(QWidget* parent)
     m_refreshButton->setAutoRaise(true);
     m_refreshButton->setToolTip(tr("Recalculate statistics"));
     connect(m_refreshButton, &QToolButton::clicked,
-            this, [this]() { startCollection(); });
+            this, [this]() { startCollection(/*manual=*/true); });
     topLayout->addWidget(m_refreshButton);
 
     m_statusLabel = new QLabel(topBar);
@@ -703,11 +703,49 @@ void StatisticsPanel::scheduleRefresh()
 {
     if (!m_model)
         return;
+    // Документ ещё грузится — промежуточные срезы не нужны: они устаревают
+    // через мгновение. Один сбор по полному документу сделает setLoading(false).
+    if (m_loading) {
+        m_dirty = true;
+        return;
+    }
     if (!isVisible()) {
         m_dirty = true;
         return;
     }
-    m_refreshTimer->start();
+    // Сбор уже идёт — НЕ трогаем его: на большом документе он длится дольше,
+    // чем приходят изменения (живой лог + авто-обновление), и перезапуск по
+    // каждому изменению отменял бы его снова и снова — панель не показала бы
+    // результат никогда. Пересбор ставим в очередь (см. onCollectionFinished).
+    if (m_watcher.isRunning()) {
+        m_pendingRefresh = true;
+        return;
+    }
+    // Окно дебаунса НЕ продлеваем: непрерывный поток дозаписей иначе
+    // отодвигал бы старт сбора бесконечно.
+    if (!m_refreshTimer->isActive())
+        m_refreshTimer->start();
+}
+
+void StatisticsPanel::setLoading(bool loading)
+{
+    if (m_loading == loading)
+        return;
+    m_loading = loading;
+
+    if (loading) {
+        // Первая загрузка документа: показываем, чего ждём, — иначе в браузере
+        // висела бы стартовая заглушка «Open a log file…», будто файл не открыт.
+        // У уже посчитанного документа (дочитывание хвоста) результат на
+        // экране не трогаем.
+        if (!m_stats.valid && m_model)
+            renderPlaceholder(tr("Statistics will be collected once the document "
+                                 "is fully loaded."));
+        return;
+    }
+    // Загрузка завершилась — считаем по всему документу (через общий дебаунс:
+    // у растущего лога дозаписи приходят пачками).
+    scheduleRefresh();
 }
 
 void StatisticsPanel::showEvent(QShowEvent* event)
@@ -723,10 +761,24 @@ void StatisticsPanel::cancelCollection()
         m_cancelFlag->store(true);
 }
 
-void StatisticsPanel::startCollection()
+void StatisticsPanel::startCollection(bool manual)
 {
+    // Автоматический сбор по ещё не догруженному документу не запускаем:
+    // считать по половине файла бессмысленно, а на большом документе это
+    // секунды процессорного времени на результат, который тут же сменится.
+    // Досчитаем, когда загрузка завершится (setLoading) — или сразу, если
+    // пользователь нажал ⟳ сам.
+    if (m_loading && !manual) {
+        m_dirty = true;
+        if (!m_stats.valid && m_model)
+            renderPlaceholder(tr("Statistics will be collected once the document "
+                                 "is fully loaded."));
+        return;
+    }
+
     m_refreshTimer->stop();
     m_dirty = false;
+    m_pendingRefresh = false; // этот сбор и есть обещанный пересбор
     cancelCollection();
     ++m_generation;
 
@@ -746,6 +798,11 @@ void StatisticsPanel::startCollection()
         return;
     }
 
+    // Пока ни один сбор не отрисован, в браузере висит стартовая заглушка
+    // «Open a log file…» — на большом документе сбор идёт секунды, и она
+    // выглядит так, будто документ не открыт.
+    if (!m_stats.valid)
+        renderPlaceholder(tr("Collecting statistics…"));
     m_statusLabel->setText(tr("Collecting statistics…"));
     auto cancel = std::make_shared<std::atomic_bool>(false);
     m_cancelFlag = cancel;
@@ -758,10 +815,24 @@ void StatisticsPanel::startCollection()
 void StatisticsPanel::onCollectionFinished()
 {
     const DocumentStats stats = m_watcher.result();
-    if (stats.cancelled || stats.generation != m_generation)
-        return; // устаревший результат: актуальный джоб уже в полёте
-    m_stats = stats;
-    renderStats();
+    // Изменения, пришедшие во время сбора, обслуживаем ПОСЛЕ отрисовки его
+    // результата — тогда даже у постоянно растущего документа панель
+    // показывает актуальные на момент старта сбора данные.
+    const bool pending = m_pendingRefresh;
+    m_pendingRefresh = false;
+
+    if (!stats.cancelled && stats.generation == m_generation) {
+        m_stats = stats;
+        renderStats();
+    }
+    // Иначе результат устарел: актуальный джоб уже в полёте либо модель сменилась.
+
+    if (pending) {
+        if (isVisible())
+            m_refreshTimer->start();
+        else
+            m_dirty = true;
+    }
 }
 
 void StatisticsPanel::renderPlaceholder(const QString& text)

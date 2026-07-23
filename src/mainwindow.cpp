@@ -1797,9 +1797,18 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     if (m_timelinePanel)
         m_timelinePanel->setModel(logView->model());
 
-    // Панель статистики — тоже (сама пересоберётся, если видима).
-    if (m_statsPanel)
+    // Панель статистики — тоже (сама пересоберётся, если видима). Состояние
+    // загрузки ставим ДО модели: иначе setModel успел бы запустить сбор по
+    // ещё не догруженному документу.
+    if (m_statsPanel) {
+        m_statsPanel->setLoading(logView->isLoading());
         m_statsPanel->setModel(logView->model());
+        m_statsLoadingConn = connect(logView, &LogViewWidget::loadingChanged,
+                                     this, [this](bool loading) {
+            if (m_statsPanel)
+                m_statsPanel->setLoading(loading);
+        });
+    }
 
     // Живое обновление панели результатов: дозагрузка строк (rowsInserted) или
     // полная перестройка (modelReset) активной вкладки → дебаунс-пересборка.
@@ -1850,8 +1859,11 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     if (m_timelinePanel)
         m_timelinePanel->setModel(nullptr);
 
-    if (m_statsPanel)
+    disconnect(m_statsLoadingConn);
+    if (m_statsPanel) {
         m_statsPanel->setModel(nullptr);
+        m_statsPanel->setLoading(false); // состояние уходящей вкладки больше не наше
+    }
 
     // Рвём соединения живого обновления с моделью уходящей вкладки.
     disconnect(m_searchModelInsertConn);

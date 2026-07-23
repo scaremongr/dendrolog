@@ -199,6 +199,9 @@ private:
     // рвутся в disconnectFromLogView (иначе старая модель дёргала бы рефреш).
     QMetaObject::Connection m_searchModelInsertConn;
     QMetaObject::Connection m_searchModelResetConn;
+    // Состояние загрузки активной вкладки → панель статистики (не считать по
+    // недогруженному документу). Рвётся в disconnectFromLogView.
+    QMetaObject::Connection m_statsLoadingConn;
 
     // Follow-tail: тогл в тулбаре + синхронизация с view активной вкладки.
     QAction* m_followTailAction = nullptr;

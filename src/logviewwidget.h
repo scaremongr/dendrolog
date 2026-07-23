@@ -40,6 +40,11 @@ public:
     bool autoReload() const { return m_autoReload; }
     void setAutoReload(bool enabled) { m_autoReload = enabled; }
 
+    // Идёт ли по вкладке фоновая загрузка данных: первичный разбор/индексация
+    // либо дочитывание хвоста. Потребители (панель статистики) используют это,
+    // чтобы не считать по заведомо неполному документу.
+    bool isLoading() const { return m_loading; }
+
     // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
     void setParserPattern(const QString& pattern);
     void setExtractionEnabled(bool enabled);
@@ -58,6 +63,9 @@ signals: // Сигналы, которые LogViewWidget будет пробра
 
     // Emitted when an incremental reload finishes (new entry count passed).
     void reloadFinished(int newEntriesCount);
+
+    // Началась/закончилась фоновая загрузка данных вкладки (см. isLoading()).
+    void loadingChanged(bool loading);
 
     // Новые сигналы для информации о строках
     void totalRowCountChanged(int totalRows);
@@ -98,6 +106,11 @@ private:
         { return size == o.size && mtimeMs == o.mtimeMs; }
         static DiskStamp of(const QString& filePath);
     };
+
+    // Пересчитывает агрегат «идёт фоновая загрузка» по состояниям файлов и
+    // сигналит об изменении. Вызывается в конце каждого события, способного
+    // это состояние изменить (старт загрузки, её завершение или обрыв).
+    void updateLoadingState();
 
     // Сбрасывает уже показанные строки файла (файл исчез или переписан).
     void dropRowsForFile(const LogFilePtr& logFile);
@@ -148,6 +161,9 @@ private:
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.
     bool m_autoReload = false;
+
+    // Кэш агрегата loadInFlight по всем файлам вкладки (см. updateLoadingState).
+    bool m_loading = false;
 };
 
 #endif // LOGVIEWWIDGET_H

@@ -144,8 +144,25 @@ void LogViewWidget::addLogFile(const QString &filePath)
     st = FileReloadState{};
     st.loadInFlight = true;
     m_logParser->startParsing(logFile);
+    updateLoadingState();
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
+}
+
+void LogViewWidget::updateLoadingState()
+{
+    bool loading = false;
+    for (auto it = m_fileReloadStates.constBegin();
+         it != m_fileReloadStates.constEnd(); ++it) {
+        if (it->loadInFlight) {
+            loading = true;
+            break;
+        }
+    }
+    if (loading == m_loading)
+        return;
+    m_loading = loading;
+    emit loadingChanged(m_loading);
 }
 
 LogViewWidget::DiskStamp LogViewWidget::DiskStamp::of(const QString& filePath)
@@ -189,6 +206,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
         st = FileReloadState{};
         st.loadInFlight = true;
         m_indexer->startIndexing(logFile, fresh);
+        updateLoadingState();
         return;
     }
 
@@ -198,6 +216,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     st = FileReloadState{};
     st.loadInFlight = true;
     m_logParser->startParsing(logFile);
+    updateLoadingState();
 }
 
 void LogViewWidget::ensureIndexer()
@@ -234,6 +253,7 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile)
     st = FileReloadState{};
     st.loadInFlight = true;
     m_indexer->startIndexing(logFile, index);
+    updateLoadingState();
 }
 
 void LogViewWidget::handleIndexBatchReady(const LogFilePtr& logFile,
@@ -269,6 +289,7 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
     st.initialLoadDone = true;
     st.loadInFlight = false;
     st.failedStamp = DiskStamp{};
+    updateLoadingState();
 
     if (wasInitial)
         emit fileParsingFinished(logFile,
@@ -289,6 +310,7 @@ void LogViewWidget::handleIndexingFailed(const LogFilePtr& logFile)
         st.loadInFlight = false;
         st.initialLoadDone = false;
         st.failedStamp = DiskStamp::of(logFile->filePath);
+        updateLoadingState();
     }
     emit fileParsingFailed(logFile);
 }
@@ -317,6 +339,7 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
     // переиндексировало его впустую на каждое изменение.
     st.initialLoadDone = false;
     st.unsupported = true;
+    updateLoadingState();
     emit fileParsingFailed(logFile);
 }
 
@@ -357,6 +380,7 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
         st.initialLoadDone = true;
         st.loadInFlight    = false;
         st.failedStamp     = DiskStamp{};
+        updateLoadingState();
     }
 
     emit fileParsingFinished(parsedLogFile, totalEntries);
@@ -379,6 +403,7 @@ void LogViewWidget::handleParsingFailed(const LogFilePtr& parsedLogFile)
     st.loadInFlight = false;
     st.initialLoadDone = false;
     st.failedStamp = DiskStamp::of(parsedLogFile->filePath);
+    updateLoadingState();
     emit fileParsingFailed(parsedLogFile);
 }
 
@@ -486,6 +511,7 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             break;
         }
     }
+    updateLoadingState(); // ветки дозаписи выше могли взвести loadInFlight
     return anyChanged;
 }
 
@@ -507,8 +533,10 @@ void LogViewWidget::handleIncrementalEntriesParsed(
 
 void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& logFile)
 {
-    if (logFile)
+    if (logFile) {
         m_fileReloadStates[logFile->filePath].loadInFlight = false;
+        updateLoadingState();
+    }
     emit totalRowCountChanged(m_model->rowCount());
     QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
@@ -527,6 +555,7 @@ void LogViewWidget::handleIncrementalParsingFailed(const LogFilePtr& logFile)
     st.loadInFlight = false;
     st.initialLoadDone = false;
     st.failedStamp = DiskStamp::of(logFile->filePath);
+    updateLoadingState();
 }
 
 void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFilePtr& parsedLogFile)
