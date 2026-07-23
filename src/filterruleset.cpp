@@ -79,8 +79,29 @@ bool FilterRuleSet::isActive() const
     return false;
 }
 
-bool FilterRuleSet::ruleMatches(int ruleIndex, QStringView message,
-                                const LogEntryFields& fields) const
+int FilterRuleSet::usableRuleCount() const
+{
+    int count = 0;
+    for (int i = 0; i < rules.size(); ++i) {
+        if (ruleUsable(i))
+            ++count;
+    }
+    return count;
+}
+
+bool FilterRuleSet::ruleUsable(int ruleIndex) const
+{
+    const FilterRule& rule = rules[ruleIndex];
+    if (!rule.isActive())
+        return false;
+    // Невалидный регекс — нейтральное правило: не валит весь лог.
+    if (rule.isRegex && !m_compiledRegexes.value(ruleIndex).isValid())
+        return false;
+    return true;
+}
+
+bool FilterRuleSet::ruleContains(int ruleIndex, QStringView message,
+                                 const LogEntryFields& fields) const
 {
     const FilterRule& rule = rules[ruleIndex];
     const int fieldIndex = (ruleIndex < m_boundFieldIndexes.size())
@@ -107,7 +128,14 @@ bool FilterRuleSet::ruleMatches(int ruleIndex, QStringView message,
                 rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
         }
     }
-    return (rule.action == FilterRule::Action::Exclude) ? !contains : contains;
+    return contains;
+}
+
+bool FilterRuleSet::ruleMatches(int ruleIndex, QStringView message,
+                                const LogEntryFields& fields) const
+{
+    const bool contains = ruleContains(ruleIndex, message, fields);
+    return (rules[ruleIndex].action == FilterRule::Action::Exclude) ? !contains : contains;
 }
 
 bool FilterRuleSet::matches(const LogEntry& entry) const
@@ -126,10 +154,7 @@ bool FilterRuleSet::matchesLine(QStringView message, const LogEntryFields& field
 
     for (int i = 0; i < rules.size(); ++i) {
         const FilterRule& rule = rules[i];
-        if (!rule.isActive())
-            continue;
-        // Невалидный регекс — нейтральное правило: не валит весь лог.
-        if (rule.isRegex && !m_compiledRegexes.value(i).isValid())
+        if (!ruleUsable(i))
             continue;
 
         if (anyActiveSeen && rule.connector == FilterRule::Connector::Or) {

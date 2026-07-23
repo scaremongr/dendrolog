@@ -1,6 +1,7 @@
 #include "markerpanelwidget.h"
 #include "highlightpalette.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QHBoxLayout>
@@ -15,7 +16,9 @@
 
 MarkerCard::MarkerCard(const HighlightPattern& pattern, QWidget* parent)
     : CardFrame(parent)
-    , m_color(pattern.color.isValid() ? pattern.color : HighlightPalette::colorAt(0))
+    , m_color(pattern.color.isValid()
+                  ? pattern.color
+                  : HighlightPalette::colorAt(0, QApplication::palette().color(QPalette::Base)))
 {
     QVBoxLayout* rows = rowsLayout();
 
@@ -210,8 +213,11 @@ void MarkerPanelWidget::removeCard(MarkerCard* card)
 
 QColor MarkerPanelWidget::nextFreeColor() const
 {
+    // Ряд палитры — по фону лога: маркер красит строку целиком, и в тёмной
+    // теме пастельная заливка съела бы светлый текст.
+    const QColor background = palette().color(QPalette::Base);
     for (int i = 0; i < 10; ++i) {
-        const QColor candidate = HighlightPalette::colorAt(i);
+        const QColor candidate = HighlightPalette::colorAt(i, background);
         bool used = false;
         for (const auto* card : m_cards) {
             if (card->pattern().color == candidate) {
@@ -222,5 +228,5 @@ QColor MarkerPanelWidget::nextFreeColor() const
         if (!used)
             return candidate;
     }
-    return HighlightPalette::colorAt(m_cards.size());
+    return HighlightPalette::colorAt(m_cards.size(), background);
 }

@@ -99,6 +99,18 @@ static QIcon tintedIcon(const QString& resourcePath, const QColor& color)
     return QIcon(result);
 }
 
+// Шрифт панели результатов поиска — на пункт меньше, чем в основном view:
+// это вспомогательный список (обычно 2–5 строк высотой), и при крупном
+// основном шрифте он съедал бы половину окна. Отдельной настройки нет
+// намеренно — размер всегда следует за настройкой шрифта лога.
+static QFont searchResultsFont()
+{
+    QFont f(AppSettings::instance().fontFamily());
+    f.setPointSize(qMax(6, AppSettings::instance().fontSize() - 1));
+    f.setWeight(QFont::Medium);
+    return f;
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow), m_progressBar(nullptr), m_statusLabel(nullptr), m_activeLogView(nullptr), m_lineInfoLabel(nullptr), m_timeFilterFrom(nullptr), m_timeFilterTo(nullptr), m_applyTimeFilterButton(nullptr), m_resetTimeFilterButton(nullptr)
 {
@@ -145,6 +157,13 @@ MainWindow::MainWindow(QWidget *parent)
             // so we always call viewport()->update() to repaint for colour changes.
             lv->setFont(f);
             lv->viewport()->update();
+        }
+
+        // Панель результатов поиска — свой (уменьшенный) шрифт; раньше она
+        // оставалась со шрифтом, снятым при её создании.
+        if (m_searchResultsView) {
+            m_searchResultsView->setFont(searchResultsFont());
+            m_searchResultsView->viewport()->update();
         }
 
         // Re-apply auto-reload timer whenever settings change.
@@ -1477,13 +1496,8 @@ void MainWindow::setupSearchResultsDock()
     // Однострочный режим (klogg-style): word-wrap НЕ включаем.
     m_searchResultsView->setModel(m_searchResultsModel);
 
-    // Тот же шрифт, что и у основных view — ради консистентности.
-    {
-        QFont f(AppSettings::instance().fontFamily());
-        f.setPointSize(AppSettings::instance().fontSize());
-        f.setWeight(QFont::Medium);
-        m_searchResultsView->setFont(f);
-    }
+    // Тот же шрифт, что и у основных view, но на пункт мельче (searchResultsFont).
+    m_searchResultsView->setFont(searchResultsFont());
     vbox->addWidget(m_searchResultsView, /*stretch=*/1);
 
     m_searchResultsDockWidget->setWidget(container);
@@ -2887,6 +2901,18 @@ void MainWindow::runSearchIntoResults()
     // всегда попадает точно на строку.
     const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
     rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+
+    // Все правила испорчены (например, неверный регекс) — иначе набор из одних
+    // непригодных правил пропустил бы в результаты ВЕСЬ лог.
+    if (rules.usableRuleCount() == 0) {
+        clearSearchResults();
+        if (m_searchResultsStatusLabel)
+            m_searchResultsStatusLabel->setText(
+                tr("Nothing to search: check the rule text (invalid regular expression?)."));
+        if (m_activeLogView->view())
+            m_activeLogView->view()->setTextHighlightPatterns({});
+        return;
+    }
 
     // Зеркалим отображение полей активной модели, чтобы текст строк совпадал.
     m_searchResultsModel->setAvailableFields(active->availableFields());

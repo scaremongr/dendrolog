@@ -8,6 +8,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QToolButton;
@@ -47,6 +48,7 @@ private:
     void toggleHighlightEnabled();  // правый клик по образцу цвета
     void updateColorButton();
     void updateGearHighlight();
+    void updateRegexValidity();     // подсветка ошибки в тексте регекса
 
     QComboBox*   m_connectorCombo;
     QCheckBox*   m_enabledCheckBox;
@@ -62,6 +64,7 @@ private:
     QWidget*     m_advancedRow;
     QCheckBox*   m_caseSensitiveCheckBox;
     QCheckBox*   m_regexCheckBox;
+    QLabel*      m_regexErrorLabel;   // виден только при неверном регексе
 
     QColor       m_color;
     bool         m_highlightEnabled = true;

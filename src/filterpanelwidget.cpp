@@ -1,7 +1,9 @@
 #include "filterpanelwidget.h"
+#include "apptheme.h"
 #include "highlightpalette.h"
 #include "toggleswitch.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -22,7 +24,9 @@
 
 FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     : CardFrame(parent)
-    , m_color(rule.highlightColor.isValid() ? rule.highlightColor : HighlightPalette::colorAt(0))
+    , m_color(rule.highlightColor.isValid()
+                  ? rule.highlightColor
+                  : HighlightPalette::colorAt(0, QApplication::palette().color(QPalette::Base)))
 {
     QVBoxLayout* rows = rowsLayout();
 
@@ -98,16 +102,27 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
 
     m_regexCheckBox = new QCheckBox(tr("Regular expression"), m_advancedRow);
     m_regexCheckBox->setChecked(rule.isRegex);
-    m_regexCheckBox->setToolTip(tr("Treat the filter text as a regular expression.\n"
-                                   "An invalid expression makes the rule neutral."));
+    m_regexCheckBox->setToolTip(tr("Treat the filter text as a Perl-style regular expression\n"
+                                   "(not a shell wildcard): '*' repeats the previous character,\n"
+                                   "'.' is any character, so 'entry number .*' — not 'entry number *'.\n"
+                                   "The rule matches when the expression is found ANYWHERE in the row.\n"
+                                   "An invalid expression is reported under the text field and the\n"
+                                   "rule stays neutral."));
     advLayout->addWidget(m_regexCheckBox);
     advLayout->addStretch(1);
 
     m_advancedRow->setVisible(false);
     rows->addWidget(m_advancedRow);
 
+    // ---- Строка 4: ошибка компиляции регекса (обычно скрыта) ---------- //
+    m_regexErrorLabel = new QLabel(this);
+    m_regexErrorLabel->setWordWrap(true);
+    m_regexErrorLabel->setVisible(false);
+    rows->addWidget(m_regexErrorLabel);
+
     // ---- Сигналы ------------------------------------------------------ //
     connect(m_textEdit, &QLineEdit::returnPressed, this, &FilterRuleCard::applyShortcutPressed);
+    connect(m_textEdit, &QLineEdit::textChanged, this, [this]() { updateRegexValidity(); });
     connect(m_gearButton, &QToolButton::toggled, this, [this](bool on) {
         m_advancedRow->setVisible(on);
     });
@@ -116,7 +131,10 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
             this, [this]() { toggleHighlightEnabled(); });
     connect(m_removeButton, &QToolButton::clicked, this, &FilterRuleCard::removeRequested);
     connect(m_caseSensitiveCheckBox, &QCheckBox::toggled, this, [this]() { updateGearHighlight(); });
-    connect(m_regexCheckBox, &QCheckBox::toggled, this, [this]() { updateGearHighlight(); });
+    connect(m_regexCheckBox, &QCheckBox::toggled, this, [this]() {
+        updateGearHighlight();
+        updateRegexValidity();
+    });
 
     // Восстанавливаем привязку к колонке: пока схема не передана через
     // setFieldNames(), сохраняем имя как единственный пункт после "(вся строка)".
@@ -129,6 +147,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     setAccentColor(m_color);
     updateColorButton();
     updateGearHighlight();
+    updateRegexValidity();
 }
 
 FilterRule FilterRuleCard::rule() const
@@ -175,12 +194,48 @@ void FilterRuleCard::setFieldNames(const QStringList& fieldNames, bool fieldScop
 void FilterRuleCard::setIsFirstRow(bool first)
 {
     // Layout всех карточек одинаковый: у первой коннектор не скрывается,
-    // а засеривается — связи с предыдущим правилом у неё нет.
+    // а засеривается — связи с предыдущим правилом у неё нет. Семантика AND/OR
+    // одинакова в обоих режимах (Filter и Search), поэтому комбобокс активен и
+    // в поиске: пользователь волен искать пересечение (AND) или объединение (OR).
     m_connectorCombo->setEnabled(!first);
     m_connectorCombo->setToolTip(first
         ? tr("The first rule has no link to a previous one.")
         : tr("Logical link to the previous rule.\n"
-             "AND binds tighter than OR: A AND B OR C = (A AND B) OR C."));
+             "AND — a row must match BOTH rules; OR — EITHER of them.\n"
+             "AND binds tighter than OR: A AND B OR C = (A AND B) OR C.\n"
+             "Works the same in Filter and Search modes."));
+}
+
+void FilterRuleCard::updateRegexValidity()
+{
+    // Невалидный регекс молча выключает правило — без этой подсказки поиск
+    // просто «ничего не находит», и причина неочевидна.
+    QString error;
+    if (m_regexCheckBox->isChecked() && !m_textEdit->text().isEmpty()) {
+        const QRegularExpression re(m_textEdit->text());
+        if (!re.isValid()) {
+            error = re.patternErrorOffset() >= 0
+                ? tr("Invalid regular expression at position %1: %2")
+                      .arg(re.patternErrorOffset()).arg(re.errorString())
+                : tr("Invalid regular expression: %1").arg(re.errorString());
+        }
+    }
+
+    m_textEdit->setPlaceholderText(m_regexCheckBox->isChecked()
+        ? tr("Regular expression...") : tr("Filter text..."));
+
+    if (error.isEmpty()) {
+        m_regexErrorLabel->clear();
+        m_regexErrorLabel->setVisible(false);
+        m_textEdit->setStyleSheet(QString());
+        return;
+    }
+    m_regexErrorLabel->setText(error);
+    m_regexErrorLabel->setStyleSheet(QStringLiteral("color: %1;")
+        .arg(AppTheme::instance().logError.name()));
+    m_regexErrorLabel->setVisible(true);
+    m_textEdit->setStyleSheet(QStringLiteral("QLineEdit { border: 1px solid %1; }")
+        .arg(AppTheme::instance().logError.name()));
 }
 
 void FilterRuleCard::chooseColor()
@@ -270,7 +325,9 @@ FilterPanelWidget::FilterPanelWidget(QWidget* parent)
     m_modeSwitch = new ToggleSwitch(m_settingsCard); // off = Filter, on = Search
     const QString modeTip = tr("On — non-destructive search: keep all rows; matches go to\n"
                                "the Search Results panel (click one to jump there).\n"
-                               "Off — filter: hide non-matching rows in the main view.");
+                               "Off — filter: hide non-matching rows in the main view.\n"
+                               "AND/OR between rules work the same in both modes; new rules\n"
+                               "added in search default to OR (show matches of any rule).");
     m_modeSwitch->setToolTip(modeTip);
     connect(m_modeSwitch, &ToggleSwitch::toggled, this, [this]() {
         updateModeDependentUi();
@@ -582,6 +639,12 @@ void FilterPanelWidget::onAddRuleClicked()
 {
     FilterRule rule;
     rule.highlightColor = nextFreeColor();
+    // Удобный дефолт под режим: в поиске чаще нужно «показать всё, что нашло
+    // ЛЮБОЕ правило» (OR/объединение), в фильтре — сузить (AND). Пользователь
+    // может переключить коннектор вручную — оба варианта доступны везде.
+    // Для первой карточки коннектор всё равно игнорируется.
+    rule.connector = (mode() == Mode::Search) ? FilterRule::Connector::Or
+                                              : FilterRule::Connector::And;
     addRule(rule);
 }
 
@@ -624,9 +687,12 @@ void FilterPanelWidget::renumberRows()
 QColor FilterPanelWidget::nextFreeColor() const
 {
     // Первый цвет палитры, ещё не занятый существующими правилами;
-    // при исчерпании палитры — просто следующий по кругу.
+    // при исчерпании палитры — просто следующий по кругу. Ряд палитры
+    // выбирается по фону лога (QPalette::Base): в тёмной теме — тёмные
+    // заливки, иначе подсветка «съедает» светлый текст.
+    const QColor background = palette().color(QPalette::Base);
     for (int i = 0; i < 10; ++i) {
-        const QColor candidate = HighlightPalette::colorAt(i);
+        const QColor candidate = HighlightPalette::colorAt(i, background);
         bool used = false;
         for (const auto* card : m_cards) {
             if (card->rule().highlightColor == candidate) {
@@ -637,5 +703,5 @@ QColor FilterPanelWidget::nextFreeColor() const
         if (!used)
             return candidate;
     }
-    return HighlightPalette::colorAt(m_cards.size());
+    return HighlightPalette::colorAt(m_cards.size(), background);
 }

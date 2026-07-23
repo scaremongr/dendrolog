@@ -37,6 +37,10 @@
 // OR-коннекторами на AND-группы; строка проходит, если истинна хотя бы
 // одна группа:  A AND B OR C  ≡  (A ∧ B) ∨ C.
 //
+// Семантика ОДНА и та же для панели в режимах Filter и Search — различается
+// только назначение результата (скрыть строки в основном view vs. вывести
+// список в панель результатов), но не способ комбинирования правил.
+//
 // Правило, привязанное к колонке, на строке без этой колонки (например,
 // continuation-строка многострочной записи) даёт «не содержит».
 //
@@ -81,6 +85,10 @@ public:
 
     // Есть ли хоть одно действующее правило (иначе фильтр пропускает всё).
     bool isActive() const;
+    // Сколько правил реально участвует в вычислениях — активных и, для
+    // регексов, успешно скомпилированных. Осмысленно после bindFields():
+    // расходится с isActive() ровно тогда, когда правило испорчено регексом.
+    int usableRuleCount() const;
 
     // Проходит ли запись фильтр. Реализация без аллокаций.
     bool matches(const LogEntry& entry) const;
@@ -98,8 +106,14 @@ public:
     bool operator==(const FilterRuleSet& other) const;
 
 private:
+    // «Нашлось ли» правило в строке — без учёта Include/Exclude.
+    bool ruleContains(int ruleIndex, QStringView message,
+                      const LogEntryFields& fields) const;
+    // То же с применением действия правила (Exclude инвертирует).
     bool ruleMatches(int ruleIndex, QStringView message,
                      const LogEntryFields& fields) const;
+    // Пригодно ли правило к вычислению (активно и, для регекса, скомпилировано).
+    bool ruleUsable(int ruleIndex) const;
 
     // Производное состояние (заполняется bindFields, не сериализуется):
     QVector<int> m_boundFieldIndexes;            // индекс колонки (-1 = вся строка)

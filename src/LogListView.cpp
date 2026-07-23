@@ -2,6 +2,7 @@
 #include "logmodel.h"
 #include "apptheme.h"
 #include "appsettings.h"
+#include "highlightpalette.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -1332,17 +1333,29 @@ void LogListView::clearSearchMatch()
     viewport()->update();
 }
 
-// Фоновые заливки совпадений. Геометрия повторяет drawSelectionHighlight:
-// однострочный режим клипуется по visibleChars, многострочный идёт по фрагментам.
-void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, const QString& text,
-                                          const RowState& state, const QVector<HighlightSpan>& spans) const
+// Заливки совпадений + перерисовка попавшего в них текста контрастным цветом.
+// Идёт ПОСЛЕ основной отрисовки: заливка затирает уже нарисованные буквы, а
+// повторный проход рисует их поверх цветом, читаемым на этой заливке (пен из
+// HighlightPalette::textOn). Так подсветка видна при любой теме и при любом
+// цвете, который выбрал пользователь, — раскраска SyntaxHighlighter внутри
+// совпадения уступает место контрасту (как в выделении).
+//
+// Геометрия повторяет drawSelectionHighlight: однострочный режим клипуется по
+// visibleChars, многострочный идёт по фрагментам. Координаты текста в точности
+// повторяют drawLogLine, а токены передаются те же — сегменты ложатся пиксель
+// в пиксель поверх исходных.
+void LogListView::drawMatchTextOverlay(QPainter& painter, const QRect& rect, const QString& text,
+                                       const RowState& state, const QVector<HighlightSpan>& spans,
+                                       const QList<HighlightToken>& tokens) const
 {
-    // Прямая отрисовка гигантской строки клипуется видимой областью —
-    // фрагменты вне клипа пропускаем (см. drawLogLine).
     const QRectF clip = painter.hasClipping() ? painter.clipBoundingRect() : QRectF();
+    const QFontMetrics fm = fontMetrics(); // тот же источник координат, что и в drawLogLine
 
     for (const auto& span : spans) {
-        int spanBegin = span.start;
+        if (!span.color.isValid())
+            continue;
+        const QColor pen = HighlightPalette::textOn(span.color);
+        int spanBegin  = span.start;
         int spanFinish = span.start + span.length;
 
         if (!state.multiLine) {
@@ -1353,24 +1366,38 @@ void LogListView::drawMatchHighlightSpans(QPainter& painter, const QRect& rect, 
             const QStringView textView(text);
             const int x1 = rect.left() + kTextPaddingX + textWidthUntil(textView, spanBegin);
             const int x2 = rect.left() + kTextPaddingX + textWidthUntil(textView, spanFinish);
-            painter.fillRect(x1, rect.top() + 1, x2 - x1, rect.height() - 2, span.color);
+            const QRect fillRect(x1, rect.top() + 1, x2 - x1, rect.height() - 2);
+            painter.fillRect(fillRect, span.color);
+
+            painter.save();
+            painter.setClipRect(fillRect, Qt::IntersectClip);
+            drawTextWithHighlights(painter, rect.left() + kTextPaddingX,
+                                   rect.bottom() - fm.descent() - 1,
+                                   textView.left(state.visibleChars), 0, tokens, pen);
+            painter.restore();
             continue;
         }
 
         for (const auto& fragment : state.fragments) {
-            if (!clip.isNull()) {
-                const int fragTop = rect.top() + fragment.rect.top();
-                if (fragTop + fragment.rect.height() < clip.top() || fragTop > clip.bottom())
-                    continue;
-            }
+            const int fragTop = rect.top() + fragment.rect.top();
+            if (!clip.isNull()
+                && (fragTop + fragment.rect.height() < clip.top() || fragTop > clip.bottom()))
+                continue;
             const int fragSelStart = qMax(spanBegin,  fragment.startPos) - fragment.startPos;
             const int fragSelEnd   = qMin(spanFinish, fragment.startPos + fragment.length) - fragment.startPos;
             if (fragSelEnd <= fragSelStart)
                 continue;
             const int x1 = rect.left() + fragment.rect.left() + textWidthUntil(fragment.text, fragSelStart);
             const int x2 = rect.left() + fragment.rect.left() + textWidthUntil(fragment.text, fragSelEnd);
-            const int y  = rect.top()  + fragment.rect.top();
-            painter.fillRect(x1, y, x2 - x1, fragment.rect.height(), span.color);
+            const QRect fillRect(x1, fragTop, x2 - x1, fragment.rect.height());
+            painter.fillRect(fillRect, span.color);
+
+            painter.save();
+            painter.setClipRect(fillRect, Qt::IntersectClip);
+            drawTextWithHighlights(painter, rect.left() + fragment.rect.left(),
+                                   fragTop + fm.height() - fm.descent(),
+                                   fragment.text, fragment.startPos, tokens, pen);
+            painter.restore();
         }
     }
 }
@@ -1405,19 +1432,6 @@ void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QStrin
         }
     }
 
-    // Заливки совпадений — до текста, чтобы существующая раскраска
-    // SyntaxHighlighter рисовалась поверх и не менялась.
-    if (!matchSpans.isEmpty())
-        drawMatchHighlightSpans(painter, rect, text, state, matchSpans);
-
-    // Подсветка результата поиска — только в найденной строке. Не кэшируем:
-    // ровно одна строка, и подсветка живёт только пока активен поиск.
-    if (state.row == m_searchMatchRow && !m_searchHighlighter.isEmpty()) {
-        const QVector<HighlightSpan> spans = m_searchHighlighter.computeSpans(text);
-        if (!spans.isEmpty())
-            drawMatchHighlightSpans(painter, rect, text, state, spans);
-    }
-
     if (state.multiLine) {
         // При прямой отрисовке (без пиксмапа — гигантские строки) painter обрезан
         // видимой областью: фрагменты вне неё пропускаем, иначе строка на тысячи
@@ -1442,6 +1456,20 @@ void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QStrin
         int baseY = rect.bottom() - fontMetrics().descent() - 1;
         QStringView visibleText = QStringView(text).left(state.visibleChars);
         drawTextWithHighlights(painter, x, baseY, visibleText, 0, tokens);
+    }
+
+    // Совпадения фильтров/поиска — ПОСЛЕ текста: заливка кладётся поверх уже
+    // нарисованных букв, и они тут же перерисовываются контрастным к ней цветом.
+    if (!matchSpans.isEmpty())
+        drawMatchTextOverlay(painter, rect, text, state, matchSpans, tokens);
+
+    // Подсветка результата поиска (тулбарные Next/Prev) — только в найденной
+    // строке. Не кэшируем: ровно одна строка, и подсветка живёт только пока
+    // активен поиск. Рисуется последней — приоритет над подсветкой фильтров.
+    if (state.row == m_searchMatchRow && !m_searchHighlighter.isEmpty()) {
+        const QVector<HighlightSpan> spans = m_searchHighlighter.computeSpans(text);
+        if (!spans.isEmpty())
+            drawMatchTextOverlay(painter, rect, text, state, spans, tokens);
     }
 }
 
@@ -2630,8 +2658,11 @@ bool LogListView::viewportEvent(QEvent *event)
 
 // --- Private Helper Functions ---
 
-void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens) const {
-    QColor defaultColor = palette().color(QPalette::Text);
+void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens, const QColor& overrideColor) const {
+    // overrideColor задан — рисуем весь фрагмент одним контрастным пеном
+    // (перерисовка поверх заливки совпадения); фоны токенов при этом не нужны.
+    const bool override = overrideColor.isValid();
+    QColor defaultColor = override ? overrideColor : palette().color(QPalette::Text);
 
     // Позиция начала и конца фрагмента в оригинальной строке
     int fragmentStart = fragmentStartPos;
@@ -2674,12 +2705,12 @@ void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const 
             const int tx = baseX + qRound(startCol * m_charWidth);
             const int tw = qRound((endCol - startCol) * m_charWidth);
             // Заливка фона (поиск с подсветкой и пр.)
-            if (token.bgColor.isValid()) {
+            if (!override && token.bgColor.isValid()) {
                 const QFontMetrics fm = painter.fontMetrics();
                 painter.fillRect(tx, y - fm.ascent(), tw, fm.height(), token.bgColor);
             }
             QStringView tokenView = text.sliced(tokenStartInFragment, tokenEndInFragment - tokenStartInFragment);
-            painter.setPen(token.color.isValid() ? token.color : defaultColor);
+            painter.setPen(!override && token.color.isValid() ? token.color : defaultColor);
             painter.drawText(tx, y, m_tabExpander.expand(tokenView, startCol));
         }
 

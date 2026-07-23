@@ -447,7 +447,9 @@ private:
     int getCharIndexAt(const QStringView& text, int x) const;
     int calculateWidth(const QStringView& text) const;
     int textWidthUntil(const QStringView& text, int count) const;
-    void drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens) const;
+    // overrideColor (если валиден) заменяет цвета токенов на один пен —
+    // используется для перерисовки текста поверх заливки совпадения.
+    void drawTextWithHighlights(QPainter& painter, int x, int y, const QStringView& text, int fragmentStartPos, const QList<HighlightToken>& tokens, const QColor& overrideColor = QColor()) const;
 
     // Вспомогательные методы для вычисления состояния строки
     QList<TextFragment> splitTextIntoLines(const QString& text, const QRect& rect) const;
@@ -466,10 +468,12 @@ private:
 
     // Отрисовка
     void drawLogLine(QPainter& painter, const QRect& rect, const QString& text, const RowState& state);
-    // Фоновые заливки совпадений; рисуются ДО текста, чтобы не конфликтовать
-    // с цветами SyntaxHighlighter и выделением.
-    void drawMatchHighlightSpans(QPainter& painter, const QRect& rect, const QString& text,
-                                 const RowState& state, const QVector<HighlightSpan>& spans) const;
+    // Заливки совпадений + перерисовка попавшего в них текста контрастным
+    // к заливке цветом. Идёт ПОСЛЕ текста, поэтому подсветка читается при
+    // любой теме и любом выбранном пользователем цвете.
+    void drawMatchTextOverlay(QPainter& painter, const QRect& rect, const QString& text,
+                              const RowState& state, const QVector<HighlightSpan>& spans,
+                              const QList<HighlightToken>& tokens) const;
     void drawSelectionHighlight(QPainter& painter, const QRect& rect, const QString& text, int selStart, int selEnd, const RowState& state);
     void drawBracketHighlight(QPainter& painter, const QRect& textRect, const RowState& state) const;
     qint64 estimateTotalHeightForDirtyCache(int rows) const;
