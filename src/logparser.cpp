@@ -239,7 +239,7 @@ void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bo
     // file.close() вызывается автоматически деструктором QFile
 }
 
-LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath)
+LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath, qint64 fromOffset)
 {
     FileStats stats;
     QFile file(filePath);
@@ -249,6 +249,11 @@ LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath)
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         stats.parseSuccess = false;
         qWarning() << "AnalyzeStats: Failed to open file:" << filePath;
+        return stats;
+    }
+
+    if (fromOffset > 0 && !file.seek(fromOffset)) {
+        stats.parseSuccess = false;
         return stats;
     }
 

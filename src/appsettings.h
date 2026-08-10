@@ -62,6 +62,16 @@ public:
     QStringList scanExtensions() const;
     void        setScanExtensions(const QStringList& extensions);
 
+    // How the scanned tree keeps up with the directory after the first scan.
+    // Values match DirectoryScanner::RefreshMode (0 = Manual, 1 = Auto, 2 = Off);
+    // stored as a plain int so this header stays free of the scanner include.
+    int  scanRefreshMode() const;
+    void setScanRefreshMode(int mode);
+
+    // Auto-refresh period in seconds (5 – 3600).
+    int  scanRefreshIntervalSecs() const;
+    void setScanRefreshIntervalSecs(int secs);
+
     // ---- View preferences ---------------------------------------------- //
 
     // Whether word-wrap is enabled by default (and remembered across sessions).
@@ -114,6 +124,8 @@ private:
 
     // Default values match the hard-coded defaults previously in MainWindow.
     QStringList m_scanExtensions { QStringLiteral("log"), QStringLiteral("txt") };
+    int         m_scanRefreshMode { 0 };   // Manual
+    int         m_scanRefreshIntervalSecs { 30 };
     bool        m_wordWrap        { true };
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };

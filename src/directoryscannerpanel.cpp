@@ -1,21 +1,34 @@
 #include "directoryscannerpanel.h"
 
-#include "directoryscanner.h"
+#include "appsettings.h"
 #include "cardframe.h"
 #include "apptheme.h"
 
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QDateTimeEdit>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QStyle>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+
+using RefreshMode = DirectoryScanner::RefreshMode;
+
+namespace {
+// Progress is reported in bytes, which overflows QProgressBar's int range on
+// big trees — drive the bar in per-mille instead and keep the exact numbers
+// for the status text.
+constexpr int kProgressScale = 1000;
+}
 
 DirectoryScannerPanel::DirectoryScannerPanel(QWidget* parent)
     : QWidget(parent)
@@ -31,6 +44,20 @@ DirectoryScannerPanel::DirectoryScannerPanel(QWidget* parent)
             this, &DirectoryScannerPanel::onContentProgress);
     connect(m_scanner, &DirectoryScanner::contentFilterFinished,
             this, &DirectoryScannerPanel::onContentFinished);
+    connect(m_scanner, &DirectoryScanner::rescanFinished,
+            this, &DirectoryScannerPanel::onRescanFinished);
+    connect(m_scanner, &DirectoryScanner::rescanStarted, this, [this]() {
+        m_statusLabel->setText(tr("Refreshing…"));
+        updateRefreshButton();
+    });
+    connect(m_scanner, &DirectoryScanner::pendingChangesChanged,
+            this, [this](bool) { updateRefreshButton(); });
+
+    // Restore the persisted refresh preference.
+    const AppSettings& settings = AppSettings::instance();
+    m_scanner->setAutoRefreshIntervalSecs(settings.scanRefreshIntervalSecs());
+    m_scanner->setRefreshMode(static_cast<RefreshMode>(settings.scanRefreshMode()));
+    updateRefreshButton();
 }
 
 void DirectoryScannerPanel::buildUi()
@@ -48,7 +75,7 @@ void DirectoryScannerPanel::buildUi()
 
     const QSize squareBtn(28, 28);
 
-    // Row 1 (always visible): [Scan▢] path…………… [⚙] [Exts▢]
+    // Row 1 (always visible): [Scan▢] [⟳▢] path…………… [⚙] [Exts▢]
     auto* headerRow = new QHBoxLayout();
     headerRow->setSpacing(4);
 
@@ -57,6 +84,13 @@ void DirectoryScannerPanel::buildUi()
     m_scanButton->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
     m_scanButton->setFixedSize(squareBtn);
     headerRow->addWidget(m_scanButton);
+
+    m_refreshButton = card->makeToolButton(QString(), QString());
+    m_refreshButton->setObjectName(QStringLiteral("scannerRefreshButton"));
+    m_refreshButton->setFixedSize(squareBtn);
+    m_refreshButton->setEnabled(false);
+    m_refreshButton->setContextMenuPolicy(Qt::CustomContextMenu);
+    headerRow->addWidget(m_refreshButton);
 
     m_pathLabel = new QLabel(tr("No directory scanned yet"), card);
     m_pathLabel->setStyleSheet(QStringLiteral("color: palette(mid); font-style: italic;"));
@@ -178,6 +212,12 @@ void DirectoryScannerPanel::buildUi()
             this, &DirectoryScannerPanel::scanRequested);
     connect(m_extsButton, &QToolButton::clicked,
             this, &DirectoryScannerPanel::configureExtensionsRequested);
+    connect(m_refreshButton, &QToolButton::clicked, this, [this]() {
+        m_scanner->rescan();
+    });
+    connect(m_refreshButton, &QToolButton::customContextMenuRequested, this, [this](const QPoint& pos) {
+        showRefreshMenu(m_refreshButton->mapToGlobal(pos));
+    });
     connect(m_settingsToggle, &QToolButton::toggled, this, [this](bool on) {
         m_filterArea->setVisible(on);
     });
@@ -228,7 +268,121 @@ void DirectoryScannerPanel::scanDirectory(const QString& path)
     m_progress->setVisible(false);
 
     m_scanner->scan(path);
+    updateRefreshButton();
 }
+
+void DirectoryScannerPanel::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (m_scanner->refreshMode() == RefreshMode::Auto && m_scanner->hasPendingChanges())
+        m_scanner->rescan();
+}
+
+// ─── Refresh mode ────────────────────────────────────────────────────────────
+
+void DirectoryScannerPanel::showRefreshMenu(const QPoint& globalPos)
+{
+    QMenu menu(this);
+    auto* group = new QActionGroup(&menu);
+    group->setExclusive(true);
+
+    const RefreshMode current = m_scanner->refreshMode();
+    const auto addMode = [&](RefreshMode mode, const QString& text, const QString& tip) {
+        QAction* act = menu.addAction(text);
+        act->setCheckable(true);
+        act->setChecked(current == mode);
+        act->setToolTip(tip);
+        group->addAction(act);
+        connect(act, &QAction::triggered, this, [this, mode]() { setRefreshMode(mode); });
+    };
+
+    addMode(RefreshMode::Manual, tr("Refresh manually"),
+            tr("The tree only changes when you refresh it; the button lights up "
+               "when something changed on disk."));
+    addMode(RefreshMode::Auto, tr("Refresh automatically (every %n s)", nullptr,
+                                  m_scanner->autoRefreshIntervalSecs()),
+            tr("Pick up changes on their own, re-reading only the files that moved."));
+    addMode(RefreshMode::Off, tr("Refresh off"),
+            tr("Nothing is watched. The button still refreshes on demand."));
+
+    menu.addSeparator();
+    QAction* interval = menu.addAction(tr("Auto-refresh interval…"));
+    connect(interval, &QAction::triggered, this, &DirectoryScannerPanel::promptRefreshInterval);
+
+    menu.exec(globalPos);
+}
+
+void DirectoryScannerPanel::setRefreshMode(RefreshMode mode)
+{
+    m_scanner->setRefreshMode(mode);
+    AppSettings::instance().setScanRefreshMode(static_cast<int>(mode));
+    updateRefreshButton();
+}
+
+void DirectoryScannerPanel::promptRefreshInterval()
+{
+    bool ok = false;
+    const int secs = QInputDialog::getInt(this, tr("Auto-refresh interval"),
+                                          tr("Rescan the directory every N seconds:"),
+                                          m_scanner->autoRefreshIntervalSecs(),
+                                          5, 3600, 5, &ok);
+    if (!ok)
+        return;
+    m_scanner->setAutoRefreshIntervalSecs(secs);
+    AppSettings::instance().setScanRefreshIntervalSecs(m_scanner->autoRefreshIntervalSecs());
+    updateRefreshButton();
+}
+
+void DirectoryScannerPanel::updateRefreshButton()
+{
+    const bool haveRoot = !m_scanner->rootPath().isEmpty();
+    m_refreshButton->setEnabled(haveRoot && !m_scanner->isRescanning());
+
+    const RefreshMode mode = m_scanner->refreshMode();
+    const bool pending = haveRoot && m_scanner->hasPendingChanges();
+    // Accent = "this button wants your attention": auto-refresh is running, or
+    // the watcher has changes waiting to be pulled in.
+    const bool highlight = (mode == RefreshMode::Auto) || pending;
+
+    QColor glyph = palette().buttonText().color();
+    if (mode == RefreshMode::Off)
+        glyph = CardFrame::mutedTextColor(palette());
+    else if (highlight)
+        glyph = AppTheme::instance().logInfo;
+    m_refreshButton->setIcon(CardFrame::tintedIcon(QStringLiteral(":/icons/reload.svg"), glyph));
+    m_card->tintToolButton(m_refreshButton, highlight);
+
+    QString modeText;
+    switch (mode) {
+    case RefreshMode::Manual: modeText = tr("manual"); break;
+    case RefreshMode::Auto:
+        modeText = tr("automatic, every %n s", nullptr, m_scanner->autoRefreshIntervalSecs());
+        break;
+    case RefreshMode::Off:    modeText = tr("off"); break;
+    }
+    QString tip = tr("Refresh the scanned directory (mode: %1).\n"
+                     "Only new, removed and modified files are re-read.\n"
+                     "Right-click to choose the refresh mode.").arg(modeText);
+    if (pending)
+        tip = tr("The directory changed on disk — click to pull the changes in.\n\n") + tip;
+    m_refreshButton->setToolTip(tip);
+}
+
+void DirectoryScannerPanel::onRescanFinished(int added, int removed, int updated)
+{
+    updateRefreshButton();
+    if (added == 0 && removed == 0 && updated == 0) {
+        m_statusLabel->setText(tr("Up to date"));
+        return;
+    }
+    QStringList parts;
+    if (added > 0)   parts << tr("+%1 new").arg(added);
+    if (removed > 0) parts << tr("−%1 gone").arg(removed);
+    if (updated > 0) parts << tr("%1 changed").arg(updated);
+    m_statusLabel->setText(parts.join(QStringLiteral(", ")));
+}
+
+// ─── Filters ─────────────────────────────────────────────────────────────────
 
 void DirectoryScannerPanel::onApplyClicked()
 {
@@ -241,7 +395,8 @@ void DirectoryScannerPanel::onApplyClicked()
         m_scanner->setDateFilter(false, QDateTime(), QDateTime());
 
     if (!text.isEmpty()) {
-        m_progress->setRange(0, 0);   // busy until first progress tick
+        m_progress->setRange(0, kProgressScale);
+        m_progress->setValue(0);
         m_progress->setVisible(true);
         m_statusLabel->setText(tr("Searching…"));
     }
@@ -279,13 +434,20 @@ void DirectoryScannerPanel::onDateBoundsChanged(const QDateTime& earliest, const
     m_seeding = false;
 }
 
-void DirectoryScannerPanel::onContentProgress(int done, int total)
+void DirectoryScannerPanel::onContentProgress(qint64 bytesDone, qint64 bytesTotal,
+                                              int filesDone, int filesTotal)
 {
-    if (total <= 0)
+    if (bytesTotal <= 0)
         return;
+    const qint64 done = qBound<qint64>(0, bytesDone, bytesTotal);
+
     m_progress->setVisible(true);
-    m_progress->setRange(0, total);
-    m_progress->setValue(done);
+    m_progress->setRange(0, kProgressScale);
+    m_progress->setValue(int(done * kProgressScale / bytesTotal));
+    m_statusLabel->setText(tr("Searching… %1% (%2/%3 files)")
+                               .arg(done * 100 / bytesTotal)
+                               .arg(filesDone)
+                               .arg(filesTotal));
 }
 
 void DirectoryScannerPanel::onContentFinished(int matched, int total)

@@ -6,7 +6,28 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Directory Scanner: a **⟳ refresh button** that re-reads the scanned directory
+  without rescanning it from scratch — only new and modified files are analysed
+  again, a log that merely grew is read from where the last scan stopped, and
+  deleted files leave the tree.
+- Directory Scanner: **three refresh modes** on that button's context menu —
+  *manual* (the button lights up when the directory changed on disk),
+  *automatic* (a file-system watcher plus a configurable period; deferred while
+  the panel is hidden) and *off*. The choice persists between sessions.
+
 ### Changed
+- Directory Scanner sorts file and directory names **case-insensitively** and
+  naturally, so `Alpha.log` no longer jumps above every lower-case name and
+  `log2` sorts before `log10`.
+- Directory Scanner content filter: files are read in chunks instead of line by
+  line, on a dedicated I/O thread pool that no longer queues behind the file
+  statistics analysis. Progress is now measured **in bytes**, so the bar tracks
+  the real work rather than jumping when a file finishes, and cancellation takes
+  effect mid-file.
+- Directory Scanner content filter skips files the date filter already rejects
+  and caches per-file verdicts, so re-applying the same query — or applying it
+  again after a refresh — only reads what actually changed.
 - Associated `.log` files now show their own document icon — a sheet of paper
   badged with the ring emblem — instead of the application icon, so log files
   are no longer indistinguishable from the DendroLog shortcut in Explorer.

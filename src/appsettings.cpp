@@ -66,6 +66,8 @@ void AppSettings::load()
     if (!exts.isEmpty())
         m_scanExtensions = exts;
 
+    m_scanRefreshMode        = qBound(0, s.value(QStringLiteral("scanRefreshMode"), 0).toInt(), 2);
+    m_scanRefreshIntervalSecs = qBound(5, s.value(QStringLiteral("scanRefreshIntervalSecs"), 30).toInt(), 3600);
     m_fontFamily             = s.value(QStringLiteral("fontFamily")).toString();
     m_fontSize               = s.value(QStringLiteral("fontSize"), 10).toInt();
     m_autoReload             = s.value(QStringLiteral("autoReload"), false).toBool();
@@ -118,6 +120,8 @@ void AppSettings::save()
 
     s.beginGroup(QStringLiteral("App"));
     s.setValue(QStringLiteral("scanExtensions"),        m_scanExtensions);
+    s.setValue(QStringLiteral("scanRefreshMode"),        m_scanRefreshMode);
+    s.setValue(QStringLiteral("scanRefreshIntervalSecs"), m_scanRefreshIntervalSecs);
     s.setValue(QStringLiteral("wordWrap"),               m_wordWrap);
     s.setValue(QStringLiteral("autoReload"),             m_autoReload);
     s.setValue(QStringLiteral("autoReloadIntervalSecs"), m_autoReloadIntervalSecs);
@@ -142,6 +146,36 @@ void AppSettings::setScanExtensions(const QStringList& extensions)
     if (m_scanExtensions == extensions)
         return;
     m_scanExtensions = extensions;
+    emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+int AppSettings::scanRefreshMode() const
+{
+    return m_scanRefreshMode;
+}
+
+void AppSettings::setScanRefreshMode(int mode)
+{
+    const int clamped = qBound(0, mode, 2);
+    if (m_scanRefreshMode == clamped)
+        return;
+    m_scanRefreshMode = clamped;
+    emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+int AppSettings::scanRefreshIntervalSecs() const
+{
+    return m_scanRefreshIntervalSecs;
+}
+
+void AppSettings::setScanRefreshIntervalSecs(int secs)
+{
+    const int clamped = qBound(5, secs, 3600);
+    if (m_scanRefreshIntervalSecs == clamped)
+        return;
+    m_scanRefreshIntervalSecs = clamped;
     emit settingsChanged();
 }
 

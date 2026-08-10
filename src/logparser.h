@@ -31,8 +31,12 @@ public:
         bool parseSuccess = true; 
     };
 
-    // This method can be called from a separate thread for stat analysis
-    FileStats analyzeFileForStats(const QString& filePath);
+    // This method can be called from a separate thread for stat analysis.
+    // `fromOffset` > 0 analyses only the tail of the file starting at that byte
+    // offset (which the caller must know to be a line boundary) — used by the
+    // directory scanner to refresh an append-only log without re-reading it all.
+    // The returned stats then describe the tail alone and have to be merged.
+    FileStats analyzeFileForStats(const QString& filePath, qint64 fromOffset = 0);
 
     // Optional: configure a dynamic block schema so that the parser extracts
     // structured fields into LogEntry::fields for every primary line.

@@ -110,6 +110,17 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
 - **Auto-reload** — right-click the reload button to toggle it per tab; interval is set in **Settings → General**.
 
+## Directory Scanner
+
+- The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.
+- Names sort **case-insensitively** and naturally: `log2` comes before `log10`. Clicking a column header re-sorts (name ascending, numeric columns largest-first).
+- **The ⟳ button refreshes.** It re-reads the directory but not the files: only new and modified ones are analysed again, and a log that merely grew is read from where the previous scan stopped (unless it was rewritten). Deleted files leave the tree.
+- **Right-click ⟳** to pick the refresh mode:
+  - **Manual** (default) — the tree never changes on its own, but the button lights up when something changed on disk.
+  - **Automatic** — changes are pulled in by themselves; the period is set from “Auto-refresh interval…” in the same menu. While the panel is hidden the refresh is deferred until it reappears.
+  - **Off** — nothing is watched; the button still refreshes on demand.
+- **⚙ opens the filters.** The content filter reads files in the background and reports progress **in bytes**, so the bar tracks the real work even when one file dwarfs the rest. Re-applying the same query is served from cache (instant), and an active date filter narrows down which files are read at all.
+
 ## Panels & layout
 
 - Toggle docks from the **View** menu or with `Ctrl+F1…F5` (Text Filters, Directory Scanner, Time Filter, Log Fields, Row Highlighters). Dock positions are remembered between sessions.

@@ -14,6 +14,7 @@
 #include "entrydetailspanel.h"
 #include "statisticspanel.h"
 #include "schemastore.h"
+#include "cardframe.h"
 #include "apptheme.h"
 #include "updatechecker.h"
 #include "stdinspooler.h"
@@ -58,7 +59,6 @@
 #include <QPixmap>
 #include <QPainter>
 #include <QKeySequence>
-#include <QSvgRenderer>
 #include <QTextBrowser>
 #include <QDialog>
 #include <QDesktopServices>
@@ -74,29 +74,12 @@
 #include <algorithm>
 #include <limits>
 
-// Renders an SVG resource and recolours it to `color`, so monochrome toolbar
-// glyphs stay visible on both light and dark palettes. Uses QSvgRenderer (Qt
-// Svg is linked) rather than QPixmap so it does not depend on the SVG image
-// format plugin being deployed.
+// Recolouring a monochrome SVG resource so the glyph stays visible on both
+// light and dark palettes lives in CardFrame, next to the other shared chrome
+// helpers — the scanner panel needs the same treatment for its buttons.
 static QIcon tintedIcon(const QString& resourcePath, const QColor& color)
 {
-    QSvgRenderer renderer(resourcePath);
-    if (!renderer.isValid())
-        return QIcon(resourcePath);
-
-    QSize size = renderer.defaultSize();
-    if (!size.isValid() || size.isEmpty())
-        size = QSize(64, 64);
-    size.scale(64, 64, Qt::KeepAspectRatio);
-
-    QPixmap result(size);
-    result.fill(Qt::transparent);
-    QPainter p(&result);
-    renderer.render(&p);
-    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    p.fillRect(result.rect(), color);
-    p.end();
-    return QIcon(result);
+    return CardFrame::tintedIcon(resourcePath, color);
 }
 
 // Шрифт панели результатов поиска — на пункт меньше, чем в основном view:

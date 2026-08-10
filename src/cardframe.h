@@ -3,6 +3,7 @@
 
 #include <QColor>
 #include <QFrame>
+#include <QIcon>
 
 class QToolButton;
 class QVBoxLayout;
@@ -52,6 +53,10 @@ public:
     // QSS palette(mid) на тёмных палитрах почти сливается с фоном, поэтому
     // весь неяркий «хром» (рамки, глифы-связки, подписи) смешивается из
     // WindowText и Window в коде. t = доля второго цвета (0 → a, 1 → b).
+
+    /// Монохромная SVG-иконка из ресурсов, перекрашенная в заданный цвет:
+    /// один и тот же глиф остаётся видимым и на светлой, и на тёмной палитре.
+    static QIcon tintedIcon(const QString& resourcePath, const QColor& color);
 
     static QColor mixedColor(const QColor& a, const QColor& b, qreal t);
     /// Рамки и разделители: 35% текста / 65% фона.

@@ -4,7 +4,8 @@
 #include <QWidget>
 #include <QDateTime>
 
-class DirectoryScanner;
+#include "directoryscanner.h"
+
 class CardFrame;
 
 class QTreeWidget;
@@ -15,6 +16,7 @@ class QCheckBox;
 class QDateTimeEdit;
 class QLabel;
 class QProgressBar;
+class QShowEvent;
 
 // ============================================================================
 // DirectoryScannerPanel — содержимое дока «Directory Scanner».
@@ -49,14 +51,27 @@ signals:
     // Пользователь нажал «Exts…» — MainWindow откроет настройки расширений.
     void configureExtensionsRequested();
 
+protected:
+    // Пока док скрыт, авто-обновление только копит «есть изменения»; при
+    // появлении панели подтягиваем их сразу, не дожидаясь очередного тика.
+    void showEvent(QShowEvent* event) override;
+
 private:
     void buildUi();
     void onApplyClicked();
     void onResetClicked();
     void onDateBoundsChanged(const QDateTime& earliest, const QDateTime& latest);
-    void onContentProgress(int done, int total);
+    void onContentProgress(qint64 bytesDone, qint64 bytesTotal, int filesDone, int filesTotal);
     void onContentFinished(int matched, int total);
+    void onRescanFinished(int added, int removed, int updated);
     void setDateEditorsEnabled(bool on);
+
+    // Кнопка ⟳ несёт три состояния обновления (вручную / авто / отключено);
+    // они же живут в AppSettings, чтобы переживать перезапуск.
+    void showRefreshMenu(const QPoint& globalPos);
+    void setRefreshMode(DirectoryScanner::RefreshMode mode);
+    void promptRefreshInterval();
+    void updateRefreshButton();
 
     DirectoryScanner* m_scanner = nullptr;
     QTreeWidget*      m_tree = nullptr;
@@ -64,6 +79,7 @@ private:
     // Header card controls
     CardFrame*    m_card = nullptr;
     QToolButton*  m_scanButton = nullptr;
+    QToolButton*  m_refreshButton = nullptr;
     QToolButton*  m_extsButton = nullptr;
     QToolButton*  m_settingsToggle = nullptr;  // ⚙ collapse/expand the filter area
     QLabel*       m_pathLabel = nullptr;

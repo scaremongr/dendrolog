@@ -2,8 +2,35 @@
 
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QPainter>
+#include <QPixmap>
+#include <QSvgRenderer>
 #include <QToolButton>
 #include <QVBoxLayout>
+
+// Рендерит SVG и заливает непрозрачные пиксели цветом `color`. Через
+// QSvgRenderer (Qt Svg слинкован), а не QPixmap — чтобы не зависеть от
+// разворачивания плагина формата SVG.
+QIcon CardFrame::tintedIcon(const QString& resourcePath, const QColor& color)
+{
+    QSvgRenderer renderer(resourcePath);
+    if (!renderer.isValid())
+        return QIcon(resourcePath);
+
+    QSize size = renderer.defaultSize();
+    if (!size.isValid() || size.isEmpty())
+        size = QSize(64, 64);
+    size.scale(64, 64, Qt::KeepAspectRatio);
+
+    QPixmap result(size);
+    result.fill(Qt::transparent);
+    QPainter p(&result);
+    renderer.render(&p);
+    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    p.fillRect(result.rect(), color);
+    p.end();
+    return QIcon(result);
+}
 
 CardFrame::CardFrame(QWidget* parent)
     : QFrame(parent)
