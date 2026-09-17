@@ -36,6 +36,9 @@ All notable changes to DendroLog are documented here. The format follows
 - The generated `.ico` files again contain the 20 and 40 px images (the shell
   sizes used at 125 % display scaling); the ICO writer had been silently
   dropping them.
+- Large logs (above the indexed-store threshold, 512 MB by default):
+  **Find Previous** no longer re-reads up to 8 MB of the file for every line it
+  steps back over, so searching backwards is as fast as searching forwards.
 
 ## [0.2.0] — 2026-07-17
 

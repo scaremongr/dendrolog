@@ -31,9 +31,12 @@ public:
             m_scratch.clear();
             return m_scratch;
         }
-        if (offset < m_winStart
-            || offset + byteLength > m_winStart + qint64(m_window.size())) {
-            if (!slideTo(offset, byteLength)) {
+        // Промах НИЖЕ окна — скан идёт назад (поиск предыдущего), выше —
+        // вперёд. Направление берётся по окну, а не по прошлому запросу:
+        // «дрожание» внутри окна промахов не даёт вовсе.
+        const bool below = offset < m_winStart;
+        if (below || offset + byteLength > m_winStart + qint64(m_window.size())) {
+            if (!slideTo(offset, byteLength, /*backward=*/below)) {
                 m_scratch.clear();
                 return m_scratch;
             }
@@ -43,15 +46,32 @@ public:
         return m_scratch;
     }
 
+    // Сколько раз окно перечитывалось с диска — наблюдаемая цена скана.
+    int slideCount() const { return m_slides; }
+
 private:
-    bool slideTo(qint64 offset, quint32 byteLength)
+    // Окно ставится так, чтобы строка оказалась внутри, а основная часть окна
+    // лежала ПО НАПРАВЛЕНИЮ скана: вперёд — окно начинается у строки, назад —
+    // заканчивается у неё. Раньше окно всегда начиналось у строки, и скан
+    // назад промахивался на КАЖДОЙ строке: seek + чтение целого окна (8 МБ)
+    // на строку. Небольшой запас (1/8 окна) в обратную сторону гасит
+    // «дрожание»: доступ по времени в мульти-файловой вкладке идёт по файлу
+    // почти, но не строго монотонно.
+    bool slideTo(qint64 offset, quint32 byteLength, bool backward)
     {
         const qint64 want = qMax<qint64>(m_windowBytes, byteLength);
-        if (!m_file.isOpen() || !m_file.seek(offset))
+        const qint64 slack = (want - qint64(byteLength)) / 8;
+        const qint64 start = qMax<qint64>(0, backward
+            ? offset + qint64(byteLength) + slack - want
+            : offset - slack);
+        if (!m_file.isOpen() || !m_file.seek(start))
             return false;
         m_window = m_file.read(want);
-        m_winStart = offset;
-        return qint64(m_window.size()) >= qint64(byteLength);
+        m_winStart = start;
+        ++m_slides;
+        // start <= offset по построению; строка могла не поместиться только
+        // если файл короче, чем обещает индекс (обрезан снаружи).
+        return offset + qint64(byteLength) <= m_winStart + qint64(m_window.size());
     }
 
     QFile m_file;
@@ -59,6 +79,7 @@ private:
     QByteArray m_window;
     qint64 m_winStart = 0;
     QString m_scratch;
+    int m_slides = 0;
 };
 
 #endif // SEQUENTIALLINEREADER_H

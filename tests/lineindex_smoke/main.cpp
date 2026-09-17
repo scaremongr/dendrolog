@@ -19,6 +19,7 @@
 #include "logindexer.h"
 #include "logparser.h"
 #include "patternheuristics.h"
+#include "sequentiallinereader.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -31,6 +32,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <vector>
 
 static int g_failures = 0;
 
@@ -746,6 +748,112 @@ static int runBenchStages(const QString& path)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// SequentialLineReader: верный текст при любом порядке доступа И ограниченная
+// цена скана — число перечитываний окна с диска. Дефект, который это ловит:
+// окно ставилось ВПЕРЁД от запрошенного смещения, поэтому скан назад
+// (findPreviousOccurrence) промахивался мимо окна на каждой строке и делал
+// seek + чтение целого окна на строку.
+// ---------------------------------------------------------------------------
+static void testSequentialReaderDirections(const QDir& dir)
+{
+    // ~3,5 МБ строк переменной длины, LF и CRLF вперемешку, несколько строк
+    // длиннее окна.
+    const qint64 window = 64 * 1024;
+    QByteArray bytes;
+    QRandomGenerator rng(7);
+    int longLines = 0;
+    for (int i = 0; i < 40000; ++i) {
+        int len = 20 + int(rng.bounded(120));
+        if (i > 0 && i % 9973 == 0) {
+            len = 100000; // длиннее окна
+            ++longLines;
+        }
+        QByteArray line = QByteArray::number(i) + ':';
+        while (line.size() < len)
+            line += char('a' + (line.size() % 26));
+        bytes += line;
+        bytes += (i % 2) ? "\r\n" : "\n";
+    }
+    const QString path = writeFile(dir, "reader_directions.log", bytes);
+    const auto lf = std::make_shared<LogFile>(path);
+    const auto index = indexFile(lf);
+    const qint64 n = index->lineCount();
+    CHECK(n == 40000, "reader: fixture line count");
+    if (n != 40000)
+        return;
+
+    const auto expected = [&](qint64 l) {
+        return QString::fromUtf8(bytes.constData() + index->lineStartOffset(l),
+                                 int(index->lineByteLength(l)));
+    };
+
+    // Честный скан сдвигает окно не реже чем на половину окна; каждая строка
+    // длиннее окна стоит пару лишних перечитываний. Сломанный скан назад —
+    // одно перечитывание на строку, т.е. ~40000.
+    const qint64 slideBound = qint64(bytes.size()) / (window / 2) + 2 * longLines + 4;
+
+    struct Order {
+        const char* name;
+        std::vector<qint64> lines;
+        bool bounded; // проверять ли цену
+    };
+    std::vector<Order> orders;
+
+    Order fwd{ "forward", {}, true };
+    for (qint64 l = 0; l < n; ++l) fwd.lines.push_back(l);
+
+    Order bwd{ "backward", {}, true };
+    for (qint64 l = n - 1; l >= 0; --l) bwd.lines.push_back(l);
+
+    // «Дрожание»: соседние строки попарно переставлены — так идёт доступ по
+    // времени в мульти-файловой вкладке, где строки файла почти по порядку.
+    Order jitFwd{ "jitter forward", {}, true };
+    for (qint64 l = 0; l + 1 < n; l += 2) { jitFwd.lines.push_back(l + 1); jitFwd.lines.push_back(l); }
+    Order jitBwd{ "jitter backward", {}, true };
+    jitBwd.lines.assign(jitFwd.lines.rbegin(), jitFwd.lines.rend());
+
+    // Поиск назад с заворотом: от середины к началу, затем от конца к середине.
+    Order wrap{ "backward with wrap", {}, true };
+    for (qint64 l = n / 2 - 1; l >= 0; --l) wrap.lines.push_back(l);
+    for (qint64 l = n - 1; l >= n / 2; --l) wrap.lines.push_back(l);
+
+    Order rnd{ "random", {}, false };
+    for (int k = 0; k < 3000; ++k) rnd.lines.push_back(qint64(rng.bounded(quint32(n))));
+
+    orders.push_back(std::move(fwd));
+    orders.push_back(std::move(bwd));
+    orders.push_back(std::move(jitFwd));
+    orders.push_back(std::move(jitBwd));
+    orders.push_back(std::move(wrap));
+    orders.push_back(std::move(rnd));
+
+    QByteArray summary;
+    for (const Order& order : orders) {
+        SequentialLineReader reader(path, window);
+        CHECK(reader.open(), "reader: open");
+        int mismatches = 0;
+        for (const qint64 l : order.lines) {
+            if (reader.lineAt(index->lineStartOffset(l), index->lineByteLength(l)) != expected(l))
+                ++mismatches;
+        }
+        if (mismatches > 0)
+            std::fprintf(stderr, "reader %s: %d wrong line(s)\n", order.name, mismatches);
+        CHECK(mismatches == 0, "reader: line text matches for every access order");
+
+        if (order.bounded && reader.slideCount() > slideBound)
+            std::fprintf(stderr, "reader %s: %d window reads, bound %lld\n", order.name,
+                         reader.slideCount(), static_cast<long long>(slideBound));
+        CHECK(!order.bounded || reader.slideCount() <= slideBound,
+              "reader: window reads stay bounded for monotonic and jittery scans");
+        summary += QByteArray(summary.isEmpty() ? "" : ", ") + order.name + '='
+                   + QByteArray::number(reader.slideCount());
+    }
+    std::fprintf(stderr, "reader window reads over %lld lines (bound %lld): %s\n",
+                 static_cast<long long>(n), static_cast<long long>(slideBound),
+                 summary.constData());
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -769,6 +877,7 @@ int main(int argc, char** argv)
     testBlockBoundaries(dir);
     testAppendReindex(dir);
     testSnapshotStability(dir);
+    testSequentialReaderDirections(dir);
 
     if (g_failures == 0)
         std::fprintf(stderr, "lineindex_smoke: all checks passed\n");
