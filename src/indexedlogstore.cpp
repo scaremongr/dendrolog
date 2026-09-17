@@ -23,6 +23,34 @@ inline LogEntryMeta metaFromIndex(const LineIndex& index, qint64 line,
     return m;
 }
 
+// Идут ли первые shownLines строк файла в порядке lessRef, т.е. можно ли взять
+// порядок файла как есть. Строки одной записи лежат в файле подряд, а
+// logicalId по строкам не убывает, поэтому достаточно проверить ЗАПИСИ:
+// метки не убывают, и за записью без метки не следует запись с меткой
+// (невалидные — «больше» любых валидных). O(записей) по снапшоту, без
+// мьютекса и без lessRef на строку: на 20-ГБ логе доли секунды.
+bool linesInTimeOrder(const LineIndex& index, qint64 shownLines)
+{
+    if (shownLines <= 1)
+        return true;
+    const LineIndexSnapshot snap = index.snapshot();
+    const quint32 firstId = snap.logicalId(0);
+    const quint32 lastId = snap.logicalId(shownLines - 1);
+    qint64 prev = snap.timestampMs(firstId);
+    bool prevValid = prev >= 0;
+    for (quint32 id = firstId + 1; id <= lastId; ++id) {
+        const qint64 ts = snap.timestampMs(id);
+        if (ts < 0) {
+            prevValid = false;
+            continue;
+        }
+        if (!prevValid || ts < prev)
+            return false;
+        prev = ts;
+    }
+    return true;
+}
+
 } // namespace
 
 IndexedLogStore::IndexedLogStore(LogModel& model)
@@ -52,18 +80,39 @@ int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineI
 {
     // Переход «один файл → несколько»: тождество больше не работает,
     // материализуем общий порядок из уже показанных строк.
-    if (m_files.size() == 1 && identityAll())
-        materializeAllRefs();
+    const bool leavingIdentity = (m_files.size() == 1);
+    bool reorder = false;
+    bool refilter = false;
+    if (leavingIdentity) {
+        // Фильтр, запущенный в тождественном режиме, вернёт строки в порядке
+        // файла — после перехода это уже не порядок вкладки. Отменяем и
+        // перезапускаем полным пересчётом, когда переход завершён.
+        refilter = m_filterJobActive;
+        if (refilter)
+            cancelPendingFilter(false);
+        // Если сам файл не упорядочен по времени, строки вкладки переставятся —
+        // честный reset на весь переход (до него view видит тождество, после —
+        // слитый порядок; промежуточных состояний он не увидит).
+        reorder = !linesInTimeOrder(*m_files[0].index, m_shownAllCount);
+        if (reorder)
+            m_model.beginResetModel();
+        materializeAllRefs(reorder);
+    }
 
     IndexedFile f;
     f.logFile = logFile;
     f.index = std::move(index);
     f.cacheFileId = m_textCache.addFile(logFile->filePath);
     m_files.append(std::move(f));
+
+    if (reorder)
+        m_model.endResetModel();
+    if (refilter)
+        applyFilter();
     return int(m_files.size()) - 1;
 }
 
-void IndexedLogStore::materializeAllRefs()
+void IndexedLogStore::materializeAllRefs(bool sortByTime)
 {
     m_allRefs.clear();
     if (m_files.isEmpty())
@@ -72,6 +121,17 @@ void IndexedLogStore::materializeAllRefs()
     m_allRefs.reserve(int(m_shownAllCount));
     for (qint64 l = 0; l < m_shownAllCount; ++l)
         m_allRefs.append(makeRef(0, l));
+    if (!sortByTime)
+        return;
+
+    // База слияния обязана быть отсортирована lessRef: строки следующих файлов
+    // вставляются в неё бинарным поиском. Раньше здесь оставался порядок
+    // файла, и на файле с преамбулой или метками не по порядку слияние тихо
+    // расставляло строки куда попало.
+    const auto less = [this](RowRef a, RowRef b) { return lessRef(a, b); };
+    std::sort(m_allRefs.begin(), m_allRefs.end(), less);
+    if (!m_identityVisible)
+        std::sort(m_visibleRefs.begin(), m_visibleRefs.end(), less);
 }
 
 void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstLine,
@@ -101,10 +161,13 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
         freshFirst = firstLine + 1;
 
         if (m_identityVisible) {
+            // m_allRefs отсортирован lessRef, а не численно по RowRef —
+            // сравнение без компаратора искало строку не там.
             const int row = identityAll()
                 ? int(firstLine)
                 : int(std::lower_bound(m_allRefs.constBegin(), m_allRefs.constEnd(),
-                                       makeRef(fileId, firstLine))
+                                       makeRef(fileId, firstLine),
+                                       [this](RowRef a, RowRef b) { return rowLess(a, b); })
                       - m_allRefs.constBegin());
             if (row >= 0 && row < visibleCount())
                 emit m_model.dataChanged(m_model.index(row, 0), m_model.index(row, 0));
@@ -113,7 +176,7 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
             const RowRef ref = makeRef(fileId, firstLine);
             const auto it = std::lower_bound(m_visibleRefs.begin(), m_visibleRefs.end(),
                                              ref,
-                                             [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                                             [this](RowRef a, RowRef b) { return rowLess(a, b); });
             const bool wasVisible = (it != m_visibleRefs.end() && *it == ref);
             const bool nowPasses = refPassesFiltersNow(ref);
             if (wasVisible && nowPasses) {
@@ -145,15 +208,19 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
         refs.reserve(int(freshCount));
         for (qint64 l = freshFirst; l < firstLine + count; ++l)
             refs.append(makeRef(fileId, l));
+        // Батч приходит в порядке файла, а inplace_merge требует, чтобы ОБЕ
+        // половины были отсортированы lessRef (как резидентный путь сортирует
+        // батч перед mergeEntries). На упорядоченном логе — одна проверка O(B).
+        const auto less = [this](RowRef a, RowRef b) { return lessRef(a, b); };
+        if (!std::is_sorted(refs.begin(), refs.end(), less))
+            std::sort(refs.begin(), refs.end(), less);
         const bool needMerge = !m_allRefs.isEmpty()
             && lessRef(refs.first(), m_allRefs.last());
         const int oldSize = int(m_allRefs.size());
         m_allRefs += refs;
-        if (needMerge) {
+        if (needMerge)
             std::inplace_merge(m_allRefs.begin(), m_allRefs.begin() + oldSize,
-                               m_allRefs.end(),
-                               [this](RowRef a, RowRef b) { return lessRef(a, b); });
-        }
+                               m_allRefs.end(), less);
     }
 
     if (markNew) {
@@ -543,13 +610,13 @@ int IndexedLogStore::rowForEntry(int logicalEntryId, const LogFile* sourceFile) 
                 return int(l);
             const auto it = std::lower_bound(m_allRefs.constBegin(), m_allRefs.constEnd(),
                                              ref,
-                                             [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                                             [this](RowRef a, RowRef b) { return rowLess(a, b); });
             if (it != m_allRefs.constEnd() && *it == ref)
                 return int(it - m_allRefs.constBegin());
         } else {
             const auto it = std::lower_bound(m_visibleRefs.constBegin(),
                                              m_visibleRefs.constEnd(), ref,
-                                             [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                                             [this](RowRef a, RowRef b) { return rowLess(a, b); });
             if (it != m_visibleRefs.constEnd() && *it == ref)
                 return int(it - m_visibleRefs.constBegin());
         }
@@ -593,7 +660,7 @@ int IndexedLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* source
     const RowRef ref = makeRef(fileId, lo);
     const auto it = std::lower_bound(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
                                      ref,
-                                     [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
     const int j = int(it - m_visibleRefs.constBegin());
     return j < int(m_visibleRefs.size()) ? j : j - 1;
 }
@@ -1008,20 +1075,32 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
     watcher->setFuture(future);
 }
 
-void IndexedLogStore::insertVisibleSorted(const QVector<RowRef>& passing)
+void IndexedLogStore::insertVisibleSorted(const QVector<RowRef>& passingInFileOrder)
 {
-    if (passing.isEmpty())
+    if (passingInFileOrder.isEmpty())
         return;
-    // Прошедшие строки отсортированы порядком своего файла; в видимом списке
-    // они обычно встают в конец (tail-догрузка). Общий случай — серии вставок,
-    // как в резидентном insertFilteredSorted.
+    // Прошедшие строки приходят в порядке своего файла. Серии вставок ниже
+    // (upper_bound от searchFrom, std::merge) требуют порядка ВКЛАДКИ — на
+    // слитой вкладке с файлом «не по порядку» это разные порядки.
+    const auto less = [this](RowRef a, RowRef b) { return rowLess(a, b); };
+    QVector<RowRef> sorted;
+    const QVector<RowRef>* source = &passingInFileOrder;
+    if (!std::is_sorted(passingInFileOrder.constBegin(), passingInFileOrder.constEnd(), less)) {
+        sorted = passingInFileOrder;
+        std::sort(sorted.begin(), sorted.end(), less);
+        source = &sorted;
+    }
+    const QVector<RowRef>& passing = *source;
+
+    // В видимом списке строки обычно встают в конец (tail-догрузка). Общий
+    // случай — серии вставок, как в резидентном insertFilteredSorted.
     struct Run { int pos; int first; int count; };
     QVector<Run> runs;
     int searchFrom = 0;
     for (int i = 0; i < passing.size(); ++i) {
         const auto it = std::upper_bound(m_visibleRefs.constBegin() + searchFrom,
                                          m_visibleRefs.constEnd(), passing[i],
-                                         [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                                         [this](RowRef a, RowRef b) { return rowLess(a, b); });
         const int pos = int(it - m_visibleRefs.constBegin());
         if (!runs.isEmpty() && runs.last().pos == pos)
             ++runs.last().count;
@@ -1039,7 +1118,7 @@ void IndexedLogStore::insertVisibleSorted(const QVector<RowRef>& passing)
         std::merge(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
                    passing.constBegin(), passing.constEnd(),
                    std::back_inserter(merged),
-                   [this](RowRef a, RowRef b) { return lessRef(a, b); });
+                   [this](RowRef a, RowRef b) { return rowLess(a, b); });
         m_visibleRefs = std::move(merged);
         m_model.endResetModel();
         return;

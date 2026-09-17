@@ -39,6 +39,15 @@ All notable changes to DendroLog are documented here. The format follows
 - Large logs (above the indexed-store threshold, 512 MB by default):
   **Find Previous** no longer re-reads up to 8 MB of the file for every line it
   steps back over, so searching backwards is as fast as searching forwards.
+- Large logs: a tab that received several files at once — opening them
+  together, merging tabs, or adding a large file to a tab that already had
+  files — **showed no lines at all**. It now shows every file merged by time.
+- Large logs: a tab merging several files is now **ordered correctly by time**
+  even when a file starts with a header without timestamps or has lines out of
+  time order; lines used to land in arbitrary places.
+- Large logs whose lines are not in time order: after a filter change the view
+  now finds the right row for the previously selected entry instead of losing it
+  or landing on a neighbouring row.
 
 ## [0.2.0] — 2026-07-17
 

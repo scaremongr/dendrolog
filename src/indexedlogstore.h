@@ -93,17 +93,28 @@ private:
     static int refFile(RowRef ref) { return int(ref >> kFileBits); }
     static qint64 refLine(RowRef ref) { return qint64(ref & ((RowRef(1) << kFileBits) - 1)); }
 
-    bool identityAll() const { return m_allRefs.isEmpty(); }
+    // Тождественный режим — вкладка из одного файла: row == line, m_allRefs
+    // пуст. Определяется ЧИСЛОМ ФАЙЛОВ, а не пустотой m_allRefs: файлы,
+    // подключённые до первого батча, оставляли m_allRefs пустым, и стор
+    // считал вкладку одно-файловой — allCount() отдавал 0 строк.
+    bool identityAll() const { return m_files.size() <= 1; }
     RowRef rowToRef(int visibleRow) const;
     // Глобальный порядок строк — зеркало LogEntry::operator< по метаданным.
     bool lessRef(RowRef a, RowRef b) const;
+    // Порядок строк ВКЛАДКИ, в котором лежат m_allRefs и m_visibleRefs: в
+    // тождественном режиме — порядок файла, иначе lessRef. Все бинарные
+    // поиски и слияния по этим спискам обязаны идти по нему — lessRef на
+    // одно-файловой вкладке с метками не по порядку промахивается.
+    bool rowLess(RowRef a, RowRef b) const { return identityAll() ? a < b : lessRef(a, b); }
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;
-    void materializeAllRefs();
+    // Переход «один файл → несколько»: m_allRefs из показанных строк первого
+    // файла, в порядке lessRef (sortByTime — порядок файла с ним расходится).
+    void materializeAllRefs(bool sortByTime);
     void startFilterJob(bool fullRescan, qint64 rangeFirst = -1, qint64 rangeCount = 0,
                         int rangeFileId = -1);
-    void insertVisibleSorted(const QVector<RowRef>& passing);
+    void insertVisibleSorted(const QVector<RowRef>& passingInFileOrder);
     void startNextPendingRange();
     std::shared_ptr<LogEntry> materializeEntry(RowRef ref) const;
 
