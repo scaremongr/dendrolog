@@ -19,7 +19,7 @@ add_executable(logstore_equivalence main.cpp
     ../../src/logfile.cpp
     ../../src/logpattern.cpp
     ../../src/patternheuristics.cpp)
-target_include_directories(logstore_equivalence PRIVATE ../../src)
+target_include_directories(logstore_equivalence PRIVATE ../../src ../common)
 target_link_libraries(logstore_equivalence PRIVATE Qt6::Core Qt6::Gui Qt6::Concurrent)
 
 add_test(NAME logstore_equivalence COMMAND logstore_equivalence)

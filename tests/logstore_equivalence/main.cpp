@@ -47,6 +47,7 @@
 #include "logparser.h"
 #include "logpattern.h"
 #include "logscan.h"
+#include "testdocuments.h"
 #include "textmatchhighlighter.h"
 
 #include <QCoreApplication>
@@ -136,333 +137,36 @@ static QString describe(const QStringList& v)
 }
 
 // ---------------------------------------------------------------------------
-// Схема полей и генерация фикстур
+// Загрузка документов — общая с другими тестами (tests/common). Ошибки
+// загрузчика и «модель не успокоилась» здесь — такие же расхождения.
 // ---------------------------------------------------------------------------
 
-static PatternBlock mk(PatternBlock::MatchKind kind, const QString& name,
-                       const QString& lead = QString(),
-                       const QString& closing = QString(),
-                       const QString& sep = QString())
+using namespace testdocs;
+
+static void reportLoadErrors(const Document& doc)
 {
-    PatternBlock b;
-    b.matchKind   = kind;
-    b.name        = name;
-    b.leadingText = lead;
-    b.closingText = closing;
-    b.separator   = sep;
-    return b;
+    for (const QString& error : doc.errors)
+        CHECK(false, error);
 }
 
-// Схема, под которую генерируются фикстуры:
-//   2026-03-05 10:00:00.000 [worker-1] INFO - текст
-static QString buildSchema()
+static Document loadResident(const QStringList& paths, const QString& schema)
 {
-    PatternDefinition def;
-    def.blocks = {
-        mk(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-        mk(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Thread"),
-           QStringLiteral("["), QStringLiteral("]")),
-        mk(PatternBlock::MatchKind::Level, QStringLiteral("Level"), QString(), QString(),
-           QStringLiteral("-")),
-        mk(PatternBlock::MatchKind::Remainder, QStringLiteral("Message")),
-    };
-    return LogPattern::serializeDefinition(def);
-}
-
-static QString writeFile(const QDir& dir, const QString& name, const QByteArray& bytes)
-{
-    const QString path = dir.filePath(name);
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        std::fprintf(stderr, "cannot write %s\n", U8(path));
-        std::exit(2);
-    }
-    f.write(bytes);
-    f.close();
-    return path;
-}
-
-// Детерминированный синтетический лог. Намеренно содержит всё, что ломает
-// наивные реализации: преамбулу свободного текста, многострочные записи,
-// пустые строки, не-ASCII, дубликаты и нарушения порядка таймстампов.
-// monotonic — метки только возрастают и нет преамбулы свободного текста:
-// на таком файле порядок строк в файле совпадает с порядком по времени, и
-// оба бэкенда обязаны показывать строку в строку одно и то же даже для
-// одно-файловой вкладки (где индексный не сортирует).
-static QByteArray makeLogBytes(int records, quint32 seed, const QByteArray& eol,
-                               const QDateTime& base, bool withPreamble,
-                               bool trailingNewline, bool monotonic)
-{
-    QRandomGenerator rng(seed);
-    QByteArray out;
-
-    const char* threads[] = { "worker-1", "worker-2", "io-pool", "main" };
-    const char* levels[]  = { "TRACE", "DEBUG", "INFO", "INFO", "WARN", "ERROR", "FATAL" };
-    const char* messages[] = {
-        "Connection established to %1",
-        "Timeout waiting for response from node %1",
-        "Disk usage at %1 percent",
-        "Кэш прогрет, записей: %1",
-        "Retrying request #%1 after transient failure",
-        "Checkpoint %1 written",
-        "Disk timeout on volume %1",
-        "Пользователь %1 вышел из системы",
-    };
-
-    auto appendLine = [&](const QString& line) {
-        out += line.toUtf8();
-        out += eol;
-    };
-
-    if (withPreamble) {
-        appendLine(QStringLiteral("### DendroLog synthetic fixture"));
-        appendLine(QStringLiteral("generated deterministically, seed=%1").arg(seed));
-        appendLine(QString());
-    }
-
-    qint64 tick = 0;
-    for (int i = 0; i < records; ++i) {
-        // Шаг времени с разбросом: часть записей получает одинаковый штамп,
-        // часть — уходит назад, чтобы слияние/сортировка были нетривиальны.
-        const int roll = int(rng.bounded(100));
-        if (roll < 10)
-            ;                                   // тот же штамп, что у предыдущей
-        else if (!monotonic && roll < 15)
-            tick -= 400;                        // шаг назад
-        else
-            tick += 500 + rng.bounded(2000);
-
-        const QDateTime ts = base.addMSecs(tick);
-        const QString line =
-            QStringLiteral("%1 [%2] %3 - %4")
-                .arg(ts.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")),
-                     QString::fromLatin1(threads[rng.bounded(4)]),
-                     QString::fromLatin1(levels[rng.bounded(7)]),
-                     QString::fromLatin1(messages[rng.bounded(8)])
-                         .arg(rng.bounded(1000)));
-        appendLine(line);
-
-        // Continuation-строки: стек-трейс без таймстампа.
-        if (rng.bounded(100) < 18) {
-            const int frames = 1 + int(rng.bounded(3));
-            for (int f = 0; f < frames; ++f)
-                appendLine(QStringLiteral("    at com.example.Module%1.call(Module%1.java:%2)")
-                               .arg(f).arg(100 + rng.bounded(900)));
-        }
-        // Пустая строка как часть записи.
-        if (rng.bounded(100) < 6)
-            appendLine(QString());
-    }
-
-    if (!trailingNewline && out.endsWith(eol))
-        out.chop(eol.size());
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// Прокачка событий
-// ---------------------------------------------------------------------------
-
-static void pump(int ms)
-{
-    QElapsedTimer t;
-    t.start();
-    do {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-    } while (t.elapsed() < ms);
-}
-
-// Ожидание тишины модели: фильтрация индексного бэкенда всегда асинхронна и
-// может идти несколькими инкрементальными джобами, поэтому ждём, пока
-// перестанут приходить modelFiltered/filterProgress И перестанет меняться
-// rowCount(). Резидентный (синхронный) путь проходит здесь мгновенно.
-static void settle(LogModel& model, int quietMs = 80, int timeoutMs = 60000)
-{
-    QElapsedTimer quiet;
-    QElapsedTimer total;
-    quiet.start();
-    total.start();
-
-    bool progressPending = false;
-    auto c1 = QObject::connect(&model, &LogModel::modelFiltered, &model,
-                               [&](int) { quiet.restart(); });
-    auto c2 = QObject::connect(&model, &LogModel::filterProgress, &model,
-                               [&](int p) {
-                                   progressPending = (p < 100);
-                                   quiet.restart();
-                               });
-
-    int lastRows = model.rowCount();
-    while (total.elapsed() < timeoutMs) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-        const int rows = model.rowCount();
-        if (rows != lastRows) {
-            lastRows = rows;
-            quiet.restart();
-        }
-        if (!progressPending && quiet.elapsed() >= quietMs)
-            break;
-    }
-    if (total.elapsed() >= timeoutMs)
-        CHECK(false, QStringLiteral("модель не пришла в покой за %1 мс").arg(timeoutMs));
-
-    QObject::disconnect(c1);
-    QObject::disconnect(c2);
-}
-
-// ---------------------------------------------------------------------------
-// Построение моделей
-// ---------------------------------------------------------------------------
-
-struct Document {
-    std::unique_ptr<LogModel> model;
-    QVector<LogFilePtr>       files;
-};
-
-// Резидентный путь: LogParser → mergeEntries, как в LogViewWidget.
-static Document buildResident(const QStringList& paths, const QString& schema)
-{
-    Document doc;
-    doc.model = std::make_unique<LogModel>();
-
-    for (const QString& path : paths) {
-        auto logFile = std::make_shared<LogFile>(path);
-        doc.files.append(logFile);
-
-        LogParser parser;
-        parser.setPattern(schema);
-        parser.setExtractionEnabled(true);
-
-        QVector<QVector<std::shared_ptr<LogEntry>>> batches;
-        bool done = false;
-
-        QObject relay;
-        QObject::connect(&parser, &LogParser::entriesParsed, &relay,
-                         [&](const QVector<std::shared_ptr<LogEntry>>& batch,
-                             const LogFilePtr&) { batches.append(batch); });
-        QObject::connect(&parser, &LogParser::parsingFinished, &relay,
-                         [&](int, const LogFilePtr&) { done = true; });
-        QObject::connect(&parser, &LogParser::parsingFailed, &relay,
-                         [&](const LogFilePtr&) { done = true; });
-
-        parser.startParsing(logFile);
-
-        QElapsedTimer t;
-        t.start();
-        while (!done && t.elapsed() < 60000)
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-        CHECK(done, QStringLiteral("резидентный парсинг %1 не завершился").arg(path));
-
-        // Порядок подачи как в production: батч сортируется и сливается.
-        for (auto& batch : batches) {
-            std::sort(batch.begin(), batch.end(), logEntryPtrLess);
-            doc.model->mergeEntries(batch);
-        }
-    }
-
-    settle(*doc.model);
+    Document doc = buildResident(paths, schema);
+    reportLoadErrors(doc);
     return doc;
 }
 
-// Индексный путь: LogIndexer → attachFile/appendIndexedRows, как в
-// LogViewWidget::startIndexedLoad + handleIndexBatchReady. Сигналы индексатора
-// приходят из воркера очередью — порядок «батчи, затем finished» сохраняется.
-// Как файлы попадают в индексную вкладку. Порядок строк у стора собирается
-// по-разному, поэтому оба сценария проверяются отдельно:
-//   • Sequential — файл полностью проиндексирован, затем добавлен следующий
-//     («дописал файл в открытую вкладку»): второй файл подключается к уже
-//     показанным строкам первого (materializeAllRefs);
-//   • Concurrent — все файлы подключены ДО первого батча и индексируются
-//     параллельно («открыл несколько файлов разом», конверсия вкладки в
-//     индексную): батчи разных файлов приходят вперемешку.
-enum class IndexedLoad { Sequential, Concurrent };
-
-static QString describe(IndexedLoad mode)
+static Document loadIndexed(const QStringList& paths, const QString& schema,
+                            IndexedLoad mode = IndexedLoad::Sequential)
 {
-    return mode == IndexedLoad::Sequential ? QStringLiteral("по очереди")
-                                           : QStringLiteral("разом");
+    Document doc = buildIndexed(paths, schema, mode);
+    reportLoadErrors(doc);
+    return doc;
 }
 
-static Document buildIndexed(const QStringList& paths, const QString& schema,
-                             IndexedLoad mode = IndexedLoad::Sequential)
+static void settleChecked(LogModel& model)
 {
-    Document doc;
-    doc.model = std::make_unique<LogModel>();
-    IndexedLogStore* store = doc.model->convertToIndexedBackend();
-    store->setFieldPattern(schema, true);
-
-    struct Job {
-        LogFilePtr                  logFile;
-        std::shared_ptr<LineIndex>  index;
-        std::unique_ptr<LogIndexer> indexer;
-        bool                        done = false;
-        bool                        fallback = false;
-    };
-    std::vector<std::unique_ptr<Job>> jobs;
-    QObject relay;
-
-    const auto prepare = [&](const QString& path) -> Job& {
-        auto job = std::make_unique<Job>();
-        job->logFile = std::make_shared<LogFile>(path);
-        job->index = std::make_shared<LineIndex>();
-        job->indexer = std::make_unique<LogIndexer>();
-        job->indexer->setPattern(schema);
-        job->indexer->setExtractionEnabled(true);
-        doc.files.append(job->logFile);
-        store->attachFile(job->logFile, job->index);
-
-        Job* raw = job.get();
-        QObject::connect(raw->indexer.get(), &LogIndexer::indexBatchReady, &relay,
-                         [store](const LogFilePtr& lf, qint64 first, qint64 count) {
-                             store->appendIndexedRows(lf, first, count, false);
-                         });
-        QObject::connect(raw->indexer.get(), &LogIndexer::indexingFinished, &relay,
-                         [raw](qint64, const LogFilePtr&) { raw->done = true; });
-        QObject::connect(raw->indexer.get(), &LogIndexer::indexingFailed, &relay,
-                         [raw](const LogFilePtr&) { raw->done = true; });
-        QObject::connect(raw->indexer.get(), &LogIndexer::needsResidentFallback, &relay,
-                         [raw](const LogFilePtr&, const QString&) {
-                             raw->fallback = true;
-                             raw->done = true;
-                         });
-        jobs.push_back(std::move(job));
-        return *raw;
-    };
-
-    const auto waitFor = [&](const std::function<bool()>& finished) {
-        QElapsedTimer t;
-        t.start();
-        while (!finished() && t.elapsed() < 60000)
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-    };
-
-    if (mode == IndexedLoad::Sequential) {
-        for (const QString& path : paths) {
-            Job& job = prepare(path);
-            job.indexer->startIndexing(job.logFile, job.index);
-            waitFor([&job] { return job.done; });
-        }
-    } else {
-        for (const QString& path : paths)
-            prepare(path);
-        for (auto& job : jobs)
-            job->indexer->startIndexing(job->logFile, job->index);
-        waitFor([&jobs] {
-            for (const auto& job : jobs)
-                if (!job->done)
-                    return false;
-            return true;
-        });
-    }
-
-    for (const auto& job : jobs) {
-        CHECK(job->done, QStringLiteral("индексация %1 не завершилась").arg(job->logFile->filePath));
-        CHECK(!job->fallback, QStringLiteral("неожиданный откат в резидентный путь: %1")
-                                  .arg(job->logFile->filePath));
-    }
-
-    settle(*doc.model);
-    return doc;
+    CHECK(settle(model), QStringLiteral("модель не пришла в покой"));
 }
 
 // ---------------------------------------------------------------------------
@@ -510,7 +214,7 @@ static void applyConfig(LogModel& model, const FilterConfig& cfg,
     model.setFilterRules(rules);
     model.setRowMarkers(cfg.markers);
 
-    settle(model);
+    settleChecked(model);
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,8 +799,8 @@ static void runFixture(const QString& fixtureName, const QStringList& paths,
 
     QElapsedTimer loadTimer;
     loadTimer.start();
-    Document res = buildResident(paths, schema);
-    Document idx = buildIndexed(paths, schema, mode);
+    Document res = loadResident(paths, schema);
+    Document idx = loadIndexed(paths, schema, mode);
     g_timing.load += loadTimer.elapsed();
 
     std::fprintf(stdout, "фикстура «%s»: %d файл(ов), %d строк(и)\n",
@@ -1161,8 +865,8 @@ static void testSingleFileOrdering(const QString& monotonicPath,
         g_context = QStringLiteral("порядок строк / файл с неубывающими метками");
         g_contextFailures = 0;
 
-        Document res = buildResident({ monotonicPath }, schema);
-        Document idx = buildIndexed({ monotonicPath }, schema);
+        Document res = loadResident({ monotonicPath }, schema);
+        Document idx = loadIndexed({ monotonicPath }, schema);
         applyConfig(*res.model, none, fieldNames);
         applyConfig(*idx.model, none, fieldNames);
 
@@ -1179,8 +883,8 @@ static void testSingleFileOrdering(const QString& monotonicPath,
         g_context = QStringLiteral("порядок строк / файл с преамбулой и метками не по порядку");
         g_contextFailures = 0;
 
-        Document res = buildResident({ unsortedPath }, schema);
-        Document idx = buildIndexed({ unsortedPath }, schema);
+        Document res = loadResident({ unsortedPath }, schema);
+        Document idx = loadIndexed({ unsortedPath }, schema);
         applyConfig(*res.model, none, fieldNames);
         applyConfig(*idx.model, none, fieldNames);
 
@@ -1232,8 +936,8 @@ static void testSingleFileUnsortedLookups(const QString& unsortedPath,
     g_context = QStringLiteral("поиск записи / один файл, метки не по порядку / загрузка");
     g_contextFailures = 0;
 
-    Document res = buildResident({ unsortedPath }, schema);
-    Document idx = buildIndexed({ unsortedPath }, schema);
+    Document res = loadResident({ unsortedPath }, schema);
+    Document idx = loadIndexed({ unsortedPath }, schema);
     const LogFile* resFile = res.files.first().get();
     const LogFile* idxFile = idx.files.first().get();
 
@@ -1344,8 +1048,7 @@ int main(int argc, char** argv)
     }
     const QStringList fieldNames = pattern.fieldNames();
 
-    const QDateTime baseA = QDateTime::fromString(
-        QStringLiteral("2026-03-05 10:00:00.000"), QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+    const QDateTime baseA = fixtureBaseTime();
     const QDateTime baseB = baseA.addSecs(120); // перекрывается с первым файлом
 
     // Файлы для строгого сравнения одно-файловой вкладки: метки неубывающие,
@@ -1375,6 +1078,13 @@ int main(int argc, char** argv)
         dir, QStringLiteral("delta.log"),
         makeLogBytes(240, 4u, "\r\n", baseB, /*withPreamble*/ true,
                      /*trailingNewline*/ false, /*monotonic*/ false));
+
+    for (const QString& path : { fileA, fileB, fileC, fileD }) {
+        if (path.isEmpty()) {
+            std::fprintf(stderr, "не удалось записать фикстуру\n");
+            return 2;
+        }
+    }
 
     runFixture(QStringLiteral("один файл (LF)"), { fileA }, schema, fieldNames);
     runFixture(QStringLiteral("один файл (CRLF, без \\n в конце)"), { fileB }, schema, fieldNames);
