@@ -48,6 +48,18 @@ All notable changes to DendroLog are documented here. The format follows
 - Large logs whose lines are not in time order: after a filter change the view
   now finds the right row for the previously selected entry instead of losing it
   or landing on a neighbouring row.
+- **Filtering no longer throws the view back to the top of the file.** When a
+  filter hid the selected entry and the window then regained focus — Alt+Tab, a
+  closed dialog, focus returning from a panel — Qt quietly made a row near the
+  top of the list current without selecting it, and the view mistook that for
+  your choice: the next filter change restored *that* row and scrolled to it.
+  The same happened when you scrolled through a log without selecting anything
+  at all. The view now ignores a current row it did not get from you, so your
+  entry (or, with nothing selected, your scroll position) survives filtering.
+- Switching which Log Fields columns are shown keeps the viewport where it was
+  instead of scrolling to a row you never selected.
+- The first keyboard move in a freshly opened log starts at the first line
+  rather than skipping to the second.
 
 ## [0.2.0] — 2026-07-17
 

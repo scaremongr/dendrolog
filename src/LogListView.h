@@ -227,6 +227,11 @@ protected:
     void leaveEvent(QEvent *event) override;
     bool viewportEvent(QEvent *event) override;
     void currentChanged(const QModelIndex &current, const QModelIndex &previous) override;
+    // Qt при получении фокуса сам назначает текущую строку, если её нет
+    // (QAbstractItemView::focusInEvent → moveCursor(MoveNext), NoUpdate —
+    // строка при этом НЕ выделяется). Это не выбор пользователя, и якорь
+    // выделения такой «текущей» строкой затирать нельзя: см. m_inFocusIn.
+    void focusInEvent(QFocusEvent* event) override;
     void updateGeometries() override;
     void changeEvent(QEvent* event) override;
     // Нейтрализация внутренней раскладки QListView (flowPositions): она O(N)
@@ -264,6 +269,9 @@ private:
     QList<QMetaObject::Connection> m_modelConnections;
     bool m_wordWrapEnabled = false; // состояние по умолчанию для всех строк
     bool m_inUpdateGeometries = false; // предотвращение рекурсии
+    // Внутри QAbstractItemView::focusInEvent: текущую строку назначает Qt,
+    // а не пользователь (см. focusInEvent).
+    bool m_inFocusIn = false;
 
     // ========== Левый отступ для маркера начала элемента ==========
     static constexpr int kLeftMarginWidth = 12; // Ширина полоски слева, где рисуется "›"

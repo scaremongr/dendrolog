@@ -323,6 +323,17 @@ void LogListView::setModel(QAbstractItemModel *model) {
                 const int total = this->model() ? this->model()->rowCount() : 0;
                 const int count = bottomRight.row() - topLeft.row() + 1;
                 const bool isBulk = (count >= total / 4 || count > 500);
+                // Якорь вьюпорта снимаем ДО пересчёта высот: строки на местах,
+                // меняются только их высоты, поэтому положение восстанавливается
+                // по той же строке с тем же смещением.
+                int anchorRow = -1;
+                qint64 anchorOffset = 0;
+                if (isBulk && total > 0) {
+                    const qint64 scrollY = scrollContentY();
+                    qint64 rowTop = 0;
+                    if (getRowAtContentY(scrollY, anchorRow, rowTop))
+                        anchorOffset = rowTop - scrollY;
+                }
                 if (isBulk) {
                     // Большой диапазон — инвалидируем всё за один раз
                     invalidateRowState(-1, /*preserveTextLengths=*/false);
@@ -357,14 +368,27 @@ void LogListView::setModel(QAbstractItemModel *model) {
                     }
                 }
                 viewport()->update();
-                // После массового изменения высот строк прокручиваем к выделенному
-                // элементу — универсально работает при смене видимых полей, паттерна
-                // и любых других модификаторов, меняющих компоновку.
+                // После массового изменения высот строк возвращаем положение:
+                // к ВЫБРАННОЙ пользователем строке (смена видимых полей,
+                // паттерна и прочих модификаторов компоновки), а если выбора
+                // нет — удерживаем вьюпорт на прежней верхней строке. Проверка
+                // выделения здесь обязательна: текущей строку мог назначить
+                // Qt при получении фокуса, не выделяя её, и прокрутка к ней
+                // утаскивала бы вьюпорт к началу файла (см. focusInEvent).
                 if (isBulk) {
-                    QTimer::singleShot(0, this, [this]() {
+                    QTimer::singleShot(0, this, [this, anchorRow, anchorOffset]() {
+                        if (!this->model())
+                            return;
                         const QModelIndex cur = currentIndex();
-                        if (cur.isValid())
+                        const bool userSelected = cur.isValid() && selectionModel()
+                            && selectionModel()->isRowSelected(cur.row(), QModelIndex());
+                        if (userSelected) {
                             scrollTo(cur, QAbstractItemView::EnsureVisible);
+                        } else if (anchorRow >= 0 && anchorRow < this->model()->rowCount()) {
+                            verticalScrollBar()->setValue(
+                                contentYToScrollValue(rowYOffset(anchorRow) - anchorOffset));
+                            viewport()->update();
+                        }
                     });
                 }
             });
@@ -2483,8 +2507,27 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     menu.exec(event->globalPos());
 }
 
+void LogListView::focusInEvent(QFocusEvent* event) {
+    // Окно снова стало активным, фокус вернулся из панели, пришёл Tab — если
+    // текущей строки нет, QAbstractItemView::focusInEvent назначает её сам
+    // (moveCursor(MoveNext) с NoUpdate: строка становится текущей, но НЕ
+    // выделяется). Пользователь при этом ничего не выбирал, поэтому якорь
+    // выделения обновлять нельзя: иначе следующая же смена фильтра
+    // «восстановит» запись у начала файла и утащит туда вьюпорт вместе с
+    // выделением. Именно так терялась позиция после фильтрации, когда
+    // выбранную запись перед этим скрывал фильтр.
+    m_inFocusIn = true;
+    QListView::focusInEvent(event);
+    m_inFocusIn = false;
+}
+
 void LogListView::currentChanged(const QModelIndex &current, const QModelIndex &previous) {
     QListView::currentChanged(current, previous);
+
+    // Текущую строку назначил не пользователь, а Qt при получении фокуса:
+    // ни якорь выделения, ни текстовое выделение не трогаем.
+    if (m_inFocusIn)
+        return;
 
     // Долгоживущий якорь выделения: запоминаем ЗАПИСЬ, а не номер строки.
     // Invalid current (например, очистка при reset) якорь не затирает —
@@ -2547,7 +2590,14 @@ QModelIndex LogListView::moveCursor(CursorAction cursorAction,
         return QModelIndex();
 
     const QModelIndex cur = currentIndex();
-    const int curRow = cur.isValid() ? qBound(0, cur.row(), rows - 1) : 0;
+    if (!cur.isValid()) {
+        // Текущей строки нет — движение начинается с первой (для MoveEnd с
+        // последней), как в базовом QListView. Прежняя реализация считала
+        // текущей строку 0 и на первое же движение вниз уходила на строку 1,
+        // пропуская первую.
+        return model()->index(cursorAction == MoveEnd ? rows - 1 : 0, 0);
+    }
+    const int curRow = qBound(0, cur.row(), rows - 1);
     int row = curRow;
 
     switch (cursorAction) {
