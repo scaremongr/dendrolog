@@ -6,6 +6,8 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-19
+
 ### Added
 - Directory Scanner: a **⟳ refresh button** that re-reads the scanned directory
   without rescanning it from scratch — only new and modified files are analysed
