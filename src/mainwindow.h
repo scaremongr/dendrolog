@@ -124,6 +124,8 @@ private slots:
     void onSearchNextTriggered();
     void onSearchPreviousTriggered();
     void onSearchEnterPressed();
+    void onQuickSearchProgress(const QString& term, int percent);
+    void onQuickSearchFinished(const QString& term, bool found);
 
     // Reload slot (manual button + auto-timer)
     void onReloadFileTriggered();
@@ -155,6 +157,8 @@ private:
     QLabel* m_statusLabel;
     QLabel* m_lineInfoLabel;
     QLineEdit* m_searchLineEdit = nullptr;
+    // Строка статуса показывает прогресс быстрого поиска — вернуть её по итогу.
+    bool m_quickSearchStatusShown = false;
 
     // Time filter widgets (added to ui->timeFilterToolBar)
     QDateTimeEdit* m_timeFilterFrom;

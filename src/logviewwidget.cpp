@@ -2,6 +2,7 @@
 #include "logviewwidget.h"
 #include "appsettings.h"
 #include "indexedlogstore.h"
+#include "quicksearch.h"
 #include <QVBoxLayout>
 #include <QDateTime>
 #include <QFileInfo>
@@ -29,6 +30,14 @@ LogViewWidget::LogViewWidget(QWidget *parent)
 
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumSize(0, 0);
+
+    m_quickSearch = new QuickSearch(this);
+    connect(m_quickSearch, &QuickSearch::finished, this, &LogViewWidget::handleQuickSearchFinished);
+    connect(m_quickSearch, &QuickSearch::progress, this,
+            [this](int percent) { emit quickSearchProgress(m_quickSearchTerm, percent); });
+    // Модель перестроилась посреди скана (фильтр, перезагрузка файла) —
+    // ищем заново от текущей строки.
+    connect(m_quickSearch, &QuickSearch::invalidated, this, &LogViewWidget::startQuickSearch);
 
     // Соединяем сигналы парсера со слотами (начальная загрузка)
     connect(m_logParser, &LogParser::entriesParsed,   this, &LogViewWidget::handleEntriesParsed);
@@ -566,53 +575,62 @@ void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFileP
 
 void LogViewWidget::searchTextNext(const QString& term, bool caseSensitive)
 {
-    if (!m_model || term.isEmpty()) {
+    if (!m_model || term.isEmpty())
         return;
-    }
-
-    int currentRow = -1;
-    if (m_view->selectionModel() && m_view->selectionModel()->currentIndex().isValid()) {
-        currentRow = m_view->selectionModel()->currentIndex().row();
-    }
-
-    Qt::CaseSensitivity cs = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    QModelIndex foundIndex = m_model->findNextOccurrence(term, currentRow, cs);
-
-    if (foundIndex.isValid()) {
-        m_view->setCurrentIndex(foundIndex);
-        // Раскрыть найденную строку и подсветить в ней вхождения term
-        // ДО scrollTo: раскрытие меняет высоту строки, и прокрутка должна
-        // целиться уже в финальную геометрию.
-        m_view->showSearchMatch(foundIndex.row(), term, caseSensitive);
-        m_view->scrollTo(foundIndex, QAbstractItemView::PositionAtCenter);
-    } else {
-        m_view->clearSearchMatch();
-    }
+    m_quickSearchTerm = term;
+    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchForward = true;
+    startQuickSearch();
 }
 
 void LogViewWidget::searchTextPrevious(const QString& term, bool caseSensitive)
 {
-    if (!m_model || term.isEmpty()) {
+    if (!m_model || term.isEmpty())
         return;
-    }
+    m_quickSearchTerm = term;
+    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchForward = false;
+    startQuickSearch();
+}
 
-    int currentRow = m_model->rowCount(); // Start from end if no selection for previous
-    if (m_view->selectionModel() && m_view->selectionModel()->currentIndex().isValid()) {
+void LogViewWidget::startQuickSearch()
+{
+    // Старт — от текущей строки; назад без текущей — с конца.
+    int currentRow = -1;
+    if (m_view->selectionModel() && m_view->selectionModel()->currentIndex().isValid())
         currentRow = m_view->selectionModel()->currentIndex().row();
-    }
-    if (currentRow == -1) { // If view is empty or no selection, effectively start from end
+    if (!m_quickSearchForward && currentRow == -1)
         currentRow = m_model->rowCount();
-    }
+    m_quickSearch->start(m_model, m_quickSearchTerm,
+                         m_quickSearchCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive,
+                         m_quickSearchForward, currentRow);
+}
 
-    Qt::CaseSensitivity cs = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    QModelIndex foundIndex = m_model->findPreviousOccurrence(term, currentRow, cs);
+void LogViewWidget::cancelQuickSearch()
+{
+    m_quickSearch->cancel();
+}
 
-    if (foundIndex.isValid()) {
+bool LogViewWidget::isQuickSearchRunning() const
+{
+    return m_quickSearch->isRunning();
+}
+
+void LogViewWidget::handleQuickSearchFinished(int row)
+{
+    const QString term = m_quickSearchTerm;
+    if (row >= 0 && row < m_model->rowCount()) {
+        const QModelIndex foundIndex = m_model->index(row, 0);
         m_view->setCurrentIndex(foundIndex);
-        m_view->showSearchMatch(foundIndex.row(), term, caseSensitive);
+        // Раскрыть найденную строку и подсветить в ней вхождения term
+        // ДО scrollTo: раскрытие меняет высоту строки, и прокрутка должна
+        // целиться уже в финальную геометрию.
+        m_view->showSearchMatch(foundIndex.row(), term, m_quickSearchCaseSensitive);
         m_view->scrollTo(foundIndex, QAbstractItemView::PositionAtCenter);
+        emit quickSearchFinished(term, true);
     } else {
         m_view->clearSearchMatch();
+        emit quickSearchFinished(term, false);
     }
 }
 

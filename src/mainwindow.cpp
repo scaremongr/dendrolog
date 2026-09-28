@@ -256,6 +256,19 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->actionSearchNext, &QAction::triggered, this, &MainWindow::onSearchNextTriggered);
     connect(ui->actionSearchPrevious, &QAction::triggered, this, &MainWindow::onSearchPreviousTriggered);
 
+    // Быстрый поиск идёт в фоне; Esc в поле поиска его отменяет.
+    QAction* cancelSearchAction = new QAction(tr("Cancel Search"), m_searchLineEdit);
+    cancelSearchAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    cancelSearchAction->setShortcutContext(Qt::WidgetShortcut);
+    static_cast<QWidget*>(m_searchLineEdit)->addAction(cancelSearchAction);
+    connect(cancelSearchAction, &QAction::triggered, this, [this]() {
+        if (m_activeLogView && m_activeLogView->isQuickSearchRunning()) {
+            m_activeLogView->cancelQuickSearch();
+            m_quickSearchStatusShown = false;
+            m_statusLabel->setText(tr("Search cancelled."));
+        }
+    });
+
     // Quick-search focus action (Ctrl+F by default): just move focus to the
     // search field and pre-select its text for an immediate new query.
     QAction* focusSearchAction = new QAction(tr("Find"), this);
@@ -1780,6 +1793,8 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::totalRowCountChanged, this, &MainWindow::handleTotalRowCountChanged);
     connect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
     connect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
+    connect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
+    connect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
 
     if (logView->view()) {
         connect(logView->view(), &LogListView::timeFilterBoundRequested,
@@ -1851,6 +1866,14 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     disconnect(logView, &LogViewWidget::totalRowCountChanged, this, &MainWindow::handleTotalRowCountChanged);
     disconnect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
     disconnect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
+    disconnect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
+    disconnect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
+    // Поиск ушедшей вкладки больше некому показывать.
+    logView->cancelQuickSearch();
+    if (m_quickSearchStatusShown) {
+        m_quickSearchStatusShown = false;
+        m_statusLabel->setText(tr("Ready"));
+    }
 
     if (logView->view())
         disconnect(logView->view(), &LogListView::timeFilterBoundRequested,
@@ -3334,6 +3357,24 @@ void MainWindow::onSearchNextTriggered()
             m_activeLogView->searchTextNext(searchTerm, false /*caseSensitive*/);
         }
     }
+}
+
+void MainWindow::onQuickSearchProgress(const QString& term, int percent)
+{
+    // Приходит, только если скан длится дольше ~200 мс: короткий поиск
+    // строку статуса не трогает.
+    m_quickSearchStatusShown = true;
+    m_statusLabel->setText(tr("Searching for \"%1\"... %2% (Esc to cancel)").arg(term).arg(percent));
+}
+
+void MainWindow::onQuickSearchFinished(const QString& term, bool found)
+{
+    if (!found) {
+        m_statusLabel->setText(tr("\"%1\" not found").arg(term));
+    } else if (m_quickSearchStatusShown) {
+        m_statusLabel->setText(tr("Ready"));
+    }
+    m_quickSearchStatusShown = false;
 }
 
 void MainWindow::onSearchPreviousTriggered()

@@ -64,6 +64,8 @@ set(DENDROLOG_CORE_SOURCES
     src/searchresultscontroller.cpp
     src/fieldreextraction.h
     src/fieldreextraction.cpp
+    src/quicksearch.h
+    src/quicksearch.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES

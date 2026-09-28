@@ -44,6 +44,11 @@ public:
             qint64 fromRow,
             const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&
                 visit) const = 0;
+        // От fromRow (или последней строки, если fromRow за концом) к 0.
+        virtual void forEachLineBackward(
+            qint64 fromRow,
+            const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&
+                visit) const = 0;
         virtual QString textAt(qint64 row) const = 0;
         virtual LogFilePtr sourceFilePtrAt(qint64 row) const = 0;
     };
@@ -77,6 +82,14 @@ public:
     {
         if (m_impl)
             m_impl->forEachLine(fromRow, visit);
+    }
+    // Обход назад: от fromRow (не дальше последней строки) до 0.
+    void forEachLineBackward(qint64 fromRow,
+                             const std::function<bool(qint64 row, const LogEntryMeta&,
+                                                      QStringView text)>& visit) const
+    {
+        if (m_impl)
+            m_impl->forEachLineBackward(fromRow, visit);
     }
 
     // Материализовать текст одной строки (редкие точечные обращения).

@@ -888,6 +888,27 @@ public:
         }
     }
 
+    void forEachLineBackward(qint64 fromRow,
+                             const std::function<bool(qint64, const LogEntryMeta&,
+                                                      QStringView)>& visit) const override
+    {
+        // SequentialLineReader сам ставит окно по направлению скана — обход
+        // назад не перечитывает окно на каждой строке.
+        QStringList paths;
+        for (const FileSnap& f : files)
+            paths.append(f.path);
+        SequentialLineReaders readers(std::move(paths));
+        for (qint64 i = qMin<qint64>(fromRow, rowCount() - 1); i >= 0; --i) {
+            int fileId; qint64 line;
+            resolve(i, fileId, line);
+            const FileSnap& f = files[fileId];
+            const QString& text = readers.lineAt(
+                fileId, f.index.lineStartOffset(line), f.index.lineByteLength(line));
+            if (!visit(i, metaAt(i), QStringView(text)))
+                return;
+        }
+    }
+
     QString textAt(qint64 row) const override
     {
         if (row < 0 || row >= rowCount())

@@ -57,6 +57,19 @@ public:
         }
     }
 
+    void forEachLineBackward(qint64 fromRow,
+                             const std::function<bool(qint64, const LogEntryMeta&,
+                                                      QStringView)>& visit) const override
+    {
+        for (qint64 i = qMin<qint64>(fromRow, m_entries.size() - 1); i >= 0; --i) {
+            const LogEntry* e = m_entries.at(i).get();
+            if (!e)
+                continue;
+            if (!visit(i, LogScanSnapshot::metaFor(*e), QStringView(e->message())))
+                return;
+        }
+    }
+
     QString textAt(qint64 row) const override
     {
         if (row < 0 || row >= m_entries.size() || !m_entries.at(row))

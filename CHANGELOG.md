@@ -49,6 +49,10 @@ All notable changes to DendroLog are documented here. The format follows
 - Lines appended to a merged indexed tab without filters are inserted in
   place instead of resetting the view on every batch, so the selection and
   scroll position survive a growing log.
+- Quick search (`F3` / `Shift+F3`) runs in the background: the window no longer
+  freezes while a huge log without matches is read from disk. A long search
+  shows its progress in the status bar, `Esc` in the search box cancels it, and
+  a term that is not found is reported there.
 - Lines appended to a large (indexed) log no longer show up empty when the end
   of the file had already been displayed: the cached last block of the file is
   read again once the file grows.

@@ -108,7 +108,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Quick find (toolbar)
 
-- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous. The match row expands and the term is highlighted.
+- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous. The match row expands and the term is highlighted. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found is reported there too.
 - For multi-criteria non-destructive search with a results list, use the **Search** mode of the **Text Filters** panel (see above).
 
 ## Reloading

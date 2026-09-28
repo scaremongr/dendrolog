@@ -12,6 +12,8 @@
 #include "LogListView.h"
 #include "filechangedetector.h"
 
+class QuickSearch;
+
 class LogViewWidget : public QWidget {
     Q_OBJECT
 public:
@@ -51,9 +53,12 @@ public:
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
-    // Search methods
+    // Быстрый поиск (F3 / Shift+F3) — в фоне (QuickSearch): найденная строка
+    // становится текущей, когда скан закончится. Новый поиск отменяет прежний.
     void searchTextNext(const QString& term, bool caseSensitive);
     void searchTextPrevious(const QString& term, bool caseSensitive);
+    void cancelQuickSearch();
+    bool isQuickSearchRunning() const;
 
 signals: // Сигналы, которые LogViewWidget будет пробрасывать для MainWindow
     void fileParsingStarted(const LogFilePtr& logFile);
@@ -72,12 +77,18 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void currentRowChanged(int currentRow, int totalRows); // Передает и текущую, и общую
     void modelFiltered(int totalRowsAfterFilter); // Signal when model has been filtered
 
+    // Быстрый поиск: прогресс долгого скана и итог (отменённый поиск итога
+    // не присылает).
+    void quickSearchProgress(const QString& term, int percent);
+    void quickSearchFinished(const QString& term, bool found);
+
 private slots:
     void handleEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& parsedLogFile);
     void handleParsingFinished(int totalEntries, const LogFilePtr& parsedLogFile);
     void handleParsingFailed(const LogFilePtr& parsedLogFile);
     void handleParsingProgress(int progressPercentage, const LogFilePtr& parsedLogFile);
     void handleModelFilteredRelay(int totalRowsAfterFilter);
+    void handleQuickSearchFinished(int row);
     // Incremental reload: append new entries without model reset
     void handleIncrementalEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr& logFile);
     void handleIncrementalParsingFinished(int totalEntries, const LogFilePtr& logFile);
@@ -122,6 +133,14 @@ private:
     LogListView *m_view;
     LogModel    *m_model;
     QVector<LogFilePtr> m_loadedFiles;  // Список загруженных файлов
+
+    // Быстрый поиск и его запрос — чтобы повторить, если модель перестроится
+    // посреди скана.
+    void startQuickSearch();
+    QuickSearch* m_quickSearch = nullptr;
+    QString m_quickSearchTerm;
+    bool m_quickSearchCaseSensitive = false;
+    bool m_quickSearchForward = true;
 
     LogParser* m_logParser;
 

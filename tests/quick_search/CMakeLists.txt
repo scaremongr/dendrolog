@@ -1,0 +1,1 @@
+dendrolog_add_test(quick_search LIBRARIES dendrolog_core TIMEOUT 120)
