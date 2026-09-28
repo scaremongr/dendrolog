@@ -91,6 +91,98 @@ IndexedLogStore::IndexedLogStore(LogModel& model, const IndexedLogStore& source)
     }
 }
 
+bool IndexedLogStore::appendSearchRows(const IndexedLogStore& source, int first, int last)
+{
+    if (first > last)
+        return true;
+    if (first < 0 || last >= source.visibleCount())
+        return false;
+    // Файлы только добавляются, номера у базы и источника совпадают. Переход
+    // «один файл → несколько» меняет порядок строк, а заменённый индекс
+    // (файл переписан) — сами строки: и то и другое — полный поиск.
+    if (source.m_files.size() < m_files.size()
+        || (m_files.size() <= 1) != (source.m_files.size() <= 1))
+        return false;
+    for (int i = 0; i < m_files.size(); ++i) {
+        if (m_files[i].index != source.m_files[i].index)
+            return false;
+    }
+    for (int i = int(m_files.size()); i < source.m_files.size(); ++i) {
+        IndexedFile copy = source.m_files[i];
+        copy.cacheFileId = m_textCache.addFile(copy.logFile->filePath);
+        m_files.append(std::move(copy));
+    }
+
+    QVector<RowRef> refs;
+    refs.reserve(last - first + 1);
+    for (int row = first; row <= last; ++row)
+        refs.append(source.rowToRef(row));
+
+    if (identityAll()) {
+        // Тождественная база (полный один файл) растёт только с конца.
+        const qint64 firstLine = refLine(refs.first());
+        if (firstLine != m_shownAllCount
+            || refLine(refs.last()) != firstLine + refs.size() - 1)
+            return false;
+        m_shownAllCount += refs.size();
+        m_pendingRanges.append({0, firstLine, qint64(refs.size())});
+    } else {
+        // Строки источника идут в порядке его вкладки — это и порядок базы.
+        const auto less = [this](RowRef a, RowRef b) { return rowLess(a, b); };
+        const bool needMerge = !m_allRefs.isEmpty() && less(refs.first(), m_allRefs.last());
+        const int oldSize = int(m_allRefs.size());
+        m_allRefs += refs;
+        if (needMerge)
+            std::inplace_merge(m_allRefs.begin(), m_allRefs.begin() + oldSize,
+                               m_allRefs.end(), less);
+        PendingRange range;
+        range.refs = std::move(refs);
+        m_pendingRanges.append(std::move(range));
+    }
+    // Поиск ещё идёт — новые строки проверит следующий джоб очереди.
+    if (!m_filterJobActive)
+        startNextPendingRange();
+    return true;
+}
+
+bool IndexedLogStore::refreshSearchRow(const IndexedLogStore& source, int row)
+{
+    if (row < 0 || row >= source.visibleCount())
+        return false;
+    const RowRef ref = source.rowToRef(row);
+    const int fileId = refFile(ref);
+    if (fileId >= m_files.size() || m_files[fileId].index != source.m_files[fileId].index)
+        return false;
+    m_textCache.invalidateFile(m_files[fileId].cacheFileId);
+    // Если строка ещё в очереди поиска, джоб проверит её сам; вставку,
+    // сделанную здесь раньше него, insertSortedRefs не задублирует.
+    reevaluateVisibleRef(ref);
+    return true;
+}
+
+void IndexedLogStore::reevaluateVisibleRef(RowRef ref)
+{
+    // Точечная переоценка одной изменившейся строки текущим фильтром.
+    const auto it = std::lower_bound(m_visibleRefs.begin(), m_visibleRefs.end(), ref,
+                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
+    const bool wasVisible = (it != m_visibleRefs.end() && *it == ref);
+    const bool nowPasses = refPassesFiltersNow(ref);
+    const int row = int(it - m_visibleRefs.begin());
+    if (wasVisible && nowPasses) {
+        emit m_model.dataChanged(m_model.index(row, 0), m_model.index(row, 0));
+    } else if (wasVisible) {
+        m_model.beginRemoveRows(QModelIndex(), row, row);
+        m_visibleRefs.erase(it);
+        m_model.endRemoveRows();
+        emit m_model.modelFiltered(visibleCount());
+    } else if (nowPasses) {
+        m_model.beginInsertRows(QModelIndex(), row, row);
+        m_visibleRefs.insert(it, ref);
+        m_model.endInsertRows();
+        emit m_model.modelFiltered(visibleCount());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Подключение файлов и приём батчей индексатора
 // ---------------------------------------------------------------------------
@@ -188,29 +280,7 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
             if (row >= 0 && row < visibleCount())
                 emit m_model.dataChanged(m_model.index(row, 0), m_model.index(row, 0));
         } else {
-            // Точечная переоценка одной изменившейся строки текущим фильтром.
-            const RowRef ref = makeRef(fileId, firstLine);
-            const auto it = std::lower_bound(m_visibleRefs.begin(), m_visibleRefs.end(),
-                                             ref,
-                                             [this](RowRef a, RowRef b) { return rowLess(a, b); });
-            const bool wasVisible = (it != m_visibleRefs.end() && *it == ref);
-            const bool nowPasses = refPassesFiltersNow(ref);
-            if (wasVisible && nowPasses) {
-                const int row = int(it - m_visibleRefs.begin());
-                emit m_model.dataChanged(m_model.index(row, 0), m_model.index(row, 0));
-            } else if (wasVisible && !nowPasses) {
-                const int row = int(it - m_visibleRefs.begin());
-                m_model.beginRemoveRows(QModelIndex(), row, row);
-                m_visibleRefs.erase(it);
-                m_model.endRemoveRows();
-                emit m_model.modelFiltered(visibleCount());
-            } else if (!wasVisible && nowPasses) {
-                const int row = int(it - m_visibleRefs.begin());
-                m_model.beginInsertRows(QModelIndex(), row, row);
-                m_visibleRefs.insert(it, ref);
-                m_model.endInsertRows();
-                emit m_model.modelFiltered(visibleCount());
-            }
+            reevaluateVisibleRef(makeRef(fileId, firstLine));
         }
     }
 
@@ -218,29 +288,34 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
     if (freshCount <= 0)
         return;
 
-    // Общий порядок (мульти-файл): дописываем и, при необходимости, сливаем.
+    // Общий порядок (мульти-файл): батч приходит в порядке файла, а слияние
+    // требует порядка lessRef (как резидентный путь сортирует батч перед
+    // mergeEntries). На упорядоченном логе — одна проверка O(B).
+    QVector<RowRef> refs;
     if (!identityAll()) {
-        QVector<RowRef> refs;
         refs.reserve(int(freshCount));
         for (qint64 l = freshFirst; l < firstLine + count; ++l)
             refs.append(makeRef(fileId, l));
-        // Батч приходит в порядке файла, а inplace_merge требует, чтобы ОБЕ
-        // половины были отсортированы lessRef (как резидентный путь сортирует
-        // батч перед mergeEntries). На упорядоченном логе — одна проверка O(B).
         const auto less = [this](RowRef a, RowRef b) { return lessRef(a, b); };
         if (!std::is_sorted(refs.begin(), refs.end(), less))
             std::sort(refs.begin(), refs.end(), less);
-        const bool needMerge = !m_allRefs.isEmpty()
-            && lessRef(refs.first(), m_allRefs.last());
-        const int oldSize = int(m_allRefs.size());
-        m_allRefs += refs;
-        if (needMerge)
-            std::inplace_merge(m_allRefs.begin(), m_allRefs.begin() + oldSize,
-                               m_allRefs.end(), less);
+        if (!m_identityVisible) {
+            // m_allRefs сейчас не видим — сливаем молча.
+            const bool needMerge = !m_allRefs.isEmpty()
+                && lessRef(refs.first(), m_allRefs.last());
+            const int oldSize = int(m_allRefs.size());
+            m_allRefs += refs;
+            if (needMerge)
+                std::inplace_merge(m_allRefs.begin(), m_allRefs.begin() + oldSize,
+                                   m_allRefs.end(), less);
+        }
     }
 
-    if (markNew) {
-        // Подсветка «новых» строк переходит на этот батч.
+    // Подсветка «новых» строк переходит на этот батч. Зовётся, когда view
+    // уже знает о вставленных строках.
+    const auto markBatchNew = [&]() {
+        if (!markNew)
+            return;
         const bool hadPrevious = !m_newRefs.isEmpty();
         m_newRefs.clear();
         for (qint64 l = freshFirst; l < firstLine + count; ++l)
@@ -249,25 +324,27 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
             emit m_model.dataChanged(m_model.index(0, 0),
                                      m_model.index(visibleCount() - 1, 0),
                                      {LogModel::IsNewRole});
-    }
+    };
 
     if (m_identityVisible) {
         // Без фильтра видимые строки = все строки. Для одного файла вставка
-        // всегда в конец; для слитых файлов новые строки могли встать в
-        // середину — тогда честный reset (редкий случай).
+        // всегда в конец; у слитых файлов — сериями по месту во времени:
+        // дозапись хвоста — одна серия в конце, без reset и с сохранением
+        // выделения. Reset — только при сотнях серий (батчи файлов вперемешку).
         if (identityAll()) {
             const int first = int(m_shownAllCount);
             m_model.beginInsertRows(QModelIndex(), first, int(firstLine + count) - 1);
             m_shownAllCount = firstLine + count;
             m_model.endInsertRows();
         } else {
-            m_model.beginResetModel();
             m_shownAllCount = qMax(m_shownAllCount, firstLine + count);
-            m_model.endResetModel();
+            insertSortedRefs(m_allRefs, refs);
         }
+        markBatchNew();
         emit m_model.modelFiltered(visibleCount());
         return;
     }
+    markBatchNew();
 
     // Активный фильтр: новые строки прогоняются инкрементальным диапазонным
     // джобом (FIFO), чтобы не пересканировать весь файл на каждый батч.
@@ -936,11 +1013,10 @@ void IndexedLogStore::startNextPendingRange()
     if (m_pendingRanges.isEmpty())
         return;
     const PendingRange r = m_pendingRanges.takeFirst();
-    startFilterJob(/*fullRescan=*/false, r.first, r.count, r.fileId);
+    startFilterJob(/*fullRescan=*/false, &r);
 }
 
-void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
-                                     qint64 rangeCount, int rangeFileId)
+void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
 {
     m_filterJobActive = true;
     auto cancel = std::make_shared<std::atomic_bool>(false);
@@ -957,7 +1033,8 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
     for (const auto& f : m_files)
         filesIn->append({f.index->snapshot(), f.logFile->filePath});
 
-    // Диапазон работы: весь документ или свежий батч одного файла.
+    // Диапазон работы: весь документ, свежий батч одного файла или явный
+    // список новых строк поисковой базы.
     QVector<RowRef> workRefs;
     qint64 identityCount = 0;
     if (fullRescan) {
@@ -965,10 +1042,12 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
             identityCount = allCount();
         else
             workRefs = m_allRefs;
+    } else if (!range->refs.isEmpty()) {
+        workRefs = range->refs;
     } else {
-        workRefs.reserve(int(rangeCount));
-        for (qint64 l = rangeFirst; l < rangeFirst + rangeCount; ++l)
-            workRefs.append(makeRef(rangeFileId, l));
+        workRefs.reserve(int(range->count));
+        for (qint64 l = range->first; l < range->first + range->count; ++l)
+            workRefs.append(makeRef(range->fileId, l));
     }
 
     const QSet<LogLevel> levels = m_model.logLevelFilter();
@@ -1060,7 +1139,7 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
                     m_filteredListStale = false;
                     emit m_model.modelFiltered(visibleCount());
                 } else {
-                    insertVisibleSorted(watcher->result());
+                    insertSortedRefs(m_visibleRefs, watcher->result());
                     emit m_model.modelFiltered(visibleCount());
                 }
                 startNextPendingRange();
@@ -1068,51 +1147,57 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
     watcher->setFuture(future);
 }
 
-void IndexedLogStore::insertVisibleSorted(const QVector<RowRef>& passingInFileOrder)
+void IndexedLogStore::insertSortedRefs(QVector<RowRef>& list, const QVector<RowRef>& refs)
 {
-    if (passingInFileOrder.isEmpty())
+    if (refs.isEmpty())
         return;
     // Прошедшие строки приходят в порядке своего файла. Серии вставок ниже
     // (upper_bound от searchFrom, std::merge) требуют порядка ВКЛАДКИ — на
     // слитой вкладке с файлом «не по порядку» это разные порядки.
     const auto less = [this](RowRef a, RowRef b) { return rowLess(a, b); };
     QVector<RowRef> sorted;
-    const QVector<RowRef>* source = &passingInFileOrder;
-    if (!std::is_sorted(passingInFileOrder.constBegin(), passingInFileOrder.constEnd(), less)) {
-        sorted = passingInFileOrder;
+    const QVector<RowRef>* source = &refs;
+    if (!std::is_sorted(refs.constBegin(), refs.constEnd(), less)) {
+        sorted = refs;
         std::sort(sorted.begin(), sorted.end(), less);
         source = &sorted;
     }
-    const QVector<RowRef>& passing = *source;
 
-    // В видимом списке строки обычно встают в конец (tail-догрузка). Общий
-    // случай — серии вставок, как в резидентном insertFilteredSorted.
+    // В списке строки обычно встают в конец (tail-догрузка). Общий случай —
+    // серии вставок, как в резидентном insertFilteredSorted. Строку, которая
+    // уже есть (переоценённый хвост поисковой базы успели вставить раньше
+    // джоба), не дублируем: равные по порядку соседствуют, upper_bound
+    // указывает сразу за ними.
     struct Run { int pos; int first; int count; };
     QVector<Run> runs;
+    QVector<RowRef> fresh;
+    fresh.reserve(source->size());
     int searchFrom = 0;
-    for (int i = 0; i < passing.size(); ++i) {
-        const auto it = std::upper_bound(m_visibleRefs.constBegin() + searchFrom,
-                                         m_visibleRefs.constEnd(), passing[i],
-                                         [this](RowRef a, RowRef b) { return rowLess(a, b); });
-        const int pos = int(it - m_visibleRefs.constBegin());
+    for (const RowRef ref : *source) {
+        const auto it = std::upper_bound(list.constBegin() + searchFrom, list.constEnd(),
+                                         ref, less);
+        const int pos = int(it - list.constBegin());
+        searchFrom = pos;
+        if (pos > 0 && list.at(pos - 1) == ref)
+            continue;
         if (!runs.isEmpty() && runs.last().pos == pos)
             ++runs.last().count;
         else
-            runs.append({pos, i, 1});
-        searchFrom = pos;
+            runs.append({pos, int(fresh.size()), 1});
+        fresh.append(ref);
     }
+    if (fresh.isEmpty())
+        return;
 
     if (runs.size() > 64) {
         m_model.beginResetModel();
         // Полная пересборка честнее сотен вставок в середину — но заново
         // фильтровать не нужно: сливаем два отсортированных списка.
         QVector<RowRef> merged;
-        merged.reserve(m_visibleRefs.size() + passing.size());
-        std::merge(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
-                   passing.constBegin(), passing.constEnd(),
-                   std::back_inserter(merged),
-                   [this](RowRef a, RowRef b) { return rowLess(a, b); });
-        m_visibleRefs = std::move(merged);
+        merged.reserve(list.size() + fresh.size());
+        std::merge(list.constBegin(), list.constEnd(), fresh.constBegin(), fresh.constEnd(),
+                   std::back_inserter(merged), less);
+        list = std::move(merged);
         m_model.endResetModel();
         return;
     }
@@ -1121,9 +1206,9 @@ void IndexedLogStore::insertVisibleSorted(const QVector<RowRef>& passingInFileOr
     for (const Run& run : runs) {
         const int first = run.pos + shift;
         m_model.beginInsertRows(QModelIndex(), first, first + run.count - 1);
-        m_visibleRefs.insert(first, run.count, RowRef(0));
+        list.insert(first, run.count, RowRef(0));
         for (int k = 0; k < run.count; ++k)
-            m_visibleRefs[first + k] = passing[run.first + k];
+            list[first + k] = fresh[run.first + k];
         m_model.endInsertRows();
         shift += run.count;
     }

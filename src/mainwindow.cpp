@@ -19,6 +19,7 @@
 #include "updatechecker.h"
 #include "stdinspooler.h"
 #include "viewexport.h"
+#include "searchresultscontroller.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -1260,7 +1261,11 @@ void MainWindow::finishPatternApplication()
     // (не навязывая правила панели вкладкам без фильтров).
     updateFilterPanelFieldNames();
     rebindFiltersOnAllViews();
-    scheduleSearchRefresh();
+    // Поиск сброшен в начале применения схемы — повторяем его с правилами,
+    // привязанными к новым полям, если панель результатов на виду (иначе
+    // его запустит её появление).
+    if (searchResultsLive())
+        runSearchIntoResults();
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
@@ -1477,15 +1482,16 @@ void MainWindow::setupSearchResultsDock()
 
     // Вторая LogListView поверх отдельной LogModel: та же отрисовка/подсветка,
     // что и в основном view, но со своим (отфильтрованным) набором записей.
-    m_searchResultsModel = new LogModel(this);
+    m_searchController = new SearchResultsController(this);
+    LogModel* resultsModel = m_searchController->model();
     // Install before the view's reset handlers; background completion must
     // not turn restored result selection into user navigation in the main log.
-    connect(m_searchResultsModel, &QAbstractItemModel::modelAboutToBeReset,
+    connect(resultsModel, &QAbstractItemModel::modelAboutToBeReset,
             this, [this]() { m_suppressResultNavigation = true; });
     m_searchResultsView = new LogListView(container);
     // Однострочный режим (klogg-style): word-wrap НЕ включаем.
-    m_searchResultsView->setModel(m_searchResultsModel);
-    connect(m_searchResultsModel, &QAbstractItemModel::modelReset,
+    m_searchResultsView->setModel(resultsModel);
+    connect(resultsModel, &QAbstractItemModel::modelReset,
             this, [this]() { m_suppressResultNavigation = false; });
 
     // Тот же шрифт, что и у основных view, но на пункт мельче (searchResultsFont).
@@ -1497,9 +1503,14 @@ void MainWindow::setupSearchResultsDock()
     // Обычная панель: её видимость не меняется при переключении режима — только
     // содержимое (пусто, если режим не Search). Управляется пользователем через
     // меню View; после первого запуска состояние восстановит restoreState.
-    // Открыли панель в режиме Search — сразу подтянуть актуальные результаты.
+    // Открыли панель в режиме Search — сразу подтянуть актуальные результаты:
+    // отставшую выдачу обновит сам контроллер, пустую — новый поиск.
     connect(m_searchResultsDockWidget, &QDockWidget::visibilityChanged,
-            this, [this](bool visible) { if (visible) scheduleSearchRefresh(); });
+            this, [this](bool) {
+        m_searchController->setLive(searchResultsLive());
+        if (searchResultsLive() && !m_searchController->isActive())
+            runSearchIntoResults();
+    });
 
     // Выбор строки в результатах (мышь или клавиатура) → прыжок в основном view.
     if (m_searchResultsView->selectionModel())
@@ -1508,23 +1519,10 @@ void MainWindow::setupSearchResultsDock()
                     onSearchResultActivated(current);
                 });
 
-    // Пересчёт счётчика совпадений после (в т.ч. асинхронной) фильтрации.
-    connect(m_searchResultsModel, &LogModel::modelFiltered, this, [this](int count) {
-        if (m_searchResultsStatusLabel)
-            m_searchResultsStatusLabel->setText(
-                tr("%n match(es) in the visible rows of the active tab", "", count));
-    });
-    connect(m_searchResultsModel, &LogModel::filterProgress, this, [this](int progress) {
-        if (m_searchResultsStatusLabel && progress < 100)
-            m_searchResultsStatusLabel->setText(
-                tr("Searching visible rows of the active tab... %1%").arg(progress));
-    });
-
-    // Дебаунс живого обновления результатов (tail auto-reload / рефильтрация).
-    m_searchRefreshTimer = new QTimer(this);
-    m_searchRefreshTimer->setSingleShot(true);
-    m_searchRefreshTimer->setInterval(200);
-    connect(m_searchRefreshTimer, &QTimer::timeout, this, [this]() { runSearchIntoResults(); });
+    // Подпись: «ищем… N%», число совпадений или почему поиска нет.
+    connect(m_searchController, &SearchResultsController::statusChanged,
+            m_searchResultsStatusLabel, &QLabel::setText);
+    m_searchController->setLive(searchResultsLive());
 
     if (ui->menuView) {
         QAction* toggle = m_searchResultsDockWidget->toggleViewAction();
@@ -1822,13 +1820,12 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
         });
     }
 
-    // Живое обновление панели результатов: дозагрузка строк (rowsInserted) или
-    // полная перестройка (modelReset) активной вкладки → дебаунс-пересборка.
-    if (m_searchRefreshTimer && logView->model()) {
-        m_searchModelInsertConn = connect(logView->model(), &QAbstractItemModel::rowsInserted,
-            this, [this](const QModelIndex&, int, int) { scheduleSearchRefresh(); });
-        m_searchModelResetConn = connect(logView->model(), &QAbstractItemModel::modelReset,
-            this, [this]() { scheduleSearchRefresh(); });
+    // Панель результатов следит за моделью активной вкладки: дописанные строки
+    // проверяет инкрементально, перестройку — полным поиском заново.
+    if (m_searchController) {
+        m_suppressResultNavigation = true;
+        m_searchController->setSource(logView->model());
+        m_suppressResultNavigation = false;
     }
 
     if (m_activeLogView && m_activeLogView->model() && m_activeLogView->view())
@@ -1877,10 +1874,12 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
         m_statsPanel->setLoading(false); // состояние уходящей вкладки больше не наше
     }
 
-    // Рвём соединения живого обновления с моделью уходящей вкладки.
-    disconnect(m_searchModelInsertConn);
-    disconnect(m_searchModelResetConn);
-    clearSearchResults();
+    // Выдача уходящей вкладки указывала бы на чужие записи.
+    if (m_searchController) {
+        m_suppressResultNavigation = true;
+        m_searchController->setSource(nullptr);
+        m_suppressResultNavigation = false;
+    }
 
     if (m_activeLogView == logView)
     {
@@ -2875,71 +2874,48 @@ void MainWindow::runSearchIntoResults()
 {
     if (m_fieldWatcher)
         return; // fields are being rewritten; finishPatternApplication refreshes
-    if (!m_filterPanel || !m_searchResultsModel || !m_activeLogView
+    if (!m_filterPanel || !m_searchController || !m_activeLogView
         || !m_activeLogView->model()
         || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
         return;
 
-    LogModel* active = m_activeLogView->model();
-
-    FilterRuleSet rules = m_filterPanel->ruleSet();
-    // Пустой запрос в режиме поиска = нет результатов (а не «пропустить всё»,
-    // как трактует пустой набор фильтр). Иначе панель заполнилась бы всем логом.
-    if (!rules.isActive()) {
-        clearSearchResults();
-        if (m_activeLogView->view())
-            m_activeLogView->view()->setTextHighlightPatterns({});
-        return;
-    }
-
     // Поиск ведём над текущим ВИДИМЫМ набором активной вкладки (после Time/Level/
     // Fields-фильтров) — тогда любой результат гарантированно виден в main и клик
-    // всегда попадает точно на строку.
+    // всегда попадает точно на строку. Пустой или испорченный запрос контроллер
+    // превращает в пустую выдачу с объясняющей подписью.
+    FilterRuleSet rules = m_filterPanel->ruleSet();
     const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
     rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
 
-    // Все правила испорчены (например, неверный регекс) — иначе набор из одних
-    // непригодных правил пропустил бы в результаты ВЕСЬ лог.
-    if (rules.usableRuleCount() == 0) {
-        clearSearchResults();
-        if (m_searchResultsStatusLabel)
-            m_searchResultsStatusLabel->setText(
-                tr("Nothing to search: check the rule text (invalid regular expression?)."));
-        if (m_activeLogView->view())
-            m_activeLogView->view()->setTextHighlightPatterns({});
-        return;
-    }
-
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
     m_suppressResultNavigation = true;
-    if (m_searchResultsStatusLabel)
-        m_searchResultsStatusLabel->setText(tr("Searching visible rows of the active tab..."));
-    m_searchResultsModel->searchVisible(*active, rules);
+    m_searchController->setSource(m_activeLogView->model());
+    m_searchController->search(rules);
     m_suppressResultNavigation = false;
 
     // Подсветка совпадений: всегда в панели результатов; в основном view — по галочке.
-    m_searchResultsView->setTextHighlightPatterns(rules.highlightPatterns());
+    const QVector<HighlightPattern> patterns = m_searchController->isActive()
+        ? rules.highlightPatterns() : QVector<HighlightPattern>{};
+    m_searchResultsView->setTextHighlightPatterns(patterns);
     if (m_activeLogView->view())
         m_activeLogView->view()->setTextHighlightPatterns(
-            m_filterPanel->highlightInMainView() ? rules.highlightPatterns()
-                                                 : QVector<HighlightPattern>{});
-
-    // modelFiltered publishes the final count for both synchronous and
-    // asynchronous paths. Until then an empty result means "still searching".
+            m_filterPanel->highlightInMainView() ? patterns : QVector<HighlightPattern>{});
 }
 
 void MainWindow::clearSearchResults()
 {
-    if (m_searchRefreshTimer)
-        m_searchRefreshTimer->stop();
-    if (!m_searchResultsModel)
+    if (!m_searchController)
         return;
     // Reset модели дёрнет currentRowChanged — не даём ему прыгнуть в main.
     m_suppressResultNavigation = true;
-    m_searchResultsModel->clear();
+    m_searchController->clear();
     m_suppressResultNavigation = false;
-    if (m_searchResultsStatusLabel)
-        m_searchResultsStatusLabel->setText(tr("No search active."));
+}
+
+bool MainWindow::searchResultsLive() const
+{
+    return m_filterPanel && m_filterPanel->mode() == FilterPanelWidget::Mode::Search
+        && m_searchResultsDockWidget && m_searchResultsDockWidget->isVisible();
 }
 
 void MainWindow::onFilterModeChanged()
@@ -2965,6 +2941,8 @@ void MainWindow::onFilterModeChanged()
         if (m_activeLogView && m_activeLogView->view())
             m_activeLogView->view()->setTextHighlightPatterns({});
     }
+    if (m_searchController)
+        m_searchController->setLive(searchResultsLive());
     updateFilterStatusButtons();
 }
 
@@ -2988,7 +2966,7 @@ void MainWindow::onSearchResultActivated(const QModelIndex& current)
         || !m_activeLogView || !m_activeLogView->model() || !m_activeLogView->view())
         return;
 
-    const LogModel::EntryKey key = m_searchResultsModel->keyForRow(current.row());
+    const LogModel::EntryKey key = m_searchController->model()->keyForRow(current.row());
     if (key.logicalEntryId < 0)
         return;
 
@@ -3002,16 +2980,6 @@ void MainWindow::onSearchResultActivated(const QModelIndex& current)
     // так что стрелками можно продолжать листать совпадения.
     m_activeLogView->view()->setCurrentIndex(idx);
     m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
-}
-
-void MainWindow::scheduleSearchRefresh()
-{
-    if (!m_filterPanel || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
-        return;
-    if (!m_searchResultsDockWidget || !m_searchResultsDockWidget->isVisible())
-        return;
-    if (m_searchRefreshTimer)
-        m_searchRefreshTimer->start();
 }
 
 void MainWindow::applyRowMarkersToActiveView()
@@ -3097,9 +3065,10 @@ void MainWindow::handleModelFiltered()
     // Любая перефильтрация (Apply/Reset из панелей, зум таймлайна, уровни)
     // могла изменить состояние фильтров — обновить кнопки-индикаторы.
     updateFilterStatusButtons();
-    // Видимый набор активной вкладки изменился — в режиме поиска пересобрать
-    // результаты (мы ищем над filteredEntries активной модели).
-    scheduleSearchRefresh();
+    // Панель результатов за видимым набором следит сама (контроллер поиска
+    // слушает модель вкладки): здесь её не трогаем — modelFiltered приходит и
+    // после каждой дописанной порции, и полный поиск заново на него свёл бы
+    // на нет инкрементальное обновление.
 }
 
 void MainWindow::onScanDirectoryClicked()

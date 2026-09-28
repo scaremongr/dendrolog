@@ -35,6 +35,18 @@ All notable changes to DendroLog are documented here. The format follows
   `dd.MM.yyyy` / `dd/MM/yyyy` timestamps keep their fraction and zone too.
 - A schema Timestamp field now includes a zone glued to the time, so lines
   such as `2026-09-20T10:00:00Z INFO …` match the schema.
+- Search Results keeps up with a growing log: appended lines are searched as
+  they arrive and added to the results, instead of every appended batch
+  starting the whole search over — on a large growing log the panel could stay
+  "Searching" forever. A line that was still being written is checked again
+  once it is complete. Changing the Log Fields selection updates the results
+  panel at once.
+- Lines appended to a merged indexed tab without filters are inserted in
+  place instead of resetting the view on every batch, so the selection and
+  scroll position survive a growing log.
+- Lines appended to a large (indexed) log no longer show up empty when the end
+  of the file had already been displayed: the cached last block of the file is
+  read again once the file grows.
 
 ## [0.3.0] — 2026-09-19
 

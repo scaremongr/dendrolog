@@ -87,6 +87,14 @@ public:
     // Discard data and any pending results, returning to an empty resident store.
     // Waits for a resident worker: it may share entries with a source document.
     void clear();
+    // Keep searchVisible results current as the source changes, without
+    // searching it all again: source rows [first, last] became visible (tail
+    // append, incremental filter), or the text of a visible source row changed
+    // (a tail line without '\n' was reindexed). Only those rows are checked and
+    // results grow by row insertions. false — a new searchVisible is needed
+    // (backend, row order or file set of the source changed, or no search).
+    bool appendSearchRows(const LogModel& source, int first, int last);
+    bool refreshSearchRow(const LogModel& source, int row);
 
     // Снапшот для последовательного скана в воркере (статистика, таймлайн).
     LogScanSnapshot scanSnapshot(bool filteredOnly) const;
@@ -170,6 +178,8 @@ public:
     // Перефильтровать, если отмена фонового джоба оставила видимый список
     // не соответствующим текущим настройкам фильтров.
     void reapplyFilterIfStale();
+    // Фоновый фильтр в полёте: rowCount() ещё не итоговый.
+    bool isFiltering() const;
 
 signals:
     void modelFiltered(int totalRowsAfterFilter);

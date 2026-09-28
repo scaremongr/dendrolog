@@ -251,6 +251,30 @@ void LogModel::clear()
     emit modelFiltered(0);
 }
 
+bool LogModel::appendSearchRows(const LogModel& source, int first, int last)
+{
+    // Без запроса пустой набор правил пропустил бы в результаты всё подряд.
+    if (this == &source || !m_filterRules.isActive())
+        return false;
+    IndexedLogStore* indexed = indexedOrNull();
+    IndexedLogStore* sourceIndexed = source.indexedOrNull();
+    if (indexed && sourceIndexed)
+        return indexed->appendSearchRows(*sourceIndexed, first, last);
+    if (!indexed && !sourceIndexed)
+        return resident()->appendSearchRows(*source.resident(), first, last);
+    return false; // источник сменил бэкенд
+}
+
+bool LogModel::refreshSearchRow(const LogModel& source, int row)
+{
+    if (this == &source || !m_filterRules.isActive())
+        return false;
+    IndexedLogStore* indexed = indexedOrNull();
+    IndexedLogStore* sourceIndexed = source.indexedOrNull();
+    // Резидентные строки текст не меняют; такой сигнал — повод искать заново.
+    return indexed && sourceIndexed && indexed->refreshSearchRow(*sourceIndexed, row);
+}
+
 LogScanSnapshot LogModel::scanSnapshot(bool filteredOnly) const
 {
     return m_store->scanSnapshot(filteredOnly);
@@ -365,6 +389,11 @@ void LogModel::cancelPendingFilter(bool wait)
 void LogModel::reapplyFilterIfStale()
 {
     m_store->reapplyFilterIfStale();
+}
+
+bool LogModel::isFiltering() const
+{
+    return m_store->isFiltering();
 }
 
 void LogModel::setRowMarkers(const QVector<HighlightPattern>& markers)

@@ -38,6 +38,16 @@ public:
     IndexedLogStore(LogModel& model, const IndexedLogStore& source);
     ~IndexedLogStore() override;
 
+    // ---- Живая поисковая база (созданная конструктором выше) ------------------
+    // Строки source [first, last] стали видимыми (дозапись, инкрементальный
+    // фильтр): дописать их в базу и проверить запросом только их, результат —
+    // вставками без reset. false — так нельзя (у источника сменился порядок
+    // строк или набор файлов), нужен полный поиск.
+    bool appendSearchRows(const IndexedLogStore& source, int first, int last);
+    // Текст видимой строки source изменился (переиндексирован хвост без '\n'):
+    // переоценить её запросом. false — нужен полный поиск.
+    bool refreshSearchRow(const IndexedLogStore& source, int row);
+
     Backend backend() const override { return Backend::Indexed; }
 
     // ---- Подключение файлов (GUI-поток, из LogViewWidget) --------------------
@@ -82,6 +92,7 @@ public:
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
     void reapplyFilterIfStale() override;
+    bool isFiltering() const override { return m_filterJobActive; }
 
 private:
     struct IndexedFile {
@@ -122,12 +133,18 @@ private:
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;
+    // Переоценить одну строку при активном фильтре: вставить, убрать или
+    // перерисовать её в m_visibleRefs.
+    void reevaluateVisibleRef(RowRef ref);
     // Переход «один файл → несколько»: m_allRefs из показанных строк первого
     // файла, в порядке lessRef (sortByTime — порядок файла с ним расходится).
     void materializeAllRefs(bool sortByTime);
-    void startFilterJob(bool fullRescan, qint64 rangeFirst = -1, qint64 rangeCount = 0,
-                        int rangeFileId = -1);
-    void insertVisibleSorted(const QVector<RowRef>& passingInFileOrder);
+    struct PendingRange;
+    void startFilterJob(bool fullRescan, const PendingRange* range = nullptr);
+    // Вставить строки в ВИДИМЫЙ список list (m_visibleRefs или, без фильтра
+    // на слитой вкладке, m_allRefs) сериями beginInsertRows; сотни серий —
+    // одним reset. Уже присутствующие строки пропускаются.
+    void insertSortedRefs(QVector<RowRef>& list, const QVector<RowRef>& refs);
     void startNextPendingRange();
     std::shared_ptr<LogEntry> materializeEntry(RowRef ref) const;
 
@@ -152,7 +169,14 @@ private:
     bool m_extractionEnabled = false;
 
     // ---- Асинхронная фильтрация (поколение/cancel — как у резидентного) ------
-    struct PendingRange { int fileId; qint64 first; qint64 count; };
+    // Диапазон строк одного файла либо (refs не пуст) явный список строк в
+    // порядке вкладки — новые строки поисковой базы.
+    struct PendingRange {
+        int fileId = -1;
+        qint64 first = 0;
+        qint64 count = 0;
+        QVector<RowRef> refs;
+    };
     int m_filterGeneration = 0;
     bool m_filterJobActive = false;
     bool m_filteredListStale = false;

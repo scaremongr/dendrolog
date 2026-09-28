@@ -37,6 +37,17 @@ void ResidentLogStore::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& so
     mergeSortedBatch(sortedBatch);
 }
 
+bool ResidentLogStore::appendSearchRows(const ResidentLogStore& source, int first, int last)
+{
+    if (first > last)
+        return true;
+    if (first < 0 || last >= source.m_filteredEntries.size())
+        return false;
+    // Видимые записи источника отсортированы logEntryPtrLess — готовый батч.
+    mergeSortedBatch(source.m_filteredEntries.mid(first, last - first + 1));
+    return true;
+}
+
 void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
 {
     // До инвалидации кэша: нужен для детекции перехода «один файл → несколько»

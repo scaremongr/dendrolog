@@ -47,6 +47,11 @@ public:
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
     void reapplyFilterIfStale() override;
+    bool isFiltering() const override { return m_filterJobActive; }
+
+    // Живая поисковая база: строки source [first, last] стали видимыми —
+    // слить их и проверить запросом только их (как батч mergeEntries).
+    bool appendSearchRows(const ResidentLogStore& source, int first, int last);
 
     // ---- Резидентные мутации (вызываются фасадом LogModel) ----------------------
     void setEntries(const QVector<std::shared_ptr<LogEntry>>& entries);

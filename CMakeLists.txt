@@ -60,6 +60,8 @@ set(DENDROLOG_CORE_SOURCES
     src/textmatchhighlighter.cpp
     src/viewexport.h
     src/viewexport.cpp
+    src/searchresultscontroller.h
+    src/searchresultscontroller.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES

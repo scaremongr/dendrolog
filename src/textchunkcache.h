@@ -53,6 +53,9 @@ private:
     };
 
     const QByteArray* chunkAt(int fileId, qint64 chunkIndex) const;
+    // Как chunkAt, но короткий (последний на момент чтения) чанк, не
+    // покрывающий neededBytes, перечитывается: файл мог вырасти.
+    const QByteArray* chunkCovering(int fileId, qint64 chunkIndex, qint64 neededBytes) const;
     bool readRange(int fileId, qint64 offset, qint64 length, QByteArray& out) const;
     void evictIfNeeded() const;
 

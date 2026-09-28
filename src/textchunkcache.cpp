@@ -82,6 +82,24 @@ const QByteArray* TextChunkCache::chunkAt(int fileId, qint64 chunkIndex) const
     return &it.value().bytes;
 }
 
+const QByteArray* TextChunkCache::chunkCovering(int fileId, qint64 chunkIndex,
+                                                qint64 neededBytes) const
+{
+    // Последний чанк файла короче kChunkBytes. Если файл с тех пор вырос
+    // (дозапись растущего лога), закэшированный короткий чанк не покрывает
+    // новые строки — без перечитывания они показывались бы пустыми, пока
+    // чанк не вытеснится.
+    const QByteArray* bytes = chunkAt(fileId, chunkIndex);
+    if (!bytes || bytes->size() >= neededBytes || bytes->size() >= kChunkBytes)
+        return bytes;
+    const auto it = m_chunks.find(chunkKey(fileId, chunkIndex));
+    if (it != m_chunks.end()) {
+        m_cachedBytes -= it.value().bytes.size();
+        m_chunks.erase(it); // bytes больше не используется
+    }
+    return chunkAt(fileId, chunkIndex);
+}
+
 void TextChunkCache::evictIfNeeded() const
 {
     while (m_cachedBytes > m_budgetBytes && !m_chunks.isEmpty()) {
@@ -122,8 +140,8 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
     const qint64 lastChunk = (offset + byteLength - 1) / kChunkBytes;
 
     if (lastChunk == firstChunk) {
-        const QByteArray* bytes = chunkAt(fileId, firstChunk);
         const qint64 local = offset - firstChunk * kChunkBytes;
+        const QByteArray* bytes = chunkCovering(fileId, firstChunk, local + byteLength);
         if (!bytes || local + byteLength > bytes->size())
             return QString();
         return QString::fromUtf8(bytes->constData() + local, int(byteLength));
@@ -132,15 +150,16 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
     if (lastChunk == firstChunk + 1) {
         // Строка на стыке двух чанков: собираем без прямого чтения диска.
         // ВАЖНО: второй chunkAt может вытеснить первый чанк — копируем головку
-        // до второго обращения.
-        const QByteArray* first = chunkAt(fileId, firstChunk);
-        if (!first)
+        // до второго обращения. Первый чанк обязан быть полным: строка
+        // продолжается за его концом.
+        const QByteArray* first = chunkCovering(fileId, firstChunk, kChunkBytes);
+        if (!first || first->size() < kChunkBytes)
             return QString();
         const qint64 local = offset - firstChunk * kChunkBytes;
         QByteArray assembled;
         assembled.reserve(int(byteLength));
         assembled.append(first->constData() + local, int(first->size() - local));
-        const QByteArray* second = chunkAt(fileId, lastChunk);
+        const QByteArray* second = chunkCovering(fileId, lastChunk, byteLength - assembled.size());
         if (!second)
             return QString();
         const qint64 remain = byteLength - assembled.size();

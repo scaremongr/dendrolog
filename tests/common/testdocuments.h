@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QObject>
 #include <QRandomGenerator>
 #include <QStringList>
@@ -395,6 +396,90 @@ inline Document buildIndexed(const QStringList& paths, const QString& schema,
     if (!settle(*doc.model))
         doc.errors << QStringLiteral("индексная модель не пришла в покой после загрузки");
     return doc;
+}
+
+// ---------------------------------------------------------------------------
+// Дозапись хвоста — как авто-обновление вкладки (LogViewWidget::
+// reloadChangedFiles): байты дописываются в файл и дочитываются только они.
+// Строка без '\n' в конце остаётся «предварительной» и при следующей дозаписи
+// переиндексируется. false — дописать или дочитать не удалось.
+// ---------------------------------------------------------------------------
+
+inline bool appendToFile(const QString& path, const QByteArray& bytes)
+{
+    QFile f(path);
+    return f.open(QIODevice::WriteOnly | QIODevice::Append) && f.write(bytes) == bytes.size();
+}
+
+inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& bytes,
+                              const QString& schema)
+{
+    IndexedLogStore* store = doc.model->indexedOrNull();
+    const LogFilePtr logFile = doc.files.value(fileIndex);
+    if (!store || !logFile || !appendToFile(logFile->filePath, bytes))
+        return false;
+    const std::shared_ptr<LineIndex> index = store->indexForFile(logFile->filePath);
+    if (!index)
+        return false;
+
+    LogIndexer indexer;
+    indexer.setPattern(schema);
+    indexer.setExtractionEnabled(true);
+    bool done = false;
+    bool ok = true;
+    QObject relay;
+    QObject::connect(&indexer, &LogIndexer::indexBatchReady, &relay,
+                     [store](const LogFilePtr& lf, qint64 first, qint64 count) {
+                         store->appendIndexedRows(lf, first, count, /*markNew*/ true);
+                     });
+    QObject::connect(&indexer, &LogIndexer::indexingFinished, &relay,
+                     [&done](qint64, const LogFilePtr&) { done = true; });
+    QObject::connect(&indexer, &LogIndexer::indexingFailed, &relay,
+                     [&](const LogFilePtr&) { ok = false; done = true; });
+    indexer.startIndexingFrom(logFile, index, index->lastLineProvisional());
+    return waitFor([&done] { return done; }) && ok;
+}
+
+// Резидентный путь дочитывает только завершённые строки: хвост без '\n'
+// передавать сюда не нужно.
+inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& bytes,
+                               const QString& schema)
+{
+    const LogFilePtr logFile = doc.files.value(fileIndex);
+    if (!logFile)
+        return false;
+    const qint64 oldSize = QFileInfo(logFile->filePath).size();
+    if (!appendToFile(logFile->filePath, bytes))
+        return false;
+
+    // Следующий id логической записи этого файла — как ведёт его вкладка.
+    int nextId = 0;
+    doc.model->scanSnapshot(false).forEachMeta(0, [&](qint64, const LogEntryMeta& m) {
+        if (m.sourceFile == logFile.get())
+            nextId = std::max(nextId, m.logicalEntryId + 1);
+        return true;
+    });
+
+    LogParser parser;
+    parser.setPattern(schema);
+    parser.setExtractionEnabled(true);
+    QVector<QVector<std::shared_ptr<LogEntry>>> batches;
+    bool done = false;
+    QObject relay;
+    QObject::connect(&parser, &LogParser::entriesParsed, &relay,
+                     [&](const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr&) {
+                         batches.append(batch);
+                     });
+    QObject::connect(&parser, &LogParser::parsingFinished, &relay,
+                     [&done](int, const LogFilePtr&) { done = true; });
+    QObject::connect(&parser, &LogParser::parsingFailed, &relay,
+                     [&done](const LogFilePtr&) { done = true; });
+    parser.startParsingFrom(logFile, oldSize, nextId);
+    if (!waitFor([&done] { return done; }))
+        return false;
+    for (const auto& batch : batches)
+        doc.model->appendEntries(batch);
+    return true;
 }
 
 } // namespace testdocs

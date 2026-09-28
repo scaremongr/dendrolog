@@ -42,6 +42,7 @@ class StatisticsPanel;
 class LogModel;
 class LogListView;
 class LogPattern;
+class SearchResultsController;
 class QModelIndex;
 class QDialog;
 class QDragEnterEvent;
@@ -184,21 +185,16 @@ private:
     QDockWidget* m_statsDockWidget = nullptr;
 
     // Панель результатов неразрушающего поиска (нижний док, создаётся в коде).
-    // Вторая пара LogModel+LogListView поверх записей или индексов активной вкладки:
-    // в режиме Search сюда выводятся совпадения, клик прыгает в основном view.
+    // Запрос, модель результатов и их живое обновление вслед за активной
+    // вкладкой — SearchResultsController; здесь только view, подпись и
+    // навигация: клик прыгает в основном view.
     QDockWidget* m_searchResultsDockWidget = nullptr;
     LogListView* m_searchResultsView = nullptr;
-    LogModel*    m_searchResultsModel = nullptr;
+    SearchResultsController* m_searchController = nullptr;
     QLabel*      m_searchResultsStatusLabel = nullptr;
-    // Дебаунс живого обновления результатов при дозагрузке строк (tail reload).
-    QTimer*      m_searchRefreshTimer = nullptr;
     // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
     // меняется программно (reset модели при пересборке результатов).
     bool         m_suppressResultNavigation = false;
-    // Соединения с моделью активной вкладки для живого обновления результатов;
-    // рвутся в disconnectFromLogView (иначе старая модель дёргала бы рефреш).
-    QMetaObject::Connection m_searchModelInsertConn;
-    QMetaObject::Connection m_searchModelResetConn;
     // Состояние загрузки активной вкладки → панель статистики (не считать по
     // недогруженному документу). Рвётся в disconnectFromLogView.
     QMetaObject::Connection m_statsLoadingConn;
@@ -354,8 +350,8 @@ private:
     // у каждой вкладки свой применённый набор.
     void applyTextFiltersToActiveView();
     // ---- Режим «Неразрушающий поиск» ---------------------------------------
-    // Пересобрать панель результатов по видимому набору активной вкладки:
-    // запустить searchVisible и обновить подсветку.
+    // Новый поиск правилами панели по видимому набору активной вкладки и
+    // подсветка совпадений.
     void runSearchIntoResults();
     // Опустошить панель результатов (модель + подпись). Док не прячется —
     // это обычная панель, видимостью управляет пользователь через меню View.
@@ -366,9 +362,9 @@ private:
     void onHighlightInMainViewChanged();
     // Клик/навигация по строке в панели результатов → прыжок в основном view.
     void onSearchResultActivated(const QModelIndex& current);
-    // Запустить дебаунс пересборки результатов, если активен режим Search
-    // и док результатов видим (иначе no-op).
-    void scheduleSearchRefresh();
+    // Режим Search и док результатов видим: только тогда выдача держится
+    // актуальной полными перезапусками поиска (см. SearchResultsController).
+    bool searchResultsLive() const;
     // Применить row-маркеры к активной вкладке.
     void applyRowMarkersToActiveView();
     // Перепривязать УЖЕ применённые правила каждой вкладки к новой схеме

@@ -77,6 +77,8 @@ The **Non-destructive search** switch at the top of the panel:
 
 Search covers **all currently visible rows** of the active tab, including the end of large files; existing level and time filters still limit its scope. Large indexed logs are searched in the background without loading their text into memory. The panel shows progress while searching and the match count when complete. **Reset**, a new search, or switching tabs discards the pending request.
 
+Results follow the active tab live: lines appended to a growing log are searched as they arrive and added to the list, without searching the whole file again; a line that was still being written is checked once it is complete. Changes to the visible rows themselves — level or time filters, a reloaded file — run the search again. While the panel is hidden, such full searches wait until it is shown.
+
 AND/OR work the **same** in both modes. One convenience: a rule added *in Search mode* defaults its link to **OR** (to “show anything any rule matches”), while in Filter mode it defaults to **AND** (narrow down). You can always change the link by hand.
 
 - **Highlight in main view** — also highlight the matched text in the main view (works in both modes; it never hides rows).

@@ -78,6 +78,9 @@ public:
     virtual void applyFilter() = 0;
     virtual void cancelPendingFilter(bool wait) = 0;
     virtual void reapplyFilterIfStale() = 0;
+    // Фоновый фильтр-джоб в полёте: видимый список ещё догоняет настройки
+    // (или новые строки ещё проверяются).
+    virtual bool isFiltering() const = 0;
 
 protected:
     LogModel& m_model;
