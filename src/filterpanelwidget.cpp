@@ -123,6 +123,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     // ---- Сигналы ------------------------------------------------------ //
     connect(m_textEdit, &QLineEdit::returnPressed, this, &FilterRuleCard::applyShortcutPressed);
     connect(m_textEdit, &QLineEdit::textChanged, this, [this]() { updateRegexValidity(); });
+    connect(m_fieldCombo, &QComboBox::currentIndexChanged, this, [this]() { updateRegexValidity(); });
     connect(m_gearButton, &QToolButton::toggled, this, [this](bool on) {
         m_advancedRow->setVisible(on);
     });
@@ -175,9 +176,9 @@ void FilterRuleCard::setFieldNames(const QStringList& fieldNames, bool fieldScop
     for (const QString& name : fieldNames)
         m_fieldCombo->addItem(name, name);
 
-    // Сохраняем выбор пользователя, даже если колонка ушла из схемы:
-    // правило с осиротевшим именем продолжит искать по всей строке
-    // (bindFields даст -1), а при возврате схемы привязка оживёт.
+    // Сохраняем выбор пользователя, даже если колонка ушла из схемы: правило
+    // с осиротевшим именем нейтрально (FilterRuleSet::fieldMissing) и помечено
+    // под текстом, а при возврате схемы привязка оживёт.
     if (!previousField.isEmpty()) {
         int idx = m_fieldCombo->findData(previousField);
         if (idx < 0) {
@@ -189,6 +190,10 @@ void FilterRuleCard::setFieldNames(const QStringList& fieldNames, bool fieldScop
     m_fieldCombo->blockSignals(false);
 
     m_fieldCombo->setEnabled(fieldScopeEnabled);
+    m_schemaFields = fieldNames;
+    m_schemaKnown = true;
+    m_fieldScopeEnabled = fieldScopeEnabled;
+    updateRegexValidity();
 }
 
 void FilterRuleCard::setIsFirstRow(bool first)
@@ -208,9 +213,11 @@ void FilterRuleCard::setIsFirstRow(bool first)
 
 void FilterRuleCard::updateRegexValidity()
 {
-    // Невалидный регекс молча выключает правило — без этой подсказки поиск
-    // просто «ничего не находит», и причина неочевидна.
+    // Невалидный регекс или колонка, которой нет в схеме, молча выключают
+    // правило — без этой подсказки поиск просто «ничего не находит», и
+    // причина неочевидна.
     QString error;
+    QString note; // не ошибка, но правило работает не так, как видно в карточке
     if (m_regexCheckBox->isChecked() && !m_textEdit->text().isEmpty()) {
         const QRegularExpression re(m_textEdit->text());
         if (!re.isValid()) {
@@ -221,12 +228,29 @@ void FilterRuleCard::updateRegexValidity()
         }
     }
 
+    const QString field = m_fieldCombo->currentData().toString();
+    if (error.isEmpty() && !field.isEmpty() && m_schemaKnown) {
+        if (!m_fieldScopeEnabled)
+            note = tr("Log Fields are off: this rule searches the entire row.");
+        else if (!m_schemaFields.contains(field))
+            error = tr("Column \"%1\" is not in the current schema: the rule is ignored "
+                       "until the column is back.").arg(field);
+    }
+
     m_textEdit->setPlaceholderText(m_regexCheckBox->isChecked()
         ? tr("Regular expression...") : tr("Filter text..."));
 
-    if (error.isEmpty()) {
+    if (error.isEmpty() && note.isEmpty()) {
         m_regexErrorLabel->clear();
         m_regexErrorLabel->setVisible(false);
+        m_textEdit->setStyleSheet(QString());
+        return;
+    }
+    if (error.isEmpty()) {
+        m_regexErrorLabel->setText(note);
+        m_regexErrorLabel->setStyleSheet(QStringLiteral("color: %1;")
+            .arg(AppTheme::instance().logDebug.name()));
+        m_regexErrorLabel->setVisible(true);
         m_textEdit->setStyleSheet(QString());
         return;
     }

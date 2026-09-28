@@ -60,6 +60,10 @@ All notable changes to DendroLog are documented here. The format follows
 - With word wrap on, Down, PageDown and End keep the current line on screen,
   and the last line can be scrolled into view: the view no longer positions
   itself by estimated line heights that change once the lines are drawn.
+- A text filter rule bound to a Log Fields column that is not in the current
+  schema no longer silently searches the whole row: it is ignored, does not
+  highlight, and its card explains why. With Filter blocks off, a card bound to
+  a column notes that it searches the entire row.
 - Lines appended to a large (indexed) log no longer show up empty when the end
   of the file had already been displayed: the cached last block of the file is
   read again once the file grows.

@@ -54,7 +54,7 @@ The **Text Filters** panel is a set of rules; each rule is one card:
 
 - **Contains / Not contains** — the row must (Include) or must not (Exclude) contain the text.
 - **AND / OR** — how the rule links to the previous one (the first rule has no link).
-- **Field** — `(entire row)` by default; can be limited to a specific Log Fields column (active when **Filter blocks** is on).
+- **Field** — `(entire row)` by default; can be limited to a specific Log Fields column (active when **Filter blocks** is on). If the chosen column is not in the current schema (for example, after switching schemas), the rule is ignored and its card says so — it does not quietly search the whole row; the binding comes back with the column. With **Filter blocks** off, a rule bound to a column searches the entire row, and its card notes that.
 - **⚙ (gear)** — per-rule options: **Case sensitive** and **Regular expression**.
 - **Colour swatch** — left-click picks the highlight colour for this rule's matches; right-click toggles this rule's highlighting on/off. The colour is auto-picked to contrast with the theme, but you can override it.
 

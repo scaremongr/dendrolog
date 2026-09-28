@@ -87,8 +87,13 @@ public:
     bool isActive() const;
     // Сколько правил реально участвует в вычислениях — активных и, для
     // регексов, успешно скомпилированных. Осмысленно после bindFields():
-    // расходится с isActive() ровно тогда, когда правило испорчено регексом.
+    // расходится с isActive(), когда правило испорчено регексом или его
+    // колонки нет в текущей схеме.
     int usableRuleCount() const;
+    // Правило привязано к колонке, которой нет в схеме из bindFields (при
+    // включённых Log Fields). Такое правило нейтрально — не ищет по всей
+    // строке; UI показывает это явно.
+    bool fieldMissing(int ruleIndex) const;
 
     // Проходит ли запись фильтр. Реализация без аллокаций.
     bool matches(const LogEntry& entry) const;
@@ -112,11 +117,12 @@ private:
     // То же с применением действия правила (Exclude инвертирует).
     bool ruleMatches(int ruleIndex, QStringView message,
                      const LogEntryFields& fields) const;
-    // Пригодно ли правило к вычислению (активно и, для регекса, скомпилировано).
+    // Пригодно ли правило к вычислению: активно, регекс скомпилирован,
+    // колонка (если задана) есть в схеме.
     bool ruleUsable(int ruleIndex) const;
 
     // Производное состояние (заполняется bindFields, не сериализуется):
-    QVector<int> m_boundFieldIndexes;            // индекс колонки (-1 = вся строка)
+    QVector<int> m_boundFieldIndexes;            // индекс колонки (-1 = вся строка или нет в схеме)
     QVector<QRegularExpression> m_compiledRegexes; // компилят для isRegex-правил
     bool m_fieldScopeActive = false;
 };

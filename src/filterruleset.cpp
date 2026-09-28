@@ -97,7 +97,18 @@ bool FilterRuleSet::ruleUsable(int ruleIndex) const
     // Невалидный регекс — нейтральное правило: не валит весь лог.
     if (rule.isRegex && !m_compiledRegexes.value(ruleIndex).isValid())
         return false;
+    // Колонки нет в текущей схеме — тоже нейтральное правило, а не молчаливый
+    // поиск по всей строке («Thread содержит worker-1» не должно находить
+    // worker-1 в тексте сообщения). Вернётся колонка — привязка оживёт.
+    if (fieldMissing(ruleIndex))
+        return false;
     return true;
+}
+
+bool FilterRuleSet::fieldMissing(int ruleIndex) const
+{
+    return m_fieldScopeActive && !rules[ruleIndex].fieldName.isEmpty()
+        && m_boundFieldIndexes.value(ruleIndex, -1) < 0;
 }
 
 bool FilterRuleSet::ruleContains(int ruleIndex, QStringView message,
@@ -178,8 +189,11 @@ bool FilterRuleSet::matchesLine(QStringView message, const LogEntryFields& field
 QVector<HighlightPattern> FilterRuleSet::highlightPatterns() const
 {
     QVector<HighlightPattern> patterns;
-    for (const auto& rule : rules) {
-        if (!rule.isActive() || rule.action != FilterRule::Action::Include
+    for (int i = 0; i < rules.size(); ++i) {
+        const FilterRule& rule = rules[i];
+        // Нейтральное правило (невалидный регекс, колонки нет в схеме) ничего
+        // не находит — и подсвечивать ему нечего.
+        if (!ruleUsable(i) || rule.action != FilterRule::Action::Include
             || !rule.highlightEnabled)
             continue;
         HighlightPattern p;

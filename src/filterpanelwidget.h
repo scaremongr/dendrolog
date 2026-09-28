@@ -48,7 +48,9 @@ private:
     void toggleHighlightEnabled();  // правый клик по образцу цвета
     void updateColorButton();
     void updateGearHighlight();
-    void updateRegexValidity();     // подсветка ошибки в тексте регекса
+    // Почему правило не работает или работает не так, как показано:
+    // неверный регекс, колонки нет в схеме, Log Fields выключены.
+    void updateRegexValidity();
 
     QComboBox*   m_connectorCombo;
     QCheckBox*   m_enabledCheckBox;
@@ -64,7 +66,10 @@ private:
     QWidget*     m_advancedRow;
     QCheckBox*   m_caseSensitiveCheckBox;
     QCheckBox*   m_regexCheckBox;
-    QLabel*      m_regexErrorLabel;   // виден только при неверном регексе
+    QLabel*      m_regexErrorLabel;   // пояснение под текстом (обычно скрыто)
+    QStringList  m_schemaFields;      // колонки текущей схемы (setFieldNames)
+    bool         m_schemaKnown = false;
+    bool         m_fieldScopeEnabled = true;
 
     QColor       m_color;
     bool         m_highlightEnabled = true;

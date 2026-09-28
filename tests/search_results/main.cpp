@@ -264,6 +264,32 @@ int main(int argc, char** argv)
     completed(results, [&] { results.searchVisible(*indexed.model, query("worker-1", "Message")); });
     CHECK(results.rowCount() == 0, "field search never falls back to the whole row");
 
+    // Колонки нет в схеме: правило нейтрально, а не ищет по всей строке.
+    {
+        const FilterRuleSet orphan = query("worker-1", "NoSuchField");
+        CHECK(orphan.fieldMissing(0) && orphan.usableRuleCount() == 0,
+              "rule bound to a missing column is unusable");
+        CHECK(orphan.highlightPatterns().isEmpty(), "unusable rule highlights nothing");
+        completed(results, [&] { results.searchVisible(*indexed.model, orphan); });
+        CHECK(results.rowCount() == 0, "missing-column query finds nothing");
+        // Рядом с пригодным правилом — нейтрально: AND «worker-2 по всей
+        // строке» обнулил бы выдачу, нейтральное правило её не трогает.
+        FilterRuleSet combined;
+        FilterRule late;
+        late.text = "LATE_NEEDLE";
+        FilterRule missing;
+        missing.text = "worker-2";
+        missing.fieldName = "NoSuchField";
+        combined.rules = {late, missing};
+        combined.bindFields({"Timestamp", "Thread", "Level", "Message"}, true);
+        CHECK(!combined.fieldMissing(0) && combined.fieldMissing(1), "only the orphan is missing");
+        completed(results, [&] { results.searchVisible(*indexed.model, combined); });
+        CHECK(results.rowCount() == 5, "missing-column rule does not search the whole row");
+        // Log Fields выключены: колонки не проверяются, поиск по всей строке.
+        combined.bindFields({"Timestamp", "Thread", "Level", "Message"}, false);
+        CHECK(!combined.fieldMissing(1), "fields off: no missing-column state");
+    }
+
     // A broad query may return more than 200000 matches as row references.
     completed(results, [&] { results.searchVisible(*indexed.model, query("ordinary|LATE_NEEDLE", {}, true)); });
     CHECK(results.rowCount() == 200005, "result count has no former input cap either");

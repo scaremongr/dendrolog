@@ -78,7 +78,8 @@ void SearchResultsController::search(const FilterRuleSet& rules)
     // непригодных правил пропустил бы в результаты весь лог.
     if (rules.usableRuleCount() == 0) {
         clear();
-        setStatus(tr("Nothing to search: check the rule text (invalid regular expression?)."));
+        setStatus(tr("Nothing to search: every rule is unusable "
+                     "(an invalid regular expression or a column missing from the schema)."));
         return;
     }
     m_active = true;
