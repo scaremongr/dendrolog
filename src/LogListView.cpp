@@ -65,11 +65,17 @@ LogListView::LogListView(QWidget *parent)
     m_heightUpdateTimer = new QTimer(this);
     m_heightUpdateTimer->setSingleShot(true);
     connect(m_heightUpdateTimer, &QTimer::timeout, this, [this]() {
+        // Вид у самого низа там и остаётся: уточнённые высоты последних
+        // строк растягивают контент, и без этого конец снова уехал бы за край.
+        QScrollBar* bar = verticalScrollBar();
+        const bool atBottom = bar->maximum() > 0 && bar->value() == bar->maximum();
         if (m_heightsDirty)
             rebuildHeightCache();   // включает rebuildPrefixSums()
         else
             rebuildPrefixSums();
         updateScrollbar();
+        if (atBottom)
+            bar->setValue(bar->maximum());
         viewport()->update();
     });
 
@@ -965,9 +971,9 @@ void LogListView::rebuildPrefixSums() {
     m_prefixDirtyFrom = std::numeric_limits<int>::max();
 }
 
-void LogListView::refineHeightsAbove(int row) {
-    if (m_uniformHeights || m_heightsDirty || !model()) return;
-    if (row < 0 || row >= m_rowHeights.size()) return;
+bool LogListView::refineHeightsAbove(int row) {
+    if (m_uniformHeights || m_heightsDirty || !model()) return false;
+    if (row < 0 || row >= m_rowHeights.size()) return false;
 
     // Идём от row вверх, пока точные высоты не перекроют вьюпорт (с запасом
     // в одну строку): только эти строки влияют на экранную позицию якоря —
@@ -986,6 +992,7 @@ void LogListView::refineHeightsAbove(int row) {
         acc += h;
     }
     if (changed) rebuildPrefixSums();
+    return changed;
 }
 
 // O(1): Y-позиция начала строки row (64-битные координаты контента)
@@ -1125,6 +1132,14 @@ void LogListView::scrollTo(const QModelIndex& index, ScrollHint hint) {
     if (row < 0 || row >= model()->rowCount()) {
         return;
     }
+
+    // С переносом строк высоты до первой отрисовки — оценки. Отрисовка идёт
+    // от первой видимой строки вниз по РЕАЛЬНЫМ высотам, поэтому прокрутку
+    // считаем по точным высотам самой строки и тех, что окажутся на экране над
+    // ней: иначе после отрисовки строка уехала бы за край вьюпорта (Down,
+    // PageDown, End), а до последней не хватило бы диапазона скроллбара.
+    if (refineHeightsAbove(row))
+        updateScrollbar();
 
     const int target = targetScrollValueForRow(row, hint);
     if (target != verticalScrollBar()->value()) {

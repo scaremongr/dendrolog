@@ -57,6 +57,9 @@ All notable changes to DendroLog are documented here. The format follows
   large view is saved. The status bar shows the progress, **Cancel Save** stops
   the export and keeps an existing destination file as it was, and the saved
   rows are the view as it was when saving started.
+- With word wrap on, Down, PageDown and End keep the current line on screen,
+  and the last line can be scrolled into view: the view no longer positions
+  itself by estimated line heights that change once the lines are drawn.
 - Lines appended to a large (indexed) log no longer show up empty when the end
   of the file had already been displayed: the cached last block of the file is
   read again once the file grows.

@@ -681,61 +681,6 @@ static void checkKeyboard(const QString& name, LogListView& view)
 }
 
 // ---------------------------------------------------------------------------
-// ЗАДОКУМЕНТИРОВАННЫЙ ДЕФЕКТ (на 2026-09-17 НЕ исправлен): с включённым
-// переносом строк высоты строк уточняются лениво, уже после прокрутки, и view
-// не возвращает текущую строку в экран — после Down / PageDown / End она
-// оказывается ниже нижней границы вьюпорта, а последняя строка недостижима
-// прокруткой. Сам курсор при этом двигается правильно и выделяется.
-//
-// Здесь проверяется то, что работает, и ЗАКРЕПЛЯЕТСЯ сам дефект: когда его
-// починят, упадёт последняя проверка — тогда замените этот вызов на обычные
-// checkKeyboard/checkGeometry (с lastRowReachable).
-// ---------------------------------------------------------------------------
-static void checkWrapKnownDefect(LogListView& view)
-{
-    setContext(QStringLiteral("перенос строк / известный дефект прокрутки"));
-    const int rows = view.model()->rowCount();
-    if (rows < 50)
-        return;
-
-    int offscreen = 0;
-    const auto step = [&](int key, int expected, const QString& what) {
-        pressKey(view, key);
-        const int cur = currentRow(view);
-        if (expected >= 0) {
-            CHECK(cur == expected,
-                  QStringLiteral("%1: текущая строка %2, ожидалась %3 %4")
-                      .arg(what).arg(cur).arg(expected).arg(viewState(view)));
-        } else {
-            CHECK(cur >= 0, QStringLiteral("%1: текущей строки нет %2").arg(what, viewState(view)));
-        }
-        CHECK(cur >= 0 && view.selectionModel()->isRowSelected(cur, QModelIndex()),
-              QStringLiteral("%1: текущая строка не выделена %2").arg(what, viewState(view)));
-        if (cur >= 0 && !rowFullyVisible(view, cur))
-            ++offscreen;
-    };
-
-    selectRow(view, 10);
-    step(Qt::Key_Down, 11, QStringLiteral("Down"));
-    step(Qt::Key_PageDown, -1, QStringLiteral("PageDown"));
-    step(Qt::Key_End, rows - 1, QStringLiteral("End"));
-
-    // Сам дефект НЕ закрепляется падением: он зависит от метрик шрифта, то
-    // есть от платформы, и строгая проверка «дефект на месте» сделала бы
-    // тест красным там, где высоты строк оцениваются точно. Сообщение
-    // заметное — если дефект перестал воспроизводиться, это повод проверить,
-    // не починен ли он, и вернуть обычные checkKeyboard/checkGeometry.
-    std::fprintf(stderr,
-                 offscreen > 0
-                     ? "ИЗВЕСТНЫЙ ДЕФЕКТ на месте: с переносом строк навигация уводит "
-                       "текущую строку за экран (%d из 3 шагов)\n"
-                     : "ВНИМАНИЕ: известный дефект с переносом строк здесь НЕ воспроизвёлся "
-                       "(%d из 3 шагов) — возможно, он починен: верните обычные "
-                       "checkKeyboard/checkGeometry\n",
-                 offscreen);
-}
-
-// ---------------------------------------------------------------------------
 
 int main(int argc, char** argv)
 {
@@ -824,9 +769,17 @@ int main(int argc, char** argv)
         view->resize(320, kViewHeight);
         view->setWordWrap(true);
         pump(400); // дебаунс resize + отложенный пересчёт высот
-        checkGeometry(b.name + QStringLiteral(", перенос строк"), *view, kViewTimersMs,
-                      /*lastRowReachable=*/false);
-        checkWrapKnownDefect(*view);
+        // Скроллбар сразу в самый низ, пока высоты последних строк ещё
+        // оценки: после их уточнения вид обязан остаться у конца.
+        setContext(b.name + QStringLiteral(", перенос строк / скроллбар до конца"));
+        view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+        pump(kViewTimersMs);
+        CHECK(rowFullyVisible(*view, b.doc.model->rowCount() - 1),
+              QStringLiteral("последняя строка не видна %1").arg(viewState(*view)));
+        // Высоты строк уточняются лениво, но навигация и прокрутка обязаны
+        // держать текущую строку на экране, а последняя строка — достижима.
+        checkGeometry(b.name + QStringLiteral(", перенос строк"), *view, kViewTimersMs);
+        checkKeyboard(b.name + QStringLiteral(", перенос строк"), *view);
     }
 
     setContext(QStringLiteral("итог"));
