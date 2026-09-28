@@ -72,6 +72,10 @@ All notable changes to DendroLog are documented here. The format follows
   text once completed instead of being split in two; blank appended lines are
   kept; and lines written while the log was being read are neither skipped nor
   read twice.
+- Adding a second file to a tab with a large log whose lines are not in time
+  order is much faster: the first file is reordered record by record from a
+  lock-free snapshot of its index instead of comparing every pair of lines
+  under the index lock.
 - Lines appended to a large (indexed) log no longer show up empty when the end
   of the file had already been displayed: the cached last block of the file is
   read again once the file grows.

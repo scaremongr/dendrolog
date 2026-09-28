@@ -6,6 +6,8 @@
 #include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
+#include <limits>
+#include <vector>
 
 namespace {
 
@@ -230,19 +232,73 @@ void IndexedLogStore::materializeAllRefs(bool sortByTime)
         return;
     // Только строки, уже показанные модели (не «сырые» из индекса).
     m_allRefs.reserve(int(m_shownAllCount));
-    for (qint64 l = 0; l < m_shownAllCount; ++l)
-        m_allRefs.append(makeRef(0, l));
-    if (!sortByTime)
+    if (!sortByTime || m_shownAllCount == 0) {
+        for (qint64 l = 0; l < m_shownAllCount; ++l)
+            m_allRefs.append(makeRef(0, l));
         return;
+    }
 
     // База слияния обязана быть отсортирована lessRef: строки следующих файлов
     // вставляются в неё бинарным поиском. Раньше здесь оставался порядок
     // файла, и на файле с преамбулой или метками не по порядку слияние тихо
     // расставляло строки куда попало.
-    const auto less = [this](RowRef a, RowRef b) { return lessRef(a, b); };
-    std::sort(m_allRefs.begin(), m_allRefs.end(), less);
-    if (!m_identityVisible)
-        std::sort(m_visibleRefs.begin(), m_visibleRefs.end(), less);
+    //
+    // Внутри одного файла lessRef — это время записи (без метки — в конец),
+    // затем id записи, затем строка. Строки записи лежат подряд, а id по
+    // строкам не убывает (и у одного файла идут подряд), поэтому достаточно
+    // УСТОЙЧИВО отсортировать id записей по времени и развернуть записи в
+    // строки. Прежде сортировались строки через lessRef — с мьютексом индекса
+    // в каждом сравнении, минуты на GUI-потоке для десятков миллионов строк;
+    // здесь ключи читаются из снапшота без блокировок, а сортируется по
+    // 4 байта на запись.
+    const LineIndexSnapshot snap = m_files[0].index->snapshot();
+    const quint32 firstId = snap.logicalId(0);
+    const quint32 lastId = snap.logicalId(m_shownAllCount - 1);
+    QVector<quint32> ids;
+    ids.reserve(int(lastId - firstId + 1));
+    for (quint32 id = firstId; id <= lastId; ++id)
+        ids.append(id);
+    const auto key = [&snap](quint32 id) {
+        const qint64 ts = snap.timestampMs(id);
+        return ts >= 0 ? ts : std::numeric_limits<qint64>::max();
+    };
+    std::stable_sort(ids.begin(), ids.end(),
+                     [&key](quint32 a, quint32 b) { return key(a) < key(b); });
+
+    // Первая строка записи — двоичный поиск по неубывающим id строк.
+    const auto firstLineOf = [&snap, this](quint32 id) {
+        qint64 lo = 0, hi = m_shownAllCount;
+        while (lo < hi) {
+            const qint64 mid = lo + (hi - lo) / 2;
+            if (snap.logicalId(mid) < id)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
+    };
+    for (const quint32 id : std::as_const(ids)) {
+        for (qint64 l = firstLineOf(id); l < m_shownAllCount && snap.logicalId(l) == id; ++l)
+            m_allRefs.append(makeRef(0, l));
+    }
+
+    // Видимые строки — в том же порядке: отбираем их из m_allRefs по
+    // битовой карте строк, O(N) вместо ещё одной сортировки.
+    if (!m_identityVisible) {
+        std::vector<bool> visible(size_t(m_shownAllCount), false);
+        for (const RowRef ref : std::as_const(m_visibleRefs)) {
+            const qint64 l = refLine(ref);
+            if (l < m_shownAllCount)
+                visible[size_t(l)] = true;
+        }
+        QVector<RowRef> ordered;
+        ordered.reserve(m_visibleRefs.size());
+        for (const RowRef ref : std::as_const(m_allRefs)) {
+            if (visible[size_t(refLine(ref))])
+                ordered.append(ref);
+        }
+        m_visibleRefs = std::move(ordered);
+    }
 }
 
 void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstLine,

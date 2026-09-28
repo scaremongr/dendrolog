@@ -1071,6 +1071,35 @@ static void testZonedMerge(const QDir& dir, const QString& schema)
 }
 
 // ---------------------------------------------------------------------------
+// Второй файл дописан во вкладку с файлом «не по порядку» при АКТИВНОМ
+// фильтре: переход «один файл → несколько» переупорядочивает и видимые
+// строки (materializeAllRefs). Эталон — резидентная вкладка с теми же
+// файлами и тем же фильтром.
+// ---------------------------------------------------------------------------
+static void testAttachWithActiveFilter(const QString& unsortedPath, const QString& secondPath,
+                                       const QString& schema, const QStringList& fieldNames)
+{
+    FilterConfig cfg;
+    cfg.name = QStringLiteral("уровни: Error+Warn");
+    cfg.levels = { LogLevel::Error, LogLevel::Warn };
+    g_context = QStringLiteral("второй файл при активном фильтре / загрузка");
+    g_contextFailures = 0;
+
+    Document idx = loadIndexed({ unsortedPath }, schema);
+    applyConfig(*idx.model, cfg, fieldNames);
+    addIndexedFiles(idx, { secondPath }, schema);
+    settleChecked(*idx.model);
+
+    Document res = loadResident({ unsortedPath, secondPath }, schema);
+    applyConfig(*res.model, cfg, fieldNames);
+
+    g_context = QStringLiteral("второй файл при активном фильтре / ") + cfg.name;
+    g_contextFailures = 0;
+    CHECK(idx.model->rowCount() > 0, QStringLiteral("фильтр оставил строки"));
+    compareVisibleRows(*res.model, *idx.model);
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char** argv)
 {
@@ -1150,6 +1179,7 @@ int main(int argc, char** argv)
     testSingleFileOrdering(fileA, fileC, schema, fieldNames);
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);
     testZonedMerge(dir, schema);
+    testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));
