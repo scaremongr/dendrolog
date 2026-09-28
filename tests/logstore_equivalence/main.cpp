@@ -59,6 +59,7 @@
 #include <QRandomGenerator>
 #include <QSet>
 #include <QTemporaryDir>
+#include <QTimeZone>
 
 #include <cstdio>
 #include <functional>
@@ -1024,6 +1025,52 @@ static void testSingleFileUnsortedLookups(const QString& unsortedPath,
 }
 
 // ---------------------------------------------------------------------------
+// Файлы из разных часовых поясов в одной вкладке сливаются по МОМЕНТУ:
+// 12:00:01.500+02:00 — это 10:00:01.500 UTC, между 10:00:00Z и 10:00:02Z.
+// Эталон задан заранее, а не резидентным бэкендом: общая ошибка
+// классификатора в обоих бэкендах иначе прошла бы незамеченной.
+// ---------------------------------------------------------------------------
+static void testZonedMerge(const QDir& dir, const QString& schema)
+{
+    QByteArray utc, plus2;
+    QStringList expected;
+    for (int i = 0; i < 10; ++i) {
+        utc += QStringLiteral("2026-09-20T10:00:%1.000Z [u] INFO - utc %2\n")
+                   .arg(2 * i, 2, 10, QLatin1Char('0')).arg(i).toUtf8();
+        plus2 += QStringLiteral("2026-09-20T12:00:%1.500+02:00 [p] INFO - plus2 %2\n")
+                     .arg(2 * i + 1, 2, 10, QLatin1Char('0')).arg(i).toUtf8();
+        expected << QStringLiteral("utc %1").arg(i) << QStringLiteral("plus2 %1").arg(i);
+    }
+    const QString utcPath = writeFile(dir, QStringLiteral("zone-utc.log"), utc);
+    const QString plus2Path = writeFile(dir, QStringLiteral("zone-plus2.log"), plus2);
+    const qint64 firstMs = QDateTime(QDate(2026, 9, 20), QTime(10, 0), QTimeZone::UTC)
+                               .toMSecsSinceEpoch();
+
+    const auto check = [&](const QString& name, const Document& doc) {
+        g_context = QStringLiteral("часовые пояса / ") + name;
+        g_contextFailures = 0;
+        const LogModel& m = *doc.model;
+        CHECK(m.rowCount() == expected.size(),
+              QStringLiteral("строк %1, ожидается %2").arg(m.rowCount()).arg(expected.size()));
+        for (int row = 0; row < qMin(m.rowCount(), int(expected.size())); ++row) {
+            CHECK(m.messageAt(row).endsWith(expected[row]),
+                  QStringLiteral("строка %1: %2, ожидается …%3")
+                      .arg(row).arg(describe(m.messageAt(row)), expected[row]));
+            // Строка row — секунда row после 10:00:00 UTC, у нечётных ещё 500 мс.
+            const qint64 wantMs = firstMs + row * 1000 + (row % 2 ? 500 : 0);
+            CHECK(m.visibleTimestampAt(row).toMSecsSinceEpoch() == wantMs,
+                  QStringLiteral("строка %1: момент %2, ожидается %3")
+                      .arg(row).arg(describe(m.visibleTimestampAt(row)),
+                                    describe(QDateTime::fromMSecsSinceEpoch(wantMs))));
+        }
+    };
+    check(QStringLiteral("резидентный"), loadResident({ utcPath, plus2Path }, schema));
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        check(QStringLiteral("индексный, ") + describe(mode),
+              loadIndexed({ utcPath, plus2Path }, schema, mode));
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char** argv)
 {
@@ -1102,6 +1149,7 @@ int main(int argc, char** argv)
 
     testSingleFileOrdering(fileA, fileC, schema, fieldNames);
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);
+    testZonedMerge(dir, schema);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

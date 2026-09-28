@@ -7,9 +7,10 @@
 // строку лога; на десятках миллионов строк два вызова pcre2-матчера стоили
 // минуты — ручной проход по UTF-16 юнитам на порядок дешевле.
 //
-// Семантика — бит-в-бит эквивалент прежних регексов (закреплено тестом
+// Семантика — бит-в-бит эквивалент регексов (закреплено тестом
 // в tests/lineindex_smoke):
-//   isoTimestampDetectPattern():  (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})([.,]\d+)?
+//   isoTimestampDetectPattern():  (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})
+//                                 + timestampSuffixDetectPattern() (дробь, зона)
 //   levelDetectPattern():         \b(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b
 //                                 (CaseInsensitive)
 // Важные детали эквивалентности:
@@ -18,6 +19,13 @@
 //   • регистронезависимость достаточна ASCII-сворачиванием: ни один
 //     не-ASCII символ simple-case-fold'ом не совпадает с буквами ключевых
 //     слов (K и S, у которых такие пары есть, в словах не встречаются).
+//
+// Политика времени: метка без зоны — локальное время машины; явная зона
+// (Z, ±hh[:mm] вплотную, ±hh[:]mm или UTC/GMT через пробел, в пределах
+// ±14:00) задаёт момент точно. Дробная часть любой длины усекается до
+// миллисекунд (".1" — 100 мс). Текст строки не меняется — зона влияет только
+// на момент: порядок, фильтр по времени, таймлайн. Сверка с заранее
+// известными моментами — testTimestampGolden в tests/lineindex_smoke.
 // ============================================================================
 
 namespace {
@@ -47,7 +55,130 @@ inline int num2(const QChar* d, qsizetype off)
 
 struct TsComponents {
     int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
+    bool hasZone = false;   // иначе — локальное время машины
+    int offsetMinutes = 0;  // к востоку от UTC
 };
+
+inline bool digitAt(const QChar* d, qsizetype n, qsizetype at)
+{
+    return at < n && isAsciiDigit(d[at].unicode());
+}
+
+// Две ASCII-цифры по смещению → 0..99, иначе -1.
+inline int twoDigitsAt(const QChar* d, qsizetype n, qsizetype at)
+{
+    return (digitAt(d, n, at) && digitAt(d, n, at + 1)) ? num2(d, at) : -1;
+}
+
+// Реальные зоны лежат в пределах −12:00…+14:00; дальше ±14:00 — не зона.
+constexpr int kMaxOffsetMinutes = 14 * 60;
+
+// Зона сразу после секунд (или дробной части) с позиции pos. Порядок
+// разбора повторяет регекс timestampSuffixDetectPattern() вместе с его
+// откатами: у «вплотную» длинная форма ±hh[:]mm берётся, только если за ней
+// не цифра, иначе ±hh; через пробел — только полная форма. Синтаксически
+// зона, но невозможное смещение (mm > 59 или дальше ±14:00) — как метка
+// без зоны.
+void scanZone(const QChar* d, qsizetype n, qsizetype pos, TsComponents& c)
+{
+    if (pos >= n)
+        return;
+    const char16_t ch = d[pos].unicode();
+    int sign = 0, hh = -1, mm = 0;
+    if (ch == u'Z' || ch == u'z') {
+        if (pos + 1 < n && isWordChar(d[pos + 1].unicode()))
+            return;
+        c.hasZone = true;
+        return;
+    }
+    if (ch == u'+' || ch == u'-') {
+        hh = twoDigitsAt(d, n, pos + 1);
+        if (hh < 0)
+            return;
+        const qsizetype afterHours = pos + 3;
+        const qsizetype mmAt = (afterHours < n && d[afterHours] == QLatin1Char(':'))
+            ? afterHours + 1 : afterHours;
+        const int minutes = twoDigitsAt(d, n, mmAt);
+        if (minutes >= 0 && !digitAt(d, n, mmAt + 2))
+            mm = minutes;
+        else if (digitAt(d, n, afterHours))
+            return;
+        sign = ch == u'+' ? 1 : -1;
+    } else if (ch == u' ' && pos + 1 < n) {
+        const char16_t next = d[pos + 1].unicode();
+        if (next == u'+' || next == u'-') {
+            hh = twoDigitsAt(d, n, pos + 2);
+            if (hh < 0)
+                return;
+            const qsizetype mmAt = (pos + 4 < n && d[pos + 4] == QLatin1Char(':'))
+                ? pos + 5 : pos + 4;
+            mm = twoDigitsAt(d, n, mmAt);
+            if (mm < 0 || digitAt(d, n, mmAt + 2))
+                return;
+            sign = next == u'+' ? 1 : -1;
+        } else {
+            // Самый частый случай горячего пути: «метка, пробел, уровень» —
+            // отсекаем по первой букве, без сравнения строк.
+            if ((next != u'U' && next != u'G') || pos + 4 > n)
+                return;
+            const char16_t b = d[pos + 2].unicode(), e = d[pos + 3].unicode();
+            const bool utc = next == u'U' && b == u'T' && e == u'C';
+            const bool gmt = next == u'G' && b == u'M' && e == u'T';
+            if (!utc && !gmt)
+                return;
+            const qsizetype after = pos + 4;
+            if (after < n) {
+                const char16_t a = d[after].unicode();
+                if (isWordChar(a) || a == u'+' || a == u'-')
+                    return; // "UTC+3" и подобное — не разбираем, как без зоны
+            }
+            c.hasZone = true;
+            return;
+        }
+    } else {
+        return;
+    }
+    if (mm > 59 || hh * 60 + mm > kMaxOffsetMinutes)
+        return;
+    c.hasZone = true;
+    c.offsetMinutes = sign * (hh * 60 + mm);
+}
+
+// Дробная часть ([.,]\d+ — жадно все цифры) и зона после секунд с позиции
+// pos. Миллисекунды — первые три цифры, дополненные нулями: ".1" = 100 мс,
+// ".123456789" = 123 мс.
+void scanFractionAndZone(const QChar* d, qsizetype n, qsizetype pos, TsComponents& c)
+{
+    c.millis = 0;
+    c.hasZone = false;
+    c.offsetMinutes = 0;
+    if (pos + 1 < n && (d[pos] == QLatin1Char('.') || d[pos] == QLatin1Char(','))
+        && isAsciiDigit(d[pos + 1].unicode())) {
+        int digits = 0;
+        for (++pos; pos < n && isAsciiDigit(d[pos].unicode()); ++pos, ++digits) {
+            if (digits < 3)
+                c.millis = c.millis * 10 + (d[pos].unicode() - u'0');
+        }
+        for (; digits < 3; ++digits)
+            c.millis *= 10;
+    }
+    scanZone(d, n, pos, c);
+}
+
+// Дней от 1970-01-01 в пролептическом григорианском календаре
+// (days_from_civil, H. Hinnant). Год — в нумерации QDate: нулевого года нет,
+// -1 — это 1 г. до н. э. (фолбэк-форматы через toInt пропускают знак).
+qint64 daysFromCivil(int y, int m, int d)
+{
+    if (y < 0)
+        ++y; // к астрономической нумерации, где 1 г. до н. э. — нулевой
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const int yoe = y - era * 400;
+    const int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return qint64(era) * 146097 + doe - 719468;
+}
 
 // Компоненты локального времени → мс epoch с кэшем конверсии по минуте.
 // Конверсия локаль→epoch (QDateTime) на Windows стоит микросекунды; прежний
@@ -71,12 +202,22 @@ qint64 cachedEpochMs(const TsComponents& c)
     return lastMinuteEpochMs + c.second * 1000 + c.millis;
 }
 
-// Самое левое вхождение формы dddd-dd-dd[ T]dd:dd:dd (+ [.,]цифры).
-// Возвращает: 1 — форма найдена и разобрана (валидность даты/времени НЕ
-// проверена), -1 — форма найдена, но отвергнута (переполнение миллисекунд,
-// как у прежнего QString::toInt — отказ без отката к другим форматам),
-// 0 — формы в строке нет.
-int scanIsoTimestamp(const QString& line, TsComponents& c)
+// Момент метки в мс epoch: с явной зоной — арифметикой, без QDateTime и
+// без базы зон; без зоны — локальное время через кэш по минуте.
+qint64 epochMs(const TsComponents& c)
+{
+    if (!c.hasZone)
+        return cachedEpochMs(c);
+    const qint64 seconds = daysFromCivil(c.year, c.month, c.day) * 86400
+        + c.hour * 3600 + c.minute * 60 + c.second - c.offsetMinutes * 60;
+    return seconds * 1000 + c.millis;
+}
+
+// Самое левое вхождение формы dddd-dd-dd[ T]dd:dd:dd, затем дробная часть
+// и зона. true — форма найдена и разобрана (валидность даты/времени НЕ
+// проверена: невалидная форма — отказ без отката к другим форматам);
+// false — формы в строке нет.
+bool scanIsoTimestamp(const QString& line, TsComponents& c)
 {
     const QChar* d = line.constData();
     const qsizetype n = line.size();
@@ -106,7 +247,7 @@ int scanIsoTimestamp(const QString& line, TsComponents& c)
         }
     }
     if (at < 0)
-        return 0;
+        return false;
 
     c.year   = num2(d, at) * 100 + num2(d, at + 2);
     c.month  = num2(d, at + 5);
@@ -114,29 +255,12 @@ int scanIsoTimestamp(const QString& line, TsComponents& c)
     c.hour   = num2(d, at + 11);
     c.minute = num2(d, at + 14);
     c.second = num2(d, at + 17);
-
-    c.millis = 0;
-    const qsizetype dot = at + 19;
-    if (dot + 1 < n
-        && (d[dot] == QLatin1Char('.') || d[dot] == QLatin1Char(','))
-        && isAsciiDigit(d[dot + 1].unicode())) {
-        // ([.,]\d+) — жадно вся цепочка цифр.
-        qint64 v = 0;
-        bool overflow = false;
-        for (qsizetype k = dot + 1; k < n && isAsciiDigit(d[k].unicode()); ++k) {
-            if (!overflow) {
-                v = v * 10 + (d[k].unicode() - u'0');
-                overflow = v > qint64(std::numeric_limits<int>::max());
-            }
-        }
-        if (overflow)
-            return -1;
-        c.millis = int(v);
-    }
-    return 1;
+    scanFractionAndZone(d, n, at + 19, c);
+    return true;
 }
 
-// Ручные фолбэк-форматы (dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy — с позиции 0).
+// Ручные фолбэк-форматы (dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy — с позиции 0),
+// за секундами — те же дробная часть и зона, что у ISO-формы.
 // true — c заполнен И дата/время валидны (проверка per-format, как раньше).
 bool scanFallbackFormats(const QString& line, const QStringList& formats,
                          TsComponents& c)
@@ -195,7 +319,8 @@ bool scanFallbackFormats(const QString& line, const QStringList& formats,
 
         if (convOk && QDate::isValid(year, month, day) && QTime::isValid(hour, minute, second, millis)) {
             c.year = year; c.month = month; c.day = day;
-            c.hour = hour; c.minute = minute; c.second = second; c.millis = millis;
+            c.hour = hour; c.minute = minute; c.second = second;
+            scanFractionAndZone(line.constData(), line.size(), 19, c);
             return true;
         }
     }
@@ -220,43 +345,31 @@ bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts) const
 {
     // QDateTime строится ИЗ мс epoch (одна конверсия, и та из кэша по минуте)
     // вместо прежних setDate+setTime (две конверсии локаль→epoch на строку).
-    TsComponents c;
-    const int iso = scanIsoTimestamp(line, c);
-    if (iso != 0) {
-        if (iso > 0 && QDate::isValid(c.year, c.month, c.day)
-            && QTime::isValid(c.hour, c.minute, c.second, c.millis)) {
-            ts = QDateTime::fromMSecsSinceEpoch(cachedEpochMs(c));
-            return true;
-        }
-        return false; // невалидная дата/время, несмотря на совпадение формы
-    }
-
-    if (scanFallbackFormats(line, m_timeFormats, c)) {
-        ts = QDateTime::fromMSecsSinceEpoch(cachedEpochMs(c));
+    qint64 msecs = 0;
+    if (detectTimestampMs(line, msecs)) {
+        ts = QDateTime::fromMSecsSinceEpoch(msecs);
         return true;
     }
-
     ts = QDateTime();
     return false;
 }
 
 bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs) const
 {
-    // Как detectTimestamp, но без построения QDateTime вовсе — для горячего
-    // пути индексатора, которому нужны только мс epoch.
+    // Без построения QDateTime вовсе — горячий путь индексатора, которому
+    // нужны только мс epoch.
     TsComponents c;
-    const int iso = scanIsoTimestamp(line, c);
-    if (iso != 0) {
-        if (iso > 0 && QDate::isValid(c.year, c.month, c.day)
+    if (scanIsoTimestamp(line, c)) {
+        if (QDate::isValid(c.year, c.month, c.day)
             && QTime::isValid(c.hour, c.minute, c.second, c.millis)) {
-            msecs = cachedEpochMs(c);
+            msecs = epochMs(c);
             return true;
         }
-        return false;
+        return false; // невалидная дата/время, несмотря на совпадение формы
     }
 
     if (scanFallbackFormats(line, m_timeFormats, c)) {
-        msecs = cachedEpochMs(c);
+        msecs = epochMs(c);
         return true;
     }
     return false;

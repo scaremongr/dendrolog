@@ -65,9 +65,10 @@ PatternBlock makeBlock(PatternBlock::MatchKind kind,
 QString timestampRegex()
 {
     // Optional date (ISO "2024-01-31", EU "31.01.2024", slashed) + time
-    // "12:34:56" with optional fraction. Date alone is not a timestamp.
+    // "12:34:56" with optional fraction and a zone glued to it. Date alone
+    // is not a timestamp. A zone after a space is left to the next block.
     return QStringLiteral(
-        R"((?:\d{4}[-/.]\d{2}[-/.]\d{2}[T ]|\d{2}[-/.]\d{2}[-/.]\d{4}[ ])?\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)");
+        R"((?:\d{4}[-/.]\d{2}[-/.]\d{2}[T ]|\d{2}[-/.]\d{2}[-/.]\d{4}[ ])?\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:[Zz]|[+-]\d{2}(?::?\d{2})?)?)");
 }
 
 QString levelRegex()
@@ -106,11 +107,20 @@ QString filePathRegex()
         R"((?:[A-Za-z]:)?[\\/]*[^\r\n\s<>:"|?*\\/]+(?:[\\/]+[^\r\n\s<>:"|?*\\/]+)*)");
 }
 
+QString timestampSuffixDetectPattern()
+{
+    return QStringLiteral(
+        R"(([.,]\d+)?)"
+        R"((?:([Zz])(?![A-Za-z0-9_]))"
+        R"(|([+-]\d{2})(?::?(\d{2}))?(?!\d))"
+        R"(| ([+-]\d{2}):?(\d{2})(?!\d))"
+        R"(| (UTC|GMT)(?![A-Za-z0-9_+-]))?)");
+}
+
 QString isoTimestampDetectPattern()
 {
-    // Capture layout used by LogParser::detectTimestamp:
-    // (1) = "YYYY-MM-DD HH:MM:SS" (fixed offsets), (2) = "[.,]fff".
-    return QStringLiteral(R"((\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})([.,]\d+)?)");
+    return QStringLiteral(R"((\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}))")
+         + timestampSuffixDetectPattern();
 }
 
 QString levelDetectPattern()

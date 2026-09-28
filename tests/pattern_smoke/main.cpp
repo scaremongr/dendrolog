@@ -67,6 +67,17 @@ int main(int argc, char** argv)
         CHECK(fieldValue(p, line, "Message") == "Something failed", "message value");
     }
 
+    // 1b. A zone glued to the time belongs to the timestamp value
+    for (const QString ts : {QStringLiteral("2025-06-11T12:00:01.123Z"),
+                             QStringLiteral("2025-06-11T12:00:01+02:00"),
+                             QStringLiteral("2025-06-11 12:00:01.123456-0530")}) {
+        const QString line = ts + " [worker-1] ERROR - zoned";
+        const LineMatchResult r = p.matchLine(line);
+        CHECK(r.ok && r.unparsedStart == -1, QString("zoned timestamp matches: %1").arg(ts));
+        CHECK(fieldValue(p, line, "Timestamp") == ts, QString("zone kept in value: %1").arg(ts));
+        CHECK(fieldValue(p, line, "Level") == "ERROR", QString("level after zone: %1").arg(ts));
+    }
+
     // 2. Whitespace collapsing: extra spaces / tabs between blocks
     {
         const QString line = "2025-06-11 12:00:01   [worker-1]\tWARN  -  padded";

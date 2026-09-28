@@ -44,6 +44,7 @@ filtering, highlighting and live reload.
 
 - **Log level** — toolbar buttons (Trace…Fatal) or the `Filters → Log Level` menu.
 - **Time range** — *Time Range Filter* panel: set From/To and Apply. A selected timestamp can be sent here from the context menu.
+- **How line times are read.** A timestamp without a time zone is taken as local time on this computer. An explicit zone is honoured: `Z`, `+02:00`, `+0200`, `+02` right after the time, and `+02:00`, `+0200`, `UTC`, `GMT` after a single space (for example, `2026-09-20 10:00:00 +0200`). So `10:00:00Z` and `12:00:00+02:00` are the same moment, and files from different zones merge correctly in one tab. Fractional seconds of any length are truncated to milliseconds (`.1` is 100 ms, `.123456` is 123 ms). The time filter, the timeline and the details panel show moments in local time; the line text is not changed.
 - **Text Filters** panel — Include/Exclude rules with AND/OR, per-rule case sensitivity and regex, optionally bound to a field. See **[Text Filters and search](#text-filters-and-search)** below for details. Filters apply to the **active tab** with **Apply** / **Reset**.
 
 ## Text Filters and search

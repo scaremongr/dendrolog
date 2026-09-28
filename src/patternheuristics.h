@@ -28,7 +28,8 @@ namespace PatternHeuristics {
 
 // ---- Canonical token sub-regexes (no captures, no anchors) ---- //
 
-// Optional date part (ISO / EU / US) followed by a mandatory time part.
+// Optional date part (ISO / EU / US) followed by a mandatory time part,
+// optional fraction and an optional zone glued to it (Z, ±hh, ±hh:mm, ±hhmm).
 QString timestampRegex();
 // TRACE/DEBUG/INFO/WARN(ING)/ERROR/FATAL/… with word boundaries.
 QString levelRegex();
@@ -37,8 +38,16 @@ QString integerRegex();
 QString ipAddressRegex();
 QString filePathRegex();
 
-// Regexes with the exact capture layout LogParser::detectTimestamp /
-// detectLogLevel rely on: (1) = "YYYY-MM-DD HH:MM:SS", (2) = "[.,]fff".
+// Reference regexes for LineClassifier's hand-written scanners (the
+// equivalence is pinned by tests/lineindex_smoke).
+//
+// What follows the seconds: fraction and time zone. Capture layout:
+// (1) "[.,]digits", (2) "Z"/"z", (3)(4) "±hh" and optional "mm" glued to the
+// time, (5)(6) "±hh" and "mm" after one space, (7) "UTC"/"GMT" after one
+// space. A zone must end at a word boundary; the offset range (mm <= 59,
+// at most ±14:00) is checked by the consumer, not by the regex.
+QString timestampSuffixDetectPattern();
+// (1) = "YYYY-MM-DD[ T]HH:MM:SS", then the suffix layout shifted by one.
 QString isoTimestampDetectPattern();
 // (1) = level word.
 QString levelDetectPattern();

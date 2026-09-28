@@ -3,6 +3,7 @@
 #include "apptheme.h"
 #include "appsettings.h"
 #include "highlightpalette.h"
+#include "lineclassifier.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -2397,6 +2398,12 @@ void LogListView::keyPressEvent(QKeyEvent *event) {
 // Разбор строки таймстампа в QDateTime по набору распространённых форматов.
 // Дробная часть секунд отбрасывается (гранулярность фильтра — секунды).
 static QDateTime parseTimestampText(const QString& raw) {
+    // Сначала тем же классификатором, что и при загрузке (ISO с дробью и
+    // зоной, фолбэк-форматы): граница фильтра — тот же момент, что у строки.
+    qint64 ms = 0;
+    if (LineClassifier().detectTimestampMs(raw.trimmed(), ms))
+        return QDateTime::fromMSecsSinceEpoch(ms - (ms % 1000 + 1000) % 1000);
+
     QString s = raw.trimmed();
     s.replace(QChar(','), QChar('.'));
     // Убрать дробные доли секунды в конце ("...:56.789" → "...:56").

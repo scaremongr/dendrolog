@@ -9,7 +9,10 @@
 //     logicalId, таймстамп, plain-text);
 //   • дозапись: переиндексация предварительного хвоста (truncateFrom) даёт
 //     тот же индекс, что свежая полная индексация итогового файла;
-//   • согласованность endOffset с якорями FileChangeDetector.
+//   • согласованность endOffset с якорями FileChangeDetector;
+//   • классификатор: ручные сканеры эквивалентны регекс-эталону, а политика
+//     времени (зоны, дробная часть, метки без зоны) сверена с заранее
+//     известными моментами.
 // ============================================================================
 
 #include "filechangedetector.h"
@@ -28,10 +31,12 @@
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimeZone>
 #include <QElapsedTimer>
 
 #include <atomic>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 static int g_failures = 0;
@@ -401,21 +406,69 @@ static void testSnapshotStability(const QDir& dir)
 }
 
 // ---------------------------------------------------------------------------
-// Эквивалентность ручных сканеров LineClassifier прежней регекс-реализации.
-// Эталон — дословная копия старого кода на QRegularExpression поверх
-// канонических паттернов PatternHeuristics (их же использует редактор схем).
+// Эквивалентность ручных сканеров LineClassifier регекс-реализации.
+// Эталон — код на QRegularExpression поверх канонических паттернов
+// PatternHeuristics, момент считается через QDateTime/QTimeZone.
+// Эквивалентность ловит ошибки сканера, но не общую ошибку семантики —
+// для неё testTimestampGolden() сверяет с заранее известными моментами.
 // ---------------------------------------------------------------------------
 
-// Прежний detectTimestamp целиком: ISO-регекс + ручные фолбэк-форматы
-// (дословная копия старой реализации, без делегирования новому коду —
-// иначе ложные срабатывания нового сканера маскировались бы).
+// Дробная часть и зона по раскладке timestampSuffixDetectPattern(); first —
+// номер группы дробной части в совпадении.
+struct RefSuffix {
+    int millis = 0;
+    bool hasZone = false;
+    int offsetSeconds = 0;
+};
+
+static RefSuffix refParseSuffix(const QRegularExpressionMatch& m, int first)
+{
+    RefSuffix s;
+    const QString fraction = m.captured(first);
+    if (!fraction.isEmpty())
+        s.millis = fraction.mid(1).left(3).leftJustified(3, QLatin1Char('0')).toInt();
+
+    int hhGroup = -1;
+    if (m.hasCaptured(first + 1) || m.hasCaptured(first + 6)) {
+        s.hasZone = true; // Z / UTC / GMT
+        return s;
+    }
+    if (m.hasCaptured(first + 2))
+        hhGroup = first + 2;
+    else if (m.hasCaptured(first + 4))
+        hhGroup = first + 4;
+    else
+        return s;
+    const QString hh = m.captured(hhGroup);
+    const int hours = hh.mid(1).toInt();
+    const int minutes = m.hasCaptured(hhGroup + 1) ? m.captured(hhGroup + 1).toInt() : 0;
+    if (minutes > 59 || hours * 60 + minutes > 14 * 60)
+        return s; // невозможное смещение (дальше ±14:00) — как без зоны
+    s.hasZone = true;
+    s.offsetSeconds = (hh.startsWith(QLatin1Char('-')) ? -1 : 1) * (hours * 3600 + minutes * 60);
+    return s;
+}
+
+static QDateTime refMoment(int year, int month, int day, int hour, int minute,
+                           int second, const RefSuffix& s)
+{
+    const QDate date(year, month, day);
+    const QTime time(hour, minute, second, s.millis);
+    if (!s.hasZone)
+        return QDateTime(date, time); // локальное время машины
+    return QDateTime(date, time, QTimeZone::fromSecondsAheadOfUtc(s.offsetSeconds));
+}
+
+// detectTimestamp целиком: ISO-регекс + ручные фолбэк-форматы, без
+// делегирования новому коду — иначе ложные срабатывания сканера
+// маскировались бы.
 static bool refDetectTimestamp(const QRegularExpression& isoRe,
+                               const QRegularExpression& suffixRe,
                                const QString& line, QDateTime& ts)
 {
     const auto match = isoRe.match(line);
     if (match.hasMatch()) {
         const auto dateTimePartRef = match.capturedView(1);
-        const auto millisPartRef = match.capturedView(2);
 
         bool ok = true;
         const int year = dateTimePartRef.mid(0, 4).toInt(&ok);
@@ -431,16 +484,10 @@ static bool refDetectTimestamp(const QRegularExpression& isoRe,
         const int second = dateTimePartRef.mid(17, 2).toInt(&ok);
         if (!ok) return false;
 
-        int millis = 0;
-        if (!millisPartRef.isEmpty()) {
-            millis = millisPartRef.mid(1).toInt(&ok);
-            if (!ok) return false;
-        }
-
+        const RefSuffix suffix = refParseSuffix(match, 2);
         if (QDate::isValid(year, month, day)
-            && QTime::isValid(hour, minute, second, millis)) {
-            ts.setDate(QDate(year, month, day));
-            ts.setTime(QTime(hour, minute, second, millis));
+            && QTime::isValid(hour, minute, second, suffix.millis)) {
+            ts = refMoment(year, month, day, hour, minute, second, suffix);
             return true;
         }
         return false;
@@ -498,8 +545,9 @@ static bool refDetectTimestamp(const QRegularExpression& isoRe,
 
         if (convOk && QDate::isValid(year, month, day)
             && QTime::isValid(hour, minute, second, millis)) {
-            ts.setDate(QDate(year, month, day));
-            ts.setTime(QTime(hour, minute, second, millis));
+            const auto suffix = suffixRe.match(line, 19, QRegularExpression::NormalMatch,
+                                               QRegularExpression::AnchorAtOffsetMatchOption);
+            ts = refMoment(year, month, day, hour, minute, second, refParseSuffix(suffix, 1));
             return true;
         }
     }
@@ -521,12 +569,13 @@ static bool refDetectLogLevel(const QRegularExpression& levelRe,
 
 static void checkClassifierLine(const LineClassifier& classifier,
                                 const QRegularExpression& isoRe,
+                                const QRegularExpression& suffixRe,
                                 const QRegularExpression& levelRe,
                                 const QString& line)
 {
     QDateTime tsNew, tsRef;
     const bool hasNew = classifier.detectTimestamp(line, tsNew);
-    const bool hasRef = refDetectTimestamp(isoRe, line, tsRef);
+    const bool hasRef = refDetectTimestamp(isoRe, suffixRe, line, tsRef);
     if (hasNew != hasRef || (hasNew && tsNew != tsRef)) {
         ++g_failures;
         std::fprintf(stderr,
@@ -563,8 +612,13 @@ static void testClassifierRegexEquivalence()
 {
     const LineClassifier classifier;
     const QRegularExpression isoRe(PatternHeuristics::isoTimestampDetectPattern());
+    const QRegularExpression suffixRe(PatternHeuristics::timestampSuffixDetectPattern());
     const QRegularExpression levelRe(PatternHeuristics::levelDetectPattern(),
                                      QRegularExpression::CaseInsensitiveOption);
+    CHECK(isoRe.isValid() && suffixRe.isValid(), "reference timestamp regexes compile");
+    const auto check = [&](const QString& line) {
+        checkClassifierLine(classifier, isoRe, suffixRe, levelRe, line);
+    };
 
     const QStringList corpus = {
         QString(),
@@ -613,14 +667,43 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("2026-07-11 10:22:33,123 WARN [net] полная строка"),
         QStringLiteral("\ttab\tINFO\ttabs"),
         QStringLiteral("00000000-0000-0000 00:00:00"),
+        QStringLiteral("2026-07-11T10:22:33Z INFO utc"),
+        QStringLiteral("2026-07-11T10:22:33.5z lowercase z"),
+        QStringLiteral("2026-07-11T10:22:33Zulu word after Z"),
+        QStringLiteral("2026-07-11T10:22:33Z_ underscore after Z"),
+        QStringLiteral("2026-07-11T10:22:33+02:00 colon offset"),
+        QStringLiteral("2026-07-11T10:22:33-0530 compact offset"),
+        QStringLiteral("2026-07-11T10:22:33+02 hours offset"),
+        QStringLiteral("2026-07-11T10:22:33+2 one digit"),
+        QStringLiteral("2026-07-11T10:22:33+023 three digits"),
+        QStringLiteral("2026-07-11T10:22:33+02001 five digits"),
+        QStringLiteral("2026-07-11T10:22:33+02:0012 digits after minutes"),
+        QStringLiteral("2026-07-11T10:22:33+02:0 short minutes"),
+        QStringLiteral("2026-07-11T10:22:33+24:00 hour out of range"),
+        QStringLiteral("2026-07-11T10:22:33+02:60 minute out of range"),
+        QStringLiteral("2026-07-11 10:22:33 +0200 spaced compact"),
+        QStringLiteral("2026-07-11 10:22:33 -05:30 spaced colon"),
+        QStringLiteral("2026-07-11 10:22:33 +02 spaced hours only"),
+        QStringLiteral("2026-07-11 10:22:33 +02:001 spaced extra digit"),
+        QStringLiteral("2026-07-11 10:22:33.123 UTC [1] LOG"),
+        QStringLiteral("2026-07-11 10:22:33 GMT"),
+        QStringLiteral("2026-07-11 10:22:33 UTC+3"),
+        QStringLiteral("2026-07-11 10:22:33 UTCx"),
+        QStringLiteral("2026-07-11 10:22:33 utc lowercase"),
+        QStringLiteral("2026-07-11 10:22:33  UTC two spaces"),
+        QStringLiteral("2026-07-11 10:22:33. +02:00 dot then zone"),
+        QStringLiteral("2026-07-11 10:22:33.123456789Z nanos"),
+        QStringLiteral("2026-07-11 10:22:33,999999999999 long fraction"),
+        QStringLiteral("11/07/2026 10:22:33.25Z fallback with suffix"),
+        QStringLiteral("31.12.2025 23:59:59,5 +0100 dotted with zone"),
     };
     for (const QString& line : corpus)
-        checkClassifierLine(classifier, isoRe, levelRe, line);
+        check(line);
 
-    // Детерминированный фаззинг: плотный алфавит вокруг цифр, разделителей и
-    // букв ключевых слов, чтобы случайно собирались почти-совпадения.
+    // Детерминированный фаззинг: плотный алфавит вокруг цифр, разделителей,
+    // зон и букв ключевых слов, чтобы случайно собирались почти-совпадения.
     const QString alphabet = QStringLiteral(
-        "0123456789-:.,/ TIWEDFANROGLZzest_[]абвШKſ");
+        "0123456789-+:.,/ TIWEDFANROGLZzUCMest_[]абвШKſ");
     QRandomGenerator rng(1234567);
     for (int iter = 0; iter < 20000; ++iter) {
         const int len = int(rng.bounded(61));
@@ -628,15 +711,105 @@ static void testClassifierRegexEquivalence()
         line.reserve(len);
         for (int k = 0; k < len; ++k)
             line.append(alphabet.at(int(rng.bounded(alphabet.size()))));
-        checkClassifierLine(classifier, isoRe, levelRe, line);
+        check(line);
     }
 
-    // Фаззинг «почти таймстампов»: валидная основа с точечными искажениями.
-    for (int iter = 0; iter < 4000; ++iter) {
-        QString line = QStringLiteral("2026-07-11 10:22:33,123 INFO msg");
-        const int pos = int(rng.bounded(line.size()));
-        line[pos] = alphabet.at(int(rng.bounded(alphabet.size())));
-        checkClassifierLine(classifier, isoRe, levelRe, line);
+    // Фаззинг «почти таймстампов»: валидные основы с точечными искажениями.
+    const QStringList bases = {
+        QStringLiteral("2026-07-11 10:22:33,123 INFO msg"),
+        QStringLiteral("2026-07-11T10:22:33.123+02:00 INFO msg"),
+        QStringLiteral("2026-07-11 10:22:33 -0530 WARN msg"),
+        QStringLiteral("2026-07-11 10:22:33.5 UTC ERROR msg"),
+        QStringLiteral("11.07.2026 10:22:33,1Z INFO msg"),
+    };
+    for (const QString& base : bases) {
+        for (int iter = 0; iter < 4000; ++iter) {
+            QString line = base;
+            const int pos = int(rng.bounded(line.size()));
+            line[pos] = alphabet.at(int(rng.bounded(alphabet.size())));
+            check(line);
+        }
+    }
+}
+
+// Политика времени на заранее известных моментах — независимо от эталонной
+// регекс-реализации, которая могла бы ошибаться так же, как сканер.
+static void testTimestampGolden()
+{
+    const LineClassifier classifier;
+    const auto utc = [](int y, int mo, int d, int h, int mi, int s, int ms) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s, ms), QTimeZone::UTC)
+            .toMSecsSinceEpoch();
+    };
+    const auto local = [](int y, int mo, int d, int h, int mi, int s, int ms) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s, ms)).toMSecsSinceEpoch();
+    };
+    const qint64 tenUtc = utc(2026, 9, 20, 10, 0, 0, 0);
+    const qint64 tenLocal = local(2026, 9, 20, 10, 0, 0, 0);
+    constexpr qint64 kNoTimestamp = std::numeric_limits<qint64>::min();
+
+    const struct { const char* line; qint64 expected; } cases[] = {
+        // Одинаковый момент в разных записях зоны.
+        { "2026-09-20T10:00:00Z INFO", tenUtc },
+        { "2026-09-20T10:00:00z", tenUtc },
+        { "2026-09-20T12:00:00+02:00 INFO", tenUtc },
+        { "2026-09-20T12:00:00+0200", tenUtc },
+        { "2026-09-20T12:00:00+02 INFO", tenUtc },
+        { "2026-09-20T04:30:00-05:30", tenUtc },
+        { "2026-09-20 12:00:00 +0200 git --date=iso", tenUtc },
+        { "2026-09-20 04:30:00 -05:30 msg", tenUtc },
+        { "2026-09-20 10:00:00 GMT", tenUtc },
+        { "2026-09-20 10:00:00.123 UTC [42] LOG: postgres", utc(2026, 9, 20, 10, 0, 0, 123) },
+        // Дробная часть — доли секунды, усечение до миллисекунд.
+        { "2026-09-20T10:00:00.1Z", utc(2026, 9, 20, 10, 0, 0, 100) },
+        { "2026-09-20T10:00:00.12Z", utc(2026, 9, 20, 10, 0, 0, 120) },
+        { "2026-09-20T10:00:00.123Z", utc(2026, 9, 20, 10, 0, 0, 123) },
+        { "2026-09-20T10:00:00,5Z", utc(2026, 9, 20, 10, 0, 0, 500) },
+        { "2026-09-20T10:00:00.123456Z", utc(2026, 9, 20, 10, 0, 0, 123) },
+        { "2026-09-20T10:00:00.123456789Z", utc(2026, 9, 20, 10, 0, 0, 123) },
+        { "2026-09-20T10:00:00.1234567890123Z", utc(2026, 9, 20, 10, 0, 0, 123) },
+        // Переход суток, года, 29 февраля, крайние смещения.
+        { "2026-09-20T01:00:00+03:00", utc(2026, 9, 19, 22, 0, 0, 0) },
+        { "2026-12-31T23:30:00-01:00", utc(2027, 1, 1, 0, 30, 0, 0) },
+        { "2028-02-29T23:59:59.999-00:30", utc(2028, 3, 1, 0, 29, 59, 999) },
+        { "2026-01-01T00:00:00+14:00", utc(2025, 12, 31, 10, 0, 0, 0) },
+        { "2026-01-01T00:00:00-12:00", utc(2026, 1, 1, 12, 0, 0, 0) },
+        { "1970-01-01T00:00:00Z", 0 },
+        // Фолбэк-форматы получают ту же дробь и зону.
+        { "20.09.2026 12:00:00,250+02:00 INFO", utc(2026, 9, 20, 10, 0, 0, 250) },
+        { "20/09/2026 10:00:00Z", tenUtc },
+        { "20.09.2026 10:00:00,5 INFO", local(2026, 9, 20, 10, 0, 0, 500) },
+        // Без зоны — локальное время машины.
+        { "2026-09-20 10:00:00 INFO", tenLocal },
+        { "2026-09-20 10:00:00,5 INFO", local(2026, 9, 20, 10, 0, 0, 500) },
+        // Похоже на зону, но не зона — тоже локальное время.
+        { "2026-09-20T10:00:00Zulu", tenLocal },
+        { "2026-09-20 10:00:00 UTC+3", tenLocal },
+        { "2026-09-20 10:00:00 +1 points", tenLocal },
+        { "2026-09-20T10:00:00+25:00", tenLocal },
+        { "2026-09-20T10:00:00-14:30", tenLocal },
+        { "2026-09-20T10:00:00+02:75", tenLocal },
+        { "2026-09-20 10:00:00 +02:0", tenLocal },
+        { "2026-09-20 10:00:00 - message", tenLocal },
+        // Известная неоднозначность: четыре цифры со знаком через пробел —
+        // это зона, даже если автор имел в виду число в тексте сообщения.
+        { "2026-09-20 10:00:00 -1000 balance", utc(2026, 9, 20, 20, 0, 0, 0) },
+        // Невалидная дата — не таймстамп, зона не спасает.
+        { "2026-02-30T10:00:00Z", kNoTimestamp },
+    };
+    for (const auto& c : cases) {
+        const QString line = QString::fromUtf8(c.line);
+        qint64 ms = kNoTimestamp;
+        const bool found = classifier.detectTimestampMs(line, ms);
+        QDateTime ts;
+        const bool foundDt = classifier.detectTimestamp(line, ts);
+        const qint64 got = found ? ms : kNoTimestamp;
+        const qint64 gotDt = foundDt ? ts.toMSecsSinceEpoch() : kNoTimestamp;
+        if (got != c.expected || gotDt != c.expected) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL golden timestamp '%s': ms=%lld dt=%lld expected=%lld\n",
+                         c.line, (long long)got, (long long)gotDt, (long long)c.expected);
+        }
     }
 }
 
@@ -872,6 +1045,7 @@ int main(int argc, char** argv)
     const QDir dir(tmp.path());
 
     testClassifierRegexEquivalence();
+    testTimestampGolden();
     testGolden(dir);
     testBom(dir);
     testBlockBoundaries(dir);

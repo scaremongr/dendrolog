@@ -24,6 +24,17 @@ All notable changes to DendroLog are documented here. The format follows
   Settings instead of always using 256 MB.
 - File system errors in Save View As are shown in the system language instead
   of garbled characters on non-English Windows.
+- Timestamps with an explicit time zone are read as the moment they denote:
+  `Z`, `+02:00`, `+0200` or `+02` right after the time, and `+02:00`, `+0200`,
+  `UTC` or `GMT` after a space. The zone used to be ignored and the time taken
+  as local, which misordered merged files from different zones and shifted the
+  time filter and the timeline. Timestamps without a zone are still local time.
+- Fractional seconds are read as fractions: `,7` is 700 ms, not 7 ms.
+  Timestamps with microseconds or nanoseconds are recognised (lines with more
+  than three fraction digits used to get no timestamp at all), and
+  `dd.MM.yyyy` / `dd/MM/yyyy` timestamps keep their fraction and zone too.
+- A schema Timestamp field now includes a zone glued to the time, so lines
+  such as `2026-09-20T10:00:00Z INFO …` match the schema.
 
 ## [0.3.0] — 2026-09-19
 
