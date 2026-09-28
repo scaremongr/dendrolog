@@ -11,6 +11,7 @@
 #include <atomic>
 
 class QTimer;
+class SequentialLineReaders;
 
 // ============================================================================
 // IndexedLogStore — бэкенд очень больших файлов: текст на диске, в памяти
@@ -96,20 +97,28 @@ private:
     static int refFile(RowRef ref) { return int(ref >> kFileBits); }
     static qint64 refLine(RowRef ref) { return qint64(ref & ((RowRef(1) << kFileBits) - 1)); }
 
-    // Тождественный режим — полный один файл: row == line, m_allRefs
-    // пуст. Учитываются число файлов и явная поисковая база, а не пустота
-    // m_allRefs: файлы,
-    // подключённые до первого батча, оставляли m_allRefs пустым, и стор
-    // считал вкладку одно-файловой — allCount() отдавал 0 строк.
+    // Тождественный режим — полный один файл: row == line, m_allRefs пуст.
+    // Решают число файлов и явная поисковая база, а не пустота m_allRefs:
+    // файлы, подключённые до первого батча, оставляли m_allRefs пустым, и
+    // стор считал вкладку одно-файловой — allCount() отдавал 0 строк.
     bool identityAll() const { return m_files.size() <= 1 && !m_explicitBase; }
     RowRef rowToRef(int visibleRow) const;
     // Глобальный порядок строк — зеркало LogEntry::operator< по метаданным.
     bool lessRef(RowRef a, RowRef b) const;
-    // Порядок строк ВКЛАДКИ, в котором лежат m_allRefs и m_visibleRefs:
-    // один файл — порядок файла (включая поисковую базу), иначе lessRef. Все бинарные
-    // поиски и слияния по этим спискам обязаны идти по нему — lessRef на
-    // одно-файловой вкладке с метками не по порядку промахивается.
+    // Порядок строк ВКЛАДКИ, в котором лежат m_allRefs и m_visibleRefs: один
+    // файл — порядок файла (включая поисковую базу), иначе lessRef. Все
+    // бинарные поиски и слияния по этим спискам обязаны идти по нему — lessRef
+    // на одно-файловой вкладке с метками не по порядку промахивается.
     bool rowLess(RowRef a, RowRef b) const { return m_files.size() <= 1 ? a < b : lessRef(a, b); }
+    // Номер файла вкладки; -1, если такой файл не подключён.
+    int fileIdOf(const LogFile* file) const;
+    // Первая строка логической записи id в файле (logicalId по строкам не
+    // убывает — двоичный поиск); -1, если записи в файле нет.
+    static qint64 firstLineOfRecord(const LineIndex& index, quint32 id);
+    QStringList filePaths() const;
+    // Текст видимой строки для синхронного скана (быстрый поиск): через
+    // ридеры скана, чтобы не вымывать кэш вьюпорта.
+    const QString& scanTextAt(SequentialLineReaders& readers, int visibleRow) const;
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;

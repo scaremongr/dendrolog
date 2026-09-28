@@ -158,10 +158,7 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
 {
     if (!logFile || count <= 0)
         return;
-    int fileId = -1;
-    for (int i = 0; i < m_files.size(); ++i) {
-        if (m_files[i].logFile == logFile) { fileId = i; break; }
-    }
+    const int fileId = fileIdOf(logFile.get());
     if (fileId < 0)
         return;
 
@@ -290,13 +287,10 @@ void IndexedLogStore::resetFileIndex(const LogFilePtr& logFile,
     m_newRefs.clear();
 
     m_model.beginResetModel();
-    for (int i = 0; i < m_files.size(); ++i) {
-        if (m_files[i].logFile != logFile)
-            continue;
-        m_files[i].index = std::move(fresh);
-        m_textCache.invalidateFile(m_files[i].cacheFileId);
+    if (const int fileId = fileIdOf(logFile.get()); fileId >= 0) {
+        m_files[fileId].index = std::move(fresh);
+        m_textCache.invalidateFile(m_files[fileId].cacheFileId);
         if (!identityAll()) {
-            const int fileId = i;
             m_allRefs.erase(std::remove_if(m_allRefs.begin(), m_allRefs.end(),
                                            [fileId](RowRef r) {
                                                return refFile(r) == fileId;
@@ -305,7 +299,6 @@ void IndexedLogStore::resetFileIndex(const LogFilePtr& logFile,
         } else {
             m_shownAllCount = 0; // единственный файл начинает с нуля
         }
-        break;
     }
     if (!m_identityVisible)
         m_visibleRefs.clear();
@@ -395,6 +388,38 @@ bool IndexedLogStore::lessRef(RowRef a, RowRef b) const
     if (fa == fb && ida != idb)
         return ida < idb;
     return fa == fb ? la < lb : fa < fb;
+}
+
+int IndexedLogStore::fileIdOf(const LogFile* file) const
+{
+    for (int i = 0; i < m_files.size(); ++i) {
+        if (m_files[i].logFile.get() == file)
+            return i;
+    }
+    return -1;
+}
+
+qint64 IndexedLogStore::firstLineOfRecord(const LineIndex& index, quint32 id)
+{
+    const qint64 total = index.lineCount();
+    qint64 lo = 0, hi = total;
+    while (lo < hi) {
+        const qint64 mid = lo + (hi - lo) / 2;
+        if (index.logicalId(mid) < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return (lo < total && index.logicalId(lo) == id) ? lo : -1;
+}
+
+QStringList IndexedLogStore::filePaths() const
+{
+    QStringList paths;
+    paths.reserve(m_files.size());
+    for (const auto& f : m_files)
+        paths.append(f.logFile->filePath);
+    return paths;
 }
 
 bool IndexedLogStore::hasActiveFilterSettings() const
@@ -569,10 +594,7 @@ QVector<std::shared_ptr<LogEntry>> IndexedLogStore::logicalRecordLines(
     if (line->isPlainText())
         return { line };
 
-    int fileId = -1;
-    for (int i = 0; i < m_files.size(); ++i) {
-        if (m_files[i].logFile == line->sourceFile()) { fileId = i; break; }
-    }
+    const int fileId = fileIdOf(line->sourceFile().get());
     if (fileId < 0)
         return { line };
 
@@ -599,30 +621,18 @@ QVector<std::shared_ptr<LogEntry>> IndexedLogStore::logicalRecordLines(
 
 int IndexedLogStore::rowForEntry(int logicalEntryId, const LogFile* sourceFile) const
 {
-    int fileId = -1;
-    for (int i = 0; i < m_files.size(); ++i) {
-        if (m_files[i].logFile.get() == sourceFile) { fileId = i; break; }
-    }
+    const int fileId = fileIdOf(sourceFile);
     if (fileId < 0)
         return -1;
     const LineIndex& index = *m_files[fileId].index;
-    const qint64 total = index.lineCount();
-
-    // logicalId по строкам файла не убывает — двоичный поиск первой строки.
     const quint32 id = quint32(logicalEntryId);
-    qint64 lo = 0, hi = total;
-    while (lo < hi) {
-        const qint64 mid = lo + (hi - lo) / 2;
-        if (index.logicalId(mid) < id)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    if (lo >= total || index.logicalId(lo) != id)
+    const qint64 first = firstLineOfRecord(index, id);
+    if (first < 0)
         return -1;
 
     // Первая ВИДИМАЯ строка этой записи.
-    for (qint64 l = lo; l < total && index.logicalId(l) == id; ++l) {
+    const qint64 total = index.lineCount();
+    for (qint64 l = first; l < total && index.logicalId(l) == id; ++l) {
         const RowRef ref = makeRef(fileId, l);
         if (m_identityVisible) {
             if (identityAll())
@@ -651,24 +661,11 @@ int IndexedLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* source
     if (exact >= 0)
         return exact;
 
-    int fileId = -1;
-    for (int i = 0; i < m_files.size(); ++i) {
-        if (m_files[i].logFile.get() == sourceFile) { fileId = i; break; }
-    }
+    const int fileId = fileIdOf(sourceFile);
     if (fileId < 0)
         return -1;
-    const LineIndex& index = *m_files[fileId].index;
-    const qint64 total = index.lineCount();
-    const quint32 id = quint32(logicalEntryId);
-    qint64 lo = 0, hi = total;
-    while (lo < hi) {
-        const qint64 mid = lo + (hi - lo) / 2;
-        if (index.logicalId(mid) < id)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    if (lo >= total || index.logicalId(lo) != id)
+    const qint64 first = firstLineOfRecord(*m_files[fileId].index, quint32(logicalEntryId));
+    if (first < 0)
         return -1; // записи нет в данных вовсе
 
     // Запись скрыта фильтром: ближайшая видимая — первая после неё, иначе
@@ -676,7 +673,7 @@ int IndexedLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* source
     if (m_identityVisible)
         return -1; // тождество: скрытых записей не бывает — сюда не попадаем
 
-    const RowRef ref = makeRef(fileId, lo);
+    const RowRef ref = makeRef(fileId, first);
     const auto it = std::lower_bound(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
                                      ref,
                                      [this](RowRef a, RowRef b) { return rowLess(a, b); });
@@ -689,34 +686,20 @@ int IndexedLogStore::findNextOccurrence(const QString& text, int startRow,
 {
     // ВНИМАНИЕ: синхронный дисковый скан. Обычно совпадение близко и чтение
     // последовательное; на гигантских файлах без совпадений возможна пауза —
-    // асинхронный вариант заведён в план (2.9).
+    // открытая задача (CLAUDE.md, «Состояние и известные слабые места»).
     const int numRows = visibleCount();
     if (text.isEmpty() || numRows == 0)
         return -1;
 
-    std::vector<std::unique_ptr<SequentialLineReader>> readers(size_t(m_files.size()));
-    const auto lineText = [&](int row) -> const QString& {
-        const RowRef ref = rowToRef(row);
-        const int fileId = refFile(ref);
-        if (!readers[size_t(fileId)]) {
-            readers[size_t(fileId)] = std::make_unique<SequentialLineReader>(
-                m_files[fileId].logFile->filePath);
-            readers[size_t(fileId)]->open();
-        }
-        const LineIndex& index = *m_files[fileId].index;
-        const qint64 line = refLine(ref);
-        return readers[size_t(fileId)]->lineAt(index.lineStartOffset(line),
-                                       index.lineByteLength(line));
-    };
-
+    SequentialLineReaders readers(filePaths());
     const int firstRow = qBound(0, startRow + 1, numRows);
     for (int i = firstRow; i < numRows; ++i) {
-        if (lineText(i).contains(text, cs))
+        if (scanTextAt(readers, i).contains(text, cs))
             return i;
     }
     if (wrapAround) {
         for (int i = 0; i <= startRow && i < numRows; ++i) {
-            if (lineText(i).contains(text, cs))
+            if (scanTextAt(readers, i).contains(text, cs))
                 return i;
         }
     }
@@ -730,35 +713,30 @@ int IndexedLogStore::findPreviousOccurrence(const QString& text, int startRow,
     if (text.isEmpty() || numRows == 0)
         return -1;
 
-    std::vector<std::unique_ptr<SequentialLineReader>> readers(size_t(m_files.size()));
-    const auto lineText = [&](int row) -> const QString& {
-        const RowRef ref = rowToRef(row);
-        const int fileId = refFile(ref);
-        if (!readers[size_t(fileId)]) {
-            readers[size_t(fileId)] = std::make_unique<SequentialLineReader>(
-                m_files[fileId].logFile->filePath);
-            readers[size_t(fileId)]->open();
-        }
-        const LineIndex& index = *m_files[fileId].index;
-        const qint64 line = refLine(ref);
-        return readers[size_t(fileId)]->lineAt(index.lineStartOffset(line),
-                                       index.lineByteLength(line));
-    };
-
+    SequentialLineReaders readers(filePaths());
     int currentRow = startRow - 1;
     if (startRow < 0 || startRow >= numRows)
         currentRow = numRows - 1;
     for (int i = currentRow; i >= 0; --i) {
-        if (lineText(i).contains(text, cs))
+        if (scanTextAt(readers, i).contains(text, cs))
             return i;
     }
     if (wrapAround) {
         for (int i = numRows - 1; i >= startRow && i >= 0; --i) {
-            if (lineText(i).contains(text, cs))
+            if (scanTextAt(readers, i).contains(text, cs))
                 return i;
         }
     }
     return -1;
+}
+
+const QString& IndexedLogStore::scanTextAt(SequentialLineReaders& readers, int visibleRow) const
+{
+    const RowRef ref = rowToRef(visibleRow);
+    const LineIndex& index = *m_files[refFile(ref)].index;
+    const qint64 line = refLine(ref);
+    return readers.lineAt(refFile(ref), index.lineStartOffset(line),
+                          index.lineByteLength(line));
 }
 
 // ---------------------------------------------------------------------------
@@ -817,19 +795,17 @@ public:
                      const std::function<bool(qint64, const LogEntryMeta&,
                                               QStringView)>& visit) const override
     {
-        std::vector<std::unique_ptr<SequentialLineReader>> readers(size_t(files.size()));
+        QStringList paths;
+        for (const FileSnap& f : files)
+            paths.append(f.path);
+        SequentialLineReaders readers(std::move(paths));
         const qint64 n = rowCount();
         for (qint64 i = qMax<qint64>(0, fromRow); i < n; ++i) {
             int fileId; qint64 line;
             resolve(i, fileId, line);
-            if (!readers[size_t(fileId)]) {
-                readers[size_t(fileId)] =
-                    std::make_unique<SequentialLineReader>(files[fileId].path);
-                readers[size_t(fileId)]->open();
-            }
             const FileSnap& f = files[fileId];
-            const QString& text = readers[size_t(fileId)]->lineAt(
-                f.index.lineStartOffset(line), f.index.lineByteLength(line));
+            const QString& text = readers.lineAt(
+                fileId, f.index.lineStartOffset(line), f.index.lineByteLength(line));
             if (!visit(i, metaAt(i), QStringView(text)))
                 return;
         }
@@ -1016,7 +992,10 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
             const qint64 n = workRefs.isEmpty() ? identityCount : workRefs.size();
             passing.reserve(int(qMin<qint64>(n, 4096)));
 
-            std::vector<std::unique_ptr<SequentialLineReader>> readers(size_t(filesIn->size()));
+            QStringList paths;
+            for (const FileInput& f : *filesIn)
+                paths.append(f.path);
+            SequentialLineReaders readers(std::move(paths));
             const bool needText = rules.isActive();
 
             for (qint64 i = 0; i < n; ++i) {
@@ -1044,13 +1023,8 @@ void IndexedLogStore::startFilterJob(bool fullRescan, qint64 rangeFirst,
                     continue;
 
                 if (needText) {
-                    if (!readers[size_t(fileId)]) {
-                        readers[size_t(fileId)] = std::make_unique<SequentialLineReader>(
-                            (*filesIn)[fileId].path);
-                        readers[size_t(fileId)]->open();
-                    }
-                    const QString& text = readers[size_t(fileId)]->lineAt(
-                        index.lineStartOffset(line), index.lineByteLength(line));
+                    const QString& text = readers.lineAt(
+                        fileId, index.lineStartOffset(line), index.lineByteLength(line));
                     LogEntryFields fields;
                     if (extraction && pattern.isValid() && index.isPrimary(line))
                         fields = pattern.extractFields(text);

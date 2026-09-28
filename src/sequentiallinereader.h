@@ -4,6 +4,9 @@
 #include <QByteArray>
 #include <QFile>
 #include <QString>
+#include <QStringList>
+#include <memory>
+#include <vector>
 
 // ============================================================================
 // SequentialLineReader — последовательное чтение текста строк по байтовым
@@ -80,6 +83,32 @@ private:
     qint64 m_winStart = 0;
     QString m_scratch;
     int m_slides = 0;
+};
+
+// Скан по нескольким файлам слитой вкладки: по SequentialLineReader на файл,
+// файл открывается при первом обращении к нему. Контракт тот же — один поток;
+// ссылка из lineAt() валидна до следующего вызова для ТОГО ЖЕ файла.
+class SequentialLineReaders {
+public:
+    explicit SequentialLineReaders(QStringList filePaths)
+        : m_paths(std::move(filePaths))
+        , m_readers(size_t(m_paths.size()))
+    {
+    }
+
+    const QString& lineAt(int fileId, qint64 offset, quint32 byteLength)
+    {
+        std::unique_ptr<SequentialLineReader>& reader = m_readers[size_t(fileId)];
+        if (!reader) {
+            reader = std::make_unique<SequentialLineReader>(m_paths.at(fileId));
+            reader->open();
+        }
+        return reader->lineAt(offset, byteLength);
+    }
+
+private:
+    QStringList m_paths;
+    std::vector<std::unique_ptr<SequentialLineReader>> m_readers;
 };
 
 #endif // SEQUENTIALLINEREADER_H
