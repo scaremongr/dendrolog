@@ -18,6 +18,12 @@ All notable changes to DendroLog are documented here. The format follows
   after successful completion. Write and commit failures are reported instead
   of displaying a misleading success message; failed exports preserve an
   existing destination.
+- Changing the field schema or turning field extraction off while a large tab
+  was still filtering in the background could crash the application.
+- Search Results over a large indexed log honours the text cache budget from
+  Settings instead of always using 256 MB.
+- File system errors in Save View As are shown in the system language instead
+  of garbled characters on non-English Windows.
 
 ## [0.3.0] — 2026-09-19
 

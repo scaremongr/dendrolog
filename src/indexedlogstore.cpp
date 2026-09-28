@@ -82,6 +82,8 @@ IndexedLogStore::IndexedLogStore(LogModel& model, const IndexedLogStore& source)
     m_explicitBase = source.m_explicitBase || !source.m_identityVisible;
     m_allRefs = source.m_identityVisible ? source.m_allRefs : source.m_visibleRefs;
     m_identityVisible = false;
+    // Own cache (GUI-only), but the user's budget rather than the default.
+    m_textCache.setBudgetBytes(source.m_textCache.budgetBytes());
     for (const auto& file : source.m_files) {
         IndexedFile copy = file;
         copy.cacheFileId = m_textCache.addFile(file.logFile->filePath);

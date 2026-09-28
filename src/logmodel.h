@@ -85,6 +85,7 @@ public:
     // Replaces any previous request; source must be a different model.
     void searchVisible(const LogModel& source, const FilterRuleSet& rules);
     // Discard data and any pending results, returning to an empty resident store.
+    // Waits for a resident worker: it may share entries with a source document.
     void clear();
 
     // Снапшот для последовательного скана в воркере (статистика, таймлайн).

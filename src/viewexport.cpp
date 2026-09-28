@@ -17,6 +17,15 @@ std::filesystem::path nativePath(const QString& path)
 #endif
 }
 
+ViewExport::Result identityError(const std::error_code& ec)
+{
+    // System messages come in the local 8-bit encoding, not UTF-8: MSVC
+    // formats them in the ANSI code page (cp1251 on a Russian Windows).
+    const std::string message = ec.message();
+    return {ViewExport::Error::IdentityCheck,
+            QString::fromLocal8Bit(message.data(), qsizetype(message.size()))};
+}
+
 ViewExport::Result checkDestination(const QString& destination,
                                    const QStringList& sourcePaths)
 {
@@ -29,7 +38,7 @@ ViewExport::Result checkDestination(const QString& destination,
     std::error_code ec;
     const bool targetExists = std::filesystem::exists(target, ec);
     if (ec)
-        return {ViewExport::Error::IdentityCheck, QString::fromStdString(ec.message())};
+        return identityError(ec);
 
     for (const QString& sourcePath : sourcePaths) {
         const QFileInfo sourceInfo(sourcePath);
@@ -45,7 +54,7 @@ ViewExport::Result checkDestination(const QString& destination,
         const auto source = nativePath(canonicalSource.isEmpty() ? absoluteSource : canonicalSource);
         const bool sourceExists = std::filesystem::exists(source, ec);
         if (ec)
-            return {ViewExport::Error::IdentityCheck, QString::fromStdString(ec.message())};
+            return identityError(ec);
         if (!sourceExists)
             continue;
 
@@ -53,7 +62,7 @@ ViewExport::Result checkDestination(const QString& destination,
         // without assuming that every Windows directory is case-insensitive.
         const bool same = std::filesystem::equivalent(target, source, ec);
         if (ec)
-            return {ViewExport::Error::IdentityCheck, QString::fromStdString(ec.message())};
+            return identityError(ec);
         if (same)
             return {ViewExport::Error::SourceFile, sourcePath};
     }

@@ -1126,13 +1126,19 @@ void MainWindow::cancelFieldExtraction()
 
 void MainWindow::applyPatternToAllViews()
 {
-    // Resident search workers share entry fields with the source document.
-    // Stop them before any schema mutation, including the synchronous path.
-    if (m_searchResultsModel)
-        m_searchResultsModel->cancelPendingFilter(true);
-    clearSearchResults();
     // A schema switch supersedes any re-extraction still in flight.
     cancelFieldExtraction();
+    // Resident filter workers read entry->fields(): each tab's own and the
+    // Search Results one, which shares entries with its source (clear() waits
+    // for it). Stop them all before ANY field mutation below — the synchronous
+    // paths included (invariant 4). finishPatternApplication() re-applies
+    // what was cancelled.
+    clearSearchResults();
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->cancelPendingFilter(true);
+    }
 
     auto pattern = std::make_shared<LogPattern>(m_conversionPattern);
     rebuildFieldVisibilityControls(pattern->fieldNames());
@@ -1210,16 +1216,6 @@ void MainWindow::applyPatternToAllViews()
     m_progressBar->setRange(0, m_pendingFieldEntries.size());
     m_progressBar->setValue(0);
     m_progressBar->show();
-
-    // Воркеры ниже перезаписывают entry->fields(), а фоновая перефильтрация
-    // модели эти поля читает — останавливаем фильтр-джобы всех вкладок
-    // (с ожиданием) до старта. Фильтры переприменятся по завершении схемы
-    // в finishPatternApplication().
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
-            lv->model()->cancelPendingFilter(true);
-    }
 
     auto worker = [pattern](const std::shared_ptr<LogEntry>& entry) {
         if (entry)

@@ -29,6 +29,7 @@ public:
     }
 
     void setBudgetBytes(qint64 budget);
+    qint64 budgetBytes() const { return m_budgetBytes; }
 
     // Зарегистрировать файл и получить его id для lineText().
     int addFile(const QString& filePath);
