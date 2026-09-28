@@ -181,6 +181,38 @@ void ResidentLogStore::removeEntriesForFile(const QString& filePath)
     emit m_model.modelFiltered(int(m_filteredEntries.size()));
 }
 
+void ResidentLogStore::removeEntry(const std::shared_ptr<LogEntry>& entry)
+{
+    if (!entry)
+        return;
+    // Оба списка отсортированы logEntryPtrLess, а строка файла в нём
+    // единственна: lower_bound указывает ровно на неё.
+    const auto find = [&entry](QVector<std::shared_ptr<LogEntry>>& list) {
+        const auto it = std::lower_bound(list.begin(), list.end(), entry, logEntryPtrLess);
+        return (it != list.end() && it->get() == entry.get()) ? it : list.end();
+    };
+    const auto all = find(m_allEntries);
+    if (all == m_allEntries.end())
+        return;
+    m_allEntries.erase(all);
+    m_cachedUniqueSourceFileCount = -1;
+    m_newEntries.remove(entry.get());
+
+    const auto visible = find(m_filteredEntries);
+    if (visible != m_filteredEntries.end()) {
+        const int row = int(visible - m_filteredEntries.begin());
+        m_model.beginRemoveRows(QModelIndex(), row, row);
+        m_filteredEntries.erase(m_filteredEntries.begin() + row);
+        m_model.endRemoveRows();
+        emit m_model.modelFiltered(int(m_filteredEntries.size()));
+    }
+    // Фоновая перефильтрация (если шла) держит снапшот с этой записью.
+    if (m_filterJobActive) {
+        cancelPendingFilter(false);
+        startFilterJob();
+    }
+}
+
 void ResidentLogStore::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
     // Полная замена данных: фоновый джоб (если шёл) устарел, а старые

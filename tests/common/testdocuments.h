@@ -452,13 +452,25 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     if (!appendToFile(logFile->filePath, bytes))
         return false;
 
-    // Следующий id логической записи этого файла — как ведёт его вкладка.
-    int nextId = 0;
-    doc.model->scanSnapshot(false).forEachMeta(0, [&](qint64, const LogEntryMeta& m) {
-        if (m.sourceFile == logFile.get())
-            nextId = std::max(nextId, m.logicalEntryId + 1);
-        return true;
-    });
+    // Контекст дочитывания — как ведёт его вкладка: последняя строка файла
+    // (её запись продолжает строка продолжения в начале дозаписи) и
+    // следующий id записи.
+    LogParser::ResumeContext context;
+    std::shared_ptr<LogEntry> last;
+    for (const auto& entry : doc.model->residentEntriesForFieldMutation()) {
+        if (!entry || entry->sourceFile() != logFile)
+            continue;
+        context.nextLogicalEntryId = std::max(context.nextLogicalEntryId,
+                                              entry->logicalEntryId() + 1);
+        if (!last || entry->originalLineNumber() > last->originalLineNumber())
+            last = entry;
+    }
+    if (last) {
+        context.currentLogicalEntryId = last->logicalEntryId();
+        context.currentTimestamp = last->timestamp();
+        context.currentLevel = last->level();
+        context.nextLineNumber = last->originalLineNumber() + 1;
+    }
 
     LogParser parser;
     parser.setPattern(schema);
@@ -474,7 +486,7 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
                      [&done](int, const LogFilePtr&) { done = true; });
     QObject::connect(&parser, &LogParser::parsingFailed, &relay,
                      [&done](const LogFilePtr&) { done = true; });
-    parser.startParsingFrom(logFile, oldSize, nextId);
+    parser.startParsingFrom(logFile, oldSize, context);
     if (!waitFor([&done] { return done; }))
         return false;
     for (const auto& batch : batches)

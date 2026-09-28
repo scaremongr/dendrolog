@@ -47,15 +47,33 @@ public:
     void setExtractionEnabled(bool enabled) { m_extractionEnabled = enabled; }
     const LogPattern& pattern() const noexcept { return m_pattern; }
 
+    // Where an incremental parse continues from: the file's last record (a
+    // continuation line at the start of the new bytes belongs to it) and the
+    // numbering. Default — the start of a file.
+    struct ResumeContext {
+        int nextLogicalEntryId = 0;         // id of the next primary line
+        int currentLogicalEntryId = -1;     // -1: no record yet
+        QDateTime currentTimestamp;         // of the current record
+        LogLevel currentLevel = LogLevel::Unknown;
+        int nextLineNumber = 1;             // 1-based line number in the file
+    };
+
 public slots:
     void startParsing(const LogFilePtr& logFile);
-    // Incremental parse: read only bytes starting at startOffset.
-    // startLogicalEntryId is the ID to assign to the first new primary entry.
-    void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId);
+    // Incremental parse: read only bytes starting at startOffset (a line
+    // boundary), continuing the numbering and the current record of context.
+    void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
+                          const ResumeContext& context);
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
     void entriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& logFile);
+    // Right before parsingFinished of a successful parse: the exact byte
+    // offset reading stopped at (the next incremental parse starts there), and
+    // whether the last line had no newline yet — then lastLineStart is its
+    // byte offset, to read it again once the writer completes it.
+    void tailState(const LogFilePtr& logFile, qint64 endOffset, bool lastLinePartial,
+                   qint64 lastLineStart);
     void parsingFinished(int totalEntries, const LogFilePtr& logFile);
     void parsingFailed(const LogFilePtr& logFile);
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
@@ -66,8 +84,11 @@ private:
     // the mutable m_pattern / m_extractionEnabled members, so reconfiguring
     // the parser (setPattern) while a parse is in flight is race-free.
     void doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction);
-    void doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId,
-                     const LogPattern& pattern, bool extraction);
+    // The one parse loop for both the initial load (initial: progress and
+    // parsingStarted/Failed) and an incremental read.
+    void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
+                   const ResumeContext& context, const LogPattern& pattern,
+                   bool extraction, bool initial);
 
     // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
     // безопасно читается воркерами пула (см. LineClassifier).

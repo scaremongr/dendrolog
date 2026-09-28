@@ -58,6 +58,9 @@ public:
     void appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
     void mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
     void removeEntriesForFile(const QString& filePath);
+    // Убрать одну запись (предварительную строку хвоста перед её
+    // перечитыванием) без reset: видимая строка удаляется rowsRemoved.
+    void removeEntry(const std::shared_ptr<LogEntry>& entry);
 
     // Прямой доступ для переизвлечения полей и посева результатов поиска —
     // только внутри слоя хранения/фасада.

@@ -64,6 +64,14 @@ All notable changes to DendroLog are documented here. The format follows
   schema no longer silently searches the whole row: it is ignored, does not
   highlight, and its card explains why. With Filter blocks off, a card bound to
   a column notes that it searches the entire row.
+- A log that grows while open (below the indexed threshold) now reads its tail
+  like a large one: a multi-line record written in parts stays one record, so
+  its continuation lines keep the record's level and time and Entry Details
+  shows it whole; line numbers continue instead of restarting at 1 for every
+  appended batch; a line the writer has not finished yet is replaced by its full
+  text once completed instead of being split in two; blank appended lines are
+  kept; and lines written while the log was being read are neither skipped nor
+  read twice.
 - Lines appended to a large (indexed) log no longer show up empty when the end
   of the file had already been displayed: the cached last block of the file is
   read again once the file grows.

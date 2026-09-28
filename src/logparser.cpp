@@ -37,21 +37,40 @@ void LogParser::startParsing(const LogFilePtr& logFile)
     });
 }
 
-void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId)
+void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
+                                 const ResumeContext& context)
 {
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, startLogicalEntryId,
+    (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, context,
                                       patternSnapshot, extraction]() {
-        this->doParseFrom(logFile, startOffset, startLogicalEntryId, patternSnapshot, extraction);
+        this->parseFrom(logFile, startOffset, context, patternSnapshot, extraction,
+                        /*initial=*/false);
     });
 }
 
-void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int startLogicalEntryId,
-                            const LogPattern& pattern, bool extraction)
+void LogParser::setPattern(const QString& schemaString)
 {
+    m_pattern.setPattern(schemaString);
+}
+
+void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction)
+{
+    parseFrom(logFile, 0, ResumeContext(), pattern, extraction, /*initial=*/true);
+}
+
+void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
+                          const ResumeContext& context, const LogPattern& pattern,
+                          bool extraction, bool initial)
+{
+    if (initial)
+        emit parsingStarted(logFile);
+
     if (!logFile || logFile->filePath.isEmpty()) {
-        emit parsingFinished(0, logFile);
+        if (initial)
+            emit parsingFailed(logFile);
+        else
+            emit parsingFinished(0, logFile);
         return;
     }
 
@@ -60,8 +79,6 @@ void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int s
         emit parsingFailed(logFile);
         return;
     }
-
-    // Seek to the continuation point.
     if (startOffset > 0 && !file.seek(startOffset)) {
         emit parsingFinished(0, logFile);
         return;
@@ -72,102 +89,17 @@ void LogParser::doParseFrom(const LogFilePtr& logFile, qint64 startOffset, int s
     const int BATCH_SIZE = 5000;
     batchEntries.reserve(BATCH_SIZE);
 
-    int logicalEntryIdCounter = startLogicalEntryId;
-    int currentLogicalEntryId = logicalEntryIdCounter - 1; // will be set on first primary line
-    QDateTime currentLogicalEntryTimestamp;
-    LogLevel currentLogicalEntryLevel = LogLevel::Unknown;
-    int fileLineNumber = 0; // relative line counter within the new block
+    // Состояние продолжается с того места, где кончилась прошлая порция: строка
+    // продолжения в начале дозаписи принадлежит последней записи файла, а
+    // номера строк идут дальше, а не с 1.
+    int logicalEntryIdCounter = context.nextLogicalEntryId;
+    int currentLogicalEntryId = context.currentLogicalEntryId;
+    QDateTime currentLogicalEntryTimestamp = context.currentTimestamp;
+    LogLevel currentLogicalEntryLevel = context.currentLevel;
+    int fileLineNumber = context.nextLineNumber - 1;
     int totalParsedEntries = 0;
 
-    QString line;
-    while (!in.atEnd()) {
-        if (m_abort.load(std::memory_order_relaxed))
-            return; // Parser is shutting down — drop the rest.
-        line = in.readLine();
-        // Skip empty lines: either the phantom EOF line produced after a trailing
-        // newline, or the completing \n of a line that had no newline at initial-parse time.
-        if (line.isEmpty())
-            continue;
-        fileLineNumber++;
-
-        QDateTime lineTs;
-        LogLevel lineLevel = LogLevel::Unknown;
-
-        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs);
-        bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
-        LogEntryFields extractedFields;
-        const bool schemaMatched = (extraction && pattern.isValid())
-            ? !(extractedFields = pattern.extractFields(line)).isEmpty()
-            : false;
-
-        std::shared_ptr<LogEntry> currentEntry;
-        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, hasLevel)) {
-            currentLogicalEntryId = logicalEntryIdCounter++;
-            currentLogicalEntryTimestamp = lineTs;
-            currentLogicalEntryLevel = lineLevel;
-            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
-                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            currentEntry->setFields(extractedFields);
-        } else {
-            if (currentLogicalEntryId < startLogicalEntryId) {
-                // No primary line yet — treat as its own entry
-                currentLogicalEntryId = logicalEntryIdCounter++;
-                currentLogicalEntryTimestamp = QDateTime();
-                currentLogicalEntryLevel = LogLevel::Unknown;
-            }
-            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
-                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-        }
-        batchEntries.push_back(currentEntry);
-        totalParsedEntries++;
-
-        if (batchEntries.size() >= BATCH_SIZE) {
-            emit entriesParsed(batchEntries, logFile);
-            batchEntries.clear();
-            batchEntries.reserve(BATCH_SIZE);
-        }
-    }
-
-    if (!batchEntries.isEmpty()) {
-        emit entriesParsed(batchEntries, logFile);
-    }
-
-    emit parsingFinished(totalParsedEntries, logFile);
-}
-
-void LogParser::setPattern(const QString& schemaString)
-{
-    m_pattern.setPattern(schemaString);
-}
-
-void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction)
-{
-    emit parsingStarted(logFile); // Испускаем сигнал о начале парсинга
-
-    if (!logFile || logFile->filePath.isEmpty()) {
-        emit parsingFailed(logFile);
-        return;
-    }
-
-    QFile file(logFile->filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        emit parsingFailed(logFile);
-        return;
-    }
-
-    QTextStream in(&file);
-    QVector<std::shared_ptr<LogEntry>> batchEntries;
-    const int BATCH_SIZE = 5000; // Отправляем по 500 записей за раз
-    batchEntries.reserve(BATCH_SIZE);
-
-    int logicalEntryIdCounter = 0;
-    int currentLogicalEntryId = -1;
-    QDateTime currentLogicalEntryTimestamp;
-    LogLevel currentLogicalEntryLevel = LogLevel::Unknown;
-    int fileLineNumber = 0;
-    int totalParsedEntries = 0;
-
-    qint64 fileSize = QFileInfo(logFile->filePath).size();
+    const qint64 fileSize = initial ? QFileInfo(logFile->filePath).size() : 0;
     qint64 bytesRead = 0;
     int lastReportedProgress = -1;
 
@@ -197,15 +129,18 @@ void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bo
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
-            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber, currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
+                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
             currentEntry->setFields(extractedFields);
         } else {
-            if (currentLogicalEntryId == -1) { 
+            if (currentLogicalEntryId < 0) {
+                // Ни одной записи ещё нет — строка становится собственной записью.
                 currentLogicalEntryId = logicalEntryIdCounter++;
-                currentLogicalEntryTimestamp = QDateTime(); 
-                currentLogicalEntryLevel = LogLevel::Unknown; 
+                currentLogicalEntryTimestamp = QDateTime();
+                currentLogicalEntryLevel = LogLevel::Unknown;
             }
-            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber, currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
+                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
         }
         batchEntries.push_back(currentEntry);
         totalParsedEntries++;
@@ -225,18 +160,50 @@ void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bo
         }
     }
 
-    // Отправляем оставшиеся записи, если они есть
-    if (!batchEntries.isEmpty()) {
+    if (!batchEntries.isEmpty())
         emit entriesParsed(batchEntries, logFile);
-    }
+    if (initial && lastReportedProgress < 100 && fileSize > 0)
+        emit parsingProgress(100, logFile);
 
-    // Убедимся, что финальный прогресс 100% отправлен
-    if (lastReportedProgress < 100 && fileSize > 0) {
-         emit parsingProgress(100, logFile);
+    // Точный конец прочитанного (дальше дочитывание продолжит отсюда) и не
+    // оборвана ли последняя строка: писатель мог не успеть дописать '\n'.
+    // Такую строку вкладка показывает предварительно и при дозаписи читает
+    // заново с её начала. Начало ищется по сырым байтам — только для
+    // кодировок, где перевод строки — один байт '\n' (не UTF-16/32).
+    qint64 endOffset = in.pos();
+    if (endOffset < 0)
+        endOffset = file.size();
+    bool lastLinePartial = false;
+    qint64 lastLineStart = -1;
+    const QStringConverter::Encoding encoding = in.encoding();
+    const bool byteNewlines = encoding != QStringConverter::Utf16
+        && encoding != QStringConverter::Utf16LE && encoding != QStringConverter::Utf16BE
+        && encoding != QStringConverter::Utf32 && encoding != QStringConverter::Utf32LE
+        && encoding != QStringConverter::Utf32BE;
+    if (byteNewlines && totalParsedEntries > 0 && endOffset > startOffset) {
+        QFile raw(logFile->filePath);
+        char last = '\n';
+        if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - 1) && raw.getChar(&last)
+            && last != '\n') {
+            lastLinePartial = true;
+            lastLineStart = startOffset;
+            constexpr qint64 kChunk = 64 * 1024;
+            for (qint64 pos = endOffset; pos > startOffset;) {
+                const qint64 from = qMax(startOffset, pos - kChunk);
+                if (!raw.seek(from))
+                    break;
+                const QByteArray chunk = raw.read(pos - from);
+                const qsizetype newline = chunk.lastIndexOf('\n');
+                if (newline >= 0) {
+                    lastLineStart = from + newline + 1;
+                    break;
+                }
+                pos = from;
+            }
+        }
     }
-
+    emit tailState(logFile, endOffset, lastLinePartial, lastLineStart);
     emit parsingFinished(totalParsedEntries, logFile);
-    // file.close() вызывается автоматически деструктором QFile
 }
 
 LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath, qint64 fromOffset)

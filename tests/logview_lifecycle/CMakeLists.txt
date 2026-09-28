@@ -1,0 +1,1 @@
+dendrolog_add_test(logview_lifecycle LIBRARIES dendrolog_widgets TIMEOUT 180)

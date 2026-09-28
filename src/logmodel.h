@@ -46,6 +46,9 @@ public:
     void mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
     // Drop every entry sourced from `filePath` and reset the view.
     void removeEntriesForFile(const QString& filePath);
+    // Drop one entry without a reset (a provisional tail line about to be
+    // read again). Resident backend only.
+    void removeEntry(const std::shared_ptr<LogEntry>& entry);
 
     // ---- Доступ к данным (шов хранилища) --------------------------------------
     // Запись видимой (отфильтрованной) строки; nullptr при выходе за границы.

@@ -81,6 +81,12 @@ void LogModel::removeEntriesForFile(const QString& filePath)
         r->removeEntriesForFile(filePath);
 }
 
+void LogModel::removeEntry(const std::shared_ptr<LogEntry>& entry)
+{
+    if (auto* r = residentOrNull())
+        r->removeEntry(entry);
+}
+
 // ---------------------------------------------------------------------------
 // Цвета файлов (презентация)
 // ---------------------------------------------------------------------------

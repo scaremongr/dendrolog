@@ -71,6 +71,8 @@ set(DENDROLOG_CORE_SOURCES
 set(DENDROLOG_WIDGETS_SOURCES
     src/LogListView.h
     src/LogListView.cpp
+    src/logviewwidget.h
+    src/logviewwidget.cpp
     src/tabexpander.h
     src/linewrapper.h
     src/texttoken.h
@@ -100,9 +102,6 @@ set(PROJECT_SOURCES
     src/mainwindow.h
     src/mainwindow.cpp
     src/mainwindow.ui
-
-    src/logviewwidget.h
-    src/logviewwidget.cpp
 
     src/logtabbar.h
     src/logtabbar.cpp

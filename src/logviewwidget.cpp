@@ -43,11 +43,13 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_logParser, &LogParser::entriesParsed,   this, &LogViewWidget::handleEntriesParsed);
     connect(m_logParser, &LogParser::parsingStarted,  this, [this](const LogFilePtr& f){ emit fileParsingStarted(f); });
     connect(m_logParser, &LogParser::parsingProgress, this, [this](int p, const LogFilePtr& f){ emit fileParsingProgress(f, p); });
+    connect(m_logParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
     connect(m_logParser, &LogParser::parsingFinished, this, &LogViewWidget::handleParsingFinished);
     connect(m_logParser, &LogParser::parsingFailed,   this, &LogViewWidget::handleParsingFailed);
 
     // Соединяем сигналы reload-парсера (только для инкрементальных обновлений)
     connect(m_reloadParser, &LogParser::entriesParsed, this, &LogViewWidget::handleIncrementalEntriesParsed);
+    connect(m_reloadParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
     connect(m_reloadParser, &LogParser::parsingFinished, this, &LogViewWidget::handleIncrementalParsingFinished);
     // Обязательно: без этого сорвавшаяся дозапись оставила бы loadInFlight
     // висеть, и файл больше никогда бы не обновлялся.
@@ -364,9 +366,10 @@ void LogViewWidget::handleEntriesParsed(
 
     // Track the highest logical ID seen (bookkeeping for incremental reload).
     if (parsedLogFile) {
-        int& nextId = m_fileReloadStates[parsedLogFile->filePath].nextLogicalEntryId;
+        FileReloadState& st = m_fileReloadStates[parsedLogFile->filePath];
         for (const auto& e : sortedBatch)
-            if (e) nextId = qMax(nextId, e->logicalEntryId() + 1);
+            if (e) st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
+        rememberLastLines(st, sortedBatch);
     }
 
     // Слияние в модель без reset: выделение и позиция скролла сохраняются,
@@ -384,8 +387,11 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
     // was already updated incrementally in handleEntriesParsed — no O(N) scan needed.
     if (parsedLogFile) {
         FileReloadState& st = m_fileReloadStates[parsedLogFile->filePath];
-        const qint64 size  = QFileInfo(parsedLogFile->filePath).size();
-        st.anchor          = FileChangeDetector::capture(parsedLogFile->filePath, size);
+        // Якорь — там, где парсер действительно остановился, а не текущий
+        // размер: дописанное после его конца иначе было бы пропущено.
+        const qint64 consumed = st.endOffset >= 0
+            ? st.endOffset : QFileInfo(parsedLogFile->filePath).size();
+        st.anchor          = FileChangeDetector::capture(parsedLogFile->filePath, consumed);
         st.initialLoadDone = true;
         st.loadInFlight    = false;
         st.failedStamp     = DiskStamp{};
@@ -414,6 +420,36 @@ void LogViewWidget::handleParsingFailed(const LogFilePtr& parsedLogFile)
     st.failedStamp = DiskStamp::of(parsedLogFile->filePath);
     updateLoadingState();
     emit fileParsingFailed(parsedLogFile);
+}
+
+void LogViewWidget::rememberLastLines(FileReloadState& st,
+                                      const QVector<std::shared_ptr<LogEntry>>& batch)
+{
+    // Две строки файла с наибольшими номерами — в любом порядке батча
+    // (начальные батчи отсортированы по времени, а не по строкам).
+    for (const auto& entry : batch) {
+        if (!entry)
+            continue;
+        const int line = entry->originalLineNumber();
+        if (!st.lastEntry || line > st.lastEntry->originalLineNumber()) {
+            st.prevEntry = st.lastEntry;
+            st.lastEntry = entry;
+        } else if (line != st.lastEntry->originalLineNumber()
+                   && (!st.prevEntry || line > st.prevEntry->originalLineNumber())) {
+            st.prevEntry = entry;
+        }
+    }
+}
+
+void LogViewWidget::handleTailState(const LogFilePtr& logFile, qint64 endOffset,
+                                    bool lastLinePartial, qint64 lastLineStart)
+{
+    if (!logFile)
+        return;
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    st.endOffset = endOffset;
+    st.lastLinePartial = lastLinePartial;
+    st.lastLineStart = lastLineStart;
 }
 
 void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
@@ -500,13 +536,44 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                 break;
             }
             // Prefix is intact and the file grew — read only the new tail and
-            // append it, preserving selection and scroll position.
+            // append it, preserving selection and scroll position. The tail
+            // continues the file's last record and its line numbering.
+            const auto contextAfter = [&st](const std::shared_ptr<LogEntry>& entry) {
+                LogParser::ResumeContext context;
+                context.nextLogicalEntryId = st.nextLogicalEntryId;
+                if (entry) {
+                    context.currentLogicalEntryId = entry->logicalEntryId();
+                    context.currentTimestamp = entry->timestamp();
+                    context.currentLevel = entry->level();
+                    context.nextLineNumber = entry->originalLineNumber() + 1;
+                }
+                return context;
+            };
+            LogParser::ResumeContext context = contextAfter(st.lastEntry);
+            qint64 from = st.anchor.consumedBytes;
+            if (st.lastLinePartial && st.lastEntry && st.lastLineStart >= 0) {
+                // Последняя строка была без перевода строки и показана
+                // предварительно — писатель её дописывает. Убираем её и читаем
+                // заново с её начала: иначе дописанная часть стала бы
+                // отдельной строкой.
+                const std::shared_ptr<LogEntry> partial = st.lastEntry;
+                const bool partialStartedRecord = !st.prevEntry
+                    || st.prevEntry->logicalEntryId() != partial->logicalEntryId();
+                context = contextAfter(partialStartedRecord ? st.prevEntry : partial);
+                if (partialStartedRecord)
+                    context.nextLogicalEntryId = partial->logicalEntryId();
+                context.nextLineNumber = partial->originalLineNumber();
+                m_model->removeEntry(partial);
+                st.lastEntry = st.prevEntry;
+                st.prevEntry.reset();
+                from = st.lastLineStart;
+            }
+            st.lastLinePartial = false;
             m_reloadParser->setPattern(m_logParser->pattern().patternString());
             st.loadInFlight = true;
-            m_reloadParser->startParsingFrom(logFile, st.anchor.consumedBytes, st.nextLogicalEntryId);
-            // Re-anchor immediately so a concurrent poll won't re-read this range.
-            const qint64 newSize = QFileInfo(logFile->filePath).size();
-            st.anchor = FileChangeDetector::capture(logFile->filePath, newSize);
+            // Якорь сдвинется по концу прочитанного (tailState); повторный
+            // опрос этот диапазон не возьмёт — по файлу загрузка в полёте.
+            m_reloadParser->startParsingFrom(logFile, from, context);
             anyChanged = true;
             break;
         }
@@ -535,6 +602,7 @@ void LogViewWidget::handleIncrementalEntriesParsed(
         if (e)
             st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
     }
+    rememberLastLines(st, batch);
 
     // Append entries directly — no model reset, selection preserved.
     m_model->appendEntries(batch);
@@ -543,7 +611,12 @@ void LogViewWidget::handleIncrementalEntriesParsed(
 void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& logFile)
 {
     if (logFile) {
-        m_fileReloadStates[logFile->filePath].loadInFlight = false;
+        FileReloadState& st = m_fileReloadStates[logFile->filePath];
+        st.loadInFlight = false;
+        // Якорь — ровно по концу прочитанного: дописанное во время чтения
+        // не прочитается повторно и не потеряется.
+        if (st.endOffset >= 0)
+            st.anchor = FileChangeDetector::capture(logFile->filePath, st.endOffset);
         updateLoadingState();
     }
     emit totalRowCountChanged(m_model->rowCount());

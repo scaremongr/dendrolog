@@ -166,8 +166,23 @@ private:
         bool   unsupported = false;
         // Подпись файла на момент исчезновения/неудачной загрузки.
         DiskStamp failedStamp;
+        // Резидентный путь (LogParser::tailState): где кончилось прочитанное,
+        // и не оборвана ли последняя строка — тогда она показана
+        // предварительно и при дозаписи читается заново с lastLineStart.
+        qint64 endOffset = -1;
+        bool   lastLinePartial = false;
+        qint64 lastLineStart = -1;
+        // Две последние строки файла: контекст дочитывания (продолжение в
+        // начале дозаписи принадлежит последней записи) и предварительная
+        // строка, которую надо убрать перед перечитыванием.
+        std::shared_ptr<LogEntry> lastEntry;
+        std::shared_ptr<LogEntry> prevEntry;
     };
     QHash<QString, FileReloadState> m_fileReloadStates; // key = filePath
+    static void rememberLastLines(FileReloadState& state,
+                                  const QVector<std::shared_ptr<LogEntry>>& batch);
+    void handleTailState(const LogFilePtr& logFile, qint64 endOffset,
+                         bool lastLinePartial, qint64 lastLineStart);
 
     // Parser used exclusively for incremental reads (so it doesn't interfere with
     // the initial parse that uses m_logParser).
