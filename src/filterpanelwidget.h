@@ -13,7 +13,6 @@ class QLineEdit;
 class QPushButton;
 class QToolButton;
 class QVBoxLayout;
-class ToggleSwitch;
 
 // ============================================================================
 // FilterRuleCard — одно правило фильтра в виде карточки (CardFrame).
@@ -38,6 +37,10 @@ public:
     void setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled);
     // Первая карточка не имеет связи с предыдущей — коннектор скрыт.
     void setIsFirstRow(bool first);
+    // Фокус в поле текста правила (новая карточка по «+ Add rule»).
+    void focusText();
+    // Подсказка в пустом поле текста (без регекса): у фильтра и поиска своя.
+    void setTextPlaceholder(const QString& text);
 
 signals:
     void removeRequested();
@@ -70,32 +73,37 @@ private:
     QStringList  m_schemaFields;      // колонки текущей схемы (setFieldNames)
     bool         m_schemaKnown = false;
     bool         m_fieldScopeEnabled = true;
+    QString      m_textPlaceholder;   // подсказка поля текста без регекса
 
     QColor       m_color;
     bool         m_highlightEnabled = true;
 };
 
 // ============================================================================
-// FilterPanelWidget — конструктор текстовых фильтров (содержимое дока).
+// FilterPanelWidget — редактор набора текстовых правил с профилями.
 //
 // Инкапсулирует весь динамический список правил; наружу отдаёт только
 // FilterRuleSet и сигналы applyRequested()/resetRequested(). MainWindow
 // не знает о внутренних layout'ах и контролах.
 //
-// Фильтры применяются к АКТИВНОМУ документу по Apply; Reset снимает
-// фильтры с активного документа, не очищая сами правила в панели.
+// Две панели на одном редакторе — роль задаётся при создании и не меняется
+// (прежний переключатель «Non-destructive search» внутри одной панели
+// новичку был неочевиден):
+//   Filter — док Text Filters: Apply скрывает несовпавшие строки активного
+//            документа, Reset снимает с него фильтр;
+//   Search — запрос панели Search (SearchPanelWidget): Search находит
+//            строки, лог остаётся полным, совпадения идут в список
+//            результатов рядом; Clear очищает выдачу.
+// Правила в обоих случаях остаются в панели — их можно применить снова.
+// У каждой роли свои профили, подписи и связь новых правил по умолчанию.
 // ============================================================================
 
 class FilterPanelWidget : public QWidget {
     Q_OBJECT
 public:
-    // Режим работы панели текстовых фильтров:
-    //   Filter — Apply скрывает несовпавшие строки в основном view (разрушающий);
-    //   Search — Apply оставляет основной view полным, а совпадения выводит
-    //            списком в нижней панели результатов (неразрушающий, klogg-style).
     enum class Mode { Filter, Search };
 
-    explicit FilterPanelWidget(QWidget* parent = nullptr);
+    explicit FilterPanelWidget(Mode mode, QWidget* parent = nullptr);
 
     // Собрать набор правил из текущего состояния UI.
     FilterRuleSet ruleSet() const;
@@ -106,13 +114,18 @@ public:
     // (галочка "Filter blocks" снята) блокирует выбор колонки.
     void setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled);
 
-    // ---- Режим работы -------------------------------------------------------
-    Mode mode() const;
-    void setMode(Mode mode);      // тихая установка (для восстановления настроек)
-    // Подсвечивать ли совпадения в ОСНОВНОМ view в режиме Search
-    // (в панели результатов совпадения подсвечиваются всегда).
+    // ---- Роль и подсветка ---------------------------------------------------
+    Mode mode() const { return m_mode; }
+    // Подсвечивать ли совпадения в ОСНОВНОМ view (у поиска список
+    // результатов подсвечивает их всегда).
     bool highlightInMainView() const;
-    void setHighlightInMainView(bool on);
+    void setHighlightInMainView(bool on); // тихо, для восстановления настроек
+
+    // Фокус в поле текста первого правила (Ctrl+Shift+F без текста).
+    void focusFirstRule();
+    // Запрос из одного правила «Contains text» вместо всех карточек —
+    // «Find All» из тулбара и контекстного меню.
+    void setSingleRule(const QString& text, bool caseSensitive);
 
     // ---- Профили фильтрации -------------------------------------------------
     // Именованные конфигурации правил. Сериализуются целиком (все профили +
@@ -120,13 +133,18 @@ public:
     QJsonObject profilesToJson() const;
     void profilesFromJson(const QJsonObject& json);
 
+    // Правило из контекстного меню лога («показать/скрыть строки с текстом»):
+    // quickRule строит его (цвет — следующий свободный, связь — AND, в поиске
+    // для «показать» — OR), addQuickRule добавляет в панель (одинокая пустая
+    // стартовая карточка заменяется). Применяет его окно — как по Apply.
+    FilterRule quickRule(const QString& text, bool exclude) const;
+    void addQuickRule(const QString& text, bool exclude);
+
 signals:
     // Пользователь нажал Apply (или Enter в поле правила).
     void applyRequested();
-    // Пользователь нажал Reset — снять фильтры с активного документа.
+    // Пользователь нажал Reset (фильтр) / Clear (поиск).
     void resetRequested();
-    // Пользователь сменил режим работы панели.
-    void modeChanged(Mode mode);
     // Пользователь переключил галочку подсветки в основном view.
     void highlightInMainViewChanged(bool on);
     // Список/содержимое профилей изменились (save/new/rename/delete/switch).
@@ -138,7 +156,7 @@ private:
     void removeCard(FilterRuleCard* card);
     void renumberRows();      // актуализирует видимость коннектора первой карточки
     QColor nextFreeColor() const;
-    void updateModeDependentUi(); // тексты кнопок под текущий режим
+
 
     // ---- Профили ------------------------------------------------------------
     struct Profile {
@@ -159,8 +177,9 @@ private:
     CardFrame*    m_settingsCard = nullptr;
     QComboBox*    m_profileCombo = nullptr;
     QToolButton*  m_profileMenuButton = nullptr;
-    ToggleSwitch* m_modeSwitch = nullptr;         // off = Filter, on = Search
+    Mode          m_mode = Mode::Filter;
     QCheckBox*    m_highlightMainCheckBox = nullptr;
+    CardListArea* m_rulesArea = nullptr;
     QVBoxLayout* m_rulesLayout;
     QVector<FilterRuleCard*> m_cards;
     QToolButton* m_addButton;

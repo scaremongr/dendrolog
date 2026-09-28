@@ -16,3 +16,15 @@ LogTabWidget::LogTabWidget(QWidget* parent)
     connect(m_bar, &LogTabBar::mergeTabsRequested,
             this, &LogTabWidget::mergeTabsRequested);
 }
+
+void LogTabWidget::tabInserted(int index)
+{
+    QTabWidget::tabInserted(index);
+    emit tabCountChanged(count());
+}
+
+void LogTabWidget::tabRemoved(int index)
+{
+    QTabWidget::tabRemoved(index);
+    emit tabCountChanged(count());
+}

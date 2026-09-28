@@ -69,7 +69,7 @@ void AppSettings::load()
     m_scanRefreshMode        = qBound(0, s.value(QStringLiteral("scanRefreshMode"), 0).toInt(), 2);
     m_scanRefreshIntervalSecs = qBound(5, s.value(QStringLiteral("scanRefreshIntervalSecs"), 30).toInt(), 3600);
     m_fontFamily             = s.value(QStringLiteral("fontFamily")).toString();
-    m_fontSize               = s.value(QStringLiteral("fontSize"), 10).toInt();
+    m_fontSize               = s.value(QStringLiteral("fontSize"), kDefaultFontSize).toInt();
     m_autoReload             = s.value(QStringLiteral("autoReload"), false).toBool();
     m_autoReloadIntervalSecs = s.value(QStringLiteral("autoReloadIntervalSecs"), 2).toInt();
     m_indexedThresholdMB     = qBound(0, s.value(QStringLiteral("indexedThresholdMB"), 512).toInt(), 1 << 20);

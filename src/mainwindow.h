@@ -11,6 +11,8 @@
 #include "logentry.h"
 #include "logfile.h"
 #include "viewexport.h"
+#include "LogListView.h"
+#include "filterruleset.h"
 
 // Forward declarations for Qt classes used in members or method signatures
 class QProgressBar;
@@ -51,6 +53,8 @@ class QDragEnterEvent;
 class QDropEvent;
 class UpdateChecker;
 class QPoint;
+class WelcomeWidget;
+class SearchPanelWidget;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; } // Forward declaration for the UI class
@@ -127,6 +131,16 @@ private slots:
     void onSearchEnterPressed();
     void onQuickSearchProgress(const QString& term, int percent);
     void onQuickSearchFinished(const QString& term, bool found);
+    // Пункт контекстного меню лога над выделенным текстом: найти его,
+    // добавить правило фильтра или маркер и применить к активной вкладке.
+    void onViewTextAction(LogListView::TextAction action, const QString& text);
+    // Панель Search: Search/Enter — запустить поиск по активной вкладке,
+    // Clear — очистить выдачу (правила остаются).
+    void onSearchRequested();
+    void onSearchCleared();
+    // «Find All»: запрос из одного правила «Contains text» в панели Search
+    // и поиск; пустой text — просто открыть панель с курсором в правиле.
+    void findAllInSearchPanel(const QString& text, bool caseSensitive);
     void onViewExportFinished(const ViewExport::Result& result);
     // Save View As of the active tab into fileName, in the background.
     void startViewExport(const QString& fileName);
@@ -149,6 +163,9 @@ public:
 
 private:
     Ui::MainWindow *ui; // Pointer to the UI class generated from mainwindow.ui
+    // Конструктор отработал: до этого указатели ui-> ещё не заполнены, а
+    // changeEvent (смена палитры) может прийти уже во время setupUi.
+    bool m_constructed = false;
 
     // Env-gated хук верификации (DENDRO_BASELINE_DUMP=<каталог>): фиксированная
     // последовательность фильтров над активной моделью с дампом результатов в
@@ -161,6 +178,9 @@ private:
     QLabel* m_statusLabel;
     QLabel* m_lineInfoLabel;
     QLineEdit* m_searchLineEdit = nullptr;
+    QAction*   m_matchCaseAction = nullptr;   // «Aa» — учитывать регистр
+    // Стартовый экран вместо пустой рамки, пока нет ни одной вкладки.
+    WelcomeWidget* m_welcome = nullptr;
     // Строка статуса показывает прогресс быстрого поиска — вернуть её по итогу.
     bool m_quickSearchStatusShown = false;
     // Фоновый Save View As и кнопка его отмены в строке статуса.
@@ -173,6 +193,12 @@ private:
     QDateTimeEdit* m_timeFilterTo;
     QPushButton* m_applyTimeFilterButton;
     QPushButton* m_resetTimeFilterButton; // Added
+    QLabel* m_timeFilterInfoLabel = nullptr;  // диапазон лога и состояние фильтра
+    QLabel* m_timeFilterErrorLabel = nullptr; // «From позже To» и т.п.
+    // Поля From/To правил пользователь: пока нет — они следуют за вкладкой
+    // (применённый фильтр либо весь диапазон её лога).
+    bool m_timeFilterEdited = false;
+    bool m_seedingTimeFilter = false;         // программная установка полей
 
     // Конструктор текстовых фильтров (содержимое textFilterDockWidget).
     // Вся логика динамического списка правил инкапсулирована в виджете.
@@ -197,14 +223,27 @@ private:
     StatisticsPanel* m_statsPanel = nullptr;
     QDockWidget* m_statsDockWidget = nullptr;
 
-    // Панель результатов неразрушающего поиска (нижний док, создаётся в коде).
-    // Запрос, модель результатов и их живое обновление вслед за активной
-    // вкладкой — SearchResultsController; здесь только view, подпись и
-    // навигация: клик прыгает в основном view.
-    QDockWidget* m_searchResultsDockWidget = nullptr;
+    // Панель Search (нижний док, создаётся в коде): запрос (FilterPanelWidget
+    // в роли Search) и результаты в одной панели (SearchPanelWidget). Модель
+    // результатов и её живое обновление вслед за активной вкладкой —
+    // SearchResultsController; здесь view, подпись и навигация: клик прыгает
+    // в основном view.
+    QDockWidget*       m_searchDockWidget = nullptr;
+    SearchPanelWidget* m_searchPanel = nullptr;
+    FilterPanelWidget* m_searchQuery = nullptr;   // запрос панели Search
     LogListView* m_searchResultsView = nullptr;
     SearchResultsController* m_searchController = nullptr;
     QLabel*      m_searchResultsStatusLabel = nullptr;
+    // Пользователь запустил поиск (Search/Enter/Find All) и не очистил его:
+    // тогда выдача следует за сменой вкладки и появлением панели.
+    bool         m_searchRequested = false;
+    // onSearchRequested сам показывает панель и ищет: её visibilityChanged
+    // в этот момент поиск не запускает.
+    bool         m_showingSearchDock = false;
+    // Правила идущего поиска (привязанные к полям) — для подсветки в логе.
+    FilterRuleSet m_searchRules;
+    // «Find All» в тулбаре поиска.
+    QAction*     m_findAllAction = nullptr;
     // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
     // меняется программно (reset модели при пересборке результатов).
     bool         m_suppressResultNavigation = false;
@@ -266,6 +305,26 @@ private:
     QTimer*       m_autoReloadTimer = nullptr;
     QToolButton*  m_reloadButton    = nullptr;  // toolbar button (icon + checkable)
     void applyAutoReloadSettings();
+    // Монохромные иконки тулбаров в цвет текста текущей палитры и цветные
+    // точки кнопок уровней (при смене темы — заново).
+    void refreshToolIcons();
+    // Стартовый экран виден, пока нет ни одной вкладки.
+    void updateWelcomeVisibility();
+    void clearRecentFiles();
+    // Размер шрифта лога: steps > 0 крупнее, < 0 мельче, 0 — по умолчанию.
+    void changeFontSize(int steps);
+    // Снять фильтр уровней / все фильтры (уровни, время, текст) с активной вкладки.
+    void showAllLevels();
+    void resetAllFiltersOnActiveView();
+    // Поля From/To дока Time Filter: применённый фильтр активной вкладки
+    // либо весь диапазон её лога (а не «вчера–сегодня»).
+    void seedTimeFilterEditors();
+    void updateTimeFilterInfo();
+    // Подсветка поля быстрого поиска «не найдено».
+    void setQuickSearchNotFound(bool notFound);
+    // Подпись списка результатов панели Search: статус контроллера + как
+    // начать поиск.
+    void updateSearchResultsStatus();
     void updateAutoReloadTimer();   // start/stop timer based on active per-tab flags
     // Atomic operation: update the flag on a tab, sync the button, update the timer.
     void setTabAutoReload(LogViewWidget* view, bool enabled);
@@ -307,7 +366,7 @@ private:
     void setupTextFilterDockContents();
     void setupRowMarkerDock();          // Док Row Highlighters
     void setupTimelineDock();           // Док Timeline (гистограмма по времени)
-    void setupSearchResultsDock();      // Док результатов неразрушающего поиска
+    void setupSearchDock();             // Док Search: запрос + результаты
     void setupEntryDetailsDock();       // Док Entry Details (текущая запись целиком)
     void setupStatisticsDock();         // Док Statistics (сводка по документу)
     void setupFilterStatusToolbar();    // Тулбар «Filters» (индикаторы-кнопки фильтров)
@@ -363,21 +422,22 @@ private:
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.
     void applyTextFiltersToActiveView();
-    // ---- Режим «Неразрушающий поиск» ---------------------------------------
-    // Новый поиск правилами панели по видимому набору активной вкладки и
-    // подсветка совпадений.
+    // ---- Панель Search (неразрушающий поиск) -------------------------------
+    // Поиск правилами панели Search по видимому набору активной вкладки и
+    // подсветка совпадений. Без запущенного пользователем поиска
+    // (m_searchRequested) — ничего не делает.
     void runSearchIntoResults();
-    // Опустошить панель результатов (модель + подпись). Док не прячется —
-    // это обычная панель, видимостью управляет пользователь через меню View.
+    // Опустошить выдачу (модель + подпись). Запрос и флаг m_searchRequested
+    // не трогает: так останавливают воркеры перед сменой схемы полей.
     void clearSearchResults();
-    // Реакция на смену режима Filter/Search в панели фильтров.
-    void onFilterModeChanged();
-    // Реакция на переключение галочки «подсвечивать в основном view».
-    void onHighlightInMainViewChanged();
+    // Подсветка совпадений в основном view вкладки: правила её фильтра
+    // (галочка Highlight панели Text Filters) плюс, у активной вкладки,
+    // идущий поиск (галочка Highlight панели Search).
+    void refreshMainViewHighlights(LogViewWidget* view);
     // Клик/навигация по строке в панели результатов → прыжок в основном view.
     void onSearchResultActivated(const QModelIndex& current);
-    // Режим Search и док результатов видим: только тогда выдача держится
-    // актуальной полными перезапусками поиска (см. SearchResultsController).
+    // Панель Search видима: только тогда выдача держится актуальной полными
+    // перезапусками поиска (см. SearchResultsController).
     bool searchResultsLive() const;
     // Применить row-маркеры к активной вкладке.
     void applyRowMarkersToActiveView();

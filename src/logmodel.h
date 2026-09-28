@@ -73,6 +73,9 @@ public:
     // Диапазон валидных таймстампов по ВСЕМ записям (не только видимым).
     QPair<QDateTime, QDateTime> fullTimeRange() const;
 
+    // Число ВСЕХ строк документа, до фильтров (rowCount() — видимые). O(1).
+    qint64 totalLineCount() const;
+
     // Первые maxCount непустых строк лога — сэмплы для эвристики схемы.
     QStringList sampleMessages(int maxCount) const;
 

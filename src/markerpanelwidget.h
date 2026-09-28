@@ -27,6 +27,8 @@ public:
     explicit MarkerCard(const HighlightPattern& pattern, QWidget* parent = nullptr);
 
     HighlightPattern pattern() const;
+    // Фокус в поле ключевого слова (новая карточка по «+ Add marker»).
+    void focusText();
 
 signals:
     void removeRequested();
@@ -69,6 +71,10 @@ public:
     QVector<HighlightPattern> markers() const;
     void setMarkers(const QVector<HighlightPattern>& markers);
 
+    // Маркер из контекстного меню лога («подсветить строки с текстом»):
+    // включённый, следующего свободного цвета. Применяет его окно.
+    void addQuickMarker(const QString& text);
+
 signals:
     // Пользователь нажал Apply (или Enter в поле маркера).
     void applyRequested();
@@ -81,11 +87,12 @@ private:
     void removeCard(MarkerCard* card);
     QColor nextFreeColor() const;
 
+    CardListArea* m_cardsArea = nullptr;
     QVBoxLayout* m_rowsLayout;
     QVector<MarkerCard*> m_cards;
-    QPushButton* m_addButton;
-    QPushButton* m_applyButton;
-    QPushButton* m_resetButton;
+    QToolButton* m_addButton;
+    QToolButton* m_applyButton;
+    QToolButton* m_resetButton;
 };
 
 #endif // MARKERPANELWIDGET_H

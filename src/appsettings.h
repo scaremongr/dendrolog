@@ -95,7 +95,10 @@ public:
     QString fontFamily() const;
     void    setFontFamily(const QString& family);
 
-    // Point size for the log view font.
+    // Point size for the log view font (kMinFontSize – kMaxFontSize).
+    static constexpr int kDefaultFontSize = 10;
+    static constexpr int kMinFontSize     = 6;
+    static constexpr int kMaxFontSize     = 32;
     int  fontSize() const;
     void setFontSize(int size);
 
@@ -130,7 +133,7 @@ private:
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };
     QString     m_fontFamily;
-    int         m_fontSize        { 10 };
+    int         m_fontSize        { kDefaultFontSize };
     int         m_indexedThresholdMB { 512 };
     int         m_textCacheBudgetMB { 256 };
 };

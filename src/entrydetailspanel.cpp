@@ -289,7 +289,7 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
 
     const QColor hl = palette().color(QPalette::Highlight);
     const QString toggleStyle = QStringLiteral(
-        "QToolButton { padding: 1px 7px; border: 1px solid transparent; border-radius: 3px; }"
+        "QToolButton { padding: 0px 5px; border: 1px solid transparent; border-radius: 3px; }"
         "QToolButton:hover { background-color: rgba(%1,%2,%3,30); }"
         "QToolButton:checked { background-color: rgba(%1,%2,%3,60);"
         " border: 1px solid rgba(%1,%2,%3,120); }")
@@ -321,7 +321,7 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
     m_browser = new QTextBrowser(this);
     m_browser->setOpenLinks(false);
     m_browser->setFrameShape(QFrame::NoFrame);
-    m_browser->document()->setDocumentMargin(8);
+    m_browser->document()->setDocumentMargin(4);
     // Ссылки "copy:*" в заголовках секций — копирование в буфер обмена.
     connect(m_browser, &QTextBrowser::anchorClicked,
             this, &EntryDetailsPanel::onAnchorClicked);
@@ -576,7 +576,7 @@ QString EntryDetailsPanel::buildHtml()
     const auto sectionHeader = [&muted](const QString& title, const QString& id,
                                         const QString& copyId = QString()) {
         QString h = QStringLiteral(
-                        "<div style=\"color:%1;font-weight:bold;margin-top:12px;\">"
+                        "<div style=\"color:%1;font-weight:bold;margin-top:8px;\">"
                         "<a name=\"sec-%2\">%3</a>")
                         .arg(muted.name(), id, title);
         if (!copyId.isEmpty())

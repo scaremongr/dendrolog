@@ -21,10 +21,10 @@
   </property>
   <layout class="QVBoxLayout" name="mainLayout">
    <property name="spacing">
-    <number>8</number>
+    <number>6</number>
    </property>
    <property name="margin">
-    <number>10</number>
+    <number>8</number>
    </property>
    <item>
     <widget class="QSplitter" name="vSplitter">
@@ -44,7 +44,7 @@
       <widget class="QWidget" name="leftWidget">
        <layout class="QVBoxLayout" name="leftLayout">
         <property name="spacing">
-         <number>6</number>
+         <number>4</number>
         </property>
         <property name="margin">
          <number>0</number>
@@ -157,15 +157,15 @@
         </attribute>
         <layout class="QVBoxLayout" name="editorLayout">
          <property name="spacing">
-          <number>6</number>
+          <number>4</number>
          </property>
          <property name="margin">
-          <number>8</number>
+          <number>4</number>
          </property>
          <item>
           <layout class="QHBoxLayout" name="nameRow">
            <property name="spacing">
-            <number>6</number>
+            <number>4</number>
            </property>
            <item>
             <widget class="QLabel" name="nameLabel">
@@ -310,7 +310,7 @@
         <number>4</number>
        </property>
        <property name="margin">
-        <number>8</number>
+        <number>4</number>
        </property>
        <item>
         <widget class="QPlainTextEdit" name="sampleEdit">
@@ -339,7 +339,7 @@
    <item>
     <layout class="QHBoxLayout" name="buttonRow">
      <property name="spacing">
-      <number>6</number>
+      <number>4</number>
      </property>
      <item>
       <widget class="QLabel" name="validationLabel">

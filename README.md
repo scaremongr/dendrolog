@@ -31,7 +31,8 @@
 - **Field schemas** — split entries into structured fields (timestamp, level,
   thread, message…); auto-detect from a sample line or import a **Grok** expression.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
-  with AND/OR, regex, per-field binding.
+  with AND/OR, regex, per-field binding. Select text in the log and right-click
+  to show only, hide, highlight or find lines with it.
 - **Row highlighters** — colour matching rows without hiding anything.
 - **Timeline histogram** — entry density over time; click to jump, drag to filter.
 - **Statistics panel** — level counts, top repeated messages, rate, anomalies.

@@ -58,7 +58,7 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     // ---- Main row: identical columns for every block type ------------ //
     m_mainRow = new QHBoxLayout();
     m_mainRow->setContentsMargins(0, 0, 0, 0);
-    m_mainRow->setSpacing(5);
+    m_mainRow->setSpacing(4);
     rows->addLayout(m_mainRow);
 
     // Column 1: the type. Sized to the widest entry so no label is ever
@@ -109,7 +109,7 @@ PatternBlockCard::PatternBlockCard(QWidget* parent)
     m_wrapRow = new QWidget(this);
     auto* wrapLayout = new QHBoxLayout(m_wrapRow);
     wrapLayout->setContentsMargins(4, 0, 0, 0);
-    wrapLayout->setSpacing(5);
+    wrapLayout->setSpacing(4);
 
     m_patternLabel = new QLabel(tr("Text"), m_wrapRow);
     wrapLayout->addWidget(m_patternLabel);
@@ -241,7 +241,7 @@ void PatternBlockCard::attachGlueWidget(QWidget* widget)
     if (!widget)
         return;
     widget->setParent(this);
-    m_mainRow->addSpacing(8);
+    m_mainRow->addSpacing(4);
     m_mainRow->addWidget(widget);
 }
 

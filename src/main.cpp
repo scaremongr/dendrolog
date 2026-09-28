@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "compactstyle.h"
 #include "singleinstance.h"
 #include <QApplication>
 #include <QElapsedTimer>
@@ -127,7 +128,9 @@ int main(int argc, char *argv[])
 
     // Fusion honours the QPalette consistently on every platform, unlike the
     // native Windows styles which (on Windows 10) ignore the dark colour scheme.
-    QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
+    // CompactStyle keeps Fusion's look but with one dense set of margins and
+    // spacings for the whole window (see compactstyle.h).
+    QApplication::setStyle(new CompactStyle(QStyleFactory::create(QStringLiteral("Fusion"))));
 
     applyColorScheme(QGuiApplication::styleHints()->colorScheme());
 

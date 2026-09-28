@@ -19,6 +19,13 @@ public:
 signals:
     void tabContextMenuRequested(int index, const QPoint& globalPos);
     void mergeTabsRequested(int fromIndex, int toIndex);
+    // Вкладка добавлена или убрана (в т.ч. закрыта последняя) — окно
+    // переключает стартовый экран и заглушку «нет вкладок».
+    void tabCountChanged(int count);
+
+protected:
+    void tabInserted(int index) override;
+    void tabRemoved(int index) override;
 
 private:
     LogTabBar* m_bar = nullptr;

@@ -199,6 +199,18 @@ public:
     // утаскивал бы свежеоткрытый файл в конец.
     bool isScrolledToBottom() const;
 
+    // Действия контекстного меню над выделенным (однострочным) текстом.
+    // Сам view их не исполняет: правила фильтров, маркеры и быстрый поиск
+    // живут в окне.
+    enum class TextAction {
+        Find,           // быстрый поиск этого текста
+        FindAll,        // все строки с текстом — списком в панели Search
+        FilterInclude,  // оставить только строки с текстом
+        FilterExclude,  // скрыть строки с текстом
+        Highlight       // окрасить строки с текстом (Row Highlighters)
+    };
+    Q_ENUM(TextAction)
+
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
 
@@ -208,7 +220,15 @@ signals:
 
     // Пользователь выбрал «использовать таймстамп как границу фильтра по времени»
     // из контекстного меню. isStart == true → нижняя граница (From), иначе верхняя (To).
+    // Таймстамп — выделенный в тексте либо, без такого выделения, метка строки.
     void timeFilterBoundRequested(const QDateTime& dt, bool isStart);
+
+    // Пункт контекстного меню над выделенным текстом (см. TextAction).
+    void textActionRequested(LogListView::TextAction action, const QString& text);
+
+    // Ctrl+колесо: крупнее (steps > 0) или мельче шрифт. Размер шрифта —
+    // общая настройка, поэтому меняет его окно, а не сам view.
+    void fontZoomRequested(int steps);
 
 protected:
     // Кастомная отрисовка элементов
@@ -497,6 +517,8 @@ private:
     
     // ---- Follow-tail ---------------------------------------------------------
     bool m_followTail = false;
+    // Недобранная до целого шага дельта Ctrl+колеса (у тачпадов тики мелкие).
+    int m_zoomWheelAccum = 0;
     void scrollToBottomFollow();
 
     // «Огромный режим»: выше порога строк плотные пер-строчные кэши

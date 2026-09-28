@@ -286,7 +286,7 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     auto* cardsHost = new QWidget(ui->blocksScroll);
     m_cardsLayout = new QVBoxLayout(cardsHost);
     m_cardsLayout->setContentsMargins(2, 2, 2, 2);
-    m_cardsLayout->setSpacing(4);
+    m_cardsLayout->setSpacing(3);
     m_cardsLayout->addStretch(1);
     ui->blocksScroll->setWidget(cardsHost);
 
@@ -325,11 +325,15 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
         schedulePreviewUpdate();
     });
 
-    auto* reloadRow = new QHBoxLayout();
-    reloadRow->setContentsMargins(0, 0, 0, 0);
-    reloadRow->addStretch(1);
-    reloadRow->addWidget(reloadSampleBtn);
-    ui->previewLayout->insertLayout(0, reloadRow);
+    // Кнопка — справа в строке статуса предпросмотра, а не отдельной
+    // строкой над текстом: та съедала высоту поля образцов.
+    auto* statusRow = new QHBoxLayout();
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    const int statusIndex = ui->previewLayout->indexOf(ui->previewStatusLabel);
+    ui->previewLayout->removeWidget(ui->previewStatusLabel);
+    statusRow->addWidget(ui->previewStatusLabel, 1);
+    statusRow->addWidget(reloadSampleBtn);
+    ui->previewLayout->insertLayout(statusIndex, statusRow);
 
     // Help (colours are blended from the palette so the text stays
     // readable on dark themes).
@@ -337,8 +341,9 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
         const QColor codeBg = CardFrame::mixedColor(
             palette().color(QPalette::Text), palette().color(QPalette::Base), 0.92);
         const QColor border = CardFrame::mutedBorderColor(palette());
+        // Исходник в UTF-8 (тире, «·», «⚙»): fromLatin1 превращал их в «â€”».
         ui->helpBrowser->setHtml(
-            QString::fromLatin1(kHelpHtml).arg(codeBg.name(), border.name()));
+            QString::fromUtf8(kHelpHtml).arg(codeBg.name(), border.name()));
     }
 
     // Splitter proportions

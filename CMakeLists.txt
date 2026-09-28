@@ -92,6 +92,8 @@ set(DENDROLOG_WIDGETS_SOURCES
 
     src/cardframe.h
     src/cardframe.cpp
+    src/compactstyle.h
+    src/compactstyle.cpp
     src/toggleswitch.h
     src/toggleswitch.cpp
     src/highlightpalette.h
@@ -107,6 +109,8 @@ set(PROJECT_SOURCES
     src/logtabbar.cpp
     src/logtabwidget.h
     src/logtabwidget.cpp
+    src/welcomewidget.h
+    src/welcomewidget.cpp
 
     src/schemastore.h
     src/schemastore.cpp
@@ -129,6 +133,8 @@ set(PROJECT_SOURCES
     src/filterpanelwidget.cpp
     src/markerpanelwidget.h
     src/markerpanelwidget.cpp
+    src/searchpanelwidget.h
+    src/searchpanelwidget.cpp
     src/entrydetailspanel.h
     src/entrydetailspanel.cpp
     src/statisticspanel.h

@@ -62,18 +62,17 @@ DirectoryScannerPanel::DirectoryScannerPanel(QWidget* parent)
 
 void DirectoryScannerPanel::buildUi()
 {
+    // Поля и промежутки — от CompactStyle, как у остальных панелей.
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(5, 5, 5, 5);
-    root->setSpacing(5);
 
     // ── Header card ─────────────────────────────────────────────────────────
     m_card = new CardFrame(this);
     m_card->setAccentColor(AppTheme::instance().logInfo);
     CardFrame* card = m_card;
     QVBoxLayout* rows = card->rowsLayout();
-    rows->setSpacing(5);
+    rows->setSpacing(3);
 
-    const QSize squareBtn(28, 28);
+    const QSize squareBtn(24, 24);
 
     // Row 1 (always visible): [Scan▢] [⟳▢] path…………… [⚙] [Exts▢]
     auto* headerRow = new QHBoxLayout();
@@ -115,7 +114,7 @@ void DirectoryScannerPanel::buildUi()
     m_filterArea = new QWidget(card);
     auto* filterLayout = new QVBoxLayout(m_filterArea);
     filterLayout->setContentsMargins(0, 2, 0, 0);
-    filterLayout->setSpacing(5);
+    filterLayout->setSpacing(3);
 
     // Separator
     auto* sep = new QFrame(m_filterArea);

@@ -2361,6 +2361,19 @@ bool LogListView::isScrolledToBottom() const
 
 void LogListView::wheelEvent(QWheelEvent *event)
 {
+    // Ctrl+колесо — размер шрифта, как в браузерах и редакторах (а не
+    // постраничная прокрутка базового QAbstractScrollArea).
+    if (event->modifiers() & Qt::ControlModifier) {
+        m_zoomWheelAccum += event->angleDelta().y();
+        const int steps = m_zoomWheelAccum / QWheelEvent::DefaultDeltasPerStep;
+        if (steps != 0) {
+            m_zoomWheelAccum -= steps * QWheelEvent::DefaultDeltasPerStep;
+            emit fontZoomRequested(steps);
+        }
+        event->accept();
+        return;
+    }
+
     // Пользователь листает вверх — он хочет читать историю, а не хвост.
     if (m_followTail && event->angleDelta().y() > 0)
         setFollowTail(false);
@@ -2449,9 +2462,11 @@ static QDateTime parseTimestampText(const QString& raw) {
     return QDateTime();
 }
 
-// Контекстное меню строки: копирование выделения, переключение word wrap для
-// строки под курсором и действия в зависимости от типа выделенного блока
-// (открыть ссылку / файл, подставить таймстамп в фильтр по времени).
+// Контекстное меню строки: копирование выделения и строки, действия над
+// выделенным текстом (найти, отфильтровать, подсветить), переключение word
+// wrap для строки под курсором и действия в зависимости от типа выделенного
+// блока (открыть ссылку / файл). Граница фильтра по времени — выделенный
+// таймстамп или метка строки под курсором.
 void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     const QPoint vpPos    = viewport()->mapFromGlobal(event->globalPos());
     const qint64 contentY = vpPos.y() + scrollContentY();
@@ -2466,9 +2481,10 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
         QAction* copyAct = menu.addAction(tr("Copy"));
         copyAct->setShortcut(QKeySequence::Copy);
         connect(copyAct, &QAction::triggered, this, [this]() { copySelectionToClipboard(); });
-    } else if (haveRow && model()) {
-        // Ничего не выделено — предлагаем скопировать всю строку под курсором
-        // (именно отображаемое содержимое, с учётом выбранных Log Fields).
+    }
+    if (haveRow && model()) {
+        // Вся строка под курсором — именно отображаемое содержимое, с учётом
+        // выбранных Log Fields.
         QAction* copyLineAct = menu.addAction(tr("Copy Whole Line"));
         const int copyRow = row;
         connect(copyLineAct, &QAction::triggered, this, [this, copyRow]() {
@@ -2484,6 +2500,26 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     QString sel;
     if (!m_selection.isEmpty() && !m_selection.isMultiRow())
         sel = selectedText().trimmed();
+
+    // Короткий однострочный фрагмент — готовый запрос: найти его, оставить
+    // или скрыть строки с ним, окрасить такие строки.
+    constexpr int kMaxQueryLength = 200;
+    if (!sel.isEmpty() && sel.size() <= kMaxQueryLength) {
+        const QString shown = fontMetrics().elidedText(sel, Qt::ElideMiddle,
+                                                       fontMetrics().averageCharWidth() * 32);
+        const auto addTextAction = [&](const QString& text, TextAction action) {
+            QAction* a = menu.addAction(text.arg(shown));
+            connect(a, &QAction::triggered, this,
+                    [this, action, sel]() { emit textActionRequested(action, sel); });
+        };
+        menu.addSeparator();
+        addTextAction(tr("Find “%1”"), TextAction::Find);
+        addTextAction(tr("Find All “%1”"), TextAction::FindAll);
+        addTextAction(tr("Show Only Lines with “%1”"), TextAction::FilterInclude);
+        addTextAction(tr("Hide Lines with “%1”"), TextAction::FilterExclude);
+        addTextAction(tr("Highlight Lines with “%1”"), TextAction::Highlight);
+    }
+
     const TextToken::TokenType selType = sel.isEmpty()
         ? TextToken::TokenType::None : TextToken::classify(sel);
     if (selType == TextToken::TokenType::Url) {
@@ -2505,17 +2541,26 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
         connect(openDir, &QAction::triggered, this, [sel]() {
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(sel).absolutePath()));
         });
-    } else if (selType == TextToken::TokenType::Timestamp) {
-        const QDateTime dt = parseTimestampText(sel);
-        if (dt.isValid()) {
-            menu.addSeparator();
-            QAction* asStart = menu.addAction(tr("Use as Time Filter Start"));
-            connect(asStart, &QAction::triggered, this,
-                    [this, dt]() { emit timeFilterBoundRequested(dt, true); });
-            QAction* asEnd = menu.addAction(tr("Use as Time Filter End"));
-            connect(asEnd, &QAction::triggered, this,
-                    [this, dt]() { emit timeFilterBoundRequested(dt, false); });
-        }
+    }
+
+    // Граница фильтра по времени: выделенный таймстамп, а без него — метка
+    // строки под курсором (выделять время ради фильтра не нужно).
+    QDateTime boundTime;
+    if (selType == TextToken::TokenType::Timestamp)
+        boundTime = parseTimestampText(sel);
+    if (!boundTime.isValid() && haveRow) {
+        if (auto* logModel = qobject_cast<LogModel*>(model()))
+            boundTime = logModel->visibleTimestampAt(row);
+    }
+    if (boundTime.isValid()) {
+        const QString shown = boundTime.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+        menu.addSeparator();
+        QAction* asStart = menu.addAction(tr("Use as Time Filter Start (%1)").arg(shown));
+        connect(asStart, &QAction::triggered, this,
+                [this, boundTime]() { emit timeFilterBoundRequested(boundTime, true); });
+        QAction* asEnd = menu.addAction(tr("Use as Time Filter End (%1)").arg(shown));
+        connect(asEnd, &QAction::triggered, this,
+                [this, boundTime]() { emit timeFilterBoundRequested(boundTime, false); });
     }
 
     if (haveRow && rowHasWrapToggle(row) && !hugeRowMode()) {

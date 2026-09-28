@@ -25,7 +25,7 @@ MarkerCard::MarkerCard(const HighlightPattern& pattern, QWidget* parent)
     // ---- Строка 1: вкл/выкл, ключевое слово, действия ------------------ //
     auto* headerRow = new QHBoxLayout();
     headerRow->setContentsMargins(0, 0, 0, 0);
-    headerRow->setSpacing(4);
+    headerRow->setSpacing(3);
     rows->addLayout(headerRow);
 
     m_enabledCheckBox = new QCheckBox(this);
@@ -45,7 +45,7 @@ MarkerCard::MarkerCard(const HighlightPattern& pattern, QWidget* parent)
     headerRow->addWidget(m_gearButton);
 
     m_colorButton = makeToolButton(QString(), tr("Row colour (click to change)"));
-    m_colorButton->setFixedSize(22, 22);
+    m_colorButton->setFixedSize(20, 20);
     m_colorButton->setAutoRaise(false);
     headerRow->addWidget(m_colorButton);
 
@@ -56,7 +56,7 @@ MarkerCard::MarkerCard(const HighlightPattern& pattern, QWidget* parent)
     m_advancedRow = new QWidget(this);
     auto* advLayout = new QHBoxLayout(m_advancedRow);
     advLayout->setContentsMargins(4, 0, 0, 0);
-    advLayout->setSpacing(10);
+    advLayout->setSpacing(8);
 
     m_caseSensitiveCheckBox = new QCheckBox(tr("Case sensitive"), m_advancedRow);
     m_caseSensitiveCheckBox->setChecked(pattern.caseSensitivity == Qt::CaseSensitive);
@@ -87,6 +87,12 @@ MarkerCard::MarkerCard(const HighlightPattern& pattern, QWidget* parent)
     setAccentColor(m_color);
     updateColorButton();
     updateGearHighlight();
+}
+
+void MarkerCard::focusText()
+{
+    m_textEdit->setFocus(Qt::OtherFocusReason);
+    m_textEdit->selectAll();
 }
 
 HighlightPattern MarkerCard::pattern() const
@@ -134,36 +140,44 @@ void MarkerCard::updateGearHighlight()
 MarkerPanelWidget::MarkerPanelWidget(QWidget* parent)
     : QWidget(parent)
 {
+    // Поля и промежутки — от CompactStyle, как у остальных панелей.
     auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(5, 5, 5, 5);
-    rootLayout->setSpacing(5);
 
+    // Шапка — та же карточка с плоскими кнопками, что и у Text Filters:
+    // добавить слева, Reset/Apply справа.
+    auto* headerCard = new CardFrame(this);
+    headerCard->setAccentColor(palette().color(QPalette::Mid)); // нейтральный акцент
     auto* controlsLayout = new QHBoxLayout();
-    m_addButton = new QPushButton(tr("+ Add marker"), this);
-    m_addButton->setToolTip(tr("Mark rows containing a keyword with a colour.\n"
-                               "Rows are NOT filtered out — the rest of the log stays visible."));
-    connect(m_addButton, &QPushButton::clicked, this, &MarkerPanelWidget::onAddMarkerClicked);
+    m_addButton = headerCard->makeToolButton(tr("＋ Add marker"),
+        tr("Mark rows containing a keyword with a colour.\n"
+           "Rows are NOT filtered out — the rest of the log stays visible."));
+    connect(m_addButton, &QToolButton::clicked, this, &MarkerPanelWidget::onAddMarkerClicked);
     controlsLayout->addWidget(m_addButton);
+    controlsLayout->addStretch(1);
 
-    m_applyButton = new QPushButton(tr("Apply"), this);
-    m_applyButton->setToolTip(tr("Apply the markers to the CURRENT document"));
-    m_applyButton->setDefault(true);
-    connect(m_applyButton, &QPushButton::clicked, this, &MarkerPanelWidget::applyRequested);
-    controlsLayout->addWidget(m_applyButton);
-
-    m_resetButton = new QPushButton(tr("Reset"), this);
-    m_resetButton->setToolTip(tr("Remove all row markers from the CURRENT document.\n"
-                                 "The markers stay in the panel for re-applying."));
-    connect(m_resetButton, &QPushButton::clicked, this, &MarkerPanelWidget::resetRequested);
+    m_resetButton = headerCard->makeToolButton(tr("⟲ Reset"),
+        tr("Remove all row markers from the CURRENT document.\n"
+           "The markers stay in the panel for re-applying."));
+    connect(m_resetButton, &QToolButton::clicked, this, &MarkerPanelWidget::resetRequested);
     controlsLayout->addWidget(m_resetButton);
 
-    controlsLayout->addStretch();
-    rootLayout->addLayout(controlsLayout);
+    m_applyButton = headerCard->makeToolButton(tr("▶ Apply"),
+        tr("Apply the markers to the CURRENT document"));
+    connect(m_applyButton, &QToolButton::clicked, this, &MarkerPanelWidget::applyRequested);
+    controlsLayout->addWidget(m_applyButton);
+    headerCard->rowsLayout()->addLayout(controlsLayout);
+    rootLayout->addWidget(headerCard);
 
-    m_rowsLayout = new QVBoxLayout();
-    m_rowsLayout->setSpacing(4);
-    rootLayout->addLayout(m_rowsLayout);
-    rootLayout->addStretch(1);
+    // Список маркеров прокручивается; пустой — объясняет, что это и как
+    // его наполнить.
+    m_cardsArea = new CardListArea(this);
+    m_cardsArea->setEmptyText(tr("No markers yet. A marker colours every row that contains "
+                                 "its keyword; rows are never hidden.\n\n"
+                                 "Add one with “+ Add marker”, or select text in the "
+                                 "log and choose “Highlight Lines with…” in its "
+                                 "context menu."));
+    m_rowsLayout = m_cardsArea->cardsLayout();
+    rootLayout->addWidget(m_cardsArea, /*stretch=*/1);
 }
 
 QVector<HighlightPattern> MarkerPanelWidget::markers() const
@@ -188,6 +202,18 @@ void MarkerPanelWidget::onAddMarkerClicked()
     HighlightPattern pattern;
     pattern.color = nextFreeColor();
     addMarker(pattern);
+    MarkerCard* card = m_cards.last();
+    m_cardsArea->revealLater(card);
+    card->focusText();
+}
+
+void MarkerPanelWidget::addQuickMarker(const QString& text)
+{
+    HighlightPattern pattern;
+    pattern.text = text;
+    pattern.color = nextFreeColor();
+    addMarker(pattern);
+    m_cardsArea->revealLater(m_cards.last());
 }
 
 void MarkerPanelWidget::addMarker(const HighlightPattern& pattern)
@@ -202,13 +228,17 @@ void MarkerPanelWidget::addMarker(const HighlightPattern& pattern)
 
     m_rowsLayout->addWidget(card);
     m_cards.append(card);
+    m_cardsArea->cardsChanged();
 }
 
 void MarkerPanelWidget::removeCard(MarkerCard* card)
 {
     m_cards.removeOne(card);
     m_rowsLayout->removeWidget(card);
+    // Вне раскладки карточка осталась бы видна на старом месте до удаления.
+    card->hide();
     card->deleteLater();
+    m_cardsArea->cardsChanged();
 }
 
 QColor MarkerPanelWidget::nextFreeColor() const

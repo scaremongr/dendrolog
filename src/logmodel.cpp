@@ -197,6 +197,11 @@ QPair<QDateTime, QDateTime> LogModel::fullTimeRange() const
     return m_store->fullTimeRange();
 }
 
+qint64 LogModel::totalLineCount() const
+{
+    return m_store->allCount();
+}
+
 QStringList LogModel::sampleMessages(int maxCount) const
 {
     return m_store->sampleMessages(maxCount);

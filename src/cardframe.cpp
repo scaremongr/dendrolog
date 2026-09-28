@@ -2,6 +2,10 @@
 
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QPointer>
+#include <QScrollBar>
+#include <QTimer>
 #include <QPainter>
 #include <QPixmap>
 #include <QSvgRenderer>
@@ -38,11 +42,11 @@ CardFrame::CardFrame(QWidget* parent)
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     auto* outer = new QHBoxLayout(this);
-    outer->setContentsMargins(0, 3, 6, 3);
-    outer->setSpacing(5);
+    outer->setContentsMargins(0, 2, 4, 2);
+    outer->setSpacing(4);
 
     m_stripe = new QFrame(this);
-    m_stripe->setFixedWidth(6);
+    m_stripe->setFixedWidth(4);
     outer->addWidget(m_stripe);
 
     m_rows = new QVBoxLayout();
@@ -134,4 +138,77 @@ void CardFrame::applyFrameStyle()
             "background-color: %1; border: none; border-radius: 2px;")
                 .arg(m_accent.isValid() ? m_accent.name() : neutral));
     }
+}
+
+// ============================================================
+// CardListArea
+// ============================================================
+
+CardListArea::CardListArea(QWidget* parent)
+    : QScrollArea(parent)
+{
+    setWidgetResizable(true);
+    setFrameShape(QFrame::NoFrame);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto* host = new QWidget(this);
+    auto* hostLayout = new QVBoxLayout(host);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(4);
+
+    m_cards = new QVBoxLayout();
+    m_cards->setContentsMargins(0, 0, 0, 0);
+    m_cards->setSpacing(4);
+    hostLayout->addLayout(m_cards);
+
+    m_emptyLabel = new QLabel(host);
+    m_emptyLabel->setWordWrap(true);
+    m_emptyLabel->setContentsMargins(2, 4, 2, 4);
+    m_emptyLabel->setVisible(false);
+    hostLayout->addWidget(m_emptyLabel);
+    hostLayout->addStretch(1);
+
+    setWidget(host);
+    changeEvent(nullptr);
+}
+
+void CardListArea::setEmptyText(const QString& text)
+{
+    m_emptyLabel->setText(text);
+    cardsChanged();
+}
+
+void CardListArea::cardsChanged()
+{
+    m_emptyLabel->setVisible(m_cards->count() == 0 && !m_emptyLabel->text().isEmpty());
+    updateGeometry();
+}
+
+void CardListArea::revealLater(QWidget* card)
+{
+    QPointer<QWidget> guard(card);
+    QTimer::singleShot(0, this, [this, guard]() {
+        if (guard)
+            ensureWidgetVisible(guard, 0, 4);
+    });
+}
+
+QSize CardListArea::minimumSizeHint() const
+{
+    QSize hint = QScrollArea::minimumSizeHint();
+    if (const QWidget* content = widget()) {
+        const int scrollBar = verticalScrollBar() ? verticalScrollBar()->sizeHint().width() : 0;
+        hint.setWidth(qMax(hint.width(),
+                           content->minimumSizeHint().width() + scrollBar + 2 * frameWidth()));
+    }
+    return hint;
+}
+
+void CardListArea::changeEvent(QEvent* event)
+{
+    if (event)
+        QScrollArea::changeEvent(event);
+    if (!event || event->type() == QEvent::PaletteChange)
+        m_emptyLabel->setStyleSheet(QStringLiteral("color: %1;")
+            .arg(CardFrame::mutedTextColor(palette()).name()));
 }

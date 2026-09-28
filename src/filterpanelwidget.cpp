@@ -1,7 +1,6 @@
 #include "filterpanelwidget.h"
 #include "apptheme.h"
 #include "highlightpalette.h"
-#include "toggleswitch.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -34,7 +33,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     // ☑ → Contains → AND/OR (у первой карточки засерен) → Field → действия.
     auto* headerRow = new QHBoxLayout();
     headerRow->setContentsMargins(0, 0, 0, 0);
-    headerRow->setSpacing(4);
+    headerRow->setSpacing(3);
     rows->addLayout(headerRow);
 
     m_enabledCheckBox = new QCheckBox(this);
@@ -75,7 +74,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     // раскраску совпадений правила. Залит цветом (вкл) или полый (выкл).
     m_highlightEnabled = rule.highlightEnabled;
     m_colorButton = makeToolButton(QString(), QString());
-    m_colorButton->setFixedSize(22, 22);
+    m_colorButton->setFixedSize(20, 20);
     m_colorButton->setAutoRaise(false);
     m_colorButton->setContextMenuPolicy(Qt::CustomContextMenu);
     headerRow->addWidget(m_colorButton);
@@ -94,7 +93,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     m_advancedRow = new QWidget(this);
     auto* advLayout = new QHBoxLayout(m_advancedRow);
     advLayout->setContentsMargins(4, 0, 0, 0);
-    advLayout->setSpacing(10);
+    advLayout->setSpacing(8);
 
     m_caseSensitiveCheckBox = new QCheckBox(tr("Case sensitive"), m_advancedRow);
     m_caseSensitiveCheckBox->setChecked(rule.caseSensitive);
@@ -148,6 +147,18 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
     setAccentColor(m_color);
     updateColorButton();
     updateGearHighlight();
+    updateRegexValidity();
+}
+
+void FilterRuleCard::focusText()
+{
+    m_textEdit->setFocus(Qt::OtherFocusReason);
+    m_textEdit->selectAll();
+}
+
+void FilterRuleCard::setTextPlaceholder(const QString& text)
+{
+    m_textPlaceholder = text;
     updateRegexValidity();
 }
 
@@ -238,7 +249,8 @@ void FilterRuleCard::updateRegexValidity()
     }
 
     m_textEdit->setPlaceholderText(m_regexCheckBox->isChecked()
-        ? tr("Regular expression...") : tr("Filter text..."));
+        ? tr("Regular expression...")
+        : (m_textPlaceholder.isEmpty() ? tr("Filter text...") : m_textPlaceholder));
 
     if (error.isEmpty() && note.isEmpty()) {
         m_regexErrorLabel->clear();
@@ -311,27 +323,37 @@ void FilterRuleCard::updateGearHighlight()
 // FilterPanelWidget
 // ===========================================================================
 
-FilterPanelWidget::FilterPanelWidget(QWidget* parent)
+FilterPanelWidget::FilterPanelWidget(Mode mode, QWidget* parent)
     : QWidget(parent)
+    , m_mode(mode)
 {
+    const bool search = (mode == Mode::Search);
+
+    // Поля и промежутки — от CompactStyle, как у остальных панелей.
     auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(5, 5, 5, 5);
-    rootLayout->setSpacing(5);
 
     // ================= Компактный блок настроек (CardFrame) =============== //
-    // Профиль, режим и действия собраны в один аккуратный блок с плоскими
-    // tool-кнопками — вместо россыпи крупных текстовых кнопок.
+    // Назначение, профиль и действия собраны в один аккуратный блок с
+    // плоскими tool-кнопками — вместо россыпи крупных текстовых кнопок.
     m_settingsCard = new CardFrame(this);
     m_settingsCard->setAccentColor(palette().color(QPalette::Mid)); // нейтральный акцент
     QVBoxLayout* cardRows = m_settingsCard->rowsLayout();
-    cardRows->setSpacing(4);
+    cardRows->setSpacing(3);
 
-    // ---- Ряд 1: профиль + меню действий ------------------------------- //
+    // ---- Ряд 1: что делает панель — одной строкой ---------------------- //
+    auto* purpose = new QLabel(search
+        ? tr("Finds lines and lists them; the log itself stays complete.")
+        : tr("Hides the lines that do not match the rules."), m_settingsCard);
+    purpose->setWordWrap(true);
+    purpose->setStyleSheet(QStringLiteral("color: %1;")
+        .arg(CardFrame::mutedTextColor(palette()).name()));
+    cardRows->addWidget(purpose);
+
+    // ---- Ряд 2: профиль + меню действий ------------------------------- //
     auto* profileRow = new QHBoxLayout();
-    profileRow->setSpacing(4);
     profileRow->addWidget(new QLabel(tr("Profile:"), m_settingsCard));
     m_profileCombo = new QComboBox(m_settingsCard);
-    m_profileCombo->setToolTip(tr("Saved filter profiles"));
+    m_profileCombo->setToolTip(search ? tr("Saved searches") : tr("Saved filter profiles"));
     connect(m_profileCombo, QOverload<int>::of(&QComboBox::activated),
             this, &FilterPanelWidget::onProfileSelected);
     profileRow->addWidget(m_profileCombo, /*stretch=*/1);
@@ -342,51 +364,36 @@ FilterPanelWidget::FilterPanelWidget(QWidget* parent)
     profileRow->addWidget(m_profileMenuButton);
     cardRows->addLayout(profileRow);
 
-    // ---- Ряд 2: режим (toggle switch) + подсветка в одну строку ------- //
-    // Порядок как у чекбокса: сам переключатель слева, подпись справа.
-    auto* modeRow = new QHBoxLayout();
-    modeRow->setSpacing(6);
-    m_modeSwitch = new ToggleSwitch(m_settingsCard); // off = Filter, on = Search
-    const QString modeTip = tr("On — non-destructive search: keep all rows; matches go to\n"
-                               "the Search Results panel (click one to jump there).\n"
-                               "Off — filter: hide non-matching rows in the main view.\n"
-                               "AND/OR between rules work the same in both modes; new rules\n"
-                               "added in search default to OR (show matches of any rule).");
-    m_modeSwitch->setToolTip(modeTip);
-    connect(m_modeSwitch, &ToggleSwitch::toggled, this, [this]() {
-        updateModeDependentUi();
-        emit modeChanged(mode());
-    });
-    modeRow->addWidget(m_modeSwitch);
-    auto* modeLabel = new QLabel(tr("Non-destructive search"), m_settingsCard);
-    modeLabel->setToolTip(modeTip);
-    modeRow->addWidget(modeLabel);
-    modeRow->addStretch(1);
-
-    // Галочка подсветки — теперь всегда в этой же строке (шестерёнка не нужна);
-    // действует в обоих режимах, поэтому вёрстка не «скачет».
-    m_highlightMainCheckBox = new QCheckBox(tr("Highlight in main view"), m_settingsCard);
-    m_highlightMainCheckBox->setChecked(true);
-    m_highlightMainCheckBox->setToolTip(tr("Highlight the matched text in the main view.\n"
-                                           "Applies in both modes (no rows are hidden by it).\n"
-                                           "In Search mode the results panel always highlights matches."));
-    connect(m_highlightMainCheckBox, &QCheckBox::toggled,
-            this, &FilterPanelWidget::highlightInMainViewChanged);
-    modeRow->addWidget(m_highlightMainCheckBox);
-    cardRows->addLayout(modeRow);
-
-    // ---- Ряд 3: действия ---------------------------------------------- //
+    // ---- Ряд 3: добавить правило | подсветка, сброс, запуск ------------ //
     auto* actionRow = new QHBoxLayout();
-    actionRow->setSpacing(4);
-    m_addButton = m_settingsCard->makeToolButton(QStringLiteral("＋ Add rule"),
-        tr("Add a filter rule"));
+    m_addButton = m_settingsCard->makeToolButton(QStringLiteral("＋ ") + tr("Add rule"),
+        search ? tr("Add a search rule") : tr("Add a filter rule"));
     connect(m_addButton, &QToolButton::clicked, this, &FilterPanelWidget::onAddRuleClicked);
     actionRow->addWidget(m_addButton);
     actionRow->addStretch(1);
-    m_resetButton = m_settingsCard->makeToolButton(QStringLiteral("⟲ Reset"), QString());
+
+    m_highlightMainCheckBox = new QCheckBox(tr("Highlight"), m_settingsCard);
+    m_highlightMainCheckBox->setChecked(true);
+    m_highlightMainCheckBox->setToolTip(search
+        ? tr("Also highlight the found text in the log.\n"
+             "The results list always highlights it.")
+        : tr("Highlight the matched text in the filtered log."));
+    connect(m_highlightMainCheckBox, &QCheckBox::toggled,
+            this, &FilterPanelWidget::highlightInMainViewChanged);
+    actionRow->addWidget(m_highlightMainCheckBox);
+
+    m_resetButton = m_settingsCard->makeToolButton(
+        search ? QStringLiteral("✕ ") + tr("Clear") : QStringLiteral("⟲ ") + tr("Reset"),
+        search ? tr("Clear the results. The rules stay here for the next search.")
+               : tr("Remove the filter from the CURRENT tab.\n"
+                    "The rules stay here for re-applying."));
     connect(m_resetButton, &QToolButton::clicked, this, &FilterPanelWidget::resetRequested);
     actionRow->addWidget(m_resetButton);
-    m_applyButton = m_settingsCard->makeToolButton(QString(), QString());
+
+    m_applyButton = m_settingsCard->makeToolButton(
+        QStringLiteral("▶ ") + (search ? tr("Search") : tr("Apply")),
+        search ? tr("Find the matching lines of the CURRENT tab (Enter in a rule does the same)")
+               : tr("Filter the CURRENT tab by the rules (Enter in a rule does the same)"));
     connect(m_applyButton, &QToolButton::clicked, this, &FilterPanelWidget::applyRequested);
     actionRow->addWidget(m_applyButton);
     cardRows->addLayout(actionRow);
@@ -394,33 +401,16 @@ FilterPanelWidget::FilterPanelWidget(QWidget* parent)
     rootLayout->addWidget(m_settingsCard);
 
     // ================= Список правил ===================================== //
-    m_rulesLayout = new QVBoxLayout();
-    m_rulesLayout->setSpacing(4);
-    rootLayout->addLayout(m_rulesLayout);
-    rootLayout->addStretch(1);
+    // Прокручивается сам: карточка настроек остаётся на месте, а длинный
+    // список правил не растягивает док за край окна.
+    m_rulesArea = new CardListArea(this);
+    m_rulesLayout = m_rulesArea->cardsLayout();
+    rootLayout->addWidget(m_rulesArea, /*stretch=*/1);
 
     // Стартовый профиль «Default» + одна пустая карточка правила.
     ensureAtLeastOneProfile();
     refreshProfileCombo();
     addRule(FilterRule{});
-    updateModeDependentUi();
-}
-
-FilterPanelWidget::Mode FilterPanelWidget::mode() const
-{
-    return m_modeSwitch->isChecked() ? Mode::Search : Mode::Filter;
-}
-
-void FilterPanelWidget::setMode(Mode mode)
-{
-    // Тихая установка (восстановление настроек): не эмитим modeChanged.
-    // Сигналы заблокированы → анимация не сработает, поэтому позицию кружка
-    // выставляем явно под новое состояние.
-    m_modeSwitch->blockSignals(true);
-    m_modeSwitch->setChecked(mode == Mode::Search);
-    m_modeSwitch->blockSignals(false);
-    m_modeSwitch->setKnobPosition(mode == Mode::Search ? 1.0 : 0.0);
-    updateModeDependentUi();
 }
 
 bool FilterPanelWidget::highlightInMainView() const
@@ -435,21 +425,21 @@ void FilterPanelWidget::setHighlightInMainView(bool on)
     m_highlightMainCheckBox->blockSignals(false);
 }
 
-void FilterPanelWidget::updateModeDependentUi()
+void FilterPanelWidget::focusFirstRule()
 {
-    const bool search = (mode() == Mode::Search);
+    if (m_cards.isEmpty())
+        addRule(FilterRule{});
+    m_rulesArea->revealLater(m_cards.first());
+    m_cards.first()->focusText();
+}
 
-    // Подпись переключателя постоянная; меняется только основная кнопка действия.
-    m_applyButton->setText(search ? tr("▶ Search") : tr("▶ Apply"));
-    m_applyButton->setToolTip(search
-        ? tr("Search the CURRENT document; list matches in the results panel\n"
-             "without hiding any rows.")
-        : tr("Apply the rules to the CURRENT document"));
-    m_resetButton->setToolTip(search
-        ? tr("Clear the results panel.\n"
-             "The rules stay in the panel for re-searching.")
-        : tr("Remove all filters from the CURRENT document.\n"
-             "The rules stay in the panel for re-applying."));
+void FilterPanelWidget::setSingleRule(const QString& text, bool caseSensitive)
+{
+    while (!m_cards.isEmpty())
+        removeCard(m_cards.last());
+    FilterRule rule = quickRule(text, /*exclude=*/false);
+    rule.caseSensitive = caseSensitive;
+    addRule(rule);
 }
 
 FilterRuleSet FilterPanelWidget::ruleSet() const
@@ -670,6 +660,33 @@ void FilterPanelWidget::onAddRuleClicked()
     rule.connector = (mode() == Mode::Search) ? FilterRule::Connector::Or
                                               : FilterRule::Connector::And;
     addRule(rule);
+    // Новую карточку — на виду и сразу с курсором в поле текста.
+    FilterRuleCard* card = m_cards.last();
+    m_rulesArea->revealLater(card);
+    card->focusText();
+}
+
+FilterRule FilterPanelWidget::quickRule(const QString& text, bool exclude) const
+{
+    FilterRule rule;
+    rule.text = text;
+    rule.action = exclude ? FilterRule::Action::Exclude : FilterRule::Action::Include;
+    // «Скрыть X» и «только X» в фильтре сужают текущий набор (AND); в поиске
+    // новый запрос дополняет выдачу (OR), как и правило по «+ Add rule».
+    rule.connector = (mode() == Mode::Search && !exclude) ? FilterRule::Connector::Or
+                                                           : FilterRule::Connector::And;
+    rule.highlightColor = nextFreeColor();
+    return rule;
+}
+
+void FilterPanelWidget::addQuickRule(const QString& text, bool exclude)
+{
+    const FilterRule rule = quickRule(text, exclude);
+    // Одинокая пустая стартовая карточка — заменить, а не копить пустые правила.
+    if (m_cards.size() == 1 && m_cards.first()->rule().text.isEmpty())
+        removeCard(m_cards.first());
+    addRule(rule);
+    m_rulesArea->revealLater(m_cards.last());
 }
 
 void FilterPanelWidget::addRule(const FilterRule& rule)
@@ -680,6 +697,8 @@ void FilterPanelWidget::addRule(const FilterRule& rule)
 
     auto* card = new FilterRuleCard(prepared, this);
     card->setFieldNames(m_fieldNames, m_fieldScopeEnabled);
+    card->setTextPlaceholder(m_mode == Mode::Search ? tr("Text to find...")
+                                                    : tr("Text to filter by..."));
 
     connect(card, &FilterRuleCard::removeRequested, this, [this, card]() {
         removeCard(card);
@@ -692,14 +711,18 @@ void FilterPanelWidget::addRule(const FilterRule& rule)
     m_rulesLayout->addWidget(card);
     m_cards.append(card);
     renumberRows();
+    m_rulesArea->cardsChanged();
 }
 
 void FilterPanelWidget::removeCard(FilterRuleCard* card)
 {
     m_cards.removeOne(card);
     m_rulesLayout->removeWidget(card);
+    // Вне раскладки карточка осталась бы видна на старом месте до удаления.
+    card->hide();
     card->deleteLater();
     renumberRows();
+    m_rulesArea->cardsChanged();
 }
 
 void FilterPanelWidget::renumberRows()

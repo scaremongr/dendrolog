@@ -3,6 +3,11 @@
         <file>icons/reload.svg</file>
         <file>icons/wordwrap.svg</file>
         <file>icons/dendrolog.svg</file>
+        <file>icons/open.svg</file>
+        <file>icons/followtail.svg</file>
+        <file>icons/autoreload.svg</file>
+        <file>icons/chevron-up.svg</file>
+        <file>icons/chevron-down.svg</file>
     </qresource>
     <qresource prefix="/help">
         <file alias="help_en.md">../docs/help_en.md</file>

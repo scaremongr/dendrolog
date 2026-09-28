@@ -596,8 +596,7 @@ StatisticsPanel::StatisticsPanel(QWidget* parent)
     // ---- Верхняя строка: обновить, статус, переключатель Filtered only ------
     auto* topBar = new QWidget(this);
     auto* topLayout = new QHBoxLayout(topBar);
-    topLayout->setContentsMargins(6, 4, 6, 4);
-    topLayout->setSpacing(6);
+    topLayout->setContentsMargins(4, 2, 4, 2);
 
     m_refreshButton = new QToolButton(topBar);
     m_refreshButton->setText(QStringLiteral("⟳"));
@@ -631,7 +630,7 @@ StatisticsPanel::StatisticsPanel(QWidget* parent)
     m_browser = new QTextBrowser(this);
     m_browser->setOpenLinks(false);
     m_browser->setFrameShape(QFrame::NoFrame);
-    m_browser->document()->setDocumentMargin(8);
+    m_browser->document()->setDocumentMargin(4);
     connect(m_browser, &QTextBrowser::anchorClicked,
             this, &StatisticsPanel::onAnchorClicked);
     layout->addWidget(m_browser, /*stretch=*/1);
@@ -909,7 +908,7 @@ QString StatisticsPanel::buildHtml()
     };
     const auto sectionHeader = [&muted](const QString& title) {
         return QStringLiteral(
-                   "<div style=\"color:%1;font-weight:bold;margin-top:14px;\">%2</div>")
+                   "<div style=\"color:%1;font-weight:bold;margin-top:8px;\">%2</div>")
             .arg(muted.name(), title);
     };
     // Регистрирует адресата навигации и возвращает ссылку «nav:N».
@@ -938,8 +937,8 @@ QString StatisticsPanel::buildHtml()
     // ---- Сводные плитки -----------------------------------------------------
     const auto tile = [&](const QString& value, const QString& caption) {
         return QStringLiteral(
-                   "<td bgcolor=\"%1\" style=\"padding:6px 10px;\">"
-                   "<div style=\"font-size:13pt;font-weight:bold;\">%2</div>"
+                   "<td bgcolor=\"%1\" style=\"padding:3px 8px;\">"
+                   "<div style=\"font-size:12pt;font-weight:bold;\">%2</div>"
                    "<div style=\"color:%3;font-size:8pt;\">%4</div></td>")
             .arg(tileBg.name(), value, muted.name(), caption);
     };
@@ -947,7 +946,7 @@ QString StatisticsPanel::buildHtml()
     const bool hasTime = m_stats.tMinMs >= 0 && m_stats.tMaxMs >= m_stats.tMinMs;
     const qint64 spanMs = hasTime ? m_stats.tMaxMs - m_stats.tMinMs : 0;
 
-    html += QLatin1String("<table width=\"100%\" cellspacing=\"3\" cellpadding=\"0\"><tr>");
+    html += QLatin1String("<table width=\"100%\" cellspacing=\"2\" cellpadding=\"0\"><tr>");
     html += tile(num(m_stats.records), tr("log records"));
     html += tile(num(m_stats.rows), tr("lines"));
     html += tile(num(m_stats.files.size()),

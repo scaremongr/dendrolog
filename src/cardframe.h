@@ -4,7 +4,9 @@
 #include <QColor>
 #include <QFrame>
 #include <QIcon>
+#include <QScrollArea>
 
+class QLabel;
 class QToolButton;
 class QVBoxLayout;
 
@@ -74,6 +76,47 @@ private:
     QVBoxLayout* m_rows   = nullptr;
     QColor       m_accent;
     bool         m_accentBorder = false;
+};
+
+// ============================================================
+// CardListArea — прокручиваемый вертикальный список карточек
+// (правила Text Filters, маркеры Row Highlighters).
+//
+//   • десяток карточек не растягивает док за край окна — список
+//     прокручивается, а шапка панели над ним остаётся на месте;
+//   • ширина не ужимается уже самих карточек (minimumSizeHint
+//     учитывает содержимое), поэтому горизонтальной прокрутки нет;
+//   • пока карточек нет, вместо пустоты показана подсказка
+//     (setEmptyText) — что это за список и как его наполнить.
+//
+// Карточки добавляются в cardsLayout(); после добавления/удаления
+// нужно звать cardsChanged() — он обновляет подсказку и геометрию.
+// ============================================================
+class CardListArea : public QScrollArea
+{
+    Q_OBJECT
+public:
+    explicit CardListArea(QWidget* parent = nullptr);
+
+    QVBoxLayout* cardsLayout() const { return m_cards; }
+
+    /// Текст-заглушка пустого списка (приглушённым цветом, с переносом).
+    void setEmptyText(const QString& text);
+
+    /// Пересчитать заглушку и минимальную ширину после смены карточек.
+    void cardsChanged();
+
+    /// Прокрутить к карточке, когда раскладка её уже расставит.
+    void revealLater(QWidget* card);
+
+    QSize minimumSizeHint() const override;
+
+protected:
+    void changeEvent(QEvent* event) override;
+
+private:
+    QVBoxLayout* m_cards = nullptr;
+    QLabel*      m_emptyLabel = nullptr;
 };
 
 #endif // CARDFRAME_H

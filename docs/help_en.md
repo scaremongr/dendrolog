@@ -9,9 +9,12 @@ filtering, highlighting and live reload.
 
 ## Opening logs
 
-- **Open log file(s)** — `File → Open` (`Ctrl+O`). Multiple files open into one tab and are merged by timestamp.
-- **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once.
-- **Recent Files** — `File → Recent Files`.
+- **Open log file(s)** — `File → Open` (`Ctrl+O`) or the folder button on the toolbar. Multiple files open into one tab and are merged by timestamp; such a tab is named after the first file, e.g. `app.log +2`.
+- **Drop files** anywhere in the window to open them.
+- **Start screen** — while no tab is open, the window shows buttons to open files or scan a folder and the recent files as links.
+- **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once (`File → Scan Directory…`).
+- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list.
+- **Close Tab** — `Ctrl+W`, the tab's cross or the middle mouse button.
 - **Save View As** — `File → Save View As…` (`Ctrl+Shift+S`). Writes exactly what the view currently shows (active filters **and** the Log Fields selection) to a **new** file. Open files are never overwritten.
 - The view is saved in the background: the window stays usable, the status bar shows the progress, and **Cancel Save** next to it stops the export. The rows are taken as they were when saving started, so filtering or scrolling meanwhile does not change the file. A cancelled export leaves an existing destination file as it was.
 - Export also protects open files accessed through another path or a filesystem link. The destination is replaced only after the entire export is written successfully; if saving fails, an error is shown and any previous destination file is preserved.
@@ -25,7 +28,9 @@ filtering, highlighting and live reload.
   - File badge — colour-coded source file (only when a tab holds several files).
   - `+N` / `−` — the line is longer than the visible width; click to expand/collapse it.
 - **Syntax highlighting** — strings, numbers, hex, URLs, file paths, GUIDs, timestamps, matching brackets.
-- **Word wrap** — toolbar button, `View → Word Wrap`, or `Alt+Z` (global default in **Settings → View**).
+- **Word wrap** — toolbar button, `View → Word Wrap`, or `Alt+Z` (global default in **Settings → Appearance**).
+- **Font size** — `Ctrl` + mouse wheel over the log, `Ctrl++` / `Ctrl+-`, or `View → Larger Font / Smaller Font`; `Ctrl+0` returns to the default size. The size is remembered.
+- **Status bar** — the current line and the number of visible lines; when filters hide lines, how many the document has in total (`Line 12 of 5 000 (filtered from 116 384)`).
 
 ## Selection, copy & context actions
 
@@ -35,24 +40,44 @@ filtering, highlighting and live reload.
 - **Copy** — `Ctrl+C`.
 - **`Space`** — expand/collapse the current line (same as the right-hand badge).
 - **Right-click → context menu:**
-  - **Copy** the selection.
+  - **Copy** the selection; **Copy Whole Line** under the cursor.
+  - With a short piece of text selected on one line:
+    - **Find “…”** — the quick find of the toolbar (jumps to the next match).
+    - **Find All “…”** — every line with it, listed in the **Search** panel.
+    - **Show Only Lines with “…”** / **Hide Lines with “…”** — adds a Contains / Not contains rule and filters the tab. The rule narrows what the tab shows now: if the Text Filters panel describes this tab's filter (or both are empty), the rule is added to the panel as if you pressed Apply; if the panel holds other rules that are not applied to this tab, they are left alone and only the tab's filter gets the rule.
+    - **Highlight Lines with “…”** — adds a marker to Row Highlighters and colours such lines.
   - **Word Wrap (this line)** for an expandable line.
   - **Open Link** when a URL is selected.
   - **Open File / Open Containing Folder** when a file path is selected.
-  - **Use as Time Filter Start / End** when a timestamp is selected.
+  - **Use as Time Filter Start / End** — the selected timestamp or, with nothing selected, the time of the line under the cursor.
 
 ## Filtering
 
-- **Log level** — toolbar buttons (Trace…Fatal) or the `Filters → Log Level` menu.
-- **Time range** — *Time Range Filter* panel: set From/To and Apply. A selected timestamp can be sent here from the context menu.
+- **Log level** — the coloured toolbar buttons (Fatal…Trace), the `Filters` menu or `Alt+1…Alt+6`. A pressed button means “show only this level”; several can be combined; with none pressed, every level is shown. **Show All Levels** (`Alt+0`) releases them all.
+- **Reset Filters of This Tab** — `Filters` menu or `Ctrl+Shift+R`: turns the level, time and text filters of the active tab off at once.
+- **Time range** — *Time Range Filter* panel: set From/To and Apply. The fields start at the time span of the active tab's log (seconds and milliseconds included) and the panel shows that span and whether the filter is on. **Whole Log** puts the span back. A bound left at the edge of the log stays open, so lines appended to a growing log keep showing up. If From is later than To, nothing is applied and the panel says why. A line's time can be sent here from its context menu.
 - **How line times are read.** A timestamp without a time zone is taken as local time on this computer. An explicit zone is honoured: `Z`, `+02:00`, `+0200`, `+02` right after the time, and `+02:00`, `+0200`, `UTC`, `GMT` after a single space (for example, `2026-09-20 10:00:00 +0200`). So `10:00:00Z` and `12:00:00+02:00` are the same moment, and files from different zones merge correctly in one tab. Fractional seconds of any length are truncated to milliseconds (`.1` is 100 ms, `.123456` is 123 ms). The time filter, the timeline and the details panel show moments in local time; the line text is not changed.
-- **Text Filters** panel — Include/Exclude rules with AND/OR, per-rule case sensitivity and regex, optionally bound to a field. See **[Text Filters and search](#text-filters-and-search)** below for details. Filters apply to the **active tab** with **Apply** / **Reset**.
+- **Text Filters** panel — hides the lines that do not match its rules (Include/Exclude, AND/OR, case sensitivity and regex per rule, optionally bound to a field). It acts on the **active tab** with **Apply** / **Reset**. To *find* lines without hiding the rest, use the **Search** panel — see **[Text Filters and Search](#text-filters-and-search)** below.
 
-## Text Filters and search
+## Text Filters and Search
 
-The **Text Filters** panel is a set of rules; each rule is one card:
+Two panels work with text, and they differ in **what happens to the log**:
 
-- **Contains / Not contains** — the row must (Include) or must not (Exclude) contain the text.
+| | **Text Filters** | **Search** |
+|---|---|---|
+| What it does | **hides** the lines that do not match | **lists** the matching lines; the log stays complete |
+| Main button | **▶ Apply** (or `Enter` in a rule) | **▶ Search** (or `Enter` in a rule) |
+| Undo button | **⟲ Reset** — the tab shows all lines again | **✕ Clear** — the results list empties |
+| Where the result is | in the log itself | in the list inside the Search panel; a click jumps to the line in the log |
+| Scope | the active tab; each tab keeps its own filter | the visible lines of the active tab |
+
+Both panels use the same rules and can be used together: filter the log down, then search in what is left. **Highlight** in each panel also colours the matched text in the log. The rules stay in a panel after Reset / Clear, so you can apply them again.
+
+### Rules
+
+Each rule is one card:
+
+- **Contains / Not contains** — the line must (Include) or must not (Exclude) contain the text.
 - **AND / OR** — how the rule links to the previous one (the first rule has no link).
 - **Field** — `(entire row)` by default; can be limited to a specific Log Fields column (active when **Filter blocks** is on). If the chosen column is not in the current schema (for example, after switching schemas), the rule is ignored and its card says so — it does not quietly search the whole row; the binding comes back with the column. With **Filter blocks** off, a rule bound to a column searches the entire row, and its card notes that.
 - **⚙ (gear)** — per-rule options: **Case sensitive** and **Regular expression**.
@@ -60,29 +85,24 @@ The **Text Filters** panel is a set of rules; each rule is one card:
 
 ### How rules combine (AND / OR)
 
-Rules combine with boolean logic, **identically in both modes** (below) — only the destination of the result differs:
+Rules combine with boolean logic, the same way in both panels:
 
-- **AND** — a row must satisfy **both** adjacent rules at once. Example: `Contains "Timeout"` **AND** `Contains "Disk"` — only rows where a single line contains *both* “Timeout” *and* “Disk”.
-- **OR** — a row only needs to satisfy **either** rule. Example: `Contains "Timeout"` **OR** `Contains "Disk"` — all rows with “Timeout” **plus** all rows with “Disk”.
+- **AND** — a line must satisfy **both** adjacent rules at once. Example: `Contains "Timeout"` **AND** `Contains "Disk"` — only lines that contain *both* “Timeout” *and* “Disk”.
+- **OR** — a line only needs to satisfy **either** rule. Example: `Contains "Timeout"` **OR** `Contains "Disk"` — all lines with “Timeout” **plus** all lines with “Disk”.
 - Precedence: **AND binds tighter than OR**, so `A AND B OR C` reads as `(A AND B) OR C`.
 - **Not contains** pairs well with AND: `Contains "error"` **AND** `Not contains "timeout"` — errors except timeouts.
+- A new rule links with **AND** in Text Filters (narrow down) and with **OR** in Search (find this too). You can always change the link by hand.
 
-> If several rules give an empty result, it is almost always because they are joined by **AND** while the texts live on **different** rows (no intersection). Switch the link to **OR** to see the union.
+> If several rules give an empty result, it is almost always because they are joined by **AND** while the texts live on **different** lines (no intersection). Switch the link to **OR** to see the union.
 
-### Two modes: Filter and Search
+### The Search panel
 
-The **Non-destructive search** switch at the top of the panel:
+The panel holds the query and the results side by side. Docked at the bottom (the default) or floating, the rules are on the left and the results on the right; docked at a side, where the panel is narrow, the results go under the rules.
 
-- **Off — Filter (default):** **Apply** *hides* rows in the main view that fail the rules. Destructive to the display (not the file) — a quick “keep only what matters”.
-- **On — Search:** **Search** keeps the main view **complete** and lists matches in a separate **Search Results** panel (bottom; opens from `View`, or by itself when you press Search). Clicking a result jumps to that row in the main view. Nothing is hidden.
-
-Search covers **all currently visible rows** of the active tab, including the end of large files; existing level and time filters still limit its scope. Large indexed logs are searched in the background without loading their text into memory. The panel shows progress while searching and the match count when complete. **Reset**, a new search, or switching tabs discards the pending request.
-
-Results follow the active tab live: lines appended to a growing log are searched as they arrive and added to the list, without searching the whole file again; a line that was still being written is checked once it is complete. Changes to the visible rows themselves — level or time filters, a reloaded file — run the search again. While the panel is hidden, such full searches wait until it is shown.
-
-AND/OR work the **same** in both modes. One convenience: a rule added *in Search mode* defaults its link to **OR** (to “show anything any rule matches”), while in Filter mode it defaults to **AND** (narrow down). You can always change the link by hand.
-
-- **Highlight in main view** — also highlight the matched text in the main view (works in both modes; it never hides rows).
+- Search covers **all currently visible lines** of the active tab, including the end of large files; level, time and text filters of the tab still limit its scope. Large indexed logs are searched in the background without loading their text into memory. The list shows progress while searching and the match count when complete.
+- Clicking a result (or moving through the list with the arrow keys) jumps to that line in the log; the focus stays in the list.
+- Results follow the active tab live: lines appended to a growing log are searched as they arrive and added to the list, without searching the whole file again; a line that was still being written is checked once it is complete. Changes to the visible lines themselves — level, time or text filters, a reloaded file — run the search again. Switching tabs runs it on the new tab. While the panel is hidden, such full searches wait until it is shown.
+- **Find All** sends a single term here: the **All** button next to the toolbar find box (`Ctrl+Shift+F`) or **Find All “…”** in the log's context menu replaces the rules with one `Contains` rule and searches. `Ctrl+Shift+F` with an empty find box just opens the panel with the cursor in the first rule.
 
 ### Regular expressions
 
@@ -90,13 +110,13 @@ The **Regular expression** checkbox treats the rule text as a **Perl/PCRE-style 
 
 - `*` repeats the previous character — it does **not** mean “any characters”. For “any characters”, write `.*`.
 - `.` is any single character; `\d` is a digit; `\d+` is one or more digits.
-- A rule matches if the expression is found **anywhere** in the row (no anchor needed).
-- Examples: `entry number \d+` matches “entry number 42”; `Log entry number .*` matches any such entry; `(WARN|ERROR)` matches rows with either level.
-- An **invalid expression** is flagged: the field gets a red border and the error (with position) appears beneath it. While invalid, the rule takes no part in the search.
+- A rule matches if the expression is found **anywhere** in the line (no anchor needed).
+- Examples: `entry number \d+` matches “entry number 42”; `Log entry number .*` matches any such entry; `(WARN|ERROR)` matches lines with either level.
+- An **invalid expression** is flagged: the field gets a red border and the error (with position) appears beneath it. While invalid, the rule takes no part in filtering or search.
 
 ### Profiles
 
-The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as new…**, **Rename…**, **Delete**). Switching profiles with unsaved edits prompts whether to keep them.
+The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as new…**, **Rename…**, **Delete**). Text Filters and Search keep separate profiles. Switching profiles with unsaved edits prompts whether to keep them.
 
 ## Highlighting (Row Highlighters)
 
@@ -104,18 +124,19 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Field schemas (Log Fields)
 
-- *Log Fields* panel — define a **schema** (ordered blocks: timestamp, level, integer, text, regex, remainder…) via **Manage…** (auto-detect from a sample line or import a Grok expression).
+- *Log Fields* panel — define a **schema** (ordered blocks: timestamp, level, integer, text, regex, remainder…) via **Manage…** or `Tools → Field Schemas…` (auto-detect from a sample line or import a Grok expression).
 - Tick **Filter blocks** to show only selected blocks; the selection is reflected in **Save View As** and in field-bound text filters.
 
 ## Quick find (toolbar)
 
-- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous. The match row expands and the term is highlighted. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found is reported there too.
-- For multi-criteria non-destructive search with a results list, use the **Search** mode of the **Text Filters** panel (see above).
+- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The match row expands and the term is highlighted. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
+- To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). The Search panel also takes several rules at once.
 
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
-- **Auto-reload** — right-click the reload button to toggle it per tab; interval is set in **Settings → General**.
+- **Auto-reload** — the toggle next to Reload, `File → Auto-reload This Tab` or `Ctrl+Shift+F5` (right-clicking Reload still works); per tab. Tabs with auto-reload on carry a small icon. The interval is set in **Settings → General**.
+- **Follow tail** — the toggle with the down arrow or `Shift+F5`: keeps the newest lines in view; scrolling up turns it off.
 
 ## Directory Scanner
 
@@ -130,16 +151,17 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Panels & layout
 
-- Toggle docks from the **View** menu or with `Ctrl+F1…F5` (Text Filters, Directory Scanner, Time Filter, Log Fields, Row Highlighters). Dock positions are remembered between sessions.
+- Toggle docks from the **View** menu or with `Ctrl+F1…F9` (Text Filters, Directory Scanner, Time Filter, Log Fields, Row Highlighters, Timeline, Search, Entry Details, Statistics). Dock positions are remembered between sessions; `View → Reset Panel Layout` restores the default arrangement.
+- Long lists in the Text Filters, Row Highlighters and Log Fields panels scroll instead of stretching the panel past the window.
+- The **Search** panel shows its rules and results side by side when docked at the bottom and stacked when docked at a side.
 
 ## Settings & theme
 
 - **Tools → Settings** (`Ctrl+,`):
-  - **General** — scan extensions, auto-reload interval.
-  - **Font** — monospaced family and size (live preview).
+  - **General** — scan extensions, auto-reload interval, large files.
+  - **Appearance** — monospaced font family and size (live preview), default word wrap.
   - **Colors** — log-level, syntax, selection and UI colours.
-  - **View** — default word wrap.
-  - **Shortcuts** — rebind any command (Restore Defaults available).
+  - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved.
 - The window follows the Windows light/dark theme automatically.
 
 ---
@@ -150,13 +172,22 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 |---|---|
 | Open log file(s) | `Ctrl+O` |
 | Save View As | `Ctrl+Shift+S` |
+| Close tab | `Ctrl+W` |
+| Exit | `Ctrl+Q` |
 | Reload file | `F5` |
+| Auto-reload this tab | `Ctrl+Shift+F5` |
+| Follow tail | `Shift+F5` |
 | Settings | `Ctrl+,` |
 | Focus search field | `Ctrl+F` |
 | Search next / previous | `F3` / `Shift+F3` |
+| Find all (Search panel) | `Ctrl+Shift+F` |
 | Toggle word wrap | `Alt+Z` |
+| Larger / smaller / default font | `Ctrl++` / `Ctrl+-` / `Ctrl+0`, `Ctrl` + wheel |
+| Show only Fatal … Trace (toggle) | `Alt+1` … `Alt+6` |
+| Show all levels | `Alt+0` |
+| Reset filters of this tab | `Ctrl+Shift+R` |
 | Copy selection | `Ctrl+C` |
 | Expand/collapse current line | `Space` |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
-| Show/Hide panels | `Ctrl+F1…F5` |
+| Show/Hide panels | `Ctrl+F1…F9` |

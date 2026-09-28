@@ -6,7 +6,83 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A start screen replaces the empty frame while no tab is open: buttons to open
+  files or scan a folder, a drop hint and the recent files as links.
+- The log's context menu acts on selected text: **Find**, **Show Only Lines
+  with…**, **Hide Lines with…** and **Highlight Lines with…**. Filters narrow
+  what the tab shows now; rules the Text Filters panel holds but has not
+  applied to the tab are neither applied nor overwritten.
+- **Use as Time Filter Start / End** works without selecting a timestamp: it
+  takes the time of the line under the cursor.
+- Font size from the keyboard and mouse: `Ctrl` + wheel over the log,
+  `Ctrl++`, `Ctrl+-`, and `Ctrl+0` for the default size (`View` menu).
+- Quick search can match case (**Aa** next to the search box).
+- **Find All**: the **All** button next to the toolbar find box
+  (`Ctrl+Shift+F`) and **Find All “…”** in the log's context menu list every
+  line with the text in the Search panel.
+- Menu commands and shortcuts: **Close Tab** (`Ctrl+W`), **Exit** (`Ctrl+Q`),
+  **Scan Directory…**, **Auto-reload This Tab** (`Ctrl+Shift+F5`), **Follow
+  Tail** in the View menu, **Show All Levels** (`Alt+0`), **Reset Filters of
+  This Tab** (`Ctrl+Shift+R`), **Field Schemas…**, and `Alt+1…Alt+6` for the
+  level buttons. All of them are configurable in Settings → Shortcuts.
+- **Whole Log** in the Time Range Filter panel, which also shows the time span
+  of the log and whether the filter is on.
+- Recent files keep 10 entries and can be cleared.
+
+### Changed
+- Text Filters is split in two panels instead of one panel with a
+  "Non-destructive search" switch that was easy to miss: **Text Filters** hides
+  the lines that do not match (Apply / Reset), **Search** finds lines and lists
+  them while the log stays complete (Search / Clear). Each panel says in one
+  line what it does and keeps its own profiles; both can be used together, and
+  each one's Highlight colours its matches in the log. Rules saved by the
+  previous version are available in both panels.
+- The Search panel holds the query and the results together (the former Search
+  Results panel): rules on the left and results on the right when docked at the
+  bottom or floating, stacked when docked at a side. It takes the place of the
+  Search Results panel in a saved layout, and tells how to start a search when
+  none is running.
+- A denser, uniform layout: one set of margins and spacings for the whole
+  window instead of Fusion's roomy defaults. The log reaches the toolbar and
+  the panels (the gap to a docked panel went from ~15 to 4 px), toolbars are
+  27 px high instead of 35 with 16 px icons, tabs are lower, text buttons are
+  as wide as their text rather than at least 80 px, and panels, cards,
+  Statistics, Entry Details and the dialogs use the same tighter spacing.
+- The toolbars are regrouped: open, reload, auto-reload, follow tail and word
+  wrap; find; log levels; filter indicators. They now fit into one row of a
+  default-sized window instead of pushing the filter indicators behind `»`.
+  Buttons show icons and their tooltips show the current shortcut.
+- Level buttons carry the level's colour, and a pressed one looks like a
+  coloured chip, readable in the dark theme too.
+- Auto-reload has its own toolbar toggle (right-clicking Reload still works),
+  and tabs with auto-reload on are marked with an icon.
+- The Time Range Filter fields start at the time span of the active tab's log
+  instead of "yesterday–today", show seconds and milliseconds, and a bound left
+  at the edge of the log stays open, so a growing log keeps showing new lines.
+- The status bar says "Line 12 of 5 000 (filtered from 116 384)" with digit
+  grouping, and "No lines match the filters" when everything is hidden.
+- A tab with several files is named after the first one ("app.log +2").
+- Long lists in the Text Filters, Row Highlighters and Log Fields panels scroll
+  instead of stretching the panel past the window. A new rule or marker is
+  scrolled into view with the cursor in its text field.
+- Row Highlighters uses the same header as Text Filters and explains itself
+  while empty; Log Fields puts the schema choice at the top.
+- A not-found quick search turns the search box red.
+- Settings: the Font and View tabs are merged into **Appearance**; the dialog
+  is larger; shortcuts can be cleared with a button in the field, and a
+  combination assigned to two commands is marked and must be resolved before
+  OK.
+
 ### Fixed
+- The Help tab of the field schema editor showed garbled characters (`â€”`)
+  instead of dashes and symbols.
+- Settings (`Ctrl+,`) had no shortcut on Windows although the help listed one.
+- A level button click filtered the tab twice, and switching between tabs with
+  different level filters filtered the shown tab again — on a large indexed log
+  each of these is a full background pass.
+- Applying a time range whose From is later than To silently removed the time
+  filter; now nothing changes and the panel explains why.
 - Search Results now searches every visible row of large indexed documents,
   including matches beyond the former 200,000-row input limit. Search runs in
   the background, keeps text on disk, and reports progress and the search scope.

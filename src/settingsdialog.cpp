@@ -8,7 +8,10 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
+#include <QBoxLayout>
+#include <QHash>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -109,22 +112,22 @@ void SettingsDialog::buildColorsTab()
     // ---- Build the widget tree ------------------------------------------- //
     auto* content = new QWidget;
     auto* mainVLayout = new QVBoxLayout(content);
-    mainVLayout->setSpacing(8);
-    mainVLayout->setContentsMargins(6, 6, 6, 6);
+    mainVLayout->setSpacing(6);
+    mainVLayout->setContentsMargins(4, 4, 4, 4);
 
     // Keep a flat index into m_colorEntries as we iterate.
     int entryIdx = 0;
     for (auto& group : groups) {
         auto* groupBox = new QGroupBox(group.title, content);
         auto* formLayout = new QFormLayout(groupBox);
-        formLayout->setHorizontalSpacing(12);
-        formLayout->setVerticalSpacing(4);
+        formLayout->setHorizontalSpacing(8);
+        formLayout->setVerticalSpacing(3);
 
         for (int i = 0; i < group.entries.size(); ++i, ++entryIdx) {
             ColorEntry& ce = m_colorEntries[entryIdx];
 
             auto* btn = new QPushButton(groupBox);
-            btn->setFixedSize(72, 22);
+            btn->setFixedSize(64, 18);
             btn->setFlat(false);
             ce.button = btn;
             updateColorButton(ce);
@@ -179,8 +182,8 @@ void SettingsDialog::buildShortcutsTab()
 
     auto* content = new QWidget;
     auto* form = new QFormLayout(content);
-    form->setHorizontalSpacing(12);
-    form->setVerticalSpacing(6);
+    form->setHorizontalSpacing(8);
+    form->setVerticalSpacing(3);
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
     for (const auto& cmd : mgr.commands()) {
@@ -188,15 +191,73 @@ void SettingsDialog::buildShortcutsTab()
         edit->setKeySequence(mgr.sequence(cmd.id));
         // A single combination is enough for application shortcuts.
         edit->setMaximumSequenceLength(1);
+        // Without the clear button a shortcut could not be removed at all:
+        // Backspace/Delete are recorded as the new combination.
+        edit->setClearButtonEnabled(true);
+        connect(edit, &QKeySequenceEdit::keySequenceChanged,
+                this, [this]() { updateShortcutConflicts(); });
 
         m_shortcutRows.append({ cmd.id, edit });
+        m_shortcutLabels.insert(cmd.id, cmd.label);
         form->addRow(new QLabel(cmd.label, content), edit);
     }
 
     ui->shortcutsScrollArea->setWidget(content);
 
+    // Conflicts are listed under the table (hidden while there are none).
+    m_shortcutConflictLabel = new QLabel(ui->shortcutsTab);
+    m_shortcutConflictLabel->setWordWrap(true);
+    m_shortcutConflictLabel->setStyleSheet(QStringLiteral("color: %1;")
+        .arg(AppTheme::instance().logError.darker(115).name()));
+    m_shortcutConflictLabel->hide();
+    if (auto* box = qobject_cast<QBoxLayout*>(ui->shortcutsTab->layout()))
+        box->insertWidget(box->indexOf(ui->shortcutsScrollArea) + 1, m_shortcutConflictLabel);
+
     connect(ui->resetShortcutsButton, &QPushButton::clicked,
             this, &SettingsDialog::resetShortcutsToDefaults);
+    updateShortcutConflicts();
+}
+
+// ---------------------------------------------------------------------------
+// One combination bound to two commands would silently drive only one of
+// them: such fields get a red border, the clashes are listed under the table
+// and OK refuses to apply the settings until they are resolved.
+// ---------------------------------------------------------------------------
+QStringList SettingsDialog::updateShortcutConflicts()
+{
+    QHash<QString, QStringList> commandsByKeys;
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
+        const QKeySequence seq = row.edit->keySequence();
+        if (!seq.isEmpty())
+            commandsByKeys[seq.toString(QKeySequence::NativeText)]
+                << m_shortcutLabels.value(row.id);
+    }
+
+    const QString red = AppTheme::instance().logError.darker(115).name();
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
+        const QString keys = row.edit->keySequence().toString(QKeySequence::NativeText);
+        const QStringList users = keys.isEmpty() ? QStringList() : commandsByKeys.value(keys);
+        const bool clash = users.size() > 1;
+        row.edit->setStyleSheet(clash
+            ? QStringLiteral("QLineEdit { border: 1px solid %1; }").arg(red)
+            : QString());
+        row.edit->setToolTip(clash
+            ? tr("%1 is also used by: %2").arg(keys, users.join(QStringLiteral(", ")))
+            : QString());
+    }
+
+    QStringList conflicts;
+    for (auto it = commandsByKeys.constBegin(); it != commandsByKeys.constEnd(); ++it) {
+        if (it.value().size() > 1)
+            conflicts << tr("%1 — %2").arg(it.key(), it.value().join(QStringLiteral(", ")));
+    }
+    conflicts.sort();
+    if (m_shortcutConflictLabel) {
+        m_shortcutConflictLabel->setText(tr("Each shortcut can drive only one command:\n%1")
+                                             .arg(conflicts.join(QLatin1Char('\n'))));
+        m_shortcutConflictLabel->setVisible(!conflicts.isEmpty());
+    }
+    return conflicts;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +329,7 @@ void SettingsDialog::loadFromSettings()
 
     // --- Colors tab: working copies are already set in buildColorsTab() ---
 
-    // --- View tab ---
+    // --- Appearance tab: default word wrap ---
     ui->wordWrapCheckBox->setChecked(s.wordWrap());
 
     // --- General tab: reload ---
@@ -316,7 +377,7 @@ void SettingsDialog::applyToSettings()
             *ce.target = ce.value;
     }
 
-    // ---- View tab --------------------------------------------------------- //
+    // ---- Appearance tab: default word wrap -------------------------------- //
     s.setWordWrap(ui->wordWrapCheckBox->isChecked());
 
     // ---- General tab: reload --------------------------------------------- //
@@ -344,6 +405,13 @@ void SettingsDialog::applyToSettings()
 // ---------------------------------------------------------------------------
 void SettingsDialog::accept()
 {
+    if (!updateShortcutConflicts().isEmpty()) {
+        ui->tabWidget->setCurrentWidget(ui->shortcutsTab);
+        QMessageBox::warning(this, tr("Settings"),
+            tr("Some shortcuts are assigned to more than one command. "
+               "Change or clear them before applying the settings."));
+        return;
+    }
     applyToSettings();
     QDialog::accept();
 }

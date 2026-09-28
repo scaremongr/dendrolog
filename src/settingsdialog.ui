@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>480</width>
-    <height>460</height>
+    <width>620</width>
+    <height>600</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -32,10 +32,10 @@
       </attribute>
       <layout class="QVBoxLayout" name="generalLayout">
        <property name="margin">
-        <number>10</number>
+        <number>6</number>
        </property>
        <property name="spacing">
-        <number>6</number>
+        <number>4</number>
        </property>
        <item>
         <widget class="QLabel" name="extensionsLabel">
@@ -143,18 +143,18 @@
      </widget>
 
      <!-- ================================================================ -->
-     <!-- Tab: Font                                                         -->
+     <!-- Tab: Appearance — font + default word wrap                      -->
      <!-- ================================================================ -->
      <widget class="QWidget" name="fontTab">
       <attribute name="title">
-       <string>Font</string>
+       <string>Appearance</string>
       </attribute>
       <layout class="QVBoxLayout" name="fontLayout">
        <property name="margin">
-        <number>10</number>
+        <number>6</number>
        </property>
        <property name="spacing">
-        <number>8</number>
+        <number>4</number>
        </property>
        <item>
         <layout class="QFormLayout" name="fontFormLayout">
@@ -240,7 +240,7 @@
          </property>
          <layout class="QVBoxLayout" name="fontPreviewFrameLayout">
           <property name="margin">
-           <number>6</number>
+           <number>4</number>
           </property>
           <item>
            <widget class="QLabel" name="fontPreviewLabel">
@@ -253,6 +253,16 @@
            </widget>
           </item>
          </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QCheckBox" name="wordWrapCheckBox">
+         <property name="text">
+          <string>Enable word wrap by default</string>
+         </property>
+         <property name="toolTip">
+          <string>Remembered across sessions; also toggled from the View menu.</string>
+         </property>
         </widget>
        </item>
        <item>
@@ -295,42 +305,6 @@
       </layout>
      </widget>
 
-     <!-- ================================================================ -->
-     <!-- Tab: View                                                         -->
-     <!-- ================================================================ -->
-     <widget class="QWidget" name="viewTab">
-      <attribute name="title">
-       <string>View</string>
-      </attribute>
-      <layout class="QVBoxLayout" name="viewLayout">
-       <property name="margin">
-        <number>10</number>
-       </property>
-       <item>
-        <widget class="QCheckBox" name="wordWrapCheckBox">
-         <property name="text">
-          <string>Enable word wrap by default</string>
-         </property>
-         <property name="toolTip">
-          <string>Remembered across sessions; also toggled from the View menu.</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <spacer name="viewSpacer">
-         <property name="orientation">
-          <enum>Qt::Vertical</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
-      </layout>
-     </widget>
 
      <!-- ================================================================ -->
      <!-- Tab: Shortcuts — rows built dynamically in code                  -->

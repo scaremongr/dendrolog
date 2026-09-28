@@ -2,10 +2,13 @@
 
 #include <QColor>
 #include <QDialog>
+#include <QHash>
 #include <QVector>
 #include <QString>
+#include <QStringList>
 
 // Forward declarations
+class QLabel;
 class QPushButton;
 class QKeySequenceEdit;
 class QSpinBox;
@@ -62,6 +65,9 @@ private:
     void buildColorsTab();
     void updateColorButton(ColorEntry& entry);
     void buildShortcutsTab();
+    // Highlights shortcuts bound to more than one command; returns the
+    // clashes ("keys — command, command"), empty when there are none.
+    QStringList updateShortcutConflicts();
     void buildPerformanceControls();
     void resetShortcutsToDefaults();
 
@@ -72,6 +78,8 @@ private:
     Ui::SettingsDialog* ui;
     QVector<ColorEntry>  m_colorEntries;
     QVector<ShortcutRow> m_shortcutRows;
+    QHash<QString, QString> m_shortcutLabels;     // command id → display label
+    QLabel* m_shortcutConflictLabel = nullptr;
 
     // ---- Performance (большие файлы; создаются в коде, не в .ui) ----------
     QSpinBox* m_indexedThresholdSpinBox = nullptr;
