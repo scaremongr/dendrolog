@@ -20,6 +20,11 @@ All notable changes to DendroLog are documented here. The format follows
   existing destination.
 - Changing the field schema or turning field extraction off while a large tab
   was still filtering in the background could crash the application.
+- Filtering, statistics or the timeline running while a new field schema is
+  being applied in the background could read fields in the middle of being
+  rewritten. New fields are now computed aside and put in place at once;
+  cancelling a schema switch (for example, by picking another schema) no
+  longer leaves the entries half in the old schema and half in the new one.
 - Search Results over a large indexed log honours the text cache budget from
   Settings instead of always using 256 MB.
 - File system errors in Save View As are shown in the system language instead

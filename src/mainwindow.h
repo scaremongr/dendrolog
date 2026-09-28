@@ -43,6 +43,7 @@ class LogModel;
 class LogListView;
 class LogPattern;
 class SearchResultsController;
+class FieldReextraction;
 class QModelIndex;
 class QDialog;
 class QDragEnterEvent;
@@ -238,12 +239,10 @@ private:
     QList<PatternEntry> m_patternList;
     QStringList m_savedVisibleFieldNames;
 
-    // Background field re-extraction (schema switch). The worker only reads
-    // entry messages and writes entry->fields; the view's field display is
-    // disabled for the duration so nothing reads fields concurrently.
-    QFutureWatcher<void>*              m_fieldWatcher = nullptr;
-    std::shared_ptr<LogPattern>        m_pendingFieldPattern;
-    QVector<std::shared_ptr<LogEntry>> m_pendingFieldEntries; // kept alive while map() runs
+    // Background field re-extraction (schema switch). Workers never write to
+    // the entries: new fields are applied on the GUI thread once it finishes,
+    // with background filters stopped (see FieldReextraction).
+    FieldReextraction* m_fieldExtraction = nullptr;
 
     // Settings persistence
     void saveSettings();
@@ -342,9 +341,12 @@ private:
     void finishPatternApplication();
     // Called when the background field re-extraction finishes.
     void onFieldExtractionFinished();
-    // Abort any in-flight background field re-extraction (and wait for its
-    // worker threads to stop) before mutating entries again.
+    // Abort any in-flight background field re-extraction and wait for its
+    // workers; entries keep their old fields.
     void cancelFieldExtraction();
+    // Stop (and wait for) every tab's background filter: they read
+    // entry->fields(), which is about to change (invariant 4).
+    void cancelFilterJobsOnAllViews();
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.

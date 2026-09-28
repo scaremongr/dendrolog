@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QDateTime>
+#include <atomic>
 #include "logfile.h"
 #include "logfield.h"
 
@@ -46,16 +47,32 @@ public:
     // Structured fields extracted from message by LogPattern::extractFields().
     // Offsets are into `message()`; isEmpty() == true for continuation lines.
     const LogEntryFields& fields() const { return m_fields; }
-    // Единственный мутатор: переизвлечение полей при смене схемы.
-    void setFields(LogEntryFields fields) { m_fields = std::move(fields); }
+    // Единственные мутаторы — поля по схеме. У опубликованной записи (она уже
+    // в модели) только на GUI-потоке и при остановленных фоновых фильтрах:
+    // воркеры фильтра, статистики и таймлайна читают поля без синхронизации.
+    // Фоновое переизвлечение (FieldReextraction) пишет не сюда, а в свой
+    // буфер и ставит поля swapFields'ом на GUI-потоке.
+    void setFields(LogEntryFields fields)
+    {
+        m_fields = std::move(fields);
+        m_hasFields.store(!m_fields.isEmpty(), std::memory_order_relaxed);
+    }
+    void swapFields(LogEntryFields& fields)
+    {
+        std::swap(m_fields, fields);
+        m_hasFields.store(!m_fields.isEmpty(), std::memory_order_relaxed);
+    }
 
     // Строка «свободного текста»: парсер не извлёк ни таймстампа, ни уровня,
     // ни структурных полей. У continuation-строк настоящей записи таймстамп и
     // уровень унаследованы от её первой строки, поэтому true возможен только
     // там, где группировка в логические записи номинальна (не-лог файл целиком
     // слипается в запись #0; преамбула до первой настоящей записи — туда же).
+    // Сами поля не читаются: это зовут воркеры статистики и таймлайна, а поля
+    // может в это время менять GUI-поток (смена схемы).
     bool isPlainText() const {
-        return !m_timestamp.isValid() && m_level == LogLevel::Unknown && m_fields.isEmpty();
+        return !m_timestamp.isValid() && m_level == LogLevel::Unknown
+            && !m_hasFields.load(std::memory_order_relaxed);
     }
 
     bool operator<(const LogEntry& other) const {
@@ -99,6 +116,9 @@ private:
     int m_originalLineNumber;
     QDateTime m_timestamp;
     LogLevel m_level;
+    // !m_fields.isEmpty() — для isPlainText() без чтения самих полей.
+    // Встаёт в выравнивание после m_level: запись не растёт.
+    std::atomic<bool> m_hasFields{false};
     QString m_message;
     LogFilePtr m_sourceFile;
     LogEntryFields m_fields;

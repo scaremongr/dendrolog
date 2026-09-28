@@ -20,6 +20,7 @@
 #include "stdinspooler.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
+#include "fieldreextraction.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -371,9 +372,9 @@ QString MainWindow::logFileDialogFilter() const
 
 MainWindow::~MainWindow()
 {
-    // Make sure no worker thread is still writing into entries we are about
-    // to release (closeEvent usually handles this, but not every teardown
-    // path goes through it).
+    // Make sure no re-extraction worker still reads entries we are about to
+    // release (closeEvent usually handles this, but not every teardown path
+    // goes through it).
     cancelFieldExtraction();
     delete ui;
 }
@@ -1112,17 +1113,21 @@ void MainWindow::onManagePatterns()
 
 void MainWindow::cancelFieldExtraction()
 {
-    if (!m_fieldWatcher)
+    if (!m_fieldExtraction)
         return;
-    // Detach our slots first so the cancelled run does not finalize, then
-    // wait for the worker threads to actually stop touching entry->fields().
-    m_fieldWatcher->disconnect(this);
-    m_fieldWatcher->cancel();
-    m_fieldWatcher->waitForFinished();
-    m_fieldWatcher->deleteLater();
-    m_fieldWatcher = nullptr;
-    m_pendingFieldEntries.clear();
-    m_pendingFieldPattern.reset();
+    // Workers stop and are waited for; entries keep their old fields intact.
+    m_fieldExtraction->cancel();
+    m_fieldExtraction->deleteLater();
+    m_fieldExtraction = nullptr;
+}
+
+void MainWindow::cancelFilterJobsOnAllViews()
+{
+    for (int t = 0; t < ui->tabWidget->count(); ++t) {
+        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
+        if (lv && lv->model())
+            lv->model()->cancelPendingFilter(true);
+    }
 }
 
 void MainWindow::applyPatternToAllViews()
@@ -1131,15 +1136,10 @@ void MainWindow::applyPatternToAllViews()
     cancelFieldExtraction();
     // Resident filter workers read entry->fields(): each tab's own and the
     // Search Results one, which shares entries with its source (clear() waits
-    // for it). Stop them all before ANY field mutation below — the synchronous
-    // paths included (invariant 4). finishPatternApplication() re-applies
-    // what was cancelled.
+    // for it). Stop them all before the synchronous field mutation below
+    // (invariant 4). finishPatternApplication() re-applies what was cancelled.
     clearSearchResults();
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
-            lv->model()->cancelPendingFilter(true);
-    }
+    cancelFilterJobsOnAllViews();
 
     auto pattern = std::make_shared<LogPattern>(m_conversionPattern);
     rebuildFieldVisibilityControls(pattern->fieldNames());
@@ -1190,49 +1190,42 @@ void MainWindow::applyPatternToAllViews()
     }
 
     // Large batch: re-extract in the background and show the same status-bar
-    // progress as file loading. While it runs we turn OFF field display so
-    // formatDisplayMessage never reads entry->fields() concurrently with the
-    // workers that overwrite them (it falls back to the raw message text).
+    // progress as file loading. Workers do not touch the entries, so filters
+    // started meanwhile read the old fields safely. Field display is OFF for
+    // the duration: the column checkboxes already describe the new schema,
+    // while the entries still carry spans of the old one.
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
         if (lv && lv->model())
             lv->model()->setFieldDisplaySelection(false, QVector<int>());
     }
 
-    // Warm up the regex on this thread (QRegularExpression compiles lazily).
-    pattern->extractFields(QString());
-
-    m_pendingFieldPattern = pattern;
-    m_pendingFieldEntries = std::move(entries);
-
-    m_fieldWatcher = new QFutureWatcher<void>(this);
-    connect(m_fieldWatcher, &QFutureWatcher<void>::progressRangeChanged,
+    m_fieldExtraction = new FieldReextraction(std::move(entries), pattern, this);
+    connect(m_fieldExtraction, &FieldReextraction::progressRangeChanged,
             m_progressBar, &QProgressBar::setRange);
-    connect(m_fieldWatcher, &QFutureWatcher<void>::progressValueChanged,
+    connect(m_fieldExtraction, &FieldReextraction::progressValueChanged,
             m_progressBar, &QProgressBar::setValue);
-    connect(m_fieldWatcher, &QFutureWatcher<void>::finished,
+    connect(m_fieldExtraction, &FieldReextraction::finished,
             this, &MainWindow::onFieldExtractionFinished);
 
     m_statusLabel->setText(tr("Applying field schema…"));
-    m_progressBar->setRange(0, m_pendingFieldEntries.size());
+    m_progressBar->setRange(0, m_fieldExtraction->entryCount());
     m_progressBar->setValue(0);
     m_progressBar->show();
-
-    auto worker = [pattern](const std::shared_ptr<LogEntry>& entry) {
-        if (entry)
-            entry->setFields(pattern->extractFields(entry->message()));
-    };
-    m_fieldWatcher->setFuture(QtConcurrent::map(m_pendingFieldEntries, worker));
+    m_fieldExtraction->start();
 }
 
 void MainWindow::onFieldExtractionFinished()
 {
-    if (m_fieldWatcher) {
-        m_fieldWatcher->deleteLater();
-        m_fieldWatcher = nullptr;
-    }
-    m_pendingFieldEntries.clear();
-    m_pendingFieldPattern.reset();
+    if (!m_fieldExtraction)
+        return;
+    // Filters started while the fields were being computed (Apply, level
+    // buttons, appended lines) read entry->fields(): stop them before the new
+    // fields go in; finishPatternApplication() re-applies them.
+    cancelFilterJobsOnAllViews();
+    m_fieldExtraction->apply();
+    m_fieldExtraction->deleteLater();
+    m_fieldExtraction = nullptr;
 
     m_progressBar->hide();
     updateStatusBarDefaultText();
@@ -2872,8 +2865,10 @@ void MainWindow::applyTextFiltersToActiveView()
 
 void MainWindow::runSearchIntoResults()
 {
-    if (m_fieldWatcher)
-        return; // fields are being rewritten; finishPatternApplication refreshes
+    // Fields are being recomputed for the new schema: rules bound to it would
+    // not match the entries' old spans. finishPatternApplication() searches.
+    if (m_fieldExtraction)
+        return;
     if (!m_filterPanel || !m_searchController || !m_activeLogView
         || !m_activeLogView->model()
         || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
