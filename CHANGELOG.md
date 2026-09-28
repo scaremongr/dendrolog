@@ -6,6 +6,8 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-28
+
 ### Added
 - A start screen replaces the empty frame while no tab is open: buttons to open
   files or scan a folder, a drop hint and the recent files as links.
