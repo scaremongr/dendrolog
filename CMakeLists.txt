@@ -19,6 +19,8 @@ set(PROJECT_SOURCES
     src/mainwindow.h
     src/mainwindow.cpp
     src/mainwindow.ui
+    src/viewexport.h
+    src/viewexport.cpp
 
     src/logviewwidget.h
     src/logviewwidget.cpp
@@ -165,4 +167,6 @@ if(BUILD_TESTING)
     add_subdirectory(tests/dirscanner_smoke)
     add_subdirectory(tests/logstore_equivalence)
     add_subdirectory(tests/logview_state)
+    add_subdirectory(tests/viewexport)
+    add_subdirectory(tests/search_results)
 endif()

@@ -80,9 +80,12 @@ public:
     QVector<std::shared_ptr<LogEntry>> logicalRecordLines(
         const std::shared_ptr<LogEntry>& line, int maxLines = 2000) const;
 
-    // Полная замена данных содержимым ВИДИМОГО списка source (посев панели
-    // результатов поиска текущей выдачей активной вкладки).
-    void seedFromVisible(const LogModel& source);
+    // Search ALL currently visible source rows, preserving its storage backend.
+    // Indexed text stays on disk; results are published by the background filter.
+    // Replaces any previous request; source must be a different model.
+    void searchVisible(const LogModel& source, const FilterRuleSet& rules);
+    // Discard data and any pending results, returning to an empty resident store.
+    void clear();
 
     // Снапшот для последовательного скана в воркере (статистика, таймлайн).
     LogScanSnapshot scanSnapshot(bool filteredOnly) const;

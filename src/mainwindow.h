@@ -184,7 +184,7 @@ private:
     QDockWidget* m_statsDockWidget = nullptr;
 
     // Панель результатов неразрушающего поиска (нижний док, создаётся в коде).
-    // Вторая пара LogModel+LogListView поверх тех же LogEntry активной вкладки:
+    // Вторая пара LogModel+LogListView поверх записей или индексов активной вкладки:
     // в режиме Search сюда выводятся совпадения, клик прыгает в основном view.
     QDockWidget* m_searchResultsDockWidget = nullptr;
     LogListView* m_searchResultsView = nullptr;
@@ -354,8 +354,8 @@ private:
     // у каждой вкладки свой применённый набор.
     void applyTextFiltersToActiveView();
     // ---- Режим «Неразрушающий поиск» ---------------------------------------
-    // Пересобрать панель результатов из активной вкладки (поиск над её
-    // filteredEntries): заполнить m_searchResultsModel и подсветку.
+    // Пересобрать панель результатов по видимому набору активной вкладки:
+    // запустить searchVisible и обновить подсветку.
     void runSearchIntoResults();
     // Опустошить панель результатов (модель + подпись). Док не прячется —
     // это обычная панель, видимостью управляет пользователь через меню View.

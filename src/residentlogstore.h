@@ -15,6 +15,9 @@
 class ResidentLogStore final : public LogStore {
 public:
     explicit ResidentLogStore(LogModel& model) : LogStore(model) {}
+    // Search base, shared by COW; applyFilter publishes the matching rows.
+    ResidentLogStore(LogModel& model, const QVector<std::shared_ptr<LogEntry>>& entries)
+        : LogStore(model), m_allEntries(entries) {}
 
     Backend backend() const override { return Backend::Resident; }
 

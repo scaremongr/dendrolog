@@ -70,6 +70,23 @@ IndexedLogStore::IndexedLogStore(LogModel& model)
 IndexedLogStore::~IndexedLogStore()
 {
     cancelPendingFilter(false);
+    delete m_progressTimer;
+}
+
+IndexedLogStore::IndexedLogStore(LogModel& model, const IndexedLogStore& source)
+    : IndexedLogStore(model)
+{
+    m_fieldPattern = source.m_fieldPattern;
+    m_extractionEnabled = source.m_extractionEnabled;
+    m_shownAllCount = source.m_shownAllCount;
+    m_explicitBase = source.m_explicitBase || !source.m_identityVisible;
+    m_allRefs = source.m_identityVisible ? source.m_allRefs : source.m_visibleRefs;
+    m_identityVisible = false;
+    for (const auto& file : source.m_files) {
+        IndexedFile copy = file;
+        copy.cacheFileId = m_textCache.addFile(file.logFile->filePath);
+        m_files.append(std::move(copy));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@
 #include "apptheme.h"
 #include "updatechecker.h"
 #include "stdinspooler.h"
+#include "viewexport.h"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -1125,6 +1126,11 @@ void MainWindow::cancelFieldExtraction()
 
 void MainWindow::applyPatternToAllViews()
 {
+    // Resident search workers share entry fields with the source document.
+    // Stop them before any schema mutation, including the synchronous path.
+    if (m_searchResultsModel)
+        m_searchResultsModel->cancelPendingFilter(true);
+    clearSearchResults();
     // A schema switch supersedes any re-extraction still in flight.
     cancelFieldExtraction();
 
@@ -1258,6 +1264,7 @@ void MainWindow::finishPatternApplication()
     // (не навязывая правила панели вкладкам без фильтров).
     updateFilterPanelFieldNames();
     rebindFiltersOnAllViews();
+    scheduleSearchRefresh();
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
@@ -1475,9 +1482,15 @@ void MainWindow::setupSearchResultsDock()
     // Вторая LogListView поверх отдельной LogModel: та же отрисовка/подсветка,
     // что и в основном view, но со своим (отфильтрованным) набором записей.
     m_searchResultsModel = new LogModel(this);
+    // Install before the view's reset handlers; background completion must
+    // not turn restored result selection into user navigation in the main log.
+    connect(m_searchResultsModel, &QAbstractItemModel::modelAboutToBeReset,
+            this, [this]() { m_suppressResultNavigation = true; });
     m_searchResultsView = new LogListView(container);
     // Однострочный режим (klogg-style): word-wrap НЕ включаем.
     m_searchResultsView->setModel(m_searchResultsModel);
+    connect(m_searchResultsModel, &QAbstractItemModel::modelReset,
+            this, [this]() { m_suppressResultNavigation = false; });
 
     // Тот же шрифт, что и у основных view, но на пункт мельче (searchResultsFont).
     m_searchResultsView->setFont(searchResultsFont());
@@ -1502,7 +1515,13 @@ void MainWindow::setupSearchResultsDock()
     // Пересчёт счётчика совпадений после (в т.ч. асинхронной) фильтрации.
     connect(m_searchResultsModel, &LogModel::modelFiltered, this, [this](int count) {
         if (m_searchResultsStatusLabel)
-            m_searchResultsStatusLabel->setText(tr("%n match(es)", "", count));
+            m_searchResultsStatusLabel->setText(
+                tr("%n match(es) in the visible rows of the active tab", "", count));
+    });
+    connect(m_searchResultsModel, &LogModel::filterProgress, this, [this](int progress) {
+        if (m_searchResultsStatusLabel && progress < 100)
+            m_searchResultsStatusLabel->setText(
+                tr("Searching visible rows of the active tab... %1%").arg(progress));
     });
 
     // Дебаунс живого обновления результатов (tail auto-reload / рефильтрация).
@@ -1865,6 +1884,7 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     // Рвём соединения живого обновления с моделью уходящей вкладки.
     disconnect(m_searchModelInsertConn);
     disconnect(m_searchModelResetConn);
+    clearSearchResults();
 
     if (m_activeLogView == logView)
     {
@@ -2220,41 +2240,36 @@ void MainWindow::on_actionSaveAs_triggered()
     if (fileName.isEmpty())
         return;
 
-    // Never overwrite a file that is currently open in any tab: the request is
-    // explicitly to save into a NEW file, leaving the originals untouched.
-    const QString targetPath = QFileInfo(fileName).absoluteFilePath();
+    // Protect sources in every tab, including aliases of their filesystem paths.
+    QStringList sourcePaths;
     for (int t = 0; t < ui->tabWidget->count(); ++t) {
         auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
         if (!lvw)
             continue;
         for (const auto& lf : lvw->loadedFiles()) {
-            if (lf && QFileInfo(lf->filePath).absoluteFilePath() == targetPath) {
-                QMessageBox::warning(this, tr("Save View As"),
-                    tr("This file is currently open. Please choose a different, new file."));
-                return;
-            }
+            if (lf)
+                sourcePaths.append(lf->filePath);
         }
-    }
-
-    QFile out(fileName);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-        QMessageBox::warning(this, tr("Save View As"),
-            tr("Could not open '%1' for writing.").arg(fileName));
-        return;
     }
 
     // Save exactly what the view currently shows: iterate the model's visible
     // rows (already filtered + merged across all documents in this tab) and use
     // the display text, so the active Log Fields selection is honoured too.
-    QTextStream stream(&out);
-    stream.setEncoding(QStringConverter::Utf8);
     LogModel* model = m_activeLogView->model();
     const int rows = model->rowCount();
-    for (int r = 0; r < rows; ++r) {
-        const QString line = model->data(model->index(r), Qt::DisplayRole).toString();
-        stream << line << '\n';
+    const auto result = ViewExport::save(fileName, sourcePaths, rows, [model](int row) {
+        return model->data(model->index(row), Qt::DisplayRole).toString();
+    });
+    if (!result.ok()) {
+        if (result.error == ViewExport::Error::SourceFile) {
+            QMessageBox::warning(this, tr("Save View As"),
+                tr("This file is currently open. Please choose a different, new file."));
+        } else {
+            QMessageBox::warning(this, tr("Save View As"),
+                tr("Could not save '%1'.\n%2").arg(fileName, result.detail));
+        }
+        return;
     }
-    out.close();
 
     m_lastOpenDir = QFileInfo(fileName).absolutePath();
     m_statusLabel->setText(tr("Saved %1 lines to %2")
@@ -2862,6 +2877,8 @@ void MainWindow::applyTextFiltersToActiveView()
 
 void MainWindow::runSearchIntoResults()
 {
+    if (m_fieldWatcher)
+        return; // fields are being rewritten; finishPatternApplication refreshes
     if (!m_filterPanel || !m_searchResultsModel || !m_activeLogView
         || !m_activeLogView->model()
         || m_filterPanel->mode() != FilterPanelWidget::Mode::Search)
@@ -2897,15 +2914,11 @@ void MainWindow::runSearchIntoResults()
         return;
     }
 
-    // Зеркалим отображение полей активной модели, чтобы текст строк совпадал.
-    m_searchResultsModel->setAvailableFields(active->availableFields());
-    m_searchResultsModel->setFieldDisplaySelection(active->fieldDisplayFilterEnabled(),
-                                                   active->visibleFieldIndexes());
-
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
     m_suppressResultNavigation = true;
-    m_searchResultsModel->seedFromVisible(*active);
-    m_searchResultsModel->setFilterRules(rules);
+    if (m_searchResultsStatusLabel)
+        m_searchResultsStatusLabel->setText(tr("Searching visible rows of the active tab..."));
+    m_searchResultsModel->searchVisible(*active, rules);
     m_suppressResultNavigation = false;
 
     // Подсветка совпадений: всегда в панели результатов; в основном view — по галочке.
@@ -2915,11 +2928,8 @@ void MainWindow::runSearchIntoResults()
             m_filterPanel->highlightInMainView() ? rules.highlightPatterns()
                                                  : QVector<HighlightPattern>{});
 
-    // На малых логах setFilterRules фильтрует синхронно и modelFiltered мог
-    // прийти ДО setEntries-контента — обновим счётчик явно.
-    if (m_searchResultsStatusLabel)
-        m_searchResultsStatusLabel->setText(
-            tr("%n match(es)", "", m_searchResultsModel->rowCount()));
+    // modelFiltered publishes the final count for both synchronous and
+    // asynchronous paths. Until then an empty result means "still searching".
 }
 
 void MainWindow::clearSearchResults()
@@ -2930,7 +2940,7 @@ void MainWindow::clearSearchResults()
         return;
     // Reset модели дёрнет currentRowChanged — не даём ему прыгнуть в main.
     m_suppressResultNavigation = true;
-    m_searchResultsModel->setEntries({});
+    m_searchResultsModel->clear();
     m_suppressResultNavigation = false;
     if (m_searchResultsStatusLabel)
         m_searchResultsStatusLabel->setText(tr("No search active."));

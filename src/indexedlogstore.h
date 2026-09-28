@@ -32,6 +32,9 @@ public:
     static constexpr int kFileBits = 40; // строк на файл: 2^40
 
     explicit IndexedLogStore(LogModel& model);
+    // Search-result base: share indices and the source's visible row references,
+    // never materialize text. No rows are shown until applyFilter completes.
+    IndexedLogStore(LogModel& model, const IndexedLogStore& source);
     ~IndexedLogStore() override;
 
     Backend backend() const override { return Backend::Indexed; }
@@ -93,19 +96,20 @@ private:
     static int refFile(RowRef ref) { return int(ref >> kFileBits); }
     static qint64 refLine(RowRef ref) { return qint64(ref & ((RowRef(1) << kFileBits) - 1)); }
 
-    // Тождественный режим — вкладка из одного файла: row == line, m_allRefs
-    // пуст. Определяется ЧИСЛОМ ФАЙЛОВ, а не пустотой m_allRefs: файлы,
+    // Тождественный режим — полный один файл: row == line, m_allRefs
+    // пуст. Учитываются число файлов и явная поисковая база, а не пустота
+    // m_allRefs: файлы,
     // подключённые до первого батча, оставляли m_allRefs пустым, и стор
     // считал вкладку одно-файловой — allCount() отдавал 0 строк.
-    bool identityAll() const { return m_files.size() <= 1; }
+    bool identityAll() const { return m_files.size() <= 1 && !m_explicitBase; }
     RowRef rowToRef(int visibleRow) const;
     // Глобальный порядок строк — зеркало LogEntry::operator< по метаданным.
     bool lessRef(RowRef a, RowRef b) const;
-    // Порядок строк ВКЛАДКИ, в котором лежат m_allRefs и m_visibleRefs: в
-    // тождественном режиме — порядок файла, иначе lessRef. Все бинарные
+    // Порядок строк ВКЛАДКИ, в котором лежат m_allRefs и m_visibleRefs:
+    // один файл — порядок файла (включая поисковую базу), иначе lessRef. Все бинарные
     // поиски и слияния по этим спискам обязаны идти по нему — lessRef на
     // одно-файловой вкладке с метками не по порядку промахивается.
-    bool rowLess(RowRef a, RowRef b) const { return identityAll() ? a < b : lessRef(a, b); }
+    bool rowLess(RowRef a, RowRef b) const { return m_files.size() <= 1 ? a < b : lessRef(a, b); }
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;
@@ -127,6 +131,9 @@ private:
     qint64 m_shownAllCount = 0;
 
     QVector<RowRef> m_allRefs;     // пуст для одного файла (тождество)
+    // A filtered single-file search base also uses m_allRefs, in FILE order.
+    // Mapping identity and chronological ordering are separate properties.
+    bool m_explicitBase = false;
     QVector<RowRef> m_visibleRefs; // действителен, когда !m_identityVisible
     bool m_identityVisible = true; // нет активного фильтра — видно всё
 

@@ -207,29 +207,48 @@ QVector<std::shared_ptr<LogEntry>> LogModel::logicalRecordLines(
     return m_store->logicalRecordLines(line, maxLines);
 }
 
-void LogModel::seedFromVisible(const LogModel& source)
+void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
 {
-    // Модель-приёмник (панель результатов поиска) всегда резидентная.
-    if (auto* r = source.residentOrNull()) {
-        resident()->setEntries(r->visibleEntries());
+    Q_ASSERT(this != &source);
+    if (this == &source)
+        return;
+    if (rules.usableRuleCount() == 0) {
+        clear();
         return;
     }
 
-    // Индексный источник: материализуем видимые строки с капом — панель
-    // результатов рассчитана на разумные выборки, а не на копию гигантского
-    // лога в памяти.
-    constexpr int kSeedCap = 200000;
-    const int n = qMin(source.rowCount(), kSeedCap);
-    if (n < source.rowCount())
-        qWarning() << "seedFromVisible: indexed source truncated to" << n
-                   << "of" << source.rowCount() << "rows";
-    QVector<std::shared_ptr<LogEntry>> entries;
-    entries.reserve(n);
-    for (int i = 0; i < n; ++i) {
-        if (auto e = source.entryAt(i))
-            entries.append(std::move(e));
-    }
-    resident()->setEntries(entries);
+    // Resident workers share field spans with the source. Finish cancellation
+    // before dropping the old request so later schema changes cannot race it.
+    cancelPendingFilter(!isIndexedBackend());
+    beginResetModel();
+    if (auto* indexed = source.indexedOrNull())
+        m_store = std::make_unique<IndexedLogStore>(*this, *indexed);
+    else
+        m_store = std::make_unique<ResidentLogStore>(*this, source.resident()->visibleEntries());
+    m_filterRules = rules;
+    m_activeLogLevels.clear();
+    m_filterStartTime = {};
+    m_filterEndTime = {};
+    m_availableFieldNames = source.m_availableFieldNames;
+    m_visibleFieldIndexes = source.m_visibleFieldIndexes;
+    m_fieldFilterEnabled = source.m_fieldFilterEnabled;
+    m_fileColors = source.m_fileColors;
+    endResetModel();
+    applyFilter();
+}
+
+void LogModel::clear()
+{
+    cancelPendingFilter(!isIndexedBackend());
+    beginResetModel();
+    m_store = std::make_unique<ResidentLogStore>(*this);
+    m_filterRules = {};
+    m_activeLogLevels.clear();
+    m_filterStartTime = {};
+    m_filterEndTime = {};
+    resetFileColors();
+    endResetModel();
+    emit modelFiltered(0);
 }
 
 LogScanSnapshot LogModel::scanSnapshot(bool filteredOnly) const

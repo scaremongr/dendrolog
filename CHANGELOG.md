@@ -6,6 +6,19 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Search Results now searches every visible row of large indexed documents,
+  including matches beyond the former 200,000-row input limit. Search runs in
+  the background, keeps text on disk, and reports progress and the search scope.
+  Replacing a query, clearing results or switching tabs discards stale results.
+- Save View As protects open log files by filesystem identity, including
+  differently cased paths, symbolic links, Windows shortcuts and hard links.
+  The destination is checked again before publishing the export.
+- Save View As writes to a temporary file and only replaces the destination
+  after successful completion. Write and commit failures are reported instead
+  of displaying a misleading success message; failed exports preserve an
+  existing destination.
+
 ## [0.3.0] — 2026-09-19
 
 ### Added
