@@ -212,6 +212,14 @@ private:
     // selection when field filtering is enabled.
     QString formatDisplayMessage(const LogEntry& entry) const;
 
+public:
+    // The display text itself, shared with background export so a saved view
+    // is exactly what the view shows. fields are spans into message.
+    static QString formatDisplayText(const QString& message, const LogEntryFields& fields,
+                                     bool fieldsShown, const QVector<int>& visibleIndexes);
+
+private:
+
     std::unique_ptr<LogStore> m_store;
 
     QSet<LogLevel> m_activeLogLevels;

@@ -1,4 +1,5 @@
 #include "viewexport.h"
+#include "testdocuments.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -52,6 +53,146 @@ protected:
 private:
     bool m_shortWrite;
 };
+
+// Строки файла результата (перевод строки платформы снят).
+static QStringList exportedLines(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {QStringLiteral("<cannot open>")};
+    QStringList lines = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'));
+    if (!lines.isEmpty() && lines.last().isEmpty())
+        lines.removeLast();
+    return lines;
+}
+
+static QStringList displayedLines(const LogModel& model)
+{
+    QStringList lines;
+    for (int row = 0; row < model.rowCount(); ++row)
+        lines << model.data(model.index(row), Qt::DisplayRole).toString();
+    return lines;
+}
+
+// Фоновый экспорт до конца; результат задания.
+static ViewExport::Result runJob(const LogModel& model, const QString& destination,
+                                 const QStringList& sources)
+{
+    ViewExportJob job;
+    ViewExport::Result result{ViewExport::Error::Write, QStringLiteral("not finished")};
+    bool done = false;
+    QObject::connect(&job, &ViewExportJob::finished, [&](const ViewExport::Result& r) {
+        result = r;
+        done = true;
+    });
+    if (!job.start(model, destination, sources))
+        return {ViewExport::Error::Write, QStringLiteral("not started")};
+    testdocs::waitFor([&] { return done; });
+    return result;
+}
+
+// Save View As в фоне пишет ровно то, что показывает модель, и только снимок
+// на момент старта; отмена оставляет прежний файл.
+static void testBackgroundExport(const QDir& dir)
+{
+    const QString schema = testdocs::buildSchema();
+    QByteArray bytes;
+    for (int i = 0; i < 3000; ++i) {
+        bytes += "2026-03-05 10:00:" + QByteArray::number(i / 60 % 60).rightJustified(2, '0')
+               + ".000 [worker-" + QByteArray::number(i % 3) + "] " + (i % 4 ? "INFO" : "ERROR")
+               + " - message " + QByteArray::number(i) + '\n';
+        if (i % 500 == 7)
+            bytes += "    continuation of " + QByteArray::number(i) + '\n';
+    }
+    const QString path = testdocs::writeFile(dir, "export-source.log", bytes);
+    auto resident = testdocs::buildResident({path}, schema);
+    auto indexed = testdocs::buildIndexed({path}, schema);
+    const QStringList fieldNames = LogPattern(schema).fieldNames();
+
+    struct { const char* name; LogModel* model; } models[] = {
+        {"resident", resident.model.get()}, {"indexed", indexed.model.get()}};
+    for (const auto& m : models) {
+        LogModel& model = *m.model;
+        model.setAvailableFields(fieldNames);
+        const QString target = dir.filePath(QStringLiteral("export-%1.log").arg(m.name));
+        for (const bool fields : {false, true}) {
+            model.setFieldDisplaySelection(fields, {3, 1}); // Message, Thread
+            const auto result = runJob(model, target, {path});
+            CHECK(result.ok(), qPrintable(QStringLiteral("%1: export succeeds").arg(m.name)));
+            CHECK(exportedLines(target) == displayedLines(model),
+                  qPrintable(QStringLiteral("%1 fields=%2: file equals the displayed text")
+                                 .arg(m.name).arg(fields)));
+        }
+
+        // Экспорт пишет снимок на момент старта: фильтр, применённый сразу
+        // после, на файл не влияет.
+        model.setLogLevelFilter({LogLevel::Error});
+        CHECK(testdocs::settle(model), "filter settles");
+        const QStringList filtered = displayedLines(model);
+        {
+            ViewExportJob job;
+            bool done = false;
+            ViewExport::Result result;
+            QObject::connect(&job, &ViewExportJob::finished,
+                             [&](const ViewExport::Result& r) { result = r; done = true; });
+            CHECK(job.start(model, target, {path}), "start export of the filtered view");
+            CHECK(!job.start(model, target, {path}), "second export is refused while running");
+            model.setLogLevelFilter({});
+            CHECK(testdocs::waitFor([&] { return done; }), "export finishes");
+            CHECK(result.ok() && exportedLines(target) == filtered,
+                  qPrintable(QStringLiteral("%1: export writes the view as it was at start").arg(m.name)));
+            CHECK(testdocs::settle(model), "filter reset settles");
+        }
+
+        // Источник защищён и в фоне.
+        const auto own = runJob(model, path, {path});
+        CHECK(own.error == ViewExport::Error::SourceFile,
+              qPrintable(QStringLiteral("%1: background export refuses the source").arg(m.name)));
+    }
+
+    // Отмена: прежний файл назначения не тронут, finished приходит с Cancelled.
+    {
+        QByteArray big;
+        big.reserve(400000 * 60);
+        for (int i = 0; i < 400000; ++i)
+            big += "2026-03-05 10:00:00.000 [w] INFO - row " + QByteArray::number(i) + '\n';
+        const QString bigPath = testdocs::writeFile(dir, "export-big.log", big);
+        auto doc = testdocs::buildIndexed({bigPath}, schema);
+        const QString target = dir.filePath("export-cancel.log");
+        put(target, "previous export");
+        ViewExportJob job;
+        bool done = false;
+        ViewExport::Result result;
+        QObject::connect(&job, &ViewExportJob::finished,
+                         [&](const ViewExport::Result& r) { result = r; done = true; });
+        CHECK(job.start(*doc.model, target, {bigPath}), "start large export");
+        job.cancel();
+        CHECK(testdocs::waitFor([&] { return done; }), "cancelled export reports finished");
+        CHECK(result.error == ViewExport::Error::Cancelled, "cancelled export reports Cancelled");
+        CHECK(read(target) == "previous export", "cancelled export keeps the destination");
+        CHECK(!job.isRunning(), "cancelled export is not running");
+    }
+
+    // Отмена синхронной записи через флаг.
+    {
+        const QString target = dir.filePath("export-flag.log");
+        put(target, "kept");
+        std::atomic_bool cancel{false};
+        int produced = 0;
+        const auto result = ViewExport::save(target, {path}, [&](const ViewExport::RowSink& sink) {
+            for (int i = 0; i < 100000; ++i) {
+                ++produced;
+                if (i == 1000)
+                    cancel = true;
+                if (!sink(QStringLiteral("row %1").arg(i)))
+                    return;
+            }
+        }, &cancel);
+        CHECK(result.error == ViewExport::Error::Cancelled, "cancel flag stops the export");
+        CHECK(produced < 100000, "rows stop being produced after cancel");
+        CHECK(read(target) == "kept", "cancelled save keeps the destination");
+    }
+}
 
 int main(int argc, char** argv)
 {
@@ -180,6 +321,8 @@ int main(int argc, char** argv)
     CHECK(commitFailure.error == ViewExport::Error::Commit, "commit failure is reported");
     CHECK(read(QDir(blockedTarget).filePath("keep")) == "external data", "commit failure preserves external data");
     CHECK(!commitFailure.detail.isEmpty(), "commit error detail retained");
+
+    testBackgroundExport(dir);
 
     std::fprintf(stdout, "View export: %d failure(s)\n", failures);
     return failures ? 1 : 0;

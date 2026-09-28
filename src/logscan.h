@@ -51,6 +51,11 @@ public:
                 visit) const = 0;
         virtual QString textAt(qint64 row) const = 0;
         virtual LogFilePtr sourceFilePtrAt(qint64 row) const = 0;
+        // Поля строки row, чей текст — text (как отдал forEachLine): те же,
+        // что покажет модель. Резидентный снапшот читает поля записи (их
+        // меняет только GUI-поток при остановленных фоновых читателях —
+        // инвариант 4), индексный извлекает схемой, как materializeEntry.
+        virtual LogEntryFields fieldsAt(qint64 row, const QString& text) const = 0;
     };
 
     LogScanSnapshot() = default;
@@ -101,6 +106,11 @@ public:
     LogFilePtr sourceFilePtrAt(qint64 row) const
     {
         return m_impl ? m_impl->sourceFilePtrAt(row) : LogFilePtr();
+    }
+    // Поля строки для показа (см. Impl::fieldsAt).
+    LogEntryFields fieldsAt(qint64 row, const QString& text) const
+    {
+        return m_impl ? m_impl->fieldsAt(row, text) : LogEntryFields();
     }
 
     static LogEntryMeta metaFor(const LogEntry& entry);

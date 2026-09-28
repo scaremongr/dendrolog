@@ -469,15 +469,22 @@ void LogModel::refreshDisplay()
 
 QString LogModel::formatDisplayMessage(const LogEntry& entry) const
 {
+    return formatDisplayText(entry.message(), entry.fields(), m_fieldFilterEnabled,
+                             m_visibleFieldIndexes);
+}
+
+QString LogModel::formatDisplayText(const QString& message, const LogEntryFields& fields,
+                                    bool fieldsShown, const QVector<int>& visibleIndexes)
+{
     // Lines that did not match the schema at all (continuation lines, junk)
     // have no fields — show their raw text so nothing silently disappears.
-    if (!m_fieldFilterEnabled || entry.fields().isEmpty())
-        return entry.message();
+    if (!fieldsShown || fields.isEmpty())
+        return message;
 
     QString result;
     bool first = true;
-    for (const int fieldIndex : m_visibleFieldIndexes) {
-        const QStringView value = entry.fields().get(fieldIndex, entry.message());
+    for (const int fieldIndex : visibleIndexes) {
+        const QStringView value = fields.get(fieldIndex, message);
         if (value.isEmpty())
             continue;
 

@@ -10,6 +10,7 @@
 #include <memory>
 #include "logentry.h"
 #include "logfile.h"
+#include "viewexport.h"
 
 // Forward declarations for Qt classes used in members or method signatures
 class QProgressBar;
@@ -126,6 +127,9 @@ private slots:
     void onSearchEnterPressed();
     void onQuickSearchProgress(const QString& term, int percent);
     void onQuickSearchFinished(const QString& term, bool found);
+    void onViewExportFinished(const ViewExport::Result& result);
+    // Save View As of the active tab into fileName, in the background.
+    void startViewExport(const QString& fileName);
 
     // Reload slot (manual button + auto-timer)
     void onReloadFileTriggered();
@@ -159,6 +163,10 @@ private:
     QLineEdit* m_searchLineEdit = nullptr;
     // Строка статуса показывает прогресс быстрого поиска — вернуть её по итогу.
     bool m_quickSearchStatusShown = false;
+    // Фоновый Save View As и кнопка его отмены в строке статуса.
+    ViewExportJob* m_exportJob = nullptr;
+    QToolButton* m_cancelExportButton = nullptr;
+    QString m_exportCancelReason; // почему экспорт отменён не пользователем
 
     // Time filter widgets (added to ui->timeFilterToolBar)
     QDateTimeEdit* m_timeFilterFrom;

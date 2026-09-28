@@ -1153,6 +1153,13 @@ void MainWindow::applyPatternToAllViews()
     // (invariant 4). finishPatternApplication() re-applies what was cancelled.
     clearSearchResults();
     cancelFilterJobsOnAllViews();
+    // A background Save View As reads the fields of resident entries too.
+    if (m_exportJob && m_exportJob->isRunning()) {
+        m_exportCancelReason = tr("Save View As cancelled: the field schema changed. "
+                                  "%1 was not changed.")
+                                   .arg(QFileInfo(m_exportJob->destination()).fileName());
+        m_exportJob->cancel(/*wait=*/true);
+    }
 
     auto pattern = std::make_shared<LogPattern>(m_conversionPattern);
     rebuildFieldVisibilityControls(pattern->fieldNames());
@@ -1312,6 +1319,21 @@ void MainWindow::setupStatusBar()
     m_progressBar->setFixedWidth(200);
     m_progressBar->hide();
     ui->statusbar->addPermanentWidget(m_progressBar);
+
+    // Save View As пишет в фоне: прогресс — в строке статуса, рядом отмена.
+    m_exportJob = new ViewExportJob(this);
+    m_cancelExportButton = new QToolButton(this);
+    m_cancelExportButton->setText(tr("Cancel Save"));
+    m_cancelExportButton->setToolTip(tr("Stop saving the view; the destination file stays as it was"));
+    m_cancelExportButton->hide();
+    ui->statusbar->addPermanentWidget(m_cancelExportButton);
+    connect(m_cancelExportButton, &QToolButton::clicked, this, [this]() { m_exportJob->cancel(); });
+    connect(m_exportJob, &ViewExportJob::progress, this, [this](int percent) {
+        m_statusLabel->setText(tr("Saving view to %1... %2%")
+                                   .arg(QFileInfo(m_exportJob->destination()).fileName())
+                                   .arg(percent));
+    });
+    connect(m_exportJob, &ViewExportJob::finished, this, &MainWindow::onViewExportFinished);
 }
 
 void MainWindow::setupTimeFilterDockContents()
@@ -2250,6 +2272,13 @@ void MainWindow::on_actionSaveAs_triggered()
 
     if (fileName.isEmpty())
         return;
+    startViewExport(fileName);
+}
+
+void MainWindow::startViewExport(const QString& fileName)
+{
+    if (!m_activeLogView || !m_activeLogView->model())
+        return;
 
     // Protect sources in every tab, including aliases of their filesystem paths.
     QStringList sourcePaths;
@@ -2263,15 +2292,35 @@ void MainWindow::on_actionSaveAs_triggered()
         }
     }
 
-    // Save exactly what the view currently shows: iterate the model's visible
-    // rows (already filtered + merged across all documents in this tab) and use
-    // the display text, so the active Log Fields selection is honoured too.
-    LogModel* model = m_activeLogView->model();
-    const int rows = model->rowCount();
-    const auto result = ViewExport::save(fileName, sourcePaths, rows, [model](int row) {
-        return model->data(model->index(row), Qt::DisplayRole).toString();
-    });
+    // Save exactly what the view currently shows: the model's visible rows
+    // (already filtered + merged across all documents in this tab) with the
+    // display text, so the active Log Fields selection is honoured too. The
+    // rows are snapshotted now and written in the background.
+    if (!m_exportJob->start(*m_activeLogView->model(), fileName, sourcePaths)) {
+        QMessageBox::information(this, tr("Save View As"),
+            tr("The view is still being saved. Wait for it to finish or cancel it."));
+        return;
+    }
+    ui->actionSaveAs->setEnabled(false);
+    m_cancelExportButton->show();
+    m_statusLabel->setText(tr("Saving view to %1...").arg(QFileInfo(fileName).fileName()));
+}
+
+void MainWindow::onViewExportFinished(const ViewExport::Result& result)
+{
+    ui->actionSaveAs->setEnabled(true);
+    m_cancelExportButton->hide();
+    const QString fileName = m_exportJob->destination();
+    if (result.error == ViewExport::Error::Cancelled) {
+        m_statusLabel->setText(m_exportCancelReason.isEmpty()
+                                   ? tr("Save View As cancelled; %1 was not changed.")
+                                         .arg(QFileInfo(fileName).fileName())
+                                   : m_exportCancelReason);
+        m_exportCancelReason.clear();
+        return;
+    }
     if (!result.ok()) {
+        updateStatusBarDefaultText();
         if (result.error == ViewExport::Error::SourceFile) {
             QMessageBox::warning(this, tr("Save View As"),
                 tr("This file is currently open. Please choose a different, new file."));
@@ -2281,6 +2330,7 @@ void MainWindow::on_actionSaveAs_triggered()
         }
         return;
     }
+    const int rows = m_exportJob->rowCount();
 
     m_lastOpenDir = QFileInfo(fileName).absolutePath();
     m_statusLabel->setText(tr("Saved %1 lines to %2")

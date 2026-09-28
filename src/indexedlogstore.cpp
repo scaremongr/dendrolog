@@ -932,6 +932,21 @@ public:
         return files[fileId].logFile;
     }
 
+    LogEntryFields fieldsAt(qint64 row, const QString& text) const override
+    {
+        // Как materializeEntry: поля — только у первичных строк.
+        if (!extraction || !pattern.isValid() || row < 0 || row >= rowCount())
+            return LogEntryFields();
+        int fileId; qint64 line;
+        resolve(row, fileId, line);
+        return files[fileId].index.isPrimary(line) ? pattern.extractFields(text)
+                                                   : LogEntryFields();
+    }
+
+    // Схема полей на момент снапшота (копия: воркер не делит её со store).
+    LogPattern pattern;
+    bool extraction = false;
+
 private:
     void resolve(qint64 row, int& fileId, qint64& line) const
     {
@@ -954,6 +969,8 @@ LogScanSnapshot IndexedLogStore::scanSnapshot(bool filteredOnly) const
     impl->files.reserve(m_files.size());
     for (const auto& f : m_files)
         impl->files.append({f.index->snapshot(), f.logFile->filePath, f.logFile});
+    impl->pattern = m_fieldPattern;
+    impl->extraction = m_extractionEnabled;
 
     if (filteredOnly && !m_identityVisible) {
         impl->refs = m_visibleRefs;

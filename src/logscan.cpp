@@ -84,6 +84,13 @@ public:
         return m_entries.at(row)->sourceFile();
     }
 
+    LogEntryFields fieldsAt(qint64 row, const QString&) const override
+    {
+        if (row < 0 || row >= m_entries.size() || !m_entries.at(row))
+            return LogEntryFields();
+        return m_entries.at(row)->fields();
+    }
+
 private:
     QVector<std::shared_ptr<LogEntry>> m_entries;
 };

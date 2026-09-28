@@ -13,6 +13,7 @@ filtering, highlighting and live reload.
 - **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once.
 - **Recent Files** — `File → Recent Files`.
 - **Save View As** — `File → Save View As…` (`Ctrl+Shift+S`). Writes exactly what the view currently shows (active filters **and** the Log Fields selection) to a **new** file. Open files are never overwritten.
+- The view is saved in the background: the window stays usable, the status bar shows the progress, and **Cancel Save** next to it stops the export. The rows are taken as they were when saving started, so filtering or scrolling meanwhile does not change the file. A cancelled export leaves an existing destination file as it was.
 - Export also protects open files accessed through another path or a filesystem link. The destination is replaced only after the entire export is written successfully; if saving fails, an error is shown and any previous destination file is preserved.
 - The file-type list (e.g. `log, txt`) is shared between Open, Save and the Directory Scanner — set it in **Settings → General**.
 
