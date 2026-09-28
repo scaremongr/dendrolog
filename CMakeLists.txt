@@ -13,23 +13,15 @@ set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если 
 # Найти Qt 6
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Concurrent Svg Network)
 
-# Добавить исходные файлы
-set(PROJECT_SOURCES
-    src/main.cpp
-    src/mainwindow.h
-    src/mainwindow.cpp
-    src/mainwindow.ui
-    src/viewexport.h
-    src/viewexport.cpp
+# Исходники разложены по трём целям — каждый файл ровно в одной из них:
+#   dendrolog_core    — данные, разбор, хранилище, модель, экспорт. Без Qt Widgets;
+#   dendrolog_widgets — представление лога, тема, настройки, сканер каталога и
+#                       общие элементы UI (всё, что тестам нужно из виджетов);
+#   DendroLog         — оболочка приложения: окно, вкладки, панели, диалоги.
+# Библиотеки статические и общие для приложения и тестов: каждый исходник
+# компилируется один раз, а тест линкует только то, чем пользуется.
 
-    src/logviewwidget.h
-    src/logviewwidget.cpp
-
-    src/logtabbar.h
-    src/logtabbar.cpp
-    src/logtabwidget.h
-    src/logtabwidget.cpp
-
+set(DENDROLOG_CORE_SOURCES
     src/logentry.h
     src/logfield.h
     src/logfile.h
@@ -62,9 +54,57 @@ set(PROJECT_SOURCES
     src/logpattern.cpp
     src/patternheuristics.h
     src/patternheuristics.cpp
+    src/filterruleset.h
+    src/filterruleset.cpp
+    src/textmatchhighlighter.h
+    src/textmatchhighlighter.cpp
+    src/viewexport.h
+    src/viewexport.cpp
+)
+
+set(DENDROLOG_WIDGETS_SOURCES
+    src/LogListView.h
+    src/LogListView.cpp
+    src/tabexpander.h
+    src/linewrapper.h
+    src/texttoken.h
+    src/texttoken.cpp
+    src/syntaxhighlighter.h
+    src/syntaxhighlighter.cpp
+
+    src/apptheme.h
+    src/apptheme.cpp
+    src/appsettings.h
+    src/appsettings.cpp
+
+    src/directoryscanner.h
+    src/directoryscanner.cpp
+    src/directoryscannerpanel.h
+    src/directoryscannerpanel.cpp
+
+    src/cardframe.h
+    src/cardframe.cpp
+    src/toggleswitch.h
+    src/toggleswitch.cpp
+    src/highlightpalette.h
+)
+
+set(PROJECT_SOURCES
+    src/main.cpp
+    src/mainwindow.h
+    src/mainwindow.cpp
+    src/mainwindow.ui
+
+    src/logviewwidget.h
+    src/logviewwidget.cpp
+
+    src/logtabbar.h
+    src/logtabbar.cpp
+    src/logtabwidget.h
+    src/logtabwidget.cpp
+
     src/schemastore.h
     src/schemastore.cpp
-
     src/conversionpatterndialog.h
     src/conversionpatterndialog.cpp
     src/conversionpatterndialog.ui
@@ -73,11 +113,6 @@ set(PROJECT_SOURCES
     src/separatornode.h
     src/separatornode.cpp
 
-    src/apptheme.cpp
-
-    src/appsettings.h
-    src/appsettings.cpp
-
     src/shortcutmanager.h
     src/shortcutmanager.cpp
 
@@ -85,30 +120,6 @@ set(PROJECT_SOURCES
     src/settingsdialog.cpp
     src/settingsdialog.ui
 
-    src/directoryscanner.h
-    src/directoryscanner.cpp
-    src/directoryscannerpanel.h
-    src/directoryscannerpanel.cpp
-
-    src/LogListView.h
-    src/LogListView.cpp
-    src/tabexpander.h
-    src/linewrapper.h
-
-    src/texttoken.h
-    src/texttoken.cpp
-    src/syntaxhighlighter.h
-    src/syntaxhighlighter.cpp
-
-    src/cardframe.h
-    src/cardframe.cpp
-    src/toggleswitch.h
-    src/toggleswitch.cpp
-    src/textmatchhighlighter.h
-    src/textmatchhighlighter.cpp
-    src/filterruleset.h
-    src/filterruleset.cpp
-    src/highlightpalette.h
     src/filterpanelwidget.h
     src/filterpanelwidget.cpp
     src/markerpanelwidget.h
@@ -128,6 +139,23 @@ set(PROJECT_SOURCES
     resources/resources.qrc
 )
 
+add_library(dendrolog_core STATIC ${DENDROLOG_CORE_SOURCES})
+target_include_directories(dendrolog_core PUBLIC src)
+target_link_libraries(dendrolog_core PUBLIC
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Concurrent
+)
+
+add_library(dendrolog_widgets STATIC ${DENDROLOG_WIDGETS_SOURCES})
+target_link_libraries(dendrolog_widgets
+    PUBLIC
+        dendrolog_core
+        Qt6::Widgets
+    PRIVATE
+        Qt6::Svg
+)
+
 # Иконка и метаданные версии для проводника Windows. Версия подставляется
 # из project(VERSION), поэтому .rc генерируется при конфигурации.
 if(WIN32)
@@ -141,10 +169,13 @@ if(WIN32)
     list(APPEND PROJECT_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/dendrolog.rc)
 endif()
 
+# Ресурсы (.qrc) остаются в исполняемом файле: из статической библиотеки их
+# регистрирующий инициализатор линкер бы выбросил.
 qt_add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
 
 # Подключение Qt модулей
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    dendrolog_widgets
     Qt6::Widgets
     Qt6::Core
     Qt6::Gui
@@ -162,11 +193,5 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
-    add_subdirectory(tests/pattern_smoke)
-    add_subdirectory(tests/lineindex_smoke)
-    add_subdirectory(tests/dirscanner_smoke)
-    add_subdirectory(tests/logstore_equivalence)
-    add_subdirectory(tests/logview_state)
-    add_subdirectory(tests/viewexport)
-    add_subdirectory(tests/search_results)
+    add_subdirectory(tests)
 endif()
