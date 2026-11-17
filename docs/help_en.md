@@ -132,6 +132,14 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The match row expands and the term is highlighted. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
 - To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). The Search panel also takes several rules at once.
 
+## Go to line or time
+
+- `Ctrl+G` or `View → Go to Line / Time…` opens one input box. Digits are a **line number of the file** — the same number Entry Details shows. Anything else is a **time**: `10:02`, `10:02:03.250`, a date `2026-03-05`, or both — `2026-03-05 10:02`. A time without a date takes the date of the selected line, or of the start of the log when nothing is selected. A zone may follow (`Z`, `+03:00`, `UTC`); without one the time is local, as in the log itself.
+- The line under the box says where the jump lands before you press **Go**. If the line is hidden by the filters, the jump goes to the nearest shown line — the next one after its place, or the last one. A number past the end of the file goes to its last line. A time goes to the first shown line at or after it; a time later than the whole log — to the last line with a timestamp.
+- In a tab with several files a line number belongs to one file: the **Line of file** list picks it and starts on the file of the selected line. It does not affect a time.
+- The line becomes the selected one, so it stays in place when filters change afterwards.
+- A large file opened alone is shown in file order; if its timestamps are not in order, a jump to a time is approximate there.
+
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
@@ -181,6 +189,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Focus search field | `Ctrl+F` |
 | Search next / previous | `F3` / `Shift+F3` |
 | Find all (Search panel) | `Ctrl+Shift+F` |
+| Go to line or time | `Ctrl+G` |
 | Toggle word wrap | `Alt+Z` |
 | Larger / smaller / default font | `Ctrl++` / `Ctrl+-` / `Ctrl+0`, `Ctrl` + wheel |
 | Show only Fatal … Trace (toggle) | `Alt+1` … `Alt+6` |

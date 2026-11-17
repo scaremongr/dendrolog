@@ -6,6 +6,13 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Go to Line / Time** (`Ctrl+G`, `View` menu): one box takes a line number
+  of the file or a time (`10:02`, `10:02:03.250`, `2026-03-05 10:02`) and shows
+  where the jump lands before you confirm. A line hidden by the filters leads
+  to the nearest shown one; in a tab with several files you pick the file the
+  line number belongs to.
+
 ## [0.4.0] — 2026-09-28
 
 ### Added

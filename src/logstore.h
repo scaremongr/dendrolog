@@ -64,6 +64,13 @@ public:
         const std::shared_ptr<LogEntry>& line, int maxLines) const = 0;
     virtual int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const = 0;
     virtual int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const = 0;
+    // Видимая строка для строки lineNumber (с 1) файла sourceFile — переход
+    // Ctrl+G. Номер за концом файла — его последняя строка. Строка скрыта
+    // фильтром — следующая видимая за её местом в порядке вкладки, иначе
+    // последняя (как nearestVisibleRow). -1 — файла нет во вкладке или не
+    // видно ни одной строки. Индексный бэкенд — двоичный поиск.
+    virtual int nearestVisibleRowForLine(qint64 lineNumber,
+                                         const LogFile* sourceFile) const = 0;
     // Синхронный поиск подстроки в видимых строках; -1 — не найдено.
     virtual int findNextOccurrence(const QString& text, int startRow,
                                    Qt::CaseSensitivity cs, bool wrapAround) const = 0;

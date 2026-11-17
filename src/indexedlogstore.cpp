@@ -814,6 +814,33 @@ int IndexedLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* source
     return j < int(m_visibleRefs.size()) ? j : j - 1;
 }
 
+int IndexedLogStore::nearestVisibleRowForLine(qint64 lineNumber,
+                                              const LogFile* sourceFile) const
+{
+    const int visible = visibleCount();
+    const int fileId = fileIdOf(sourceFile);
+    if (visible == 0 || fileId < 0)
+        return -1;
+
+    // Индекс растёт в воркере раньше, чем строки показаны модели: одно-файловая
+    // вкладка ограничена показанным, у слитой место ещё не показанной строки
+    // всё равно находится двоичным поиском.
+    qint64 total = m_files[fileId].index->lineCount();
+    if (identityAll())
+        total = qMin(total, m_shownAllCount);
+    if (total <= 0)
+        return -1;
+    const qint64 line = qBound(qint64(0), lineNumber - 1, total - 1);
+    if (m_identityVisible && identityAll())
+        return int(line);
+
+    const QVector<RowRef>& list = m_identityVisible ? m_allRefs : m_visibleRefs;
+    const auto it = std::lower_bound(list.constBegin(), list.constEnd(),
+                                     makeRef(fileId, line),
+                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
+    return qMin(int(it - list.constBegin()), int(list.size()) - 1);
+}
+
 int IndexedLogStore::findNextOccurrence(const QString& text, int startRow,
                                         Qt::CaseSensitivity cs, bool wrapAround) const
 {

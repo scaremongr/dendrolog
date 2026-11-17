@@ -33,6 +33,8 @@
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
   to show only, hide, highlight or find lines with it.
+- **Go to line or time** — `Ctrl+G` jumps to a line number of the file or to a
+  moment; with filters on it lands on the nearest shown line.
 - **Row highlighters** — colour matching rows without hiding anything.
 - **Timeline histogram** — entry density over time; click to jump, drag to filter.
 - **Statistics panel** — level counts, top repeated messages, rate, anomalies.

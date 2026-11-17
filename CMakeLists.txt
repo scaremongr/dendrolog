@@ -66,6 +66,8 @@ set(DENDROLOG_CORE_SOURCES
     src/fieldreextraction.cpp
     src/quicksearch.h
     src/quicksearch.cpp
+    src/gotolocation.h
+    src/gotolocation.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES
@@ -73,6 +75,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/LogListView.cpp
     src/logviewwidget.h
     src/logviewwidget.cpp
+    src/gotodialog.h
+    src/gotodialog.cpp
     src/tabexpander.h
     src/linewrapper.h
     src/texttoken.h

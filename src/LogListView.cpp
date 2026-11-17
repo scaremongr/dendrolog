@@ -1363,6 +1363,30 @@ void LogListView::showSearchMatch(int row, const QString& term, bool caseSensiti
     viewport()->update();
 }
 
+void LogListView::goToRow(int row)
+{
+    if (!model() || row < 0 || row >= model()->rowCount())
+        return;
+    const QModelIndex index = model()->index(row, 0);
+    // Follow-tail вернул бы вид к хвосту на следующей же дописанной порции:
+    // программная прокрутка его сама не снимает (только ползунок и колесо).
+    if (m_followTail && row < model()->rowCount() - 1)
+        setFollowTail(false);
+    // setCurrentIndex выделяет строку (ClearAndSelect) и через currentChanged
+    // обновляет m_persistentSelection. Но если строка уже текущая (её мог
+    // назначить Qt по фокусу, без выделения и без якоря), currentChanged не
+    // придёт — якорь ставим сами.
+    setCurrentIndex(index);
+    if (auto* logModel = qobject_cast<LogModel*>(model())) {
+        const LogModel::EntryKey key = logModel->keyForRow(row);
+        if (key.logicalEntryId >= 0) {
+            m_persistentSelection.logicalEntryId = key.logicalEntryId;
+            m_persistentSelection.sourceFile = key.sourceFile;
+        }
+    }
+    scrollTo(index, QAbstractItemView::PositionAtCenter);
+}
+
 void LogListView::clearSearchMatch()
 {
     if (m_searchMatchRow < 0)
