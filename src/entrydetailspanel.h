@@ -59,6 +59,7 @@ public:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
     void onAnchorClicked(const QUrl& url); // ссылки "copy:*" и "fold:*"

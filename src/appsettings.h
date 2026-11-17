@@ -33,6 +33,14 @@
 //   AppSettings::instance().save();           // on close or after dialog
 // ---------------------------------------------------------------------------
 
+// Выбор темы окна (Settings → Appearance). Какая схема при этом действует,
+// решает effectiveColorScheme() в colorschemecontroller.h.
+enum class ThemeMode {
+    System,   // как в системе — следовать теме ОС (по умолчанию)
+    Light,
+    Dark,
+};
+
 class AppSettings : public QObject
 {
     Q_OBJECT
@@ -77,6 +85,16 @@ public:
     // Whether word-wrap is enabled by default (and remembered across sessions).
     bool wordWrap() const;
     void setWordWrap(bool enabled);
+
+    // ---- Theme ---------------------------------------------------------- //
+
+    // Тема окна. В ini — словом: [App] theme=system|light|dark; неизвестное
+    // значение читается как System. Цвета вкладки Colors ([Theme]) от выбора
+    // не зависят: набор один на обе темы.
+    ThemeMode themeMode() const;
+    void      setThemeMode(ThemeMode mode);
+    static QString   themeModeToString(ThemeMode mode);
+    static ThemeMode themeModeFromString(const QString& text);
 
     // ---- File reload preferences --------------------------------------- //
 
@@ -130,6 +148,7 @@ private:
     int         m_scanRefreshMode { 0 };   // Manual
     int         m_scanRefreshIntervalSecs { 30 };
     bool        m_wordWrap        { true };
+    ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };
     QString     m_fontFamily;

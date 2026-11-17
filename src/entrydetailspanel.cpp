@@ -1,6 +1,7 @@
 #include "entrydetailspanel.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include <QTimer>
 #include "cardframe.h"
 #include "logentry.h"
 
@@ -354,6 +355,15 @@ void EntryDetailsPanel::showEvent(QShowEvent* event)
     QWidget::showEvent(event);
     if (m_dirty)
         rebuildNow();
+}
+
+// Смена темы: цвета HTML посчитаны из палитры браузера — перестроить.
+// Отложенно: дочерний браузер получает новую палитру позже панели.
+void EntryDetailsPanel::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && m_browser)
+        QTimer::singleShot(0, this, &EntryDetailsPanel::scheduleRebuild);
 }
 
 void EntryDetailsPanel::scheduleRebuild()

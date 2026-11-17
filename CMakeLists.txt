@@ -88,6 +88,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/apptheme.cpp
     src/appsettings.h
     src/appsettings.cpp
+    src/colorschemecontroller.h
+    src/colorschemecontroller.cpp
 
     src/directoryscanner.h
     src/directoryscanner.cpp

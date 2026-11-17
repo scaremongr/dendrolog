@@ -12,6 +12,14 @@ All notable changes to DendroLog are documented here. The format follows
   where the jump lands before you confirm. A line hidden by the filters leads
   to the nearest shown one; in a tab with several files you pick the file the
   line number belongs to.
+- **Theme** in `Settings → Appearance`: **Same as system** (the default, follows
+  the OS as before), **Light** or **Dark**. The choice applies at once to the
+  whole window and is remembered.
+
+### Fixed
+- Switching between the light and dark theme while a log is open no longer
+  leaves lines drawn in the previous theme's text colour, and the Entry Details
+  and Statistics panels are redrawn in the new colours.
 
 ## [0.4.0] — 2026-09-28
 
