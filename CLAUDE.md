@@ -42,6 +42,23 @@ cmake --build build --config Release --target DendroLog   # сборка
 открытое окно (`SingleInstance`); пайп передать нельзя, поэтому при `-` всегда
 открывается своё окно.
 
+### Облачная сессия (Linux)
+
+Qt 6.8 в `/opt/qt6` ставит setup script окружения (из conda-forge: в apt
+только 6.4, а проекту нужен 6.5+; `download.qt.io` закрыт сетевой политикой).
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/qt6
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Полная сборка — около минуты на 4 ядрах, тесты — около 2,5 минут. Окна нет:
+тесты сами ставят `QT_QPA_PLATFORM=offscreen`, приложение запускать с этой
+переменной. Если `/opt/qt6` нет, setup script не отработал — сказать об этом
+автору; Qt из apt не подойдёт. Windows-сборку и установщики даёт только CI
+(артефакты запуска на PR).
+
 ## Тесты
 
 ```sh
