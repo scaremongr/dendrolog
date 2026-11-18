@@ -163,6 +163,18 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/entrydetailspanel.cpp
     src/statisticspanel.h
     src/statisticspanel.cpp
+
+    # Каталог схем и редактор схем: в библиотеке ради tests/schema_store
+    # (схема с описанием проходит через редактор и сохранение).
+    src/schemastore.h
+    src/schemastore.cpp
+    src/conversionpatterndialog.h
+    src/conversionpatterndialog.cpp
+    src/conversionpatterndialog.ui
+    src/patternblockcard.h
+    src/patternblockcard.cpp
+    src/separatornode.h
+    src/separatornode.cpp
 )
 
 set(PROJECT_SOURCES
@@ -175,16 +187,6 @@ set(PROJECT_SOURCES
     src/logtabbar.cpp
     src/logtabwidget.h
     src/logtabwidget.cpp
-
-    src/schemastore.h
-    src/schemastore.cpp
-    src/conversionpatterndialog.h
-    src/conversionpatterndialog.cpp
-    src/conversionpatterndialog.ui
-    src/patternblockcard.h
-    src/patternblockcard.cpp
-    src/separatornode.h
-    src/separatornode.cpp
 
     src/shortcutmanager.h
     src/shortcutmanager.cpp

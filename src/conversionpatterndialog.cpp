@@ -35,7 +35,9 @@ namespace {
 
 constexpr int SchemaColName = 0;
 constexpr int SchemaColSummary = 1;
-constexpr int SchemaDataRole = Qt::UserRole;
+constexpr int SchemaDataRole = Qt::UserRole;      // canonical schema JSON
+constexpr int SchemaMetaRole = Qt::UserRole + 1;  // QJsonObject: description, unknown keys
+constexpr int SchemaFileRole = Qt::UserRole + 2;  // file name in the patterns folder
 
 constexpr int kMaxPreviewLines = 50;
 constexpr int kMaxPreviewLineLength = 4000;
@@ -403,6 +405,8 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     connect(ui->schemaTable, &QTableWidget::currentCellChanged,
             this, &ConversionPatternDialog::onSchemaSelectionChanged);
     connect(ui->nameEdit, &QLineEdit::textEdited, this, &ConversionPatternDialog::onSchemaNameEdited);
+    connect(ui->descriptionEdit, &QLineEdit::textEdited,
+            this, &ConversionPatternDialog::onSchemaDescriptionEdited);
     connect(ui->applyBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onApplyChanges);
     connect(ui->revertBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onRevertChanges);
     connect(ui->addBlockBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onAddBlock);
@@ -457,13 +461,13 @@ ConversionPatternDialog::PatternList ConversionPatternDialog::resultPatterns() c
 {
     PatternList list;
     for (int row = 0; row < ui->schemaTable->rowCount(); ++row) {
-        const QTableWidgetItem* item = ui->schemaTable->item(row, SchemaColName);
-        if (!item)
+        if (!ui->schemaTable->item(row, SchemaColName))
             continue;
-        const QString name = item->text().trimmed();
-        const QString schema = item->data(SchemaDataRole).toString().trimmed();
-        if (!schema.isEmpty())
-            list.append({name, schema});
+        SchemaStore::SchemaEntry entry = schemaRow(row);
+        entry.name = entry.name.trimmed();
+        entry.schema = entry.schema.trimmed();
+        if (!entry.schema.isEmpty())
+            list.append(entry);
     }
     return list;
 }
@@ -479,7 +483,7 @@ void ConversionPatternDialog::populateSchemas(const PatternList& list,
     for (const auto& entry : list) {
         const int row = ui->schemaTable->rowCount();
         ui->schemaTable->insertRow(row);
-        setSchemaRow(row, entry.first, entry.second);
+        setSchemaRow(row, entry);
     }
 
     if (ui->schemaTable->rowCount() == 0)
@@ -501,9 +505,7 @@ void ConversionPatternDialog::populateSchemas(const PatternList& list,
     ui->schemaTable->setCurrentCell(selectRow, 0);
 }
 
-void ConversionPatternDialog::setSchemaRow(int row,
-                                           const QString& name,
-                                           const QString& serializedSchema)
+void ConversionPatternDialog::setSchemaRow(int row, const SchemaStore::SchemaEntry& entry)
 {
     if (row < 0 || row >= ui->schemaTable->rowCount())
         return;
@@ -513,10 +515,28 @@ void ConversionPatternDialog::setSchemaRow(int row,
     if (!ui->schemaTable->item(row, SchemaColSummary))
         ui->schemaTable->setItem(row, SchemaColSummary, new QTableWidgetItem());
 
-    ui->schemaTable->item(row, SchemaColName)->setText(
-        name.trimmed().isEmpty() ? tr("Untitled schema") : name);
-    ui->schemaTable->item(row, SchemaColName)->setData(SchemaDataRole, serializedSchema);
+    QTableWidgetItem* item = ui->schemaTable->item(row, SchemaColName);
+    item->setText(entry.name.trimmed().isEmpty() ? tr("Untitled schema") : entry.name);
+    item->setData(SchemaDataRole, entry.schema);
+    item->setData(SchemaMetaRole, entry.meta);
+    item->setData(SchemaFileRole, entry.fileName);
+    item->setToolTip(entry.description());
     updateSchemaSummary(row);
+}
+
+SchemaStore::SchemaEntry ConversionPatternDialog::schemaRow(int row) const
+{
+    SchemaStore::SchemaEntry entry;
+    const QTableWidgetItem* item = (row >= 0 && row < ui->schemaTable->rowCount())
+        ? ui->schemaTable->item(row, SchemaColName)
+        : nullptr;
+    if (!item)
+        return entry;
+    entry.name = item->text();
+    entry.schema = item->data(SchemaDataRole).toString();
+    entry.meta = item->data(SchemaMetaRole).toJsonObject();
+    entry.fileName = item->data(SchemaFileRole).toString();
+    return entry;
 }
 
 void ConversionPatternDialog::updateSchemaSummary(int row)
@@ -608,9 +628,12 @@ void ConversionPatternDialog::loadSchemaRow(int row)
         }
 
         ui->nameEdit->setText(name);
+        ui->descriptionEdit->setText(schemaRow(row).description());
+        ui->descriptionEdit->setCursorPosition(0);
         rebuildCards(definition);
     } else {
         ui->nameEdit->clear();
+        ui->descriptionEdit->clear();
         rebuildCards(PatternDefinition());
     }
     m_syncing = false;
@@ -625,11 +648,15 @@ void ConversionPatternDialog::saveSchemaRow(int row)
     if (m_syncing || row < 0 || row >= ui->schemaTable->rowCount())
         return;
 
-    const QString name = ui->nameEdit->text().trimmed().isEmpty()
+    // Metadata (unknown keys) and the file name stay with the row; the editor
+    // owns the name, the description and the blocks.
+    SchemaStore::SchemaEntry entry = schemaRow(row);
+    entry.name = ui->nameEdit->text().trimmed().isEmpty()
         ? tr("Untitled schema")
         : ui->nameEdit->text().trimmed();
-    const QString serializedSchema = LogPattern::serializeDefinition(currentDefinitionFromEditor());
-    setSchemaRow(row, name, serializedSchema);
+    entry.setDescription(ui->descriptionEdit->text());
+    entry.schema = LogPattern::serializeDefinition(currentDefinitionFromEditor());
+    setSchemaRow(row, entry);
 }
 
 // ---------------------------------------------------------------- //
@@ -783,9 +810,9 @@ void ConversionPatternDialog::onRevertChanges()
 // Presets
 // ---------------------------------------------------------------- //
 
-ConversionPatternDialog::PatternList ConversionPatternDialog::userPresets() const
+ConversionPatternDialog::PresetList ConversionPatternDialog::userPresets() const
 {
-    PatternList presets;
+    PresetList presets;
     QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
     s.beginGroup(QLatin1String(kPresetsGroup));
     const QStringList names = s.value(QStringLiteral("names")).toStringList();
@@ -798,7 +825,7 @@ ConversionPatternDialog::PatternList ConversionPatternDialog::userPresets() cons
     return presets;
 }
 
-void ConversionPatternDialog::saveUserPresets(const PatternList& presets)
+void ConversionPatternDialog::saveUserPresets(const PresetList& presets)
 {
     QStringList names, values;
     for (const auto& preset : presets) {
@@ -828,7 +855,7 @@ void ConversionPatternDialog::rebuildPresetMenu()
         });
     }
 
-    const PatternList user = userPresets();
+    const PresetList user = userPresets();
     if (!user.isEmpty()) {
         menu->addSeparator();
         for (const auto& preset : user) {
@@ -845,7 +872,7 @@ void ConversionPatternDialog::rebuildPresetMenu()
         for (const auto& preset : user) {
             const QString name = preset.first;
             deleteMenu->addAction(name, this, [this, name]() {
-                PatternList presets = userPresets();
+                PresetList presets = userPresets();
                 for (int i = presets.size() - 1; i >= 0; --i)
                     if (presets[i].first == name)
                         presets.removeAt(i);
@@ -875,7 +902,7 @@ void ConversionPatternDialog::onSavePreset()
     if (!ok || name.isEmpty())
         return;
 
-    PatternList presets = userPresets();
+    PresetList presets = userPresets();
     const QString serialized = LogPattern::serializeDefinition(currentDefinitionFromEditor());
     bool replaced = false;
     for (auto& preset : presets) {
@@ -1143,6 +1170,7 @@ void ConversionPatternDialog::updateButtonStates()
     ui->autoDetectBtn->setEnabled(hasSchema);
     ui->presetBtn->setEnabled(hasSchema);
     ui->grokBtn->setEnabled(hasSchema);
+    ui->descriptionEdit->setEnabled(hasSchema);
     ui->savePresetBtn->setEnabled(hasSchema);
     ui->blocksScroll->setEnabled(hasSchema);
 }
@@ -1157,9 +1185,10 @@ void ConversionPatternDialog::onAddSchema()
 
     const int row = ui->schemaTable->rowCount();
     ui->schemaTable->insertRow(row);
-    setSchemaRow(row,
-                 tr("New schema"),
-                 LogPattern::serializeDefinition(defaultDefinition()));
+    SchemaStore::SchemaEntry entry;
+    entry.name = tr("New schema");
+    entry.schema = LogPattern::serializeDefinition(defaultDefinition());
+    setSchemaRow(row, entry);
     ui->schemaTable->setCurrentCell(row, 0);
     ui->nameEdit->setFocus();
     ui->nameEdit->selectAll();
@@ -1191,7 +1220,7 @@ void ConversionPatternDialog::onImportSchema()
 
     QString error;
     const SchemaStore::SchemaEntry entry = SchemaStore::importFile(path, &error);
-    if (entry.first.isEmpty() && entry.second.isEmpty()) {
+    if (entry.isEmpty()) {
         QMessageBox::warning(this, tr("Import schema"),
             error.isEmpty() ? tr("The file could not be imported.") : error);
         return;
@@ -1200,7 +1229,7 @@ void ConversionPatternDialog::onImportSchema()
     // The file is now in the patterns folder; show it as a new row right away.
     const int row = ui->schemaTable->rowCount();
     ui->schemaTable->insertRow(row);
-    setSchemaRow(row, entry.first, entry.second);
+    setSchemaRow(row, entry);
     ui->schemaTable->setCurrentCell(row, 0);
     updateButtonStates();
 }
@@ -1211,13 +1240,17 @@ void ConversionPatternDialog::onExportSchema()
     if (row < 0)
         return;
 
-    // Export exactly what the editor currently shows (including unapplied edits).
-    const QString name = ui->nameEdit->text().trimmed().isEmpty()
+    // Export exactly what the editor currently shows (including unapplied
+    // edits), with the row's metadata.
+    SchemaStore::SchemaEntry entry = schemaRow(row);
+    entry.name = ui->nameEdit->text().trimmed().isEmpty()
         ? tr("schema")
         : ui->nameEdit->text().trimmed();
-    const QString serialized = LogPattern::serializeDefinition(currentDefinitionFromEditor());
+    entry.setDescription(ui->descriptionEdit->text());
+    entry.schema = LogPattern::serializeDefinition(currentDefinitionFromEditor());
 
-    const QString suggested = QDir(QDir::homePath()).filePath(SchemaStore::suggestedFileName(name));
+    const QString suggested =
+        QDir(QDir::homePath()).filePath(SchemaStore::suggestedFileName(entry.name));
     const QString path = QFileDialog::getSaveFileName(
         this, tr("Export schema"), suggested,
         tr("Schema files (*.json);;All files (*)"));
@@ -1225,7 +1258,7 @@ void ConversionPatternDialog::onExportSchema()
         return;
 
     QString error;
-    if (!SchemaStore::exportToFile(name, serialized, path, &error)) {
+    if (!SchemaStore::exportToFile(entry, path, &error)) {
         QMessageBox::warning(this, tr("Export schema"),
             error.isEmpty() ? tr("The schema could not be exported.") : error);
     }
@@ -1284,6 +1317,13 @@ void ConversionPatternDialog::onSchemaSelectionChanged(int currentRow, int, int 
 }
 
 void ConversionPatternDialog::onSchemaNameEdited(const QString&)
+{
+    if (m_syncing)
+        return;
+    setDirty();
+}
+
+void ConversionPatternDialog::onSchemaDescriptionEdited(const QString&)
 {
     if (m_syncing)
         return;

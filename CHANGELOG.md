@@ -83,6 +83,12 @@ All notable changes to DendroLog are documented here. The format follows
   keeps the line inside its entry, and lines with a timestamp and a level word
   start an entry as before. The open tab (both for small and huge files) and
   the directory scanner split entries the same way.
+- **Schema descriptions.** The field schema editor (`Tools → Field Schemas…`)
+  has a Description line; the description is the tooltip of the schema in the
+  editor's list and in the *Log Fields* schema box. Built-in schemas come with
+  one.
+- Editing or renaming a schema in the editor saves it to the same file; a file
+  named after the schema still follows a rename.
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
   and `FTL` count as Fatal; `ERR` as Error; `WRN` as Warn;
   `INF` and `NOTICE` as Info; `DBG` as Debug; `VERBOSE` and `VRB` as Trace.
@@ -96,6 +102,12 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- Saving a schema in the editor no longer drops its description and the keys
+  of the schema file DendroLog does not know (also on import and export).
+  Editing or renaming a built-in schema in the editor no longer makes it look
+  deleted (it moved to a new file); changing only its description keeps it
+  eligible for updates by a new version.
+
 - **The Directory Scanner counts entries, not lines.** A stack trace or any
   other multi-line message used to add one entry per line; now the Entries
   column equals the number of entries of the opened tab, and W/E/F and the

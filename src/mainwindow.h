@@ -15,6 +15,7 @@
 #include "logviewwidget.h"
 #include "filterruleset.h"
 #include "openrouting.h"
+#include "schemastore.h"
 
 // Forward declarations for Qt classes used in members or method signatures
 class QuickSearchField;
@@ -306,8 +307,7 @@ private:
     QVBoxLayout* m_fieldCheckboxLayout = nullptr;
     QComboBox* m_conversionPatternCombo = nullptr;
     QString    m_conversionPattern;             // Global pattern (for next file opens)
-    using PatternEntry = QPair<QString, QString>; // (display name, pattern string)
-    QList<PatternEntry> m_patternList;
+    SchemaStore::SchemaList m_patternList;      // schemas with metadata, as on disk
     QStringList m_savedVisibleFieldNames;
 
     // Background field re-extraction (schema switch). Workers never write to
