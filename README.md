@@ -46,6 +46,9 @@
   moment; with filters on it lands on the nearest shown line.
 - **Next / previous error** — `F8` / `Shift+F8` step through Error and Fatal
   lines, `F7` / `Shift+F7` through warnings, without freezing the window on a huge log.
+- **Bookmarks with notes** — `Ctrl+F2` marks a line, `F2` / `Shift+F2` jump
+  between bookmarks, the Bookmarks panel lists them with a note each; they stay
+  through filters, reloads and the switch to the large-file mode.
 - **Row highlighters** — colour matching rows without hiding anything.
 - **Timeline histogram** — entry density over time; click to jump, drag to filter.
 - **Statistics panel** — level counts, top repeated messages, rate, anomalies.

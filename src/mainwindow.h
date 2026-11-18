@@ -47,6 +47,7 @@ class MarkerPanelWidget;
 class TimelineHistogramWidget;
 class EntryDetailsPanel;
 class StatisticsPanel;
+class BookmarkPanelWidget;
 class LogModel;
 class LogListView;
 class LogPattern;
@@ -140,6 +141,8 @@ private slots:
     void onQuickSearchFinished(const QString& term, bool found);
     void onLevelJumpProgress(LogLevelMask levels, bool forward, int percent);
     void onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
+    void onBookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome);
+    void editBookmarkNote(int bookmarkId, bool created);
     // Пункт контекстного меню лога над выделенным текстом: найти его,
     // добавить правило фильтра или маркер и применить к активной вкладке.
     void onViewTextAction(LogListView::TextAction action, const QString& text);
@@ -237,6 +240,8 @@ private:
     // топ повторяющихся сообщений, темп записей и эвристики-аномалии.
     StatisticsPanel* m_statsPanel = nullptr;
     QDockWidget* m_statsDockWidget = nullptr;
+    BookmarkPanelWidget* m_bookmarkPanel = nullptr;
+    QDockWidget* m_bookmarkDockWidget = nullptr;
 
     // Панель Search (нижний док, создаётся в коде): запрос (FilterPanelWidget
     // в роли Search) и результаты в одной панели (SearchPanelWidget). Модель
@@ -389,6 +394,9 @@ private:
     void setupSearchDock();             // Док Search: запрос + результаты
     void setupEntryDetailsDock();       // Док Entry Details (текущая запись целиком)
     void setupStatisticsDock();         // Док Statistics (сводка по документу)
+    void setupBookmarksDock();          // Док Bookmarks (закладки активной вкладки)
+    // Строка статуса: итог перехода F8 / F2 (пустой текст — убрать своё).
+    void showJumpStatus(const QString& text);
     void setupFilterStatusToolbar();    // Тулбар «Filters» (индикаторы-кнопки фильтров)
     void setupDirectoryScanner();
     void setupFieldVisibilityDock();    // New: Log Fields panel

@@ -13,6 +13,7 @@
 #include <QSet>
 #include <memory>
 
+class BookmarkStore;
 class LogStore;
 class ResidentLogStore;
 class IndexedLogStore;
@@ -142,8 +143,17 @@ public:
         // до следующего батча или до полного reset.
         IsNewRole,
         // Цвет фона строки от недеструктивного row-маркера (Row Highlighters).
-        RowMarkerColorRole
+        RowMarkerColorRole,
+        // bool: на строке стоит закладка (BookmarkStore::isBookmarkedRow, O(1)).
+        BookmarkRole
     };
+
+    // Закладки вкладки (R-2). Живут вместе с моделью: переживают фильтр,
+    // перезагрузку файла и конверсию бэкенда.
+    BookmarkStore& bookmarks() const { return *m_bookmarks; }
+    // Отметка закладки на видимой строке изменилась (зовёт BookmarkStore):
+    // dataChanged только с BookmarkRole — view перерисовывает без сброса кэшей.
+    void notifyBookmarkRow(int row);
 
     // ---- Dynamic field-visibility control -----------------------------------
     void setAvailableFields(const QStringList& fieldNames);
@@ -260,6 +270,8 @@ private:
     QStringList m_availableFieldNames;
     QVector<int> m_visibleFieldIndexes;
     bool m_fieldFilterEnabled = false;
+
+    BookmarkStore* m_bookmarks = nullptr; // child QObject
 };
 
 #endif // LOGMODEL_H

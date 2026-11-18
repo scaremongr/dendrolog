@@ -102,6 +102,7 @@ void SettingsDialog::buildColorsTab()
             tr("UI Elements"),
             {
                 { tr("Gutter marker"),  t.gutterMarker, &t.gutterMarker },
+                { tr("Bookmark"),       t.gutterBookmark, &t.gutterBookmark },
                 { tr("Badge background"), t.badgeBg,    &t.badgeBg      },
                 { tr("Badge text"),     t.badgeFg,      &t.badgeFg      },
                 { tr("Bracket match"),  t.bracketMatch, &t.bracketMatch },

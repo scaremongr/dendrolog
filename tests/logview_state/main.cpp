@@ -35,6 +35,7 @@
 // ============================================================================
 
 #include "LogListView.h"
+#include "bookmarkstore.h"
 #include "testdocuments.h"
 
 #include <QApplication>
@@ -363,6 +364,22 @@ static QVector<Trigger> triggers()
                        b.doc.model->setRowMarkers({ p });
                    },
                    [](Backend& b) { b.doc.model->setRowMarkers({}); } };
+        t.visibleSetUnchanged = true;
+        list.append(t);
+    }
+
+    // Закладки (R-2): отметка в жёлобе — роль без смены текста и видимого
+    // набора; ни выделение, ни прокрутка от неё не двигаются.
+    {
+        Trigger t{ QStringLiteral("закладки: поставить на запись и соседние строки"),
+                   [](Backend& b, const EntryInfo& e) {
+                       LogModel& m = *b.doc.model;
+                       const int row = m.rowForEntry(e.key.logicalEntryId, e.key.sourceFile);
+                       for (const int r : { row - 1, row, row + 1, 0, m.rowCount() - 1 })
+                           if (r >= 0 && r < m.rowCount() && !m.bookmarks().isBookmarkedRow(r))
+                               m.bookmarks().toggle(r);
+                   },
+                   [](Backend& b) { b.doc.model->bookmarks().clear(); } };
         t.visibleSetUnchanged = true;
         list.append(t);
     }

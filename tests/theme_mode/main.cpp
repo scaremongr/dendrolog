@@ -29,6 +29,8 @@
 #include "entrydetailspanel.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
+#include "bookmarkpanelwidget.h"
+#include "logviewwidget.h"
 #include "statisticspanel.h"
 #include "welcomewidget.h"
 #include "testdocuments.h"
@@ -470,7 +472,7 @@ static void checkRepaintsOnThemeChange(const char* name, const WidgetFactory& ma
     s.setThemeMode(ThemeMode::System);
 }
 
-static void checkOpenPanels()
+static void checkOpenPanels(const QDir& dir)
 {
     ColorSchemeController controller;
 
@@ -509,6 +511,32 @@ static void checkOpenPanels()
     });
     checkRepaintsOnThemeChange("Row Highlighters, empty", []() -> std::unique_ptr<QWidget> {
         return std::make_unique<MarkerPanelWidget>();
+    });
+
+    // Закладки: живая с заметкой и скрытая фильтром (приглушённый акцент).
+    // Вкладка одна на все экземпляры панели — данные не зависят от темы.
+    {
+        const QString path = testdocs::writeFile(dir, QStringLiteral("bookmarks.log"),
+            "2026-03-05 10:00:00.000 [w] INFO - first\n"
+            "2026-03-05 10:00:01.000 [w] ERROR - second\n"
+            "2026-03-05 10:00:02.000 [w] INFO - third\n");
+        LogViewWidget tab;
+        tab.addLogFile(path);
+        testdocs::waitFor([&tab] { return !tab.isLoading() && tab.model()->rowCount() == 3; });
+        const int live = tab.bookmarks().add(1);
+        tab.bookmarks().setNote(live, QStringLiteral("connection lost"));
+        tab.bookmarks().add(2);
+        tab.model()->setLogLevelFilter({ LogLevel::Error });
+        testdocs::settle(*tab.model());
+        LogViewWidget* source = &tab;
+        checkRepaintsOnThemeChange("Bookmarks", [source]() -> std::unique_ptr<QWidget> {
+            auto panel = std::make_unique<BookmarkPanelWidget>();
+            panel->setLogView(source);
+            return panel;
+        });
+    }
+    checkRepaintsOnThemeChange("Bookmarks, empty", []() -> std::unique_ptr<QWidget> {
+        return std::make_unique<BookmarkPanelWidget>();
     });
 
     checkRepaintsOnThemeChange("Entry Details", []() -> std::unique_ptr<QWidget> {
@@ -580,7 +608,7 @@ int main(int argc, char** argv)
     checkNotFoundColour();
     checkController();
     checkOpenView(QDir(temporary.path()));
-    checkOpenPanels();
+    checkOpenPanels(QDir(temporary.path()));
 
     QFile::remove(AppSettings::iniFilePath());
     if (failures) {
