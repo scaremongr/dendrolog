@@ -10,6 +10,9 @@
 //      пользователем схема, чужой файл того же имени, новая схема в новой
 //      версии, потерянный манифест.
 //   4. Каждый файл схемы перечислен в resources/resources.qrc.
+//   5. Метки времени форматов распознаёт LineClassifier (F-10), а схемы,
+//      исправленные ради этого после Q-5 (q5/ — их прежние версии),
+//      доезжают до пользователя, который их не трогал.
 //
 // Каталог схем в исходниках передаётся define DENDROLOG_PATTERNS_SOURCE_DIR.
 
@@ -25,6 +28,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 
 #include <cstdio>
@@ -401,8 +405,33 @@ void testSamples(const SchemaCase& sc)
 // 2. Оба бэкенда: границы записей и поля
 // ---------------------------------------------------------------------------
 
+bool expectsTime(const SchemaCase& sc, const Sample& s)
+{
+    static const QStringList kWithoutTime = {
+        QStringLiteral("serilog-console.json"),      // время без даты — F-11
+        QStringLiteral("python-basicconfig.json"),   // в формате нет времени вовсе
+    };
+    return !kWithoutTime.contains(sc.file)
+        && !s.fields.value(QStringLiteral("Timestamp")).startsWith(QStringLiteral("13:55:40.016"));
+}
+
+void testClassifierTime(const SchemaCase& sc)
+{
+    const LineClassifier classifier;
+    for (const Sample& s : sc.samples) {
+        if (s.continuation)
+            continue;
+        qint64 ms = 0;
+        const bool has = classifier.detectTimestampMs(s.line, ms);
+        const bool expectedTime = expectsTime(sc, s);
+        check(has == expectedTime, QStringLiteral("%1: метка времени %2 распознаётся классификатором: %3")
+                                       .arg(sc.file, expectedTime ? QString() : QStringLiteral("НЕ"), s.line));
+    }
+}
+
 struct RowInfo {
     int     recordId = -1;
+    qint64  ms = -1;      // момент записи, -1 — нет
     QString fieldsText;   // поля строки, как их отдаёт хранилище
 };
 
@@ -418,6 +447,7 @@ QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const LogPattern& pattern
             continue;
         RowInfo info;
         info.recordId = e->logicalEntryId();
+        info.ms = e->timestamp().isValid() ? e->timestamp().toMSecsSinceEpoch() : -1;
         info.fieldsText = e->fields().isEmpty()
             ? QString()
             : describeFields(pattern, e->message(), e->fields());
@@ -465,6 +495,13 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
         check(idxStarts == !s.continuation,
               QStringLiteral("%1: индексный, начало записи на строке %2: %3")
                   .arg(sc.file).arg(i + 1).arg(s.line));
+        check(r.ms == x.ms,
+              QStringLiteral("%1: момент строки %2 у бэкендов: %3 | %4")
+                  .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms));
+        if (!s.continuation)
+            check((r.ms >= 0) == expectsTime(sc, s),
+                  QStringLiteral("%1: у записи строки %2 %3момент: %4")
+                      .arg(sc.file).arg(i + 1).arg(expectsTime(sc, s) ? QString() : QStringLiteral("нет "), s.line));
         check(r.fieldsText == x.fieldsText,
               QStringLiteral("%1: поля строки %2 у бэкендов: %3 | %4")
                   .arg(sc.file).arg(i + 1).arg(r.fieldsText, x.fieldsText));
@@ -476,30 +513,10 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
     }
 }
 
-// Известный пробел: LineClassifier не понимает метки syslog, access-логов,
-// nginx error и время без даты — у таких записей нет момента (порядок,
-// фильтр времени, таймлайн). Закреплено, чтобы задача о классификаторе
-// (docs/roadmap.md) перевернула ожидание явно.
-void testClassifierTimeGap(const SchemaCase& sc)
-{
-    static const QStringList kWithoutTime = {
-        QStringLiteral("access-combined.json"), QStringLiteral("nginx-error.json"),
-        QStringLiteral("syslog-rfc3164.json"), QStringLiteral("serilog-console.json"),
-        QStringLiteral("python-basicconfig.json"),   // в формате нет времени вовсе
-    };
-    const LineClassifier classifier;
-    for (const Sample& s : sc.samples) {
-        if (s.continuation)
-            continue;
-        qint64 ms = 0;
-        const bool has = classifier.detectTimestampMs(s.line, ms);
-        const bool expectedTime = !kWithoutTime.contains(sc.file)
-            && !s.fields.value(QStringLiteral("Timestamp")).startsWith(QStringLiteral("13:55:40.016"));
-        check(has == expectedTime, QStringLiteral("%1: метка времени %2 распознаётся классификатором: %3")
-                                       .arg(sc.file, expectedTime ? QString() : QStringLiteral("НЕ"), s.line));
-    }
-}
-
+// Момент записи распознаёт LineClassifier (F-10): ISO, nginx error
+// (dddd/dd/dd), access (dd/Mmm/dddd:…), syslog без года. Время без даты
+// (Serilog console, Logback HH:mm:ss.SSS) — нет, это F-11; Python
+// basicConfig времени не пишет вовсе. Перевернёт ожидание F-11.
 // ---------------------------------------------------------------------------
 // 3. Установка
 // ---------------------------------------------------------------------------
@@ -654,6 +671,94 @@ void testInstall()
 // 4. Ресурсы
 // ---------------------------------------------------------------------------
 
+// Автоопределение схемы (редактор) узнаёт метки новых видов как блок
+// Timestamp: syslog в начале строки, access-лог в скобках, nginx error.
+void testAutoDetectTimestamp()
+{
+    const struct { const char* line; int block; } cases[] = {
+        { "Nov 18 13:55:36 web01 sshd[2231]: Accepted publickey for deploy", 0 },
+        { "Nov  8 03:04:05 web01 kernel: usb 1-1: new device", 0 },
+        { "127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326", -1 },
+        { "2026/11/18 13:55:36 [error] 1234#1234: *99 open() failed", 0 },
+    };
+    for (const auto& c : cases) {
+        const QString line = QString::fromUtf8(c.line);
+        const PatternDefinition def = PatternHeuristics::suggestSchema(line);
+        int found = -1;
+        for (int b = 0; b < def.blocks.size(); ++b) {
+            if (def.blocks[b].matchKind == PatternBlock::MatchKind::Timestamp) {
+                found = b;
+                break;
+            }
+        }
+        check(c.block >= 0 ? found == c.block : found > 0,
+              QStringLiteral("автоопределение: блок Timestamp (%1): %2").arg(found).arg(line));
+    }
+    // Блок Timestamp берёт всю метку access-лога вместе с зоной.
+    const QRegularExpression re(QRegularExpression::anchoredPattern(PatternHeuristics::timestampRegex()));
+    for (const char* t : { "10/Oct/2026:13:55:36 -0700", "18/Nov/2026:13:55:36", "Nov 18 13:55:36",
+                           "Nov  8 03:04:05", "2026/11/18 13:55:36", "13:55:36" })
+        check(re.match(QString::fromLatin1(t)).hasMatch(),
+              QStringLiteral("timestampRegex принимает «%1»").arg(QString::fromLatin1(t)));
+    for (const char* t : { "Foo 18 13:55:36", "18/Foo/2026:13:55:36", "Nov 18 13:55",
+                           "Nov  18 13:55:36" })
+        check(!re.match(QString::fromLatin1(t)).hasMatch(),
+              QStringLiteral("timestampRegex не принимает «%1»").arg(QString::fromLatin1(t)));
+}
+
+// Схемы, исправленные после Q-5 ради блока Timestamp (F-10): у
+// пользователя, который поставил их прежние версии и не трогал, они
+// заменяются новыми; изменённая пользователем прежняя версия остаётся.
+void testUpgradeFromQ5()
+{
+    const QString q5Dir = QStringLiteral(DENDROLOG_Q5_PATTERNS_DIR);
+    const QStringList fixed = jsonFiles(q5Dir);
+    check(fixed == QStringList({QStringLiteral("access-combined.json"),
+                                QStringLiteral("syslog-rfc3164.json")}),
+          QStringLiteral("прежние версии исправленных схем: %1").arg(fixed.join(QLatin1Char(' '))));
+    for (const QString& f : fixed)
+        check(readAll(QDir(q5Dir).filePath(f)) != readAll(QDir(kSourceDir).filePath(f)),
+              QStringLiteral("%1 в этом выпуске изменена").arg(f));
+
+    QTemporaryDir tmpDir;
+    const QDir tmp(tmpDir.path());
+    const QString v0 = makeSource(tmp, QStringLiteral("q5"));
+    for (const QString& f : fixed) {
+        QFile::remove(QDir(v0).filePath(f));
+        QFile::copy(QDir(q5Dir).filePath(f), QDir(v0).filePath(f));
+    }
+    for (const bool userEdited : {false, true}) {
+        const QString target = tmp.filePath(userEdited ? QStringLiteral("edited/patterns")
+                                                       : QStringLiteral("untouched/patterns"));
+        BuiltinSchemas::InstallReport r = BuiltinSchemas::install(v0, target);
+        check(r.errors.isEmpty() && r.installed.size() == jsonFiles(kSourceDir).size(),
+              QStringLiteral("прежний выпуск установлен"));
+        const QString edited = QDir(target).filePath(fixed.first());
+        if (userEdited)
+            check(changeSchema(edited, QStringLiteral("APP ")), QStringLiteral("правка прежней схемы"));
+        const QByteArray editedBytes = readAll(edited);
+
+        r = BuiltinSchemas::install(kSourceDir, target);
+        check(r.errors.isEmpty(), QStringLiteral("обновление без ошибок: %1").arg(r.errors.join(QStringLiteral("; "))));
+        check(r.installed.isEmpty(), QStringLiteral("новых схем нет"));
+        const QStringList expectedUpdated = userEdited ? fixed.mid(1) : fixed;
+        check(r.updated == expectedUpdated,
+              QStringLiteral("обновлены %1, ожидалось %2")
+                  .arg(r.updated.join(QLatin1Char(' ')), expectedUpdated.join(QLatin1Char(' '))));
+        for (const QString& f : expectedUpdated) {
+            check(readAll(QDir(target).filePath(f)) == readAll(QDir(kSourceDir).filePath(f)),
+                  QStringLiteral("%1 заменена исправленной").arg(f));
+            QString name;
+            const QString canonical = schemaOf(f, &name);
+            check(LogPattern(canonical).isValid()
+                      && canonical.contains(QStringLiteral("timestamp")),
+                  QStringLiteral("%1: поле времени — блок Timestamp").arg(f));
+        }
+        if (userEdited)
+            check(readAll(edited) == editedBytes, QStringLiteral("изменённая пользователем прежняя схема цела"));
+    }
+}
+
 void testQrc()
 {
     const QString qrc = QString::fromUtf8(readAll(QDir(kSourceDir).filePath(QStringLiteral("../resources.qrc"))));
@@ -687,9 +792,11 @@ int main(int argc, char** argv)
         printAutodetect(sc);
         testSamples(sc);
         testBackends(sc, QDir(tmpDir.path()));
-        testClassifierTimeGap(sc);
+        testClassifierTime(sc);
     }
     testInstall();
+    testUpgradeFromQ5();
+    testAutoDetectTimestamp();
     testQrc();
 
     std::fprintf(stderr, "builtin_schemas: %d проверок, %d провалов\n", g_checks, g_failures);

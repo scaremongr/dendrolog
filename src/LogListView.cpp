@@ -2517,11 +2517,16 @@ void LogListView::keyPressEvent(QKeyEvent *event) {
 
 // Разбор строки таймстампа в QDateTime по набору распространённых форматов.
 // Дробная часть секунд отбрасывается (гранулярность фильтра — секунды).
-static QDateTime parseTimestampText(const QString& raw) {
+// year — опорная дата года для меток без года (syslog): та же, что у файла
+// строки, иначе граница получила бы год по сегодняшней дате, а строки — по
+// mtime файла.
+static QDateTime parseTimestampText(const QString& raw,
+                                    const LineClassifier::YearReference& year) {
     // Сначала тем же классификатором, что и при загрузке (ISO с дробью и
-    // зоной, фолбэк-форматы): граница фильтра — тот же момент, что у строки.
+    // зоной, фолбэк-формы, syslog, access): граница фильтра — тот же
+    // момент, что у строки.
     qint64 ms = 0;
-    if (LineClassifier().detectTimestampMs(raw.trimmed(), ms))
+    if (LineClassifier().detectTimestampMs(raw.trimmed(), ms, year))
         return QDateTime::fromMSecsSinceEpoch(ms - (ms % 1000 + 1000) % 1000);
 
     QString s = raw.trimmed();
@@ -2638,8 +2643,17 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     // Граница фильтра по времени: выделенный таймстамп, а без него — метка
     // строки под курсором (выделять время ради фильтра не нужно).
     QDateTime boundTime;
-    if (selType == TextToken::TokenType::Timestamp)
-        boundTime = parseTimestampText(sel);
+    if (selType == TextToken::TokenType::Timestamp) {
+        LineClassifier::YearReference year;
+        if (haveRow) {
+            if (auto* logModel = qobject_cast<LogModel*>(model())) {
+                const std::shared_ptr<LogEntry> entry = logModel->entryAt(row);
+                if (entry && entry->sourceFile())
+                    year = LineClassifier::yearReferenceForFile(entry->sourceFile()->filePath);
+            }
+        }
+        boundTime = parseTimestampText(sel, year);
+    }
     if (!boundTime.isValid() && haveRow) {
         if (auto* logModel = qobject_cast<LogModel*>(model()))
             boundTime = logModel->visibleTimestampAt(row);

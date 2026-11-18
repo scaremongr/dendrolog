@@ -17,6 +17,16 @@ All notable changes to DendroLog are documented here. The format follows
   only the built-in schemas you have not changed. Nothing is selected by
   default — the schema box now says `(none)` instead of showing the first
   schema while no schema is active.
+- **Timestamps of syslog, access logs and nginx error logs are read.** Lines
+  with `Nov 18 13:55:36` (syslog, no year), `18/Nov/2026:13:55:36 +0000`
+  (nginx / Apache access) and `2026/11/18 13:55:36` (nginx error) now get
+  their moment: they merge by time with other files, and the time filter,
+  the timeline and the directory scanner's From / To work for them. A
+  syslog line takes the latest year that is not after the file's last
+  change, so a file that runs over New Year reads correctly. The built-in
+  Syslog (RFC 3164) and access schemas read their time field as a Timestamp
+  block; if you have not edited them, they update by themselves. A time
+  without a date (`[13:55:36 INF]`) is not read yet.
 - **Whole word and regular expression in quick find.** Two toggles next to
   **Aa** in the toolbar find box: **ab** (`Alt+W`) finds the text only as a
   whole word, **.\*** (`Alt+R`) treats it as a regular expression with the same

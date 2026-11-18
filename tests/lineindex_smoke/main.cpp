@@ -27,6 +27,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QLocale>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -267,6 +268,68 @@ static void testGolden(const QDir& dir)
     }
 }
 
+// Метки syslog, access-лога и nginx error на обоих путях загрузки: моменты
+// одинаковы и равны заранее известным, год меток syslog — по mtime файла,
+// в том числе через Новый год и при дозаписи после него.
+static void setMtime(const QString& path, const QDateTime& when)
+{
+    QFile f(path);
+    CHECK(f.open(QIODevice::ReadWrite)
+              && f.setFileTime(when, QFileDevice::FileModificationTime),
+          "set file mtime");
+}
+
+static void testNewTimestampFormsBackends(const QDir& dir)
+{
+    const auto local = [](int y, int mo, int d, int h, int mi, int s) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s)).toMSecsSinceEpoch();
+    };
+    const QString path = writeFile(dir, QStringLiteral("forms.log"),
+        "Dec 31 23:59:58 web01 sshd[1]: error: first\n"
+        "\tcontinuation of the first\n"
+        "Jan  1 00:00:02 web01 app[2]: WARN second, new year\n"
+        "2026/12/31 23:59:59 [error] 1#1: nginx\n"
+        "1.2.3.4 - - [31/Dec/2026:22:00:00 -0200] \"GET /x HTTP/1.1\" 500 0 ERROR\n"
+        "at Dec 31 23:59:58 continuation with a level ERROR\n");
+    setMtime(path, QDateTime(QDate(2027, 1, 1), QTime(0, 0, 3)));
+    auto lf = std::make_shared<LogFile>(path);
+    const auto entries = parseFile(lf);
+    const auto index = indexFile(lf);
+    compareParserVsIndex(QStringLiteral("forms.log"), path, lf, entries, *index);
+    const qint64 expected[] = {
+        local(2026, 12, 31, 23, 59, 58), local(2026, 12, 31, 23, 59, 58),
+        local(2027, 1, 1, 0, 0, 2), local(2026, 12, 31, 23, 59, 59),
+        QDateTime(QDate(2027, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch(),
+        QDateTime(QDate(2027, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch(),
+    };
+    CHECK(index->lineCount() == 6, "forms.log: six lines");
+    for (qint64 i = 0; i < qMin<qint64>(6, index->lineCount()); ++i)
+        CHECK(index->timestampMs(index->logicalId(i)) == expected[i],
+              qPrintable(QString("forms.log: line %1 moment").arg(i)));
+    CHECK(index->logicalEntryCount() == 4, "forms.log: syslog in the middle of a line starts no record");
+
+    // Дозапись после Нового года: строки, прочитанные до неё, сохраняют год
+    // по прежнему mtime, дописанные получают новый — и так же, как свежий
+    // разбор того же файла.
+    const QString grow = writeFile(dir, QStringLiteral("forms_grow.log"),
+                                   "Dec 31 23:59:58 web01 app: INFO before\n");
+    setMtime(grow, QDateTime(QDate(2026, 12, 31), QTime(23, 59, 59)));
+    auto growLf = std::make_shared<LogFile>(grow);
+    const auto growIndex = indexFile(growLf);
+    appendToFile(grow, "Jan  1 00:00:02 web01 app: INFO after\n");
+    setMtime(grow, QDateTime(QDate(2027, 1, 1), QTime(0, 0, 3)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, growLf, growIndex, false);
+    }
+    const auto fresh = indexFile(std::make_shared<LogFile>(grow));
+    compareIndexes(QStringLiteral("forms_grow.log"), *growIndex, *fresh);
+    CHECK(growIndex->lineCount() == 2
+              && growIndex->timestampMs(growIndex->logicalId(0)) == local(2026, 12, 31, 23, 59, 58)
+              && growIndex->timestampMs(growIndex->logicalId(1)) == local(2027, 1, 1, 0, 0, 2),
+          "forms_grow.log: appended line after New Year gets the new year");
+}
+
 // Слова словаря уровней на обоих путях загрузки: запись с таким словом после
 // метки времени — первичная, её уровень одинаков у LogParser и LogIndexer и
 // равен заданному; строка-продолжение наследует его.
@@ -505,39 +568,84 @@ static QDateTime refMoment(int year, int month, int day, int hour, int minute,
     return QDateTime(date, time, QTimeZone::fromSecondsAheadOfUtc(s.offsetSeconds));
 }
 
-// detectTimestamp целиком: ISO-регекс + ручные фолбэк-форматы, без
-// делегирования новому коду — иначе ложные срабатывания сканера
-// маскировались бы.
-static bool refDetectTimestamp(const QRegularExpression& isoRe,
-                               const QRegularExpression& suffixRe,
-                               const QString& line, QDateTime& ts)
+// Эталонные регексы меток (PatternHeuristics) и опорная дата года.
+struct RefTimestampRes {
+    QRegularExpression iso, access, syslog, suffix;
+    LineClassifier::YearReference year;
+};
+
+static int refMonth(const QString& name)
 {
-    const auto match = isoRe.match(line);
-    if (match.hasMatch()) {
-        const auto dateTimePartRef = match.capturedView(1);
+    static const QStringList kMonths = {
+        QStringLiteral("JAN"), QStringLiteral("FEB"), QStringLiteral("MAR"),
+        QStringLiteral("APR"), QStringLiteral("MAY"), QStringLiteral("JUN"),
+        QStringLiteral("JUL"), QStringLiteral("AUG"), QStringLiteral("SEP"),
+        QStringLiteral("OCT"), QStringLiteral("NOV"), QStringLiteral("DEC") };
+    return int(kMonths.indexOf(name.toUpper())) + 1;
+}
 
+// Год метки без года независимо от сканера: последний год, в котором
+// (месяц, день) — валидная дата не позже опорной (уже «+1 день»).
+static int refResolveYear(int month, int day, const LineClassifier::YearReference& ref)
+{
+    const QDate cutoff(ref.year, ref.month, ref.day);
+    for (int y = ref.year; y > ref.year - 10; --y) {
+        const QDate date(y, month, day);
+        if (date.isValid() && date <= cutoff)
+            return y;
+    }
+    return 0;
+}
+
+// detectTimestamp целиком на регексах + ручные фолбэк-форматы, без
+// делегирования новому коду — иначе ложные срабатывания сканера
+// маскировались бы. Порядок: форма с полной датой (ISO, dddd/dd/dd, access)
+// на позиции 0; формы позиции 0 (фолбэк, syslog), только валидные; самая
+// левая форма с полной датой; невалидная — не метка.
+static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, QDateTime& ts)
+{
+    const auto isoMatch = re.iso.match(line);
+    const auto accessMatch = re.access.match(line);
+    // Ведущая форма с полной датой: самая левая из двух.
+    const QRegularExpressionMatch* mid = nullptr;
+    if (isoMatch.hasMatch())
+        mid = &isoMatch;
+    if (accessMatch.hasMatch() && (!mid || accessMatch.capturedStart(0) < mid->capturedStart(0)))
+        mid = &accessMatch;
+
+    const auto fromMid = [&](const QRegularExpressionMatch& m) {
+        int year, month, day, hour, minute, second, first;
         bool ok = true;
-        const int year = dateTimePartRef.mid(0, 4).toInt(&ok);
-        if (!ok) return false;
-        const int month = dateTimePartRef.mid(5, 2).toInt(&ok);
-        if (!ok) return false;
-        const int day = dateTimePartRef.mid(8, 2).toInt(&ok);
-        if (!ok) return false;
-        const int hour = dateTimePartRef.mid(11, 2).toInt(&ok);
-        if (!ok) return false;
-        const int minute = dateTimePartRef.mid(14, 2).toInt(&ok);
-        if (!ok) return false;
-        const int second = dateTimePartRef.mid(17, 2).toInt(&ok);
-        if (!ok) return false;
-
-        const RefSuffix suffix = refParseSuffix(match, 2);
+        if (&m == &isoMatch) {
+            const auto p = m.capturedView(1);
+            year = p.mid(0, 4).toInt(&ok);
+            month = p.mid(5, 2).toInt(&ok);
+            day = p.mid(8, 2).toInt(&ok);
+            hour = p.mid(11, 2).toInt(&ok);
+            minute = p.mid(14, 2).toInt(&ok);
+            second = p.mid(17, 2).toInt(&ok);
+            first = 2;
+        } else {
+            day = m.captured(1).toInt();
+            month = refMonth(m.captured(2));
+            year = m.captured(3).toInt();
+            hour = m.captured(4).toInt();
+            minute = m.captured(5).toInt();
+            second = m.captured(6).toInt();
+            first = 7;
+        }
+        const RefSuffix suffix = refParseSuffix(m, first);
         if (QDate::isValid(year, month, day)
             && QTime::isValid(hour, minute, second, suffix.millis)) {
             ts = refMoment(year, month, day, hour, minute, second, suffix);
             return true;
         }
+        ts = QDateTime();
         return false;
-    }
+    };
+
+    if (mid && mid->capturedStart(0) == 0)
+        return fromMid(*mid);
 
     const QStringView lineRef{line};
     const QStringList timeFormats = {
@@ -591,13 +699,32 @@ static bool refDetectTimestamp(const QRegularExpression& isoRe,
 
         if (convOk && QDate::isValid(year, month, day)
             && QTime::isValid(hour, minute, second, millis)) {
-            const auto suffix = suffixRe.match(line, 19, QRegularExpression::NormalMatch,
+            const auto suffix = re.suffix.match(line, 19, QRegularExpression::NormalMatch,
                                                QRegularExpression::AnchorAtOffsetMatchOption);
             ts = refMoment(year, month, day, hour, minute, second, refParseSuffix(suffix, 1));
             return true;
         }
     }
 
+
+    const auto syslog = re.syslog.match(line);
+    if (syslog.hasMatch()) {
+        const int month = refMonth(syslog.captured(1));
+        const int day = syslog.captured(2).trimmed().toInt();
+        const int year = refResolveYear(month, day, re.year);
+        const RefSuffix suffix = refParseSuffix(syslog, 6);
+        const int hour = syslog.captured(3).toInt();
+        const int minute = syslog.captured(4).toInt();
+        const int second = syslog.captured(5).toInt();
+        if (year != 0 && QDate::isValid(year, month, day)
+            && QTime::isValid(hour, minute, second, suffix.millis)) {
+            ts = refMoment(year, month, day, hour, minute, second, suffix);
+            return true;
+        }
+    }
+
+    if (mid)
+        return fromMid(*mid);
     ts = QDateTime();
     return false;
 }
@@ -614,14 +741,13 @@ static bool refDetectLogLevel(const QRegularExpression& levelRe,
 }
 
 static void checkClassifierLine(const LineClassifier& classifier,
-                                const QRegularExpression& isoRe,
-                                const QRegularExpression& suffixRe,
+                                const RefTimestampRes& tsRe,
                                 const QRegularExpression& levelRe,
                                 const QString& line)
 {
     QDateTime tsNew, tsRef;
-    const bool hasNew = classifier.detectTimestamp(line, tsNew);
-    const bool hasRef = refDetectTimestamp(isoRe, suffixRe, line, tsRef);
+    const bool hasNew = classifier.detectTimestamp(line, tsNew, tsRe.year);
+    const bool hasRef = refDetectTimestamp(tsRe, line, tsRef);
     if (hasNew != hasRef || (hasNew && tsNew != tsRef)) {
         ++g_failures;
         std::fprintf(stderr,
@@ -633,7 +759,7 @@ static void checkClassifierLine(const LineClassifier& classifier,
 
     // Быстрый вариант индексатора обязан давать те же мс epoch.
     qint64 msNew = -2;
-    const bool hasMsNew = classifier.detectTimestampMs(line, msNew);
+    const bool hasMsNew = classifier.detectTimestampMs(line, msNew, tsRe.year);
     if (hasMsNew != hasRef || (hasMsNew && msNew != tsRef.toMSecsSinceEpoch())) {
         ++g_failures;
         std::fprintf(stderr,
@@ -657,15 +783,22 @@ static void checkClassifierLine(const LineClassifier& classifier,
 static void testClassifierRegexEquivalence()
 {
     const LineClassifier classifier;
-    const QRegularExpression isoRe(PatternHeuristics::isoTimestampDetectPattern());
-    const QRegularExpression suffixRe(PatternHeuristics::timestampSuffixDetectPattern());
+    // Опорная дата года — посреди года, чтобы метки syslog по обе стороны
+    // от неё уходили в разные годы.
+    RefTimestampRes tsRe{
+        QRegularExpression(PatternHeuristics::isoTimestampDetectPattern()),
+        QRegularExpression(PatternHeuristics::accessTimestampDetectPattern()),
+        QRegularExpression(PatternHeuristics::syslogTimestampDetectPattern()),
+        QRegularExpression(PatternHeuristics::timestampSuffixDetectPattern()),
+        LineClassifier::yearReference(QDate(2026, 7, 11)) };
     // Регистр сворачивается в самом шаблоне и только для ASCII: опция
     // CaseInsensitive приравняла бы «ſ» к S, а знак Кельвина — к K.
     const QRegularExpression levelRe(PatternHeuristics::levelDetectPattern());
-    CHECK(isoRe.isValid() && suffixRe.isValid() && levelRe.isValid(),
+    CHECK(tsRe.iso.isValid() && tsRe.access.isValid() && tsRe.syslog.isValid()
+              && tsRe.suffix.isValid() && levelRe.isValid(),
           "reference timestamp and level regexes compile");
     const auto check = [&](const QString& line) {
-        checkClassifierLine(classifier, isoRe, suffixRe, levelRe, line);
+        checkClassifierLine(classifier, tsRe, levelRe, line);
     };
 
     const QStringList corpus = {
@@ -770,6 +903,62 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("2026-07-11 10:22:33,999999999999 long fraction"),
         QStringLiteral("11/07/2026 10:22:33.25Z fallback with suffix"),
         QStringLiteral("31.12.2025 23:59:59,5 +0100 dotted with zone"),
+        // nginx error: dddd/dd/dd.
+        QStringLiteral("2026/11/18 13:55:36 [error] 1234#1234: *99 open()"),
+        QStringLiteral("2026/11/18T13:55:36Z slashed with T"),
+        QStringLiteral("2026/11-18 13:55:36 mixed separators"),
+        QStringLiteral("2026-11/18 13:55:36 mixed separators back"),
+        QStringLiteral("2026/13/18 13:55:36 bad month slashed"),
+        QStringLiteral("2026.11.18 13:55:36 dotted is not a form"),
+        QStringLiteral("prefix 2026/11/18 13:55:36 mid-line slashed"),
+        // access-лог: dd/Mmm/dddd:dd:dd:dd.
+        QStringLiteral("127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326"),
+        QStringLiteral("[18/Nov/2026:13:55:36 +0000]"),
+        QStringLiteral("18/Nov/2026:13:55:36 at start without zone"),
+        QStringLiteral("18/nov/2026:13:55:36 lowercase month"),
+        QStringLiteral("18/NOV/2026:13:55:36 upper month"),
+        QStringLiteral("18/Nob/2026:13:55:36 not a month"),
+        QStringLiteral("31/Nov/2026:13:55:36 +0000 bad day"),
+        QStringLiteral("29/Feb/2028:23:59:59 +0100 leap"),
+        QStringLiteral("29/Feb/2027:23:59:59 not leap"),
+        QStringLiteral("18/Nov/2026:24:00:00 +0000 bad hour"),
+        QStringLiteral("18/Nov/2026:13:55:36.250+0530 fraction and glued zone"),
+        QStringLiteral("18/Nov/2026 13:55:36 space instead of colon"),
+        QStringLiteral("x 18/Nov/2026:13:55:36 then 2026-11-17 10:00:00"),
+        QStringLiteral("x 2026-11-17 10:00:00 then 18/Nov/2026:13:55:36"),
+        // syslog RFC 3164: только с начала строки.
+        QStringLiteral("Nov 18 13:55:36 web01 sshd[2231]: Accepted"),
+        QStringLiteral("Nov  8 03:04:05 web01 kernel: usb"),
+        QStringLiteral("Nov 8 03:04:05 single space"),
+        QStringLiteral("Nov 08 03:04:05 zero padded"),
+        QStringLiteral("Jul 11 10:22:33 the reference day"),
+        QStringLiteral("Jul 12 10:22:33 the day after reference"),
+        QStringLiteral("Jul 13 10:22:33 two days after reference"),
+        QStringLiteral("Jan  1 00:00:00 new year"),
+        QStringLiteral("Dec 31 23:59:59 old year"),
+        QStringLiteral("Feb 29 12:00:00 leap day"),
+        QStringLiteral("Feb 30 12:00:00 no such day"),
+        QStringLiteral("Nov 31 12:00:00 no such day"),
+        QStringLiteral("Nov  0 12:00:00 day zero"),
+        QStringLiteral("nov 18 13:55:36 lowercase"),
+        QStringLiteral("NOV 18 13:55:36 uppercase"),
+        QStringLiteral("Foo 18 13:55:36 not a month"),
+        QStringLiteral("Nov 18 13:55 no seconds"),
+        QStringLiteral("Nov 18 13:55:3 short seconds"),
+        QStringLiteral("Nov 18  13:55:36 two spaces before time"),
+        QStringLiteral("Nov   8 13:55:36 three spaces"),
+        QStringLiteral("Nov 123 13:55:36 three digit day"),
+        QStringLiteral("Nov 18 13:55:36.123456 high precision"),
+        QStringLiteral("Nov 18 13:55:36 +0200 zone after space"),
+        QStringLiteral("Nov 18 13:55:36Z glued zone"),
+        QStringLiteral(" Nov 18 13:55:36 leading space"),
+        QStringLiteral("at Nov 18 13:55:36 the job failed"),
+        QStringLiteral("Nov 18 13:55:36 app: started 2026-11-17 10:00:00"),
+        QStringLiteral("Nov 18 25:55:36 bad hour falls back to 2026-11-17 10:00:00"),
+        QStringLiteral("11/07/2026 10:22:33 then 2026-07-11 10:22:33 later"),
+        QStringLiteral("99/99/2026 10:22:33 then 2026-07-11 10:22:33 later"),
+        QStringLiteral("Nov 18 13:55:36 then 2026-13-40 00:00:00 invalid later"),
+        QStringLiteral("x 2026-13-40 00:00:00 invalid first then 2026-07-11 10:22:33"),
     };
     for (const QString& line : corpus)
         check(line);
@@ -795,6 +984,11 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("2026-07-11 10:22:33 -0530 WARN msg"),
         QStringLiteral("2026-07-11 10:22:33.5 UTC ERROR msg"),
         QStringLiteral("11.07.2026 10:22:33,1Z INFO msg"),
+        QStringLiteral("2026/07/11 10:22:33 [error] 1#1: msg"),
+        QStringLiteral("1.2.3.4 - - [11/Jul/2026:10:22:33 +0200] \"GET /\" 200 1"),
+        QStringLiteral("Jul 11 10:22:33 host app[1]: msg"),
+        QStringLiteral("Jul  1 10:22:33.5 host app: msg"),
+        QStringLiteral("Dec 1 10:22:33 host app: msg"),
     };
     for (const QString& base : bases) {
         for (int iter = 0; iter < 4000; ++iter) {
@@ -843,6 +1037,42 @@ static void testClassifierRegexEquivalence()
                 line += seps.at(int(rng.bounded(seps.size())));
         }
         check(line);
+    }
+
+    // Фаззинг меток с названиями месяцев: склейки из месяцев (и их
+    // обрезков), чисел, пробелов и разделителей — случайный алфавит выше
+    // почти никогда не собирает «Nov 18 13:55:36» или «18/Nov/2026:…».
+    const QStringList tsPieces = {
+        QStringLiteral("Jan"), QStringLiteral("Feb"), QStringLiteral("feb"),
+        QStringLiteral("JUL"), QStringLiteral("Nov"), QStringLiteral("Dec"),
+        QStringLiteral("No"), QStringLiteral("Nox"), QStringLiteral("2026"),
+        QStringLiteral("2028"), QStringLiteral("1"), QStringLiteral("8"),
+        QStringLiteral("18"), QStringLiteral("29"), QStringLiteral("31"),
+        QStringLiteral("00"), QStringLiteral("13:55:36"), QStringLiteral("23:59:59"),
+        QStringLiteral("13:55"), QStringLiteral("+0000"), QStringLiteral("-0700"),
+        QStringLiteral(".123"), QStringLiteral("Z"), QStringLiteral("UTC"),
+        QStringLiteral("2026-07-11"), QStringLiteral("2026/07/11"),
+    };
+    const QString tsSeps = QStringLiteral("  /:[]-.T");
+    for (int iter = 0; iter < 30000; ++iter) {
+        QString line;
+        const int count = 1 + int(rng.bounded(7));
+        for (int k = 0; k < count; ++k) {
+            line += tsPieces.at(int(rng.bounded(tsPieces.size())));
+            if (rng.bounded(3) != 0)
+                line += tsSeps.at(int(rng.bounded(tsSeps.size())));
+        }
+        check(line);
+    }
+
+    // Опорная дата у границы года: та же основа даёт разные годы.
+    for (const QDate& refDate : { QDate(2026, 12, 31), QDate(2027, 1, 1), QDate(2028, 2, 28),
+                                  QDate(2028, 2, 29), QDate(2029, 3, 1) }) {
+        tsRe.year = LineClassifier::yearReference(refDate);
+        for (const char* l : { "Jan  1 00:00:00 a", "Jan  2 00:00:00 a", "Dec 31 23:59:59 a",
+                               "Feb 28 10:00:00 a", "Feb 29 10:00:00 a", "Mar  1 10:00:00 a",
+                               "Mar  2 10:00:00 a", "Nov 18 13:55:36 a" })
+            check(QString::fromLatin1(l));
     }
 }
 
@@ -1009,6 +1239,26 @@ static void testTimestampGolden()
         { "2026-09-20 10:00:00 -1000 balance", utc(2026, 9, 20, 20, 0, 0, 0) },
         // Невалидная дата — не таймстамп, зона не спасает.
         { "2026-02-30T10:00:00Z", kNoTimestamp },
+        // nginx error: dddd/dd/dd, без зоны — локальное время.
+        { "2026/09/20 10:00:00 [error] 1#1: x", tenLocal },
+        { "2026/09/20T12:00:00+02:00", tenUtc },
+        // access-лог: зона через пробел внутри скобок; без зоны — локальное.
+        { "1.2.3.4 - - [20/Sep/2026:10:00:00 +0000] \"GET /\" 200 1", tenUtc },
+        { "1.2.3.4 - - [20/Sep/2026:03:00:00 -0700] \"GET /\" 200 1", tenUtc },
+        { "[20/Sep/2026:15:30:00 +0530]", tenUtc },
+        { "[20/sep/2026:10:00:00]", tenLocal },
+        { "[20/Sep/2026:10:00:00.5 +0000]", utc(2026, 9, 20, 10, 0, 0, 500) },
+        { "[01/Jan/2027:01:00:00 +0200]", utc(2026, 12, 31, 23, 0, 0, 0) },
+        { "[29/Feb/2028:23:30:00 -0100]", utc(2028, 3, 1, 0, 30, 0, 0) },
+        // Похоже на метку, но не метка.
+        { "[29/Feb/2027:10:00:00 +0000]", kNoTimestamp },
+        { "[31/Nov/2026:10:00:00 +0000]", kNoTimestamp },
+        { "[20/Sept/2026:10:00:00 +0000]", kNoTimestamp },
+        { "[20/Sep/2026 10:00:00 +0000]", kNoTimestamp },
+        { "2026.09.20 10:00:00", kNoTimestamp },
+        { "2026/09-20 10:00:00", kNoTimestamp },
+        // Метка в начале строки главнее метки в середине.
+        { "20/09/2026 10:00:00Z then 2026-01-01 00:00:00Z", tenUtc },
     };
     for (const auto& c : cases) {
         const QString line = QString::fromUtf8(c.line);
@@ -1024,6 +1274,59 @@ static void testTimestampGolden()
                          c.line, (long long)got, (long long)gotDt, (long long)c.expected);
         }
     }
+
+    // Метки syslog без года: год — по опорной дате (mtime файла), сутки
+    // запаса, переход через Новый год, 29 февраля; только с начала строки.
+    const struct { const char* line; QDate reference; qint64 expected; } yearCases[] = {
+        { "Sep 20 10:00:00 host app: x", QDate(2026, 9, 20), tenLocal },
+        { "Sep 20 10:00:00 host app: x", QDate(2027, 3, 1), tenLocal },
+        { "Sep 20 10:00:00 host app: x", QDate(2026, 9, 19), tenLocal },   // сутки запаса
+        { "Sep 20 10:00:00 host app: x", QDate(2026, 9, 18), local(2025, 9, 20, 10, 0, 0, 0) },
+        { "Dec 31 23:59:59 host app: x", QDate(2027, 1, 2), local(2026, 12, 31, 23, 59, 59, 0) },
+        { "Jan  1 00:00:01 host app: x", QDate(2027, 1, 2), local(2027, 1, 1, 0, 0, 1, 0) },
+        { "Jan  1 00:00:01 host app: x", QDate(2026, 12, 31), local(2027, 1, 1, 0, 0, 1, 0) },
+        { "Jan  2 00:00:01 host app: x", QDate(2026, 12, 31), local(2026, 1, 2, 0, 0, 1, 0) },
+        { "Feb 29 12:00:00 host app: x", QDate(2028, 3, 10), local(2028, 2, 29, 12, 0, 0, 0) },
+        { "Feb 29 12:00:00 host app: x", QDate(2029, 3, 10), local(2028, 2, 29, 12, 0, 0, 0) },
+        { "Feb 29 12:00:00 host app: x", QDate(2028, 2, 27), local(2024, 2, 29, 12, 0, 0, 0) },
+        { "Feb 29 12:00:00 host app: x", QDate(2028, 2, 28), local(2028, 2, 29, 12, 0, 0, 0) },
+        { "Sep  2 10:00:00 host app: x", QDate(2026, 9, 20), local(2026, 9, 2, 10, 0, 0, 0) },
+        { "Sep 2 10:00:00.250 host app: x", QDate(2026, 9, 20), local(2026, 9, 2, 10, 0, 0, 250) },
+        { "sep 20 12:00:00 +0200 host", QDate(2026, 9, 20), tenUtc },
+        { "Sep 20 10:00:00 app: 2025-01-01 00:00:00", QDate(2026, 9, 20), tenLocal },
+        // Похоже на метку, но не метка.
+        { "Feb 30 12:00:00 host app: x", QDate(2026, 9, 20), kNoTimestamp },
+        { "Sep 20 10:00 host app: x", QDate(2026, 9, 20), kNoTimestamp },
+        { "Sept 20 10:00:00 host app: x", QDate(2026, 9, 20), kNoTimestamp },
+        { "at Sep 20 10:00:00 the job failed", QDate(2026, 9, 20), kNoTimestamp },
+        { "\tSep 20 10:00:00 continuation", QDate(2026, 9, 20), kNoTimestamp },
+        { "Sep 20 24:00:00 host app: x", QDate(2026, 9, 20), kNoTimestamp },
+    };
+    for (const auto& c : yearCases) {
+        const QString line = QString::fromUtf8(c.line);
+        const auto ref = LineClassifier::yearReference(c.reference);
+        qint64 ms = kNoTimestamp;
+        const qint64 got = classifier.detectTimestampMs(line, ms, ref) ? ms : kNoTimestamp;
+        if (got != c.expected) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL golden year '%s' ref %s: ms=%lld expected=%lld\n",
+                         c.line, qPrintable(c.reference.toString(Qt::ISODate)),
+                         (long long)got, (long long)c.expected);
+        }
+    }
+
+    // Без опорной даты — сегодняшняя: метка сегодняшнего дня — этого года.
+    const QDate today = QDate::currentDate();
+    const QString todayLine = QLocale::c().toString(today, QStringLiteral("MMM d"))
+        + QStringLiteral(" 10:00:00 host app: x");
+    qint64 todayMs = kNoTimestamp;
+    CHECK(classifier.detectTimestampMs(todayLine, todayMs)
+              && todayMs == QDateTime(today, QTime(10, 0)).toMSecsSinceEpoch(),
+          "syslog stamp without a reference date takes the current year");
+    // Опорная дата по файлу — его mtime.
+    CHECK(LineClassifier::yearReferenceForFile(QStringLiteral("/no/such/file")).year
+              == today.addDays(1).year(),
+          "missing file: reference date is today");
 }
 
 // Бенчмарк-режим: lineindex_smoke --bench <файл> [строка-схемы] — чистая
@@ -1065,8 +1368,11 @@ static int runBenchStages(const QString& path)
 {
     // Стадии 0–3 накопительные: I/O → декод → timestamp → level. Стадия 4 —
     // декод + level без timestamp: цена классификации уровня отдельно, без
-    // шума самой дорогой стадии.
-    for (int stage = 0; stage <= 4; ++stage) {
+    // шума самой дорогой стадии. Стадия 5 — декод + detectTimestampMs с
+    // опорной датой файла: горячий путь индексатора, без QDateTime (у
+    // стадии 2 её цену определяет построение QDateTime на строку).
+    const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(path);
+    for (int stage = 0; stage <= 5; ++stage) {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) {
             std::fprintf(stderr, "cannot open %s\n", qPrintable(path));
@@ -1111,14 +1417,21 @@ static int runBenchStages(const QString& path)
                 if (stage >= 1) {
                     text = QString::fromUtf8(data, int(len));
                     sink += text.size();
+                    if (stage == 5) {
+                        qint64 ms = 0;
+                        if (classifier.detectTimestampMs(text, ms, yearRef)) {
+                            ++tsCount;
+                            sink += ms & 1;
+                        }
+                    }
                     if (stage == 2 || stage == 3) {
                         QDateTime ts;
-                        if (classifier.detectTimestamp(text, ts)) {
+                        if (classifier.detectTimestamp(text, ts, yearRef)) {
                             ++tsCount;
                             sink += ts.toMSecsSinceEpoch() & 1;
                         }
                     }
-                    if (stage >= 3) {
+                    if (stage == 3 || stage == 4) {
                         LogLevel lvl = LogLevel::Unknown;
                         if (classifier.detectLogLevel(text, lvl))
                             ++lvlCount;
@@ -1264,6 +1577,7 @@ int main(int argc, char** argv)
     testLevelVocabulary();
     testTimestampGolden();
     testGolden(dir);
+    testNewTimestampFormsBackends(dir);
     testLevelVocabularyBackends(dir);
     testBom(dir);
     testBlockBoundaries(dir);

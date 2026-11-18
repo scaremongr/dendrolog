@@ -159,6 +159,11 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         sincePublish.restart();
     };
 
+    // Год меток без года (syslog) — по mtime файла на момент этого прохода,
+    // как у LogParser: дозапись после Нового года получает новый год.
+    const LineClassifier::YearReference yearRef =
+        LineClassifier::yearReferenceForFile(logFile->filePath);
+
     // Классификация и запись одной строки (bytes БЕЗ EOL-байт).
     const auto processLine = [&](const char* data, qint64 len, quint8 eol) {
         text = QString::fromUtf8(data, int(len));
@@ -166,7 +171,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         qint64 tsMs = -1;
         LogLevel lvl = LogLevel::Unknown;
         // detectTimestampMs: мс epoch без построения QDateTime на строку.
-        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs);
+        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef);
         const bool hasLvl = m_classifier.detectLogLevel(text, lvl);
         // extractFields здесь нужен ТОЛЬКО для решения primary/continuation
         // (спаны выбрасываются). Строка с таймстампом и уровнем первична и

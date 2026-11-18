@@ -187,6 +187,27 @@ static void testTailAnalysis(const QString& dir)
     const LogParser::FileStats words = parser.analyzeFileForStats(path).stats;
     CHECK(words.fatalCount == 2 && words.errorCount == 1 && words.warnCount == 1,
           "level words count once per entry, continuation lines do not count");
+    // F-10: From/To по меткам syslog (год — по mtime файла, через Новый
+    // год), nginx error и access-лога.
+    writeFile(path,
+              "Dec 31 23:59:58 web01 sshd[1]: error: first\n"
+              "2026/12/31 23:59:59 [warn] 1#1: nginx\n"
+              "1.2.3.4 - - [31/Dec/2026:22:00:01 -0200] \"GET / HTTP/1.1\" 500 0 ERROR\n"
+              "Jan  1 00:00:02 web01 app[2]: INFO last\n");
+    {
+        QFile f(path);
+        CHECK(f.open(QIODevice::ReadWrite)
+                  && f.setFileTime(QDateTime(QDate(2027, 1, 1), QTime(0, 0, 5)),
+                                   QFileDevice::FileModificationTime),
+              "set mtime");
+    }
+    const LogParser::FileStats forms = parser.analyzeFileForStats(path).stats;
+    CHECK(forms.totalEntries == 4, "four records with the new timestamp forms");
+    CHECK(forms.firstEntryTimestamp == QDateTime(QDate(2026, 12, 31), QTime(23, 59, 58)),
+          "From: syslog stamp gets the year before the file's New Year mtime");
+    CHECK(forms.lastEntryTimestamp == QDateTime(QDate(2027, 1, 1), QTime(0, 0, 2)),
+          "To: syslog stamp after New Year gets the mtime year");
+
     CHECK(onlyHead.firstEntryTimestamp == whole.firstEntryTimestamp,
           "the head keeps the first timestamp");
     CHECK(onlyTail.lastEntryTimestamp == whole.lastEntryTimestamp,

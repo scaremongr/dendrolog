@@ -1,0 +1,51 @@
+{
+    "name": "Syslog (RFC 3164)",
+    "description": "Classic syslog file (/var/log/syslog, messages, auth.log): Mmm dd hh:mm:ss host program[pid]: message.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": "[A-Z][a-z]{2} {1,2}\\d{1,2} \\d{2}:\\d{2}:\\d{2}"
+        },
+        {
+            "name": "Host",
+            "kind": "text",
+            "leadingText": "",
+            "closingText": "",
+            "separator": " ",
+            "customRegex": ""
+        },
+        {
+            "name": "Program",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "\\[?",
+            "customRegex": "[^\\s\\[:]+",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "PID",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "\\]?:",
+            "customRegex": "\\d*",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

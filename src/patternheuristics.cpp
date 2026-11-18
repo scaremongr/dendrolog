@@ -69,8 +69,17 @@ QString timestampRegex()
     // Optional date (ISO "2024-01-31", EU "31.01.2024", slashed) + time
     // "12:34:56" with optional fraction and a zone glued to it. Date alone
     // is not a timestamp. A zone after a space is left to the next block.
-    return QStringLiteral(
-        R"((?:\d{4}[-/.]\d{2}[-/.]\d{2}[T ]|\d{2}[-/.]\d{2}[-/.]\d{4}[ ])?\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:[Zz]|[+-]\d{2}(?::?\d{2})?)?)");
+    //
+    // Two forms with a month name come first: the access log
+    // "18/Nov/2026:13:55:36 +0000" (its zone sits inside the brackets, so it
+    // belongs to the block) and the syslog "Nov 18 13:55:36" / "Nov  8 …".
+    static const QString re =
+        QStringLiteral(R"((?:\d{2}/)") + monthNameRegex()
+        + QStringLiteral(R"(/\d{4}:\d{2}:\d{2}:\d{2}(?: [+-]\d{4})?)"
+                         R"(|)") + monthNameRegex()
+        + QStringLiteral(R"( (?: \d|\d{1,2}) \d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)"
+                         R"(|(?:\d{4}[-/.]\d{2}[-/.]\d{2}[T ]|\d{2}[-/.]\d{2}[-/.]\d{4}[ ])?\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:[Zz]|[+-]\d{2}(?::?\d{2})?)?))");
+    return re;
 }
 
 namespace {
@@ -147,9 +156,46 @@ QString timestampSuffixDetectPattern()
         R"(| (UTC|GMT)(?![A-Za-z0-9_+-]))?)");
 }
 
+QString monthNameRegex()
+{
+    // Регистр сворачивается в классах и только для ASCII — как у слов уровня.
+    static const QString alternation = [] {
+        static const char* const kMonths[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+        QString alt;
+        for (const char* m : kMonths) {
+            if (!alt.isEmpty())
+                alt += QLatin1Char('|');
+            for (const char* c = m; *c; ++c) {
+                const QChar upper = QLatin1Char(*c);
+                alt += QLatin1Char('[');
+                alt += upper;
+                alt += upper.toLower();
+                alt += QLatin1Char(']');
+            }
+        }
+        return QStringLiteral("(?:") + alt + QLatin1Char(')');
+    }();
+    return alternation;
+}
+
 QString isoTimestampDetectPattern()
 {
-    return QStringLiteral(R"((\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}))")
+    return QStringLiteral(R"((\d{4}(?:-\d{2}-\d{2}|/\d{2}/\d{2})[ T]\d{2}:\d{2}:\d{2}))")
+         + timestampSuffixDetectPattern();
+}
+
+QString accessTimestampDetectPattern()
+{
+    return QStringLiteral(R"((\d{2})/()") + monthNameRegex()
+         + QStringLiteral(R"()/(\d{4}):(\d{2}):(\d{2}):(\d{2}))")
+         + timestampSuffixDetectPattern();
+}
+
+QString syslogTimestampDetectPattern()
+{
+    return QStringLiteral(R"(^()") + monthNameRegex()
+         + QStringLiteral(R"() ( ?\d|\d{2}) (\d{2}):(\d{2}):(\d{2}))")
          + timestampSuffixDetectPattern();
 }
 

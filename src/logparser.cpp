@@ -159,6 +159,11 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     qint64 bytesRead = 0;
     int lastReportedProgress = -1;
 
+    // Год меток без года (syslog) — по mtime файла на момент этого прохода:
+    // дозапись после Нового года получает новый год (LineClassifier).
+    const LineClassifier::YearReference yearRef =
+        LineClassifier::yearReferenceForFile(logFile->filePath);
+
     QString line;
     while (!in.atEnd()) {
         if (m_abort.load(std::memory_order_relaxed))
@@ -173,7 +178,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         QDateTime lineTs;
         LogLevel lineLevel = LogLevel::Unknown;
 
-        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs);
+        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef);
         bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
         const bool schemaMatched = (extraction && pattern.isValid())
@@ -304,6 +309,7 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
     }
 
     QStringDecoder decoder(encoding, QStringConverter::Flag::Stateless);
+    const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(filePath);
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
 
@@ -313,7 +319,7 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
             line.chop(1);
         QDateTime ts;
         LogLevel level = LogLevel::Unknown;
-        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts);
+        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef);
         const bool hasLevel = m_classifier.detectLogLevel(line, level);
         // Схема полей здесь не участвует: вкладка решает по ней, только когда
         // включено извлечение полей, а по умолчанию — по метке и уровню.

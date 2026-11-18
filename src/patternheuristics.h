@@ -29,7 +29,9 @@ namespace PatternHeuristics {
 // ---- Canonical token sub-regexes (no captures, no anchors) ---- //
 
 // Optional date part (ISO / EU / US) followed by a mandatory time part,
-// optional fraction and an optional zone glued to it (Z, ±hh, ±hh:mm, ±hhmm).
+// optional fraction and an optional zone glued to it (Z, ±hh, ±hh:mm, ±hhmm);
+// or an access log "18/Nov/2026:13:55:36 +0000" (zone included), or a syslog
+// "Nov 18 13:55:36".
 QString timestampRegex();
 // Any word of the level vocabulary (kLevelWords in logentry.h) with word
 // boundaries; case-insensitive for ASCII letters only.
@@ -48,8 +50,18 @@ QString filePathRegex();
 // space. A zone must end at a word boundary; the offset range (mm <= 59,
 // at most ±14:00) is checked by the consumer, not by the regex.
 QString timestampSuffixDetectPattern();
-// (1) = "YYYY-MM-DD[ T]HH:MM:SS", then the suffix layout shifted by one.
+// (1) = "YYYY-MM-DD[ T]HH:MM:SS" or "YYYY/MM/DD[ T]HH:MM:SS" (nginx error),
+// then the suffix layout shifted by one. Searched anywhere in the line.
 QString isoTimestampDetectPattern();
+// Access log "DD/Mon/YYYY:HH:MM:SS": (1) day, (2) month name, (3) year,
+// (4)(5)(6) time, then the suffix layout from (7). Searched anywhere.
+QString accessTimestampDetectPattern();
+// Syslog RFC 3164 "Mon DD HH:MM:SS" at the start of the line (no year; the
+// day may be " 8" or "8"): (1) month name, (2) day, (3)(4)(5) time, then the
+// suffix layout from (6).
+QString syslogTimestampDetectPattern();
+// English month abbreviation Jan…Dec, ASCII case folded, no capture.
+QString monthNameRegex();
 // (1) = level word.
 QString levelDetectPattern();
 

@@ -1,5 +1,8 @@
 #include "lineclassifier.h"
 
+#include <QFileInfo>
+
+#include <initializer_list>
 #include <limits>
 
 // ============================================================================
@@ -9,10 +12,22 @@
 //
 // Семантика — бит-в-бит эквивалент регексов (закреплено тестом
 // в tests/lineindex_smoke):
-//   isoTimestampDetectPattern():  (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})
-//                                 + timestampSuffixDetectPattern() (дробь, зона)
+//   isoTimestampDetectPattern():    dddd-dd-dd или dddd/dd/dd, [ T], dd:dd:dd
+//   accessTimestampDetectPattern(): dd/Mmm/dddd:dd:dd:dd (access-лог)
+//   syslogTimestampDetectPattern(): ^Mmm dd hh:mm:ss, день может быть « 8»
+//                                   или «8» (RFC 3164, без года)
+//   за секундами любой формы — timestampSuffixDetectPattern() (дробь, зона)
 //   levelDetectPattern():         \b(слово из kLevelWords, logentry.h)\b,
 //                                 регистр сворачивается только для ASCII
+// Где в строке: метка на позиции 0 (любая форма, в том числе фолбэк-формы
+// dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy и syslog) главнее метки в середине;
+// иначе — самая левая из форм с полной датой (ISO, dddd/dd/dd, access),
+// которые, как ISO, ищутся по всей строке. Форма без года (syslog) — только
+// с начала строки: в тексте сообщения её нечем отличить от метки. Найденная
+// форма с невалидной датой — не метка, без отката к следующей; формы
+// позиции 0 с невалидной датой просто не совпали.
+// Месяцы — английские сокращения Jan…Dec, регистр сворачивается для ASCII.
+// Год метки без года — по опорной дате (LineClassifier::YearReference).
 // Важные детали эквивалентности:
 //   • \d и \w у QRegularExpression без UseUnicodePropertiesOption — только
 //     ASCII; не-ASCII символы (включая суррогаты) для сканера — разделители;
@@ -213,50 +228,165 @@ qint64 epochMs(const TsComponents& c)
     return seconds * 1000 + c.millis;
 }
 
-// Самое левое вхождение формы dddd-dd-dd[ T]dd:dd:dd, затем дробная часть
-// и зона. true — форма найдена и разобрана (валидность даты/времени НЕ
-// проверена: невалидная форма — отказ без отката к другим форматам);
-// false — формы в строке нет.
-bool scanIsoTimestamp(const QString& line, TsComponents& c)
+// Номер месяца 1..12 по английскому сокращению из трёх букв с позиции at
+// (регистр сворачивается для ASCII), иначе 0.
+int monthAt(const QChar* d, qsizetype n, qsizetype at)
 {
-    const QChar* d = line.constData();
-    const qsizetype n = line.size();
+    if (at + 3 > n)
+        return 0;
+    const char16_t a = toUpperAscii(d[at].unicode());
+    const char16_t b = toUpperAscii(d[at + 1].unicode());
+    const char16_t c = toUpperAscii(d[at + 2].unicode());
+    switch (a) {
+    case u'J':
+        if (b == u'A' && c == u'N') return 1;
+        if (b == u'U' && c == u'N') return 6;
+        if (b == u'U' && c == u'L') return 7;
+        return 0;
+    case u'F': return (b == u'E' && c == u'B') ? 2 : 0;
+    case u'M':
+        if (b == u'A' && c == u'R') return 3;
+        if (b == u'A' && c == u'Y') return 5;
+        return 0;
+    case u'A':
+        if (b == u'P' && c == u'R') return 4;
+        if (b == u'U' && c == u'G') return 8;
+        return 0;
+    case u'S': return (b == u'E' && c == u'P') ? 9 : 0;
+    case u'O': return (b == u'C' && c == u'T') ? 10 : 0;
+    case u'N': return (b == u'O' && c == u'V') ? 11 : 0;
+    case u'D': return (b == u'E' && c == u'C') ? 12 : 0;
+    default:   return 0;
+    }
+}
 
-    // Сначала разделители — они отсеивают почти все позиции на первом же
-    // сравнении, цифры проверяются только у выживших кандидатов.
-    qsizetype at = -1;
+bool digitsAt(const QChar* d, qsizetype at, std::initializer_list<int> offsets)
+{
+    for (int o : offsets)
+        if (!isAsciiDigit(d[at + o].unicode()))
+            return false;
+    return true;
+}
+
+// Формы с полной датой, которые ищутся по всей строке.
+enum class MidForm { None, Iso, Access };
+
+// Самое левое вхождение формы с полной датой:
+//   Iso    — dddd-dd-dd[ T]dd:dd:dd или dddd/dd/dd[ T]dd:dd:dd (nginx error);
+//   Access — dd/Mmm/dddd:dd:dd:dd.
+// Один проход: на каждой позиции сначала разделители — они отсеивают почти
+// все позиции на первом же сравнении, цифры и месяц проверяются только у
+// выживших кандидатов. Две формы не могут начаться в одной позиции (у ISO
+// третий символ — цифра, у access — «/»).
+MidForm scanMidForm(const QChar* d, qsizetype n, qsizetype& at)
+{
     for (qsizetype i = 0; i + 19 <= n; ++i) {
-        if (d[i + 4] != QLatin1Char('-') || d[i + 7] != QLatin1Char('-')
-            || d[i + 13] != QLatin1Char(':') || d[i + 16] != QLatin1Char(':'))
-            continue;
-        const char16_t sep = d[i + 10].unicode();
-        if (sep != u' ' && sep != u'T')
-            continue;
-        static constexpr int kDigitOffsets[14] =
-            { 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18 };
-        bool digitsOk = true;
-        for (int o : kDigitOffsets) {
-            if (!isAsciiDigit(d[i + o].unicode())) {
-                digitsOk = false;
-                break;
+        const char16_t s4 = d[i + 4].unicode();
+        if ((s4 == u'-' || s4 == u'/') && d[i + 7].unicode() == s4
+            && d[i + 13] == QLatin1Char(':') && d[i + 16] == QLatin1Char(':')) {
+            const char16_t sep = d[i + 10].unicode();
+            if ((sep == u' ' || sep == u'T')
+                && digitsAt(d, i, { 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18 })) {
+                at = i;
+                return MidForm::Iso;
             }
         }
-        if (digitsOk) {
+        if (d[i + 2] == QLatin1Char('/') && i + 20 <= n && d[i + 6] == QLatin1Char('/')
+            && d[i + 11] == QLatin1Char(':') && d[i + 14] == QLatin1Char(':')
+            && d[i + 17] == QLatin1Char(':')
+            && digitsAt(d, i, { 0, 1, 7, 8, 9, 10, 12, 13, 15, 16, 18, 19 })
+            && monthAt(d, n, i + 3) != 0) {
             at = i;
-            break;
+            return MidForm::Access;
         }
     }
-    if (at < 0)
-        return false;
+    return MidForm::None;
+}
 
-    c.year   = num2(d, at) * 100 + num2(d, at + 2);
-    c.month  = num2(d, at + 5);
-    c.day    = num2(d, at + 8);
-    c.hour   = num2(d, at + 11);
-    c.minute = num2(d, at + 14);
-    c.second = num2(d, at + 17);
-    scanFractionAndZone(d, n, at + 19, c);
-    return true;
+// Разбор найденной формы с полной датой (валидность НЕ проверена).
+void parseMidForm(const QChar* d, qsizetype n, MidForm form, qsizetype at,
+                  TsComponents& c)
+{
+    if (form == MidForm::Iso) {
+        c.year   = num2(d, at) * 100 + num2(d, at + 2);
+        c.month  = num2(d, at + 5);
+        c.day    = num2(d, at + 8);
+        c.hour   = num2(d, at + 11);
+        c.minute = num2(d, at + 14);
+        c.second = num2(d, at + 17);
+        scanFractionAndZone(d, n, at + 19, c);
+    } else {
+        c.day    = num2(d, at);
+        c.month  = monthAt(d, n, at + 3);
+        c.year   = num2(d, at + 7) * 100 + num2(d, at + 9);
+        c.hour   = num2(d, at + 12);
+        c.minute = num2(d, at + 15);
+        c.second = num2(d, at + 18);
+        scanFractionAndZone(d, n, at + 20, c);
+    }
+}
+
+bool isValidComponents(const TsComponents& c)
+{
+    return QDate::isValid(c.year, c.month, c.day)
+        && QTime::isValid(c.hour, c.minute, c.second, c.millis);
+}
+
+// Год метки без года: последний год, в котором её день не позже опорного
+// (опорная дата + 1 день уже учтена в ref). 29 февраля — ближайший
+// високосный; невозможный день (31 ноября) — 0.
+int resolveYear(int month, int day, const LineClassifier::YearReference& ref)
+{
+    int year = (month < ref.month || (month == ref.month && day <= ref.day))
+        ? ref.year : ref.year - 1;
+    // Високосный год встречается хотя бы раз в 8 лет (2096 → 2104).
+    for (int k = 0; k < 8; ++k, --year)
+        if (QDate::isValid(year, month, day))
+            return year;
+    return 0;
+}
+
+// Метка syslog (RFC 3164) с позиции 0: «Mmm dd hh:mm:ss», день дополнен
+// пробелом («Nov  8») или без него («Nov 8»). true — метка и валидна.
+bool scanSyslogTimestamp(const QChar* d, qsizetype n,
+                         const LineClassifier::YearReference& ref, TsComponents& c)
+{
+    if (n < 14 || d[3] != QLatin1Char(' '))
+        return false;
+    const int month = monthAt(d, n, 0);
+    if (month == 0)
+        return false;
+    int day;
+    qsizetype t;
+    if (d[4] == QLatin1Char(' ') && isAsciiDigit(d[5].unicode()) && d[6] == QLatin1Char(' ')) {
+        day = d[5].unicode() - u'0';
+        t = 7;
+    } else if (isAsciiDigit(d[4].unicode()) && isAsciiDigit(d[5].unicode())
+               && d[6] == QLatin1Char(' ')) {
+        day = num2(d, 4);
+        t = 7;
+    } else if (isAsciiDigit(d[4].unicode()) && d[5] == QLatin1Char(' ')) {
+        day = d[4].unicode() - u'0';
+        t = 6;
+    } else {
+        return false;
+    }
+    if (t + 8 > n || d[t + 2] != QLatin1Char(':') || d[t + 5] != QLatin1Char(':')
+        || !digitsAt(d, t, { 0, 1, 3, 4, 6, 7 }))
+        return false;
+    // Без опорной даты — сегодняшняя; считается только у совпавшей формы.
+    const int year = resolveYear(month, day,
+                                 ref.isValid() ? ref : LineClassifier::yearReference(QDate()));
+    if (year == 0)
+        return false;
+    c.year = year;
+    c.month = month;
+    c.day = day;
+    c.hour = num2(d, t);
+    c.minute = num2(d, t + 3);
+    c.second = num2(d, t + 6);
+    scanFractionAndZone(d, n, t + 8, c);
+    return isValidComponents(c);
 }
 
 // Ручные фолбэк-форматы (dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy — с позиции 0),
@@ -265,6 +395,11 @@ bool scanIsoTimestamp(const QString& line, TsComponents& c)
 bool scanFallbackFormats(const QString& line, const QStringList& formats,
                          TsComponents& c)
 {
+    // У всех форм d[2] == d[5] — «/» или «.»: строка без этого отсекается до
+    // перебора форматов по именам (горячий путь).
+    if (line.size() < 19 || (line[2] != QLatin1Char('/') && line[2] != QLatin1Char('.'))
+        || line[5] != line[2])
+        return false;
     const QStringView lineRef{line};
     bool convOk = true;
 
@@ -341,12 +476,30 @@ LineClassifier::LineClassifier()
     };
 }
 
-bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts) const
+LineClassifier::YearReference LineClassifier::yearReference(const QDate& referenceDate)
+{
+    const QDate next = (referenceDate.isValid() ? referenceDate : QDate::currentDate()).addDays(1);
+    YearReference ref;
+    ref.year = next.year();
+    ref.month = next.month();
+    ref.day = next.day();
+    return ref;
+}
+
+LineClassifier::YearReference LineClassifier::yearReferenceForFile(const QString& filePath)
+{
+    const QFileInfo info(filePath);
+    const QDateTime modified = info.exists() ? info.lastModified() : QDateTime();
+    return yearReference(modified.isValid() ? modified.toLocalTime().date() : QDate());
+}
+
+bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
+                                     const YearReference& year) const
 {
     // QDateTime строится ИЗ мс epoch (одна конверсия, и та из кэша по минуте)
     // вместо прежних setDate+setTime (две конверсии локаль→epoch на строку).
     qint64 msecs = 0;
-    if (detectTimestampMs(line, msecs)) {
+    if (detectTimestampMs(line, msecs, year)) {
         ts = QDateTime::fromMSecsSinceEpoch(msecs);
         return true;
     }
@@ -354,25 +507,36 @@ bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts) const
     return false;
 }
 
-bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs) const
+bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
+                                       const YearReference& year) const
 {
     // Без построения QDateTime вовсе — горячий путь индексатора, которому
-    // нужны только мс epoch.
+    // нужны только мс epoch. Порядок форм — в начале файла.
+    const QChar* d = line.constData();
+    const qsizetype n = line.size();
     TsComponents c;
-    if (scanIsoTimestamp(line, c)) {
-        if (QDate::isValid(c.year, c.month, c.day)
-            && QTime::isValid(c.hour, c.minute, c.second, c.millis)) {
-            msecs = epochMs(c);
-            return true;
-        }
-        return false; // невалидная дата/время, несмотря на совпадение формы
-    }
-
+    // Сначала формы позиции 0: фолбэк-форматы, затем syslog. Ни
+    // одна из них не начинается так же, как форма с полной датой (у ISO
+    // d[2] — цифра, у access d[5] — буква), поэтому порядок проверок не
+    // меняет результат «позиция 0 главнее», а строке syslog не нужен проход
+    // по всей строке.
     if (scanFallbackFormats(line, m_timeFormats, c)) {
         msecs = epochMs(c);
         return true;
     }
-    return false;
+    if (scanSyslogTimestamp(d, n, year, c)) {
+        msecs = epochMs(c);
+        return true;
+    }
+    qsizetype at = -1;
+    const MidForm mid = scanMidForm(d, n, at);
+    if (mid == MidForm::None)
+        return false;
+    parseMidForm(d, n, mid, at, c);
+    if (!isValidComponents(c))
+        return false; // невалидная дата/время, несмотря на совпадение формы
+    msecs = epochMs(c);
+    return true;
 }
 
 bool LineClassifier::detectLogLevel(const QString &line, LogLevel &level) const
