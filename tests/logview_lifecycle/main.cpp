@@ -25,6 +25,7 @@
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QWheelEvent>
 #include <cstdio>
 #include <functional>
 
@@ -220,6 +221,34 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
     model.setLogLevelFilter({});
     CHECK(settled(tab), name + ": jumps: filter reset settles");
     testdocs::pump(50);
+
+    // --- Переход в последние полэкрана (Q-14) ------------------------------
+    // Центрировать такую строку нельзя — вид встаёт у самого низа. Это не
+    // «пользователь читает хвост»: дозапись не должна его двигать.
+    followTail();
+    {
+        const int nearEnd = model.rowCount() - 4;
+        view.goToRow(nearEnd);
+        testdocs::pump(0);
+        CHECK(view.currentIndex().row() == nearEnd && !view.followTail(),
+              name + ": jump near the end: row is current, follow-tail is off");
+        CHECK(view.isScrolledToBottom(), name + ": jump near the end leaves the view at the bottom");
+        const int before = view.verticalScrollBar()->value();
+        append();
+        append();
+        CHECK(view.verticalScrollBar()->value() == before && rowOnScreen(nearEnd),
+              name + ": jump near the end: an append does not pull the view to the tail");
+
+        // Пользователь сам докрутил до хвоста — прилипание возвращается.
+        QWheelEvent wheel(QPointF(10, 10), view.viewport()->mapToGlobal(QPointF(10, 10)),
+                          QPoint(), QPoint(0, -120 * 50), Qt::NoButton, Qt::NoModifier,
+                          Qt::NoScrollPhase, false);
+        QApplication::sendEvent(view.viewport(), &wheel);
+        CHECK(view.isScrolledToBottom(), name + ": the wheel reaches the tail");
+        append();
+        CHECK(view.isScrolledToBottom() && !view.followTail(),
+              name + ": a view scrolled to the tail by the user keeps showing the tail");
+    }
 
     // --- Старт быстрого поиска -------------------------------------------
     // Пользователь выбрал строку 100, фильтр её скрыл; Qt при возврате фокуса

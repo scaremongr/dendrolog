@@ -37,6 +37,14 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- A jump to a line near the end of a growing log (Go to, timeline, Search,
+  quick search, `F8`) no longer slides to the tail on the next appended lines
+  when Follow tail is off. The view follows the tail again once you scroll
+  down to it yourself or switch Follow tail on.
+- A jump or a filter applied right after a tab was shown or the window was
+  resized no longer loses the scroll position: the view used to return to
+  where it stood at the moment of the resize, leaving the selected line off
+  screen.
 - With **Follow tail** on, a jump no longer snaps back to the end of a growing
   log on the next appended lines. A click on the timeline, a jump from
   Statistics, a result picked in the Search panel and a quick-search match
