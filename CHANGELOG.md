@@ -44,7 +44,8 @@ All notable changes to DendroLog are documented here. The format follows
 ### Fixed
 - A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
   **Recent Files**: its temporary file is gone once the window closes. Such
-  entries left by earlier versions are dropped on start.
+  entries left by earlier versions are dropped on start. The **Open** dialog no
+  longer starts in the temporary folder after a piped stream either.
 - A relative path passed on the command line while a window is already open
   is resolved against the folder the command was run in, not the folder of
   the open window.

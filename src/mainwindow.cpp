@@ -3696,7 +3696,10 @@ void MainWindow::openRecentFile(const QString& filePath)
     view->addLogFile(filePath);
     updateTabLabel(view);
 
-    m_lastOpenDir = QFileInfo(filePath).absolutePath();
+    // Спул stdin — временный файл: ни в недавние, ни в «последнюю папку»
+    // диалога Open он не идёт.
+    if (RecentFiles::accepts(filePath))
+        m_lastOpenDir = QFileInfo(filePath).absolutePath();
     addToRecentFiles(filePath);
 }
 
