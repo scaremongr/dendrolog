@@ -141,6 +141,8 @@ private slots:
     // «Find All»: запрос из одного правила «Contains text» в панели Search
     // и поиск; пустой text — просто открыть панель с курсором в правиле.
     void findAllInSearchPanel(const QString& text, bool caseSensitive);
+    // Go to Line / Time (Ctrl+G): диалог над активной вкладкой.
+    void showGoToDialog();
     void onViewExportFinished(const ViewExport::Result& result);
     // Save View As of the active tab into fileName, in the background.
     void startViewExport(const QString& fileName);
@@ -244,6 +246,7 @@ private:
     FilterRuleSet m_searchRules;
     // «Find All» в тулбаре поиска.
     QAction*     m_findAllAction = nullptr;
+    QAction*     m_goToAction = nullptr;
     // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
     // меняется программно (reset модели при пересборке результатов).
     bool         m_suppressResultNavigation = false;

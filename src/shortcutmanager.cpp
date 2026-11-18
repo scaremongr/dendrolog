@@ -27,6 +27,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("searchNext"),  tr("Search next"),               QKeySequence(Qt::Key_F3) },
         { QStringLiteral("searchPrev"),  tr("Search previous"),           QKeySequence(Qt::SHIFT | Qt::Key_F3) },
         { QStringLiteral("findAll"),     tr("Find all (Search panel)"),   QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F) },
+        { QStringLiteral("goTo"),        tr("Go to line or time…"),       QKeySequence(Qt::CTRL | Qt::Key_G) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },

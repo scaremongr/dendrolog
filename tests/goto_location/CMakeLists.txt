@@ -1,0 +1,1 @@
+dendrolog_add_test(goto_location LIBRARIES dendrolog_widgets TIMEOUT 300)

@@ -350,6 +350,11 @@ int LogModel::nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) c
     return m_store->nearestVisibleRow(logicalEntryId, sourceFile);
 }
 
+int LogModel::nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const
+{
+    return m_store->nearestVisibleRowForLine(lineNumber, sourceFile);
+}
+
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow,
                                          Qt::CaseSensitivity cs, bool wrapAround) const
 {

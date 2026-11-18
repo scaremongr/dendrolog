@@ -422,6 +422,49 @@ int ResidentLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* sourc
     return -1;
 }
 
+int ResidentLogStore::nearestVisibleRowForLine(qint64 lineNumber,
+                                               const LogFile* sourceFile) const
+{
+    if (m_filteredEntries.isEmpty())
+        return -1;
+
+    // Один проход по обоим спискам, как в nearestVisibleRow: j — число
+    // видимых записей до позиции i полного списка. Ищем строку файла с
+    // наименьшим номером >= lineNumber, а если такой нет — с наибольшим
+    // (номер за концом файла). Порядок списка — по времени, поэтому номера
+    // строк файла в нём не обязаны расти: точное совпадение обрывает проход,
+    // остальное досматривается до конца.
+    struct Candidate {
+        qint64 line = -1;
+        int row = -1;        // позиция среди видимых (или место вставки)
+    };
+    Candidate atOrAfter, last;
+    int j = 0;
+    for (int i = 0; i < m_allEntries.size(); ++i) {
+        const auto& e = m_allEntries[i];
+        const bool visible = (j < m_filteredEntries.size()
+                              && m_filteredEntries[j].get() == e.get());
+        if (e->sourceFile().get() == sourceFile) {
+            const qint64 line = e->originalLineNumber();
+            if (line >= lineNumber && (atOrAfter.line < 0 || line < atOrAfter.line)) {
+                atOrAfter = { line, j };
+                if (line == lineNumber)
+                    break;
+            }
+            if (line > last.line)
+                last = { line, j };
+        }
+        if (visible)
+            ++j;
+    }
+    const Candidate& found = atOrAfter.line >= 0 ? atOrAfter : last;
+    if (found.line < 0)
+        return -1;
+    // Видимая запись стоит ровно на j; скрытая — место вставки: следующая
+    // видимая, а за концом списка — последняя.
+    return qMin(found.row, int(m_filteredEntries.size()) - 1);
+}
+
 int ResidentLogStore::findNextOccurrence(const QString& text, int startRow,
                                          Qt::CaseSensitivity cs, bool wrapAround) const
 {

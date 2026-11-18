@@ -39,6 +39,7 @@ public:
         const std::shared_ptr<LogEntry>& line, int maxLines) const override;
     int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const override;
     int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const override;
+    int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const override;
     int findNextOccurrence(const QString& text, int startRow,
                            Qt::CaseSensitivity cs, bool wrapAround) const override;
     int findPreviousOccurrence(const QString& text, int startRow,

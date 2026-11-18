@@ -3,6 +3,7 @@
 #include "logviewwidget.h"
 #include "logtabwidget.h"
 #include "conversionpatterndialog.h"
+#include "gotodialog.h"
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
 #include "appsettings.h"
@@ -382,6 +383,13 @@ MainWindow::MainWindow(QWidget *parent)
     addAction(focusSearchAction);   // window-level shortcut
     m_shortcutActions.insert(QStringLiteral("focusSearch"), focusSearchAction);
 
+    // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.
+    m_goToAction = new QAction(tr("Go to Line / Time…"), this);
+    connect(m_goToAction, &QAction::triggered, this, &MainWindow::showGoToDialog);
+    ui->menuView->insertAction(ui->actionWordWrap, m_goToAction);
+    ui->menuView->insertSeparator(ui->actionWordWrap);
+    m_shortcutActions.insert(QStringLiteral("goTo"), m_goToAction);
+
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {
@@ -550,6 +558,7 @@ void MainWindow::updateWelcomeVisibility()
     // Команды над вкладкой без вкладок ничего не делали бы — гасим их.
     for (QAction* a : { ui->actionCloseTab, ui->actionReloadFile, ui->actionFollowTail,
                         ui->actionSearchNext, ui->actionSearchPrevious, m_findAllAction,
+                        m_goToAction,
                         ui->actionShowAllLevels, ui->actionResetAllFilters,
                         ui->actionFatal, ui->actionError, ui->actionWarn,
                         ui->actionInfo, ui->actionDebug, ui->actionTrace })
@@ -3248,6 +3257,31 @@ void MainWindow::onSearchCleared()
 {
     m_searchRequested = false;
     clearSearchResults();
+}
+
+void MainWindow::showGoToDialog()
+{
+    LogViewWidget* tab = m_activeLogView;
+    if (!tab || !tab->model() || !tab->view())
+        return;
+
+    // Опорная строка — выбранная пользователем: текущую без выделения мог
+    // назначить Qt при возврате фокуса (инвариант 10).
+    const QModelIndex current = tab->view()->currentIndex();
+    const int currentRow = current.isValid() && tab->view()->selectionModel()
+            && tab->view()->selectionModel()->isRowSelected(current.row(), QModelIndex())
+        ? current.row() : -1;
+
+    GoToDialog dialog(tab->model(), tab->loadedFiles(), currentRow, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    // Вкладку могли закрыть, пока диалог был открыт (второй экземпляр, таймер).
+    if (tab != m_activeLogView || dialog.target().row < 0)
+        return;
+    tab->view()->goToRow(dialog.target().row);
+    tab->view()->setFocus(Qt::OtherFocusReason);
+    // Точное попадание пояснений не требует, но прошлое пояснение убираем.
+    m_statusLabel->setText(dialog.targetNote().isEmpty() ? tr("Ready") : dialog.targetNote());
 }
 
 void MainWindow::findAllInSearchPanel(const QString& text, bool caseSensitive)

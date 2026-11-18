@@ -172,6 +172,8 @@ public:
     // ---- Поиск записи в отфильтрованном представлении -----------------------
     int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const;
     int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const;
+    // Видимая строка для строки lineNumber (с 1) файла; см. LogStore.
+    int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const;
 
     // Search methods
     QModelIndex findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;

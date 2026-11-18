@@ -754,6 +754,20 @@ void StatisticsPanel::showEvent(QShowEvent* event)
         startCollection();
 }
 
+// Смена темы: цвета HTML посчитаны из палитры браузера — отрисовать готовый
+// результат заново, без пересбора. Отложенно: дочерний браузер получает
+// новую палитру позже панели.
+void StatisticsPanel::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && m_browser) {
+        QTimer::singleShot(0, this, [this] {
+            if (m_stats.valid)
+                renderStats();
+        });
+    }
+}
+
 void StatisticsPanel::cancelCollection()
 {
     if (m_cancelFlag)

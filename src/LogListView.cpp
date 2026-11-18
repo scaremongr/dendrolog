@@ -591,7 +591,8 @@ void LogListView::updateFontMetricsCache() {
 }
 
 // ---------------------------------------------------------------------------
-// changeEvent — реагирует на смену шрифта (например, при смене настроек).
+// changeEvent — реагирует на смену шрифта (например, при смене настроек)
+// и палитры (смена темы).
 // updateFontMetricsCache() вызывается всегда; деferred-пересчёт высот —
 // только когда таймер уже создан (в конструкторе таймер создаётся после
 // setFont, поэтому при первичной установке шрифта пересчёт не нужен —
@@ -605,6 +606,12 @@ void LogListView::changeEvent(QEvent* event)
             m_heightUpdateTimer->start(0);
             viewport()->update();
         }
+    } else if (event->type() == QEvent::PaletteChange) {
+        // Смена темы: цвет текста по умолчанию берётся из палитры и уже
+        // запечён в pixmap'ах строк. Высоты от палитры не зависят.
+        m_rowStateCache.clear();
+        clearRowPixmaps();
+        viewport()->update();
     }
 }
 
@@ -1361,6 +1368,30 @@ void LogListView::showSearchMatch(int row, const QString& term, bool caseSensiti
 
     removeRowPixmap(row);
     viewport()->update();
+}
+
+void LogListView::goToRow(int row)
+{
+    if (!model() || row < 0 || row >= model()->rowCount())
+        return;
+    const QModelIndex index = model()->index(row, 0);
+    // Follow-tail вернул бы вид к хвосту на следующей же дописанной порции:
+    // программная прокрутка его сама не снимает (только ползунок и колесо).
+    if (m_followTail && row < model()->rowCount() - 1)
+        setFollowTail(false);
+    // setCurrentIndex выделяет строку (ClearAndSelect) и через currentChanged
+    // обновляет m_persistentSelection. Но если строка уже текущая (её мог
+    // назначить Qt по фокусу, без выделения и без якоря), currentChanged не
+    // придёт — якорь ставим сами.
+    setCurrentIndex(index);
+    if (auto* logModel = qobject_cast<LogModel*>(model())) {
+        const LogModel::EntryKey key = logModel->keyForRow(row);
+        if (key.logicalEntryId >= 0) {
+            m_persistentSelection.logicalEntryId = key.logicalEntryId;
+            m_persistentSelection.sourceFile = key.sourceFile;
+        }
+    }
+    scrollTo(index, QAbstractItemView::PositionAtCenter);
 }
 
 void LogListView::clearSearchMatch()

@@ -68,6 +68,8 @@ add_subdirectory(search_results)
 add_subdirectory(field_reextraction)
 add_subdirectory(quick_search)
 add_subdirectory(logview_lifecycle)
+add_subdirectory(goto_location)
+add_subdirectory(theme_mode)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
 # пропускать правильные передачи через Qt как гонки, ни прятать настоящие.

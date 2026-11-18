@@ -74,6 +74,7 @@ void AppSettings::load()
     m_autoReloadIntervalSecs = s.value(QStringLiteral("autoReloadIntervalSecs"), 2).toInt();
     m_indexedThresholdMB     = qBound(0, s.value(QStringLiteral("indexedThresholdMB"), 512).toInt(), 1 << 20);
     m_textCacheBudgetMB      = qBound(64, s.value(QStringLiteral("textCacheBudgetMB"), 256).toInt(), 2048);
+    m_themeMode              = themeModeFromString(s.value(QStringLiteral("theme")).toString());
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -129,10 +130,45 @@ void AppSettings::save()
     s.setValue(QStringLiteral("fontSize"),               m_fontSize);
     s.setValue(QStringLiteral("indexedThresholdMB"),     m_indexedThresholdMB);
     s.setValue(QStringLiteral("textCacheBudgetMB"),      m_textCacheBudgetMB);
+    s.setValue(QStringLiteral("theme"),                  themeModeToString(m_themeMode));
     s.endGroup();
 
     // Save theme colors.
     AppTheme::instance().save(s);
+}
+
+// ---------------------------------------------------------------------------
+ThemeMode AppSettings::themeMode() const
+{
+    return m_themeMode;
+}
+
+void AppSettings::setThemeMode(ThemeMode mode)
+{
+    if (m_themeMode == mode)
+        return;
+    m_themeMode = mode;
+    emit settingsChanged();
+}
+
+QString AppSettings::themeModeToString(ThemeMode mode)
+{
+    switch (mode) {
+        case ThemeMode::Light: return QStringLiteral("light");
+        case ThemeMode::Dark:  return QStringLiteral("dark");
+        case ThemeMode::System: break;
+    }
+    return QStringLiteral("system");
+}
+
+ThemeMode AppSettings::themeModeFromString(const QString& text)
+{
+    const QString word = text.trimmed().toLower();
+    if (word == QLatin1String("light"))
+        return ThemeMode::Light;
+    if (word == QLatin1String("dark"))
+        return ThemeMode::Dark;
+    return ThemeMode::System;
 }
 
 // ---------------------------------------------------------------------------
