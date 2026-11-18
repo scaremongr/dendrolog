@@ -278,6 +278,9 @@ private:
         Qt::CaseSensitivity cs = Qt::CaseInsensitive;
         QRegularExpression  re;   // precompiled when isRegex
         std::shared_ptr<SearchProgress> progress;
+        // Keeps the sequence mapped() iterates over alive for as long as the
+        // kernel (which owns a copy of this functor) exists.
+        std::shared_ptr<const QList<SearchItem>> items;
 
         bool operator()(const SearchItem& item) const;
     };
@@ -370,7 +373,10 @@ private:
     bool                            m_contentCaseSensitive = false;
     bool                            m_contentFilterActive = false;   // results valid
     QSet<QString>                   m_contentMatches;                // matching paths
-    QList<SearchItem>               m_contentTodo;   // files being searched, in result order
+    // Files being searched, in result order. Immutable once handed to the
+    // workers and shared with them: a new search builds a new list instead of
+    // rewriting this one (see startContentSearch). Null when nothing is searched.
+    std::shared_ptr<const QList<SearchItem>> m_contentTodo;
     int                             m_contentCandidates = 0;         // incl. cache hits
     qint64                          m_contentTotalBytes = 0;
     QFutureWatcher<bool>*           m_contentWatcher = nullptr;      // running search

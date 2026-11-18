@@ -194,7 +194,7 @@ DirectoryScanner::DirectoryScanner(QTreeWidget* tree, QObject* parent)
         emit contentFilterProgress(m_contentProgress->bytesDone.load(std::memory_order_relaxed),
                                    m_contentTotalBytes,
                                    m_contentProgress->filesDone.load(std::memory_order_relaxed),
-                                   int(m_contentTodo.size()));
+                                   m_contentTodo ? int(m_contentTodo->size()) : 0);
     });
 
     // File-system events arrive in bursts (a writer flushing, an archiver
@@ -1130,7 +1130,14 @@ void DirectoryScanner::startContentSearch()
     //   • files whose size and mtime match a cached verdict reuse it, so
     //     re-applying a filter (or applying it again after a refresh) only
     //     touches what actually changed.
-    m_contentTodo.clear();
+    //
+    // The list is built afresh and never edited once the workers have it. A
+    // cancelled search winds down on its own (cancelContentSearch does not
+    // wait), so its workers may still be reading the previous list, or may
+    // have just let go of it: reusing that buffer would rely on nothing but
+    // the container's reference count to keep the two apart.
+    m_contentTodo.reset();
+    auto todo = std::make_shared<QList<SearchItem>>();
     m_contentMatches.clear();
     m_contentCandidates = 0;
     m_contentTotalBytes = 0;
@@ -1159,10 +1166,10 @@ void DirectoryScanner::startContentSearch()
         }
 
         m_contentTotalBytes += candidate.size;
-        m_contentTodo.append(candidate);
+        todo->append(candidate);
     }
 
-    if (m_contentTodo.isEmpty()) {
+    if (todo->isEmpty()) {
         m_contentFilterActive = true;
         refreshAllVisibility();
         emit contentFilterFinished(m_contentMatches.size(), m_contentCandidates);
@@ -1182,6 +1189,8 @@ void DirectoryScanner::startContentSearch()
     }
     m_contentProgress = std::make_shared<SearchProgress>();
     matcher.progress  = m_contentProgress;
+    m_contentTodo = std::move(todo);
+    matcher.items = m_contentTodo;
 
     m_contentWatcher = new QFutureWatcher<bool>(this);
     connect(m_contentWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
@@ -1190,9 +1199,9 @@ void DirectoryScanner::startContentSearch()
         m_contentProgressTimer->stop();
         m_contentProgress.reset();
 
-        const int n = int(m_contentTodo.size());
+        const int n = m_contentTodo ? int(m_contentTodo->size()) : 0;
         for (int i = 0; i < n && i < w->future().resultCount(); ++i) {
-            const SearchItem& searched = m_contentTodo.at(i);
+            const SearchItem& searched = m_contentTodo->at(i);
             const bool matched = w->resultAt(i);
             if (matched)
                 m_contentMatches.insert(searched.path);
@@ -1205,14 +1214,15 @@ void DirectoryScanner::startContentSearch()
         emit contentFilterFinished(m_contentMatches.size(), m_contentCandidates);
     });
 
-    emit contentFilterProgress(0, m_contentTotalBytes, 0, int(m_contentTodo.size()));
+    emit contentFilterProgress(0, m_contentTotalBytes, 0, int(m_contentTodo->size()));
     m_contentProgressTimer->start();
-    // Hand mapped() its OWN sequence (an rvalue, so the future takes ownership).
-    // A cancelled search keeps running until its workers notice, and the next
-    // Apply rebuilds m_contentTodo immediately — a sequence held by reference
-    // would be pulled out from under those workers.
+    // mapped() iterates over the shared list; the functor it copies keeps the
+    // list alive. A cancelled search keeps running until its workers notice,
+    // and the next Apply replaces m_contentTodo immediately — a sequence owned
+    // only by this object would be pulled out from under those workers.
     m_contentWatcher->setFuture(
-        QtConcurrent::mapped(&m_contentPool, QList<SearchItem>(m_contentTodo), matcher));
+        QtConcurrent::mapped(&m_contentPool, m_contentTodo->cbegin(), m_contentTodo->cend(),
+                             matcher));
 }
 
 bool DirectoryScanner::passesDateFilter(QTreeWidgetItem* item) const
