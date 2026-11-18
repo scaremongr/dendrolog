@@ -5,17 +5,28 @@
 //   • файл переписан заново (ротация) — полная перезагрузка;
 //   • растущий файл пересёк порог индексного бэкенда — вкладка на лету
 //     становится индексной, строки те же;
-//   • вкладку закрыли посреди загрузки — без падения.
+//   • вкладку закрыли посреди загрузки — без падения;
+//   • переходы на растущем логе с включённым Follow Tail (найденная строка
+//     быстрого поиска, переход к записи из Search и статистики): дозапись не
+//     возвращает вид к хвосту;
+//   • быстрый поиск стартует от строки, выбранной пользователем, даже когда
+//     её скрыл фильтр, — а не от строки, назначенной Qt по фокусу, и не с
+//     начала файла; то же после перестройки модели посреди поиска.
 // ============================================================================
 
 #include "appsettings.h"
 #include "logviewwidget.h"
 #include "testdocuments.h"
 
+#include "LogListView.h"
+
 #include <QApplication>
+#include <QFocusEvent>
+#include <QScrollBar>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <cstdio>
+#include <functional>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -107,6 +118,153 @@ static void checkAppendInParts(const QDir& dir, const QString& name, const QStri
           name + ": rewritten file is reloaded from scratch: " + rows(model).join(" | "));
 }
 
+// 400 строк: каждая третья — ERROR, NEEDLE на строках 30, 150 и 300 (все ERROR).
+static QByteArray jumpFixture()
+{
+    QByteArray out;
+    for (int i = 0; i < 400; ++i) {
+        QByteArray text = "ordinary " + QByteArray::number(i);
+        if (i == 30 || i == 150 || i == 300)
+            text = "NEEDLE " + QByteArray::number(i);
+        out += record(i, i % 3 ? "INFO" : "ERROR", text);
+    }
+    return out;
+}
+
+// Быстрый поиск до итога: текст найденной (текущей) строки или пустая строка.
+static QString quickSearch(LogViewWidget& tab, bool forward, const std::function<void()>& meanwhile = {})
+{
+    bool finished = false, found = false;
+    const QMetaObject::Connection connection = QObject::connect(
+        &tab, &LogViewWidget::quickSearchFinished,
+        [&](const QString&, bool ok) { finished = true; found = ok; });
+    if (forward)
+        tab.searchTextNext("NEEDLE", true);
+    else
+        tab.searchTextPrevious("NEEDLE", true);
+    if (meanwhile)
+        meanwhile(); // до возврата в цикл событий: итог скана ещё не доставлен
+    const bool done = testdocs::waitFor([&] { return finished; });
+    QObject::disconnect(connection);
+    if (!done || !found)
+        return QString();
+    const QModelIndex current = tab.view()->currentIndex();
+    return current.isValid() ? tab.model()->messageAt(current.row()) : QString();
+}
+
+// Переходы на растущем логе и старт быстрого поиска.
+static void checkJumps(const QDir& dir, const QString& name, const QString& schema)
+{
+    const QString path = testdocs::writeFile(dir, name + "-jumps.log", jumpFixture());
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), name + ": jumps: initial load");
+    testdocs::pump(300);
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    CHECK(model.rowCount() == 400, name + ": jumps: fixture loaded");
+
+    int appended = 0;
+    const auto append = [&] {
+        CHECK(testdocs::appendToFile(path, record(400 + appended, "ERROR",
+                                                  "tail " + QByteArray::number(appended))),
+              name + ": jumps: append");
+        ++appended;
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + ": jumps: reload settles");
+        testdocs::pump(50);
+    };
+    const auto rowOnScreen = [&](int row) {
+        return view.viewport()->rect().intersects(view.visualRect(model.index(row, 0)));
+    };
+    // Вид остался на строке row: Follow Tail снят, дозапись к хвосту не увела.
+    const auto staysAt = [&](int row, const QString& what) {
+        CHECK(view.currentIndex().row() == row
+                  && view.selectionModel()->isRowSelected(row, QModelIndex()),
+              name + ": " + what + ": the row is current and selected");
+        CHECK(!view.followTail(), name + ": " + what + ": follow-tail is off");
+        CHECK(rowOnScreen(row), name + ": " + what + ": the row is on screen");
+        append();
+        CHECK(rowOnScreen(row) && !view.isScrolledToBottom(),
+              name + ": " + what + ": an append does not pull the view back to the tail");
+    };
+    const auto followTail = [&] {
+        view.setFollowTail(true);
+        append();
+        CHECK(view.isScrolledToBottom(), name + ": jumps: follow-tail shows the tail");
+    };
+
+    // --- Найденная строка быстрого поиска ---------------------------------
+    followTail();
+    CHECK(quickSearch(tab, true).endsWith("NEEDLE 30"), name + ": quick search finds the first match");
+    staysAt(30, "quick search match");
+
+    // --- Переход к записи: из Search Results и из статистики --------------
+    followTail();
+    const LogModel::EntryKey key = model.keyForRow(200);
+    CHECK(tab.goToEntry(key.logicalEntryId, key.sourceFile), name + ": jump to a record");
+    staysAt(200, "jump to a record");
+    CHECK(!tab.goToEntry(1000000, key.sourceFile) && view.currentIndex().row() == 200,
+          name + ": a record that is not in the tab is ignored");
+    // Запись скрыта фильтром — переход к ближайшей видимой строке.
+    const LogModel::EntryKey hidden = model.keyForRow(100);
+    model.setLogLevelFilter({LogLevel::Error});
+    CHECK(settled(tab), name + ": jumps: filter settles");
+    CHECK(tab.goToEntry(hidden.logicalEntryId, hidden.sourceFile)
+              && model.messageAt(view.currentIndex().row()).endsWith("ordinary 102"),
+          name + ": jump to a hidden record lands on the next visible row");
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), name + ": jumps: filter reset settles");
+    testdocs::pump(50);
+
+    // --- Старт быстрого поиска -------------------------------------------
+    // Пользователь выбрал строку 100, фильтр её скрыл; Qt при возврате фокуса
+    // назначает текущей другую строку, не выделяя её (инвариант 10).
+    const auto hideSelected = [&] {
+        model.setLogLevelFilter({LogLevel::Error});
+        CHECK(settled(tab), name + ": start: filter settles");
+        testdocs::pump(50);
+        QFocusEvent focus(QEvent::FocusIn, Qt::ActiveWindowFocusReason);
+        QApplication::sendEvent(&view, &focus);
+    };
+    const auto showAll = [&] {
+        model.setLogLevelFilter({});
+        CHECK(settled(tab), name + ": start: filter reset settles");
+        testdocs::pump(50);
+    };
+    view.goToRow(100);
+    hideSelected();
+    CHECK(quickSearch(tab, true).endsWith("NEEDLE 150"),
+          name + ": forward search starts from the hidden selected row, not from the top");
+    showAll();
+    view.goToRow(100);
+    hideSelected();
+    CHECK(quickSearch(tab, false).endsWith("NEEDLE 30"),
+          name + ": backward search starts from the hidden selected row");
+    showAll();
+
+    // Выбранная строка видна — поиск идёт от неё, как и раньше.
+    view.goToRow(150);
+    CHECK(quickSearch(tab, true).endsWith("NEEDLE 300"), name + ": forward from a selected match");
+    view.goToRow(150);
+    CHECK(quickSearch(tab, false).endsWith("NEEDLE 30"), name + ": backward from a selected match");
+
+    // Модель перестроилась посреди поиска (фильтр скрыл выбранную строку):
+    // поиск начинается заново от её места, а не с начала файла. Синхронный
+    // reset до доставки итога бывает только у резидентного фильтра.
+    if (!model.isIndexedBackend()) {
+        view.goToRow(100);
+        const QString found = quickSearch(tab, true, [&] { model.setLogLevelFilter({LogLevel::Error}); });
+        CHECK(found.endsWith("NEEDLE 150"),
+              name + ": a search restarted by a model reset keeps its starting place: " + found);
+        showAll();
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -121,8 +279,10 @@ int main(int argc, char** argv)
 
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
+    checkJumps(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
+    checkJumps(dir, QStringLiteral("indexed"), schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

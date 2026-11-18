@@ -64,6 +64,15 @@ public:
         const std::shared_ptr<LogEntry>& line, int maxLines) const = 0;
     virtual int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const = 0;
     virtual int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const = 0;
+    // МЕСТО записи среди видимых строк: запись видна — её строка
+    // (rowForEntry), *visible = true; скрыта фильтром — число видимых строк,
+    // стоящих перед ней в порядке вкладки (от 0 до числа видимых
+    // включительно), *visible = false. В отличие от nearestVisibleRow место
+    // не прижимается к последней строке, поэтому «перед последней видимой» и
+    // «после всех видимых» различимы: от места стартует быстрый поиск.
+    // -1 — записи нет в данных.
+    virtual int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
+                                  bool* visible = nullptr) const = 0;
     // Видимая строка для строки lineNumber (с 1) файла sourceFile — переход
     // Ctrl+G. Номер за концом файла — его последняя строка. Строка скрыта
     // фильтром — следующая видимая за её местом в порядке вкладки, иначе

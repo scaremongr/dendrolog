@@ -422,6 +422,27 @@ int ResidentLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* sourc
     return -1;
 }
 
+int ResidentLogStore::placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
+                                        bool* visible) const
+{
+    const int exact = rowForEntry(logicalEntryId, sourceFile);
+    if (visible)
+        *visible = exact >= 0;
+    if (exact >= 0)
+        return exact;
+    // Тот же проход, что в nearestVisibleRow: j — число видимых записей до
+    // позиции i полного списка; здесь оно отдаётся как есть.
+    int j = 0;
+    for (int i = 0; i < m_allEntries.size(); ++i) {
+        const auto& e = m_allEntries[i];
+        if (e->logicalEntryId() == logicalEntryId && e->sourceFile().get() == sourceFile)
+            return j;
+        if (j < m_filteredEntries.size() && m_filteredEntries[j].get() == e.get())
+            ++j;
+    }
+    return -1;
+}
+
 int ResidentLogStore::nearestVisibleRowForLine(qint64 lineNumber,
                                                const LogFile* sourceFile) const
 {

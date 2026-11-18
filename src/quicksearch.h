@@ -12,6 +12,7 @@
 #include <memory>
 
 class LogModel;
+struct LogFile;
 class QTimer;
 
 // ============================================================================
@@ -30,7 +31,7 @@ class QTimer;
 //     на число вставленных перед ней, finished() отдаёт номер в ТЕКУЩЕЙ модели;
 //   • reset, удаление или перестановка строк — номер из снапшота уже ничего не
 //     значит: вместо finished() приходит invalidated(), и владелец начинает
-//     поиск заново от текущей строки.
+//     поиск заново от строки, выбранной пользователем (startRowFor).
 // ============================================================================
 class QuickSearch : public QObject {
     Q_OBJECT
@@ -52,6 +53,16 @@ public:
     // levels (LogScanSnapshot::findRowWithLevel).
     void startLevel(LogModel* model, LogLevelMask levels, bool forward, int startRow,
                     bool wrapAround = true);
+    // Строка, от которой стартует поиск (startRow для start/scan), по выбору
+    // пользователя: selectedRow — выбранная строка view (LogListView::
+    // userSelectedRow) или -1; anchorEntryId/anchorFile — запись, выбранная
+    // последней (-1 — нет). Выбранная строка видна — от неё. Запись скрыта
+    // фильтром — от её МЕСТА среди видимых строк: вперёд первой проверяется
+    // следующая за ним видимая строка, назад — предыдущая. Выбора нет —
+    // вперёд с начала (-1), назад с конца (rowCount). Место — LogModel::
+    // placeAmongVisible.
+    static int startRowFor(const LogModel& model, int selectedRow, int anchorEntryId,
+                           const LogFile* anchorFile, bool forward);
     // Отменить поиск: сигналов по нему больше не будет.
     void cancel();
     bool isRunning() const { return m_running; }

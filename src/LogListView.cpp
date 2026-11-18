@@ -386,11 +386,8 @@ void LogListView::setModel(QAbstractItemModel *model) {
                     QTimer::singleShot(0, this, [this, anchorRow, anchorOffset]() {
                         if (!this->model())
                             return;
-                        const QModelIndex cur = currentIndex();
-                        const bool userSelected = cur.isValid() && selectionModel()
-                            && selectionModel()->isRowSelected(cur.row(), QModelIndex());
-                        if (userSelected) {
-                            scrollTo(cur, QAbstractItemView::EnsureVisible);
+                        if (userSelectedRow() >= 0) {
+                            scrollTo(currentIndex(), QAbstractItemView::EnsureVisible);
                         } else if (anchorRow >= 0 && anchorRow < this->model()->rowCount()) {
                             verticalScrollBar()->setValue(
                                 contentYToScrollValue(rowYOffset(anchorRow) - anchorOffset));
@@ -1392,6 +1389,15 @@ void LogListView::goToRow(int row)
         }
     }
     scrollTo(index, QAbstractItemView::PositionAtCenter);
+}
+
+int LogListView::userSelectedRow() const
+{
+    const QModelIndex current = currentIndex();
+    if (!current.isValid() || !selectionModel()
+        || !selectionModel()->isRowSelected(current.row(), QModelIndex()))
+        return -1;
+    return current.row();
 }
 
 void LogListView::clearSearchMatch()

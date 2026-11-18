@@ -172,6 +172,9 @@ public:
     // ---- Поиск записи в отфильтрованном представлении -----------------------
     int rowForEntry(int logicalEntryId, const LogFile* sourceFile) const;
     int nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) const;
+    // Место записи среди видимых строк (LogStore::placeAmongVisible).
+    int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
+                          bool* visible = nullptr) const;
     // Видимая строка для строки lineNumber (с 1) файла; см. LogStore.
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const;
 

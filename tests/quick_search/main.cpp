@@ -5,12 +5,16 @@
 //     с заворачиванием и без;
 //   • найденная строка пересчитывается через вставки, случившиеся за время
 //     скана; reset/удаление строк — invalidated() вместо устаревшего номера;
-//   • отменённый поиск ничего не присылает.
+//   • отменённый поиск ничего не присылает;
+//   • строка старта (startRowFor): выбранная строка, а если её скрыл фильтр —
+//     её место среди видимых строк, сверенное с перебором и с синхронным
+//     поиском по полной модели.
 // ============================================================================
 
 #include "quicksearch.h"
 #include "testdocuments.h"
 
+#include <QHash>
 #include <QTemporaryDir>
 #include <cstdio>
 
@@ -74,6 +78,96 @@ static void compareWithModel(const QString& name, LogModel& model)
     CHECK(mismatches == 0, name + ": background scan matches the synchronous search");
 }
 
+// Строка старта против перебора. order — ключи всех строк модели БЕЗ фильтра
+// (её порядок), модель сейчас отфильтрована. Для каждой строки-выбора место
+// среди видимых считается перебором: p — число видимых строк, стоящих раньше;
+// matches — есть ли в строке полной модели NEEDLE.
+// Старт: строка видна — она сама; скрыта — вперёд p - 1 (первой проверяется
+// строка p), назад p (первой проверяется p - 1), в том числе когда скрытая
+// запись стоит после ВСЕХ видимых строк (p == n: вперёд — сразу через край).
+static void checkStartRows(const QString& name, LogModel& model,
+                           const QVector<LogModel::EntryKey>& order,
+                           const QVector<bool>& matches)
+{
+    const int n = model.rowCount();
+    QHash<QPair<int, const LogFile*>, int> visibleRow;
+    for (int row = 0; row < n; ++row) {
+        const LogModel::EntryKey key = model.keyForRow(row);
+        visibleRow.insert({key.logicalEntryId, key.sourceFile}, row);
+    }
+    CHECK(visibleRow.size() == n && n > 0 && n < order.size(), name + ": fixture rows are unique records");
+    const int total = order.size();
+    QVector<int> rowOf(total, -1); // позиция полной модели → видимая строка
+    for (int i = 0; i < total; ++i)
+        rowOf[i] = visibleRow.value({order[i].logicalEntryId, order[i].sourceFile}, -1);
+    // Первое видимое совпадение от позиции i полной модели, не включая её.
+    const auto expected = [&](int i, int step) {
+        for (int k = 1; k <= total; ++k) {
+            const int j = ((i + step * k) % total + total) % total;
+            if (rowOf[j] >= 0 && matches[j])
+                return rowOf[j];
+        }
+        return -1;
+    };
+
+    const LogScanSnapshot snapshot = model.scanSnapshot(true);
+    const QString needle = QStringLiteral("NEEDLE");
+    int mismatches = 0, hiddenChecked = 0, beyondLast = 0, searchMismatches = 0;
+    int p = 0; // видимых строк раньше позиции i
+    for (int i = 0; i < order.size(); ++i) {
+        const LogModel::EntryKey key = order[i];
+        const int row = rowOf[i];
+        int wantForward, wantBackward;
+        if (row >= 0) {
+            wantForward = wantBackward = row;
+        } else {
+            wantForward = p - 1;
+            wantBackward = p;
+            ++hiddenChecked;
+            if (p == n)
+                ++beyondLast;
+        }
+        // Выбранная строка скрыта: view отдаёт -1 и якорь-запись.
+        const int forward = QuickSearch::startRowFor(model, -1, key.logicalEntryId, key.sourceFile, true);
+        const int backward = QuickSearch::startRowFor(model, -1, key.logicalEntryId, key.sourceFile, false);
+        if (forward != wantForward || backward != wantBackward) {
+            if (++mismatches <= 5)
+                std::fprintf(stderr, "  %s origin %d: forward %d/%d backward %d/%d\n", qPrintable(name),
+                             i, forward, wantForward, backward, wantBackward);
+        }
+        // Поиск от скрытой строки находит ближайшее видимое совпадение в
+        // порядке ПОЛНОЙ модели — то, к которому пользователь пришёл бы от
+        // выбранной строки, пролистав скрытые.
+        // (Каждая 17-я скрытая строка и все за последней видимой: скан читает
+        // текст, а под санитайзером это дорого.)
+        if (row < 0 && (p == n || hiddenChecked % 17 == 0)) {
+            const qint64 next = QuickSearch::scan(snapshot, needle, Qt::CaseSensitive, true, forward, true);
+            const qint64 previous = QuickSearch::scan(snapshot, needle, Qt::CaseSensitive, false, backward, true);
+            if (next != expected(i, 1) || previous != expected(i, -1))
+                ++searchMismatches;
+        }
+        if (row >= 0)
+            ++p;
+    }
+    CHECK(mismatches == 0, name + ": start row matches the brute-force position");
+    CHECK(searchMismatches == 0,
+          name + ": search from a hidden row finds the nearest visible match in tab order");
+    CHECK(hiddenChecked > 0 && beyondLast > 0, name + ": hidden rows inside and past the visible ones are covered");
+
+    // Выбранная видимая строка важнее якоря; без выбора — с начала или с конца.
+    CHECK(QuickSearch::startRowFor(model, 7, order[0].logicalEntryId, order[0].sourceFile, true) == 7
+              && QuickSearch::startRowFor(model, 7, -1, nullptr, false) == 7,
+          name + ": the selected row wins");
+    CHECK(QuickSearch::startRowFor(model, -1, -1, nullptr, true) == -1
+              && QuickSearch::startRowFor(model, -1, -1, nullptr, false) == n,
+          name + ": no selection starts from the top or from the end");
+    CHECK(QuickSearch::startRowFor(model, n + 3, -1, nullptr, true) == -1,
+          name + ": a row past the end is not a selection");
+    CHECK(QuickSearch::startRowFor(model, -1, 1 << 30, order[0].sourceFile, true) == -1
+              && QuickSearch::startRowFor(model, -1, 1 << 30, order[0].sourceFile, false) == n,
+          name + ": a record that is gone is not a selection");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -99,10 +193,19 @@ int main(int argc, char** argv)
         };
         for (const auto& m : models) {
             compareWithModel(QString::fromLatin1(m.name), *m.model);
+            // Порядок полной модели и строки с совпадением в ней — эталон для
+            // строки старта под фильтром.
+            QVector<LogModel::EntryKey> order;
+            QVector<bool> matches;
+            for (int row = 0; row < m.model->rowCount(); ++row) {
+                order.append(m.model->keyForRow(row));
+                matches.append(m.model->messageAt(row).contains(QLatin1String("NEEDLE")));
+            }
             // Видимое подмножество: поиск идёт только по нему.
             m.model->setLogLevelFilter({LogLevel::Error});
             CHECK(testdocs::settle(*m.model), "filter settles");
             compareWithModel(QString::fromLatin1(m.name) + " filtered", *m.model);
+            checkStartRows(QString::fromLatin1(m.name) + " filtered", *m.model, order, matches);
             m.model->setLogLevelFilter({});
             CHECK(testdocs::settle(*m.model), "filter reset settles");
         }

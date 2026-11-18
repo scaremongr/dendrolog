@@ -24,6 +24,16 @@ All notable changes to DendroLog are documented here. The format follows
   whole window and is remembered.
 
 ### Fixed
+- With **Follow tail** on, a jump no longer snaps back to the end of a growing
+  log on the next appended lines. A click on the timeline, a jump from
+  Statistics, a result picked in the Search panel and a quick-search match
+  (`F3`) now select the line and switch Follow tail off, as Go to Line / Time
+  does.
+- Quick search (`F3` / `Shift+F3`) starts from the line you selected. When a
+  filter hides that line, the search continues from its place instead of from
+  the top of the log, also when the filter is applied while a search is
+  running; a line that only got keyboard focus is no longer taken for the
+  selected one.
 - Switching between the light and dark theme while a log is open no longer
   leaves lines drawn in the previous theme's text colour, and the Entry Details
   and Statistics panels are redrawn in the new colours.

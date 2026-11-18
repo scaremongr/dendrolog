@@ -99,6 +99,27 @@ void QuickSearch::launch(LogModel* model, int startRow, Scan scan)
         }));
 }
 
+int QuickSearch::startRowFor(const LogModel& model, int selectedRow, int anchorEntryId,
+                             const LogFile* anchorFile, bool forward)
+{
+    const int rows = model.rowCount();
+    if (selectedRow >= 0 && selectedRow < rows)
+        return selectedRow;
+    if (anchorEntryId >= 0) {
+        bool visible = false;
+        const int place = model.placeAmongVisible(anchorEntryId, anchorFile, &visible);
+        if (place >= 0 && visible)
+            return place;
+        // Запись скрыта: place — число видимых строк перед ней, то есть номер
+        // первой видимой строки за её местом. Старт в поиск не включается,
+        // поэтому вперёд отступаем на строку назад (place проверится первой),
+        // а назад стартуем с place (первой проверится place - 1).
+        if (place >= 0)
+            return forward ? place - 1 : place;
+    }
+    return forward ? -1 : rows;
+}
+
 void QuickSearch::cancel()
 {
     ++m_generation;

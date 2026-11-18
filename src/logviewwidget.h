@@ -60,6 +60,11 @@ public:
     void cancelQuickSearch();
     bool isQuickSearchRunning() const;
 
+    // Переход к записи (из Search Results, из статистики) как выбор
+    // пользователя (LogListView::goToRow). Запись скрыта фильтром — к ближайшей
+    // видимой строке (LogModel::nearestVisibleRow); false — перейти некуда.
+    bool goToEntry(int logicalEntryId, const LogFile* sourceFile);
+
     // Переход к следующей / предыдущей видимой записи с уровнем из levels
     // (F8 / Shift+F8; к первой показанной строке записи) от строки, выбранной
     // пользователем; через край — заворачивает. Переход — выбор пользователя

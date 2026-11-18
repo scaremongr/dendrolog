@@ -681,15 +681,29 @@ void LogViewWidget::searchTextPrevious(const QString& term, bool caseSensitive)
 
 void LogViewWidget::startQuickSearch()
 {
-    // Старт — от текущей строки; назад без текущей — с конца.
-    int currentRow = -1;
-    if (m_view->selectionModel() && m_view->selectionModel()->currentIndex().isValid())
-        currentRow = m_view->selectionModel()->currentIndex().row();
-    if (!m_quickSearchForward && currentRow == -1)
-        currentRow = m_model->rowCount();
+    // Старт — от строки, выбранной пользователем (инвариант 10: текущую без
+    // выделения мог назначить Qt по фокусу). Её скрыл фильтр — от её места;
+    // выбора нет — вперёд с начала, назад с конца. Сюда же приходит перезапуск
+    // после invalidated: view к этому моменту уже восстановил выделение (в
+    // обработчике modelReset), а скрытая запись находится по якорю.
+    const int currentRow = QuickSearch::startRowFor(*m_model, m_view->userSelectedRow(),
+                                                    m_view->selectedRecordId(),
+                                                    m_view->selectedRecordFile(),
+                                                    m_quickSearchForward);
     m_quickSearch->start(m_model, m_quickSearchTerm,
                          m_quickSearchCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive,
                          m_quickSearchForward, currentRow);
+}
+
+bool LogViewWidget::goToEntry(int logicalEntryId, const LogFile* sourceFile)
+{
+    if (!m_model || !m_view)
+        return false;
+    const int row = m_model->nearestVisibleRow(logicalEntryId, sourceFile);
+    if (row < 0)
+        return false;
+    m_view->goToRow(row);
+    return true;
 }
 
 void LogViewWidget::cancelQuickSearch()
@@ -711,11 +725,7 @@ void LogViewWidget::goToLevel(LogLevelMask levels, bool forward)
     // Опорная строка — выбранная пользователем: текущую без выделения мог
     // назначить Qt при возврате фокуса (инвариант 10). Без неё вперёд ищем с
     // начала, назад — с конца.
-    int startRow = -1;
-    const QModelIndex current = m_view->currentIndex();
-    if (current.isValid() && m_view->selectionModel()
-        && m_view->selectionModel()->isRowSelected(current.row(), QModelIndex()))
-        startRow = current.row();
+    const int startRow = m_view->userSelectedRow();
     m_levelJump->cancel();
     if (m_model->rowCount() <= m_levelJumpSyncRows) {
         finishLevelJump(m_model->findRowWithLevel(levels, startRow, forward), startRow);
@@ -749,13 +759,12 @@ void LogViewWidget::handleQuickSearchFinished(int row)
 {
     const QString term = m_quickSearchTerm;
     if (row >= 0 && row < m_model->rowCount()) {
-        const QModelIndex foundIndex = m_model->index(row, 0);
-        m_view->setCurrentIndex(foundIndex);
-        // Раскрыть найденную строку и подсветить в ней вхождения term
-        // ДО scrollTo: раскрытие меняет высоту строки, и прокрутка должна
-        // целиться уже в финальную геометрию.
-        m_view->showSearchMatch(foundIndex.row(), term, m_quickSearchCaseSensitive);
-        m_view->scrollTo(foundIndex, QAbstractItemView::PositionAtCenter);
+        // Раскрыть найденную строку и подсветить в ней вхождения term ДО
+        // перехода: раскрытие меняет высоту строки, и прокрутка должна
+        // целиться уже в финальную геометрию. Сам переход — общий (goToRow):
+        // строка становится выбором пользователя, follow-tail снимается.
+        m_view->showSearchMatch(row, term, m_quickSearchCaseSensitive);
+        m_view->goToRow(row);
         emit quickSearchFinished(term, true);
     } else {
         m_view->clearSearchMatch();
