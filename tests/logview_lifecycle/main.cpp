@@ -1021,8 +1021,15 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
                          .arg(now ? now->originalLineNumber() : -1));
         CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
               what + ": the current row stays selected");
-        CHECK(view.verticalScrollBar()->value() == scroll && view.visualRect(cur) == rect,
-              what + QStringLiteral(": the viewport stays put (scroll %1 → %2)")
+        // Резидентная вкладка ведёт высоты строк по тексту: текст в другой
+        // кодировке может рисоваться запасным шрифтом другой высоты (так на
+        // Windows), и прокрутка в пикселях законно сдвигается. Инвариант —
+        // текущая строка на том же месте экрана.
+        const QRect after = view.visualRect(cur);
+        CHECK(after.top() == rect.top(),
+              what + QStringLiteral(": the current row stays at the same place on screen "
+                                    "(top %1 → %2, scroll %3 → %4)")
+                         .arg(rect.top()).arg(after.top())
                          .arg(scroll).arg(view.verticalScrollBar()->value()));
         CHECK(tab.fileEncoding(file).source == FileEncoding::Source::User
                   && tab.fileEncoding(file).decoder.encoding() == encoding,

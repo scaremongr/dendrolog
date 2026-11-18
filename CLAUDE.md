@@ -67,7 +67,7 @@ ctest --test-dir build --output-on-failure
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Девятнадцать тестов без окна, зарегистрированы в CTest при `BUILD_TESTING`; CI
+Двадцать тестов без окна, зарегистрированы в CTest при `BUILD_TESTING`; CI
 (`.github/workflows/build.yml`) собирает и гоняет их на Windows и Linux:
 
 | Тест | Что проверяет |
