@@ -6,13 +6,39 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-18
+
 ### Added
+- **Go to Line / Time** (`Ctrl+G`, `View` menu): one box takes a line number
+  of the file or a time (`10:02`, `10:02:03.250`, `2026-03-05 10:02`) and shows
+  where the jump lands before you confirm. A line hidden by the filters leads
+  to the nearest shown one; in a tab with several files you pick the file the
+  line number belongs to.
+- **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
+  Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
+  the nearest shown entry of level Error or Fatal (or Warn). A multi-line
+  entry such as a stack trace counts once. Past the last one the jump
+  continues from the other end of the tab and says so in the status bar.
+  Lines hidden by filters are skipped. On a huge log the lookup runs in the
+  background and reads no text from disk.
+- **Whole word, regular expression and history in quick find.** Two toggles
+  next to **Aa** in the toolbar find box: **ab** (`Alt+W`) finds the text only
+  as a whole word, **.\*** (`Alt+R`) treats it as a regular expression with the
+  same syntax as Text Filters; `Alt+C` toggles **Aa**. An invalid expression
+  marks the box red and says where the error is. The toggles, **Aa** included,
+  are remembered between runs, and **All** (`Ctrl+Shift+F`) carries them over
+  to the Search panel. The down arrow in the find box (or the arrow at its
+  right edge) lists the last 20 searches; picking one runs it again, and
+  **Clear search history** forgets them.
 - **↓ N new lines.** When the log grows while you read further up with Follow
   tail off, a badge at the bottom of the view counts the lines appended below
   the screen (only those the tab's filters show). Click it, or press `Alt+End`
   (`View → Go to New Lines`), to jump to the first new line; lines you scroll
   past drop out of the count, and the badge goes away at the bottom or when
   Follow tail is turned on.
+- **Theme** in `Settings → Appearance`: **Same as system** (the default, follows
+  the OS as before), **Light** or **Dark**. The choice applies at once to the
+  whole window and is remembered.
 - **Built-in field schemas** for common formats, in the list from the first
   start: Logback / Log4j, Spring Boot, nginx / Apache access (combined),
   nginx error, Syslog (RFC 3164), Syslog / journalctl (ISO timestamp),
@@ -23,41 +49,10 @@ All notable changes to DendroLog are documented here. The format follows
   only the built-in schemas you have not changed. Nothing is selected by
   default — the schema box now says `(none)` instead of showing the first
   schema while no schema is active.
-- **Timestamps of syslog, access logs and nginx error logs are read.** Lines
-  with `Nov 18 13:55:36` (syslog, no year), `18/Nov/2026:13:55:36 +0000`
-  (nginx / Apache access) and `2026/11/18 13:55:36` (nginx error) now get
-  their moment: they merge by time with other files, and the time filter,
-  the timeline and the directory scanner's From / To work for them. A
-  syslog line takes the latest year that is not after the file's last
-  change, so a file that runs over New Year reads correctly. The built-in
-  Syslog (RFC 3164) and access schemas read their time field as a Timestamp
-  block; if you have not edited them, they update by themselves. A time
-  without a date (`[13:55:36 INF]`) is not read yet.
-- **Whole word and regular expression in quick find.** Two toggles next to
-  **Aa** in the toolbar find box: **ab** (`Alt+W`) finds the text only as a
-  whole word, **.\*** (`Alt+R`) treats it as a regular expression with the same
-  syntax as Text Filters; `Alt+C` toggles **Aa**. An invalid expression marks
-  the box red and says where the error is. The toggles, **Aa** included, are
-  remembered between runs, and **All** (`Ctrl+Shift+F`) carries them over to
-  the Search panel.
-- **Recent searches in quick find:** the down arrow in the find box (or the
-  arrow at its right edge) lists the last 20 searches; picking one runs it
-  again. **Clear search history** forgets them.
-- **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
-  Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
-  the nearest shown entry of level Error or Fatal (or Warn). A multi-line
-  entry such as a stack trace counts once. Past the last one the jump
-  continues from the other end of the tab and says so in the status bar.
-  Lines hidden by filters are skipped. On a huge log the lookup runs in the
-  background and reads no text from disk.
-- **Go to Line / Time** (`Ctrl+G`, `View` menu): one box takes a line number
-  of the file or a time (`10:02`, `10:02:03.250`, `2026-03-05 10:02`) and shows
-  where the jump lands before you confirm. A line hidden by the filters leads
-  to the nearest shown one; in a tab with several files you pick the file the
-  line number belongs to.
-- **Theme** in `Settings → Appearance`: **Same as system** (the default, follows
-  the OS as before), **Light** or **Dark**. The choice applies at once to the
-  whole window and is remembered.
+- **Schema descriptions.** The field schema editor (`Tools → Field Schemas…`)
+  has a Description line; the description is the tooltip of the schema in the
+  editor's list and in the *Log Fields* schema box. Built-in schemas come with
+  one.
 - **A folder dropped on the window opens in the Directory Scanner**: the panel
   comes up and the scan starts. The same goes for a folder on the command line
   (`DendroLog C:\logs`) and one handed over to the already open window. Files
@@ -75,20 +70,24 @@ All notable changes to DendroLog are documented here. The format follows
   “timestamp message” logs used to become one huge entry without a field
   schema: every line after the first was glued to it as a continuation, so
   lines had no time of their own, the timeline was empty, the time filter and
-  the merge by time did not work, and the directory scanner showed one entry.
+  the merge by time did not work, and the Directory Scanner showed one entry.
   Now an entry starts at a line whose timestamp stands at the very start, right
   after a `[` at the start (`[2026-11-18 13:55:36] …`), or — for access logs —
   in brackets after the client address. A timestamp in the middle of a line or
   in an indented line (a JSON or SQL body, the text of an exception) still
   keeps the line inside its entry, and lines with a timestamp and a level word
-  start an entry as before. The open tab (both for small and huge files) and
-  the directory scanner split entries the same way.
-- **Schema descriptions.** The field schema editor (`Tools → Field Schemas…`)
-  has a Description line; the description is the tooltip of the schema in the
-  editor's list and in the *Log Fields* schema box. Built-in schemas come with
-  one.
-- Editing or renaming a schema in the editor saves it to the same file; a file
-  named after the schema still follows a rename.
+  start an entry as before. Small and huge files and the Directory Scanner
+  split entries the same way.
+- **More timestamp forms are read: syslog, access logs and nginx error
+  logs.** Lines with `Nov 18 13:55:36` (syslog, no year),
+  `18/Nov/2026:13:55:36 +0000` (nginx / Apache access) and
+  `2026/11/18 13:55:36` (nginx error) now get their moment: they merge by time
+  with other files, and the time filter, the timeline, Go to Time and the
+  Directory Scanner's From / To work for them. A syslog line takes the latest
+  year that is not after the file's last change, so a file that runs over New
+  Year reads correctly. The built-in Syslog (RFC 3164) and access schemas read
+  their time field as a timestamp; if you have not edited them, they update by
+  themselves. A time without a date (`[13:55:36 INF]`) is not read yet.
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
   and `FTL` count as Fatal; `ERR` as Error; `WRN` as Warn;
   `INF` and `NOTICE` as Info; `DBG` as Debug; `VERBOSE` and `VRB` as Trace.
@@ -97,49 +96,44 @@ All notable changes to DendroLog are documented here. The format follows
   a field schema they were glued to the previous entry. The **Level** block of
   a field schema accepts the same words. The full table is in Quick Help
   (`F1`), “Which word means which level”.
-- The directory scanner counts Fatal, Error and Warn per entry: a level word
-  in a continuation line (a stack trace, a dumped message) no longer adds to
-  the counters, so they agree with the opened tab.
+- A jump — a click on the timeline, a jump from Statistics, a result picked in
+  the Search panel, a quick-search match (`F3`) — now selects the line and
+  switches Follow tail off, as Go to Line / Time does, so the next appended
+  lines no longer pull the view back to the end of the log.
+- Quick search (`F3` / `Shift+F3`) starts from the line you selected. When a
+  filter hides that line, the search continues from its place instead of from
+  the top of the log, also when the filter is applied while a search is
+  running; a line that only got keyboard focus is no longer taken for the
+  selected one.
 
 ### Fixed
-- Saving a schema in the editor no longer drops its description and the keys
-  of the schema file DendroLog does not know (also on import and export).
-  Editing or renaming a built-in schema in the editor no longer makes it look
-  deleted (it moved to a new file); changing only its description keeps it
-  eligible for updates by a new version.
-
 - **The Directory Scanner counts entries, not lines.** A stack trace or any
   other multi-line message used to add one entry per line; now the Entries
   column equals the number of entries of the opened tab, and W/E/F and the
-  From / To span agree with it. Lines in a CRLF file are split the same way.
-- The Directory Scanner reads the appended part of a **UTF-16** log correctly
-  (it was decoded as UTF-8 and lost its counts), and a log whose last line was
-  still being written no longer gains an extra entry when the line is finished.
-- A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
-  **Recent Files**: its temporary file is gone once the window closes. Such
-  entries left by earlier versions are dropped on start. The **Open** dialog no
-  longer starts in the temporary folder after a piped stream either.
-- A relative path passed on the command line while a window is already open
-  is resolved against the folder the command was run in, not the folder of
-  the open window.
+  From / To span agree with it: a level word in a continuation line (a stack
+  trace, a dumped message) no longer adds to the counters. Lines in a CRLF
+  file are split the same way. The appended part of a **UTF-16** log is read
+  correctly (it was decoded as UTF-8 and lost its counts), and a log whose
+  last line was still being written no longer gains an extra entry when the
+  line is finished.
 - **UTF-16 logs that grow.** Lines appended to an open UTF-16 file (and
   UTF-32) used to show as garbage: the new part was read as UTF-8. It is now
   read in the file's encoding, a line written in several parts stays one
-  line, and a line continuing a multi-line entry stays in that entry.
-- A UTF-16 file larger than the indexed-backend threshold is no longer read
-  again from the start on every auto-reload tick and every `F5`; only the
-  appended part is read.
-- **Switching between the light and dark theme repaints the panels.** Rule
+  line, and a line continuing a multi-line entry stays in that entry. A UTF-16
+  file larger than the indexed-backend threshold is no longer read again from
+  the start on every auto-reload tick and every `F5`; only the appended part
+  is read.
+- **Switching between the light and dark theme repaints everything.** Rule
   and marker cards in Text Filters, Search and Row Highlighters, the header
   cards of Entry Details and the Directory Scanner kept the colours of the
   theme the window was opened in — white boxes and black labels on a dark
-  window, or the reverse — until a restart. The same happened when the OS
-  theme changed while DendroLog was running. The section toggles of Entry
-  Details, the muted captions, the Statistics placeholder, the scanner's
-  refresh icon and the "not found" tint of the quick-search box now follow
-  the theme as well.
-- The dark theme no longer depends on which theme was active before it: it
-  looks the same after a switch from light as on a start under a dark OS.
+  window, or the reverse — until a restart, and lines of an open log kept the
+  previous theme's text colour. The same happened when the OS theme changed
+  while DendroLog was running. The section toggles of Entry Details, the muted
+  captions, the Statistics panel, the scanner's refresh icon and the
+  "not found" tint of the quick-search box now follow the theme as well. The
+  dark theme looks the same after a switch from light as on a start under a
+  dark OS.
 - A jump to a line near the end of a growing log (Go to, timeline, Search,
   quick search, `F8`) no longer slides to the tail on the next appended lines
   when Follow tail is off. The view follows the tail again once you scroll
@@ -148,19 +142,18 @@ All notable changes to DendroLog are documented here. The format follows
   resized no longer loses the scroll position: the view used to return to
   where it stood at the moment of the resize, leaving the selected line off
   screen.
-- With **Follow tail** on, a jump no longer snaps back to the end of a growing
-  log on the next appended lines. A click on the timeline, a jump from
-  Statistics, a result picked in the Search panel and a quick-search match
-  (`F3`) now select the line and switch Follow tail off, as Go to Line / Time
-  does.
-- Quick search (`F3` / `Shift+F3`) starts from the line you selected. When a
-  filter hides that line, the search continues from its place instead of from
-  the top of the log, also when the filter is applied while a search is
-  running; a line that only got keyboard focus is no longer taken for the
-  selected one.
-- Switching between the light and dark theme while a log is open no longer
-  leaves lines drawn in the previous theme's text colour, and the Entry Details
-  and Statistics panels are redrawn in the new colours.
+- Saving a schema in the editor no longer drops its description and the keys
+  of the schema file DendroLog does not know (also on import and export).
+  Editing or renaming a schema saves it to the same file, so an edited or
+  renamed built-in schema no longer looks deleted; changing only its
+  description keeps it eligible for updates by a new version.
+- A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
+  **Recent Files**: its temporary file is gone once the window closes. Such
+  entries left by earlier versions are dropped on start. The **Open** dialog no
+  longer starts in the temporary folder after a piped stream either.
+- A relative path passed on the command line while a window is already open
+  is resolved against the folder the command was run in, not the folder of
+  the open window.
 
 ## [0.4.0] — 2026-09-28
 

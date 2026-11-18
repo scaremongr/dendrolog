@@ -22,12 +22,17 @@
 ## Features
 
 - **Multi-file tabs** — open several files into one tab, merged by timestamp.
+  ISO, syslog, nginx / Apache access and nginx error timestamps are read with
+  their time zone; a line that opens with a timestamp starts a new entry, so
+  plain logs split into entries without any setup.
 - **Huge files** — multi-gigabyte logs open without being loaded into RAM: a
   compact line index (~10 bytes per line) keeps scrolling, filtering and
   search responsive while the text stays on disk.
 - **Directory scanner** — scan a whole folder of logs into a sortable tree:
   per-file entry counts, time ranges, warn/error/fatal counts and sizes;
   narrow it down by content or date range and open files right from the results.
+  Rotated logs (`app.log.1`, `app.log-20260101`) are listed; drop a folder on
+  the window to scan it.
 - **Field schemas** — split entries into structured fields (timestamp, level,
   thread, message…); ready-made schemas for Logback / Log4j, Spring Boot,
   nginx / Apache, syslog / journalctl, Serilog and Python logging, auto-detect
@@ -35,6 +40,8 @@
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
   to show only, hide, highlight or find lines with it.
+- **Quick find** — whole word, regular expression and recent searches right
+  in the toolbar box; **All** lists every match in the Search panel.
 - **Go to line or time** — `Ctrl+G` jumps to a line number of the file or to a
   moment; with filters on it lands on the nearest shown line.
 - **Next / previous error** — `F8` / `Shift+F8` step through Error and Fatal
