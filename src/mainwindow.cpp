@@ -1,4 +1,5 @@
 ﻿#include "mainwindow.h"
+#include "bookmarkpanelwidget.h"
 #include "quicksearchfield.h"
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
@@ -156,6 +157,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupSearchDock();
     setupEntryDetailsDock();
     setupStatisticsDock();
+    setupBookmarksDock();
     setupDirectoryScanner();
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
@@ -453,6 +455,30 @@ MainWindow::MainWindow(QWidget *parent)
         addLevelJump(tr("Previous Error"), QStringLiteral("prevError"), errors, false);
         addLevelJump(tr("Next Warning"), QStringLiteral("nextWarning"), warnings, true);
         addLevelJump(tr("Previous Warning"), QStringLiteral("prevWarning"), warnings, false);
+        ui->menuView->insertSeparator(ui->actionWordWrap);
+    }
+
+    // Закладки (R-2): поставить / снять на выбранной строке (Ctrl+F2),
+    // следующая / предыдущая видимая (F2 / Shift+F2).
+    {
+        QAction* toggle = new QAction(tr("Add / Remove Bookmark"), this);
+        connect(toggle, &QAction::triggered, this, [this]() {
+            if (m_activeLogView && !m_activeLogView->toggleBookmarkAtSelection())
+                m_statusLabel->setText(tr("Select a line to bookmark it"));
+        });
+        ui->menuView->insertAction(ui->actionWordWrap, toggle);
+        m_shortcutActions.insert(QStringLiteral("toggleBookmark"), toggle);
+        const auto addBookmarkJump = [this](const QString& text, const QString& id, bool forward) {
+            QAction* action = new QAction(text, this);
+            connect(action, &QAction::triggered, this, [this, forward]() {
+                if (m_activeLogView)
+                    m_activeLogView->goToBookmark(forward);
+            });
+            ui->menuView->insertAction(ui->actionWordWrap, action);
+            m_shortcutActions.insert(id, action);
+        };
+        addBookmarkJump(tr("Next Bookmark"), QStringLiteral("nextBookmark"), true);
+        addBookmarkJump(tr("Previous Bookmark"), QStringLiteral("prevBookmark"), false);
         ui->menuView->insertSeparator(ui->actionWordWrap);
     }
 
@@ -782,6 +808,7 @@ void MainWindow::applyDefaultPanelLayout()
         ui->timeFilterDockWidget,
         ui->fieldVisibilityDockWidget,
         m_markerDockWidget,
+        m_bookmarkDockWidget,
         m_statsDockWidget,
         ui->directoryScannerDockWidget,
     };
@@ -2025,6 +2052,39 @@ void MainWindow::setupEntryDetailsDock()
     }
 }
 
+void MainWindow::setupBookmarksDock()
+{
+    m_bookmarkDockWidget = new QDockWidget(tr("Bookmarks"), this);
+    // objectName обязателен: saveState()/restoreState() узнают док по нему.
+    m_bookmarkDockWidget->setObjectName(QStringLiteral("bookmarksDockWidget"));
+
+    m_bookmarkPanel = new BookmarkPanelWidget(m_bookmarkDockWidget);
+    m_bookmarkDockWidget->setWidget(m_bookmarkPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_bookmarkDockWidget);
+    // Панель по требованию: по умолчанию скрыта (View → Bookmarks Panel, Ctrl+F11).
+    m_bookmarkDockWidget->hide();
+    connect(m_bookmarkPanel, &BookmarkPanelWidget::statusMessage,
+            this, [this](const QString& text) { m_statusLabel->setText(text); });
+
+    if (ui->menuView) {
+        QAction* toggle = m_bookmarkDockWidget->toggleViewAction();
+        toggle->setText(tr("Bookmarks Panel"));
+        // Сгруппировать с прочими переключателями панелей (до первого сепаратора).
+        QAction* beforeAction = nullptr;
+        for (QAction* a : ui->menuView->actions()) {
+            if (a->isSeparator()) {
+                beforeAction = a;
+                break;
+            }
+        }
+        if (beforeAction)
+            ui->menuView->insertAction(beforeAction, toggle);
+        else
+            ui->menuView->addAction(toggle);
+        m_shortcutActions.insert(QStringLiteral("panelBookmarks"), toggle);
+    }
+}
+
 void MainWindow::setupStatisticsDock()
 {
     m_statsDockWidget = new QDockWidget(tr("Statistics"), this);
@@ -2243,6 +2303,10 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
     connect(logView, &LogViewWidget::levelJumpProgress, this, &MainWindow::onLevelJumpProgress);
     connect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
+    connect(logView, &LogViewWidget::bookmarkJumpFinished, this, &MainWindow::onBookmarkJumpFinished);
+    connect(logView, &LogViewWidget::bookmarkNoteEditRequested, this, &MainWindow::editBookmarkNote);
+    if (m_bookmarkPanel)
+        m_bookmarkPanel->setLogView(logView);
 
     if (logView->view()) {
         connect(logView->view(), &LogListView::timeFilterBoundRequested,
@@ -2323,6 +2387,8 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     disconnect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
     disconnect(logView, &LogViewWidget::levelJumpProgress, this, &MainWindow::onLevelJumpProgress);
     disconnect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
+    disconnect(logView, &LogViewWidget::bookmarkJumpFinished, this, &MainWindow::onBookmarkJumpFinished);
+    disconnect(logView, &LogViewWidget::bookmarkNoteEditRequested, this, &MainWindow::editBookmarkNote);
     // Поиск ушедшей вкладки больше некому показывать.
     logView->cancelQuickSearch();
     logView->cancelLevelJump();
@@ -3880,6 +3946,11 @@ void MainWindow::onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJu
         text = tr("The shown lines changed during the search - press the key again");
         break;
     }
+    showJumpStatus(text);
+}
+
+void MainWindow::showJumpStatus(const QString& text)
+{
     // Удачный переход пояснений не требует, но своё прошлое пояснение убираем
     // (только своё: строку статуса с тех пор мог занять кто-то другой).
     if (!text.isEmpty())
@@ -3888,6 +3959,47 @@ void MainWindow::onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJu
         m_statusLabel->setText(tr("Ready"));
     m_levelJumpStatusShown = !text.isEmpty();
     m_levelJumpStatusText = text;
+}
+
+void MainWindow::onBookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome)
+{
+    Q_UNUSED(forward);
+    QString text;
+    switch (outcome) {
+    case LogViewWidget::LevelJumpOutcome::Moved:
+    case LogViewWidget::LevelJumpOutcome::Interrupted:
+        break;
+    case LogViewWidget::LevelJumpOutcome::Wrapped:
+        text = tr("No more bookmarks this way - continued from the other end");
+        break;
+    case LogViewWidget::LevelJumpOutcome::OnlyCurrent:
+        text = tr("This is the only bookmark among the shown lines");
+        break;
+    case LogViewWidget::LevelJumpOutcome::NotFound:
+        text = tr("No bookmarks among the shown lines");
+        break;
+    }
+    showJumpStatus(text);
+}
+
+void MainWindow::editBookmarkNote(int bookmarkId, bool created)
+{
+    if (!m_activeLogView)
+        return;
+    BookmarkStore& store = m_activeLogView->bookmarks();
+    const Bookmark* bookmark = store.find(bookmarkId);
+    if (!bookmark)
+        return;
+    bool ok = false;
+    const QString note = QInputDialog::getText(
+        this, tr("Bookmark Note"),
+        tr("Note for line %1 of %2:").arg(bookmark->line)
+            .arg(QFileInfo(bookmark->filePath).fileName()),
+        QLineEdit::Normal, bookmark->note, &ok);
+    if (ok)
+        store.setNote(bookmarkId, note);
+    else if (created)
+        store.remove(bookmarkId); // «Add Bookmark with Note…» отменён целиком
 }
 
 void MainWindow::updateSearchResultsStatus()

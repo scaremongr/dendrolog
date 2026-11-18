@@ -51,6 +51,7 @@ filtering, highlighting and live reload.
   - **Open Link** when a URL is selected.
   - **Open File / Open Containing Folder** when a file path is selected.
   - **Use as Time Filter Start / End** — the selected timestamp or, with nothing selected, the time of the line under the cursor.
+  - **Add Bookmark / Remove Bookmark** and **Add Bookmark with Note… / Edit Bookmark Note…** for the line under the cursor (see Bookmarks).
 
 ## Filtering
 
@@ -185,6 +186,16 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - The line becomes the selected one and Follow tail is switched off, as with Go to.
 - On a very large log the lookup runs in the background (the level is taken from the line index, the text is not read), so the window stays responsive; a long lookup shows its progress in the status bar, and pressing the key again starts over. If the shown lines change while it runs (a filter finishes, the file is reloaded), the status bar asks to press the key again.
 
+## Bookmarks
+
+- `Ctrl+F2` (`View → Add / Remove Bookmark`) bookmarks the selected line or removes its bookmark; the context menu of a line does the same and can ask for a note. A bookmarked line has a ribbon in the left margin.
+- `F2` / `Shift+F2` (`View → Next Bookmark` / `Previous Bookmark`) jump from the selected line to the next / previous bookmark among the shown lines; past the last one the jump continues from the other end of the tab, as with `F8`. Bookmarks on lines hidden by filters are skipped.
+- A bookmark belongs to one physical line, not to the whole entry: a bookmark on a line of a stack trace stays on that line.
+- The **Bookmarks** panel (`Ctrl+F11`) lists the bookmarks of the current tab: file and line number, the start of the line's text and a note you can edit right there. Click the file and line to go to the bookmark, ✕ removes it, **Clear All** removes every bookmark of the tab.
+- A bookmark on a line hidden by the filters is marked **hidden by filter**; clicking it goes to the nearest shown line. When the filter is removed, the margin mark is back.
+- Bookmarks stay through tail updates, a full reload of the file and the switch of a growing file to the large-file mode. If the file is rewritten and the line is gone or has different text, the bookmark stays in the panel with its text and note, marked **line not found**, and is not moved to another line. Bookmarking that line again reattaches the bookmark and keeps its note. While the file is being read again the bookmark is marked **line not loaded**.
+- Bookmarks live until the tab is closed.
+
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
@@ -207,7 +218,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Panels & layout
 
-- Toggle docks from the **View** menu or with `Ctrl+F1…F9` (Text Filters, Directory Scanner, Time Filter, Log Fields, Row Highlighters, Timeline, Search, Entry Details, Statistics). Dock positions are remembered between sessions; `View → Reset Panel Layout` restores the default arrangement.
+- Toggle docks from the **View** menu or with `Ctrl+F1`, `Ctrl+F3…F11` (Text Filters `Ctrl+F1`, Time Filter `F3`, Log Fields `F4`, Row Highlighters `F5`, Timeline `F6`, Search `F7`, Entry Details `F8`, Statistics `F9`, Directory Scanner `F10`, Bookmarks `F11`; `Ctrl+F2` is the bookmark key). Dock positions are remembered between sessions; `View → Reset Panel Layout` restores the default arrangement.
 - Long lists in the Text Filters, Row Highlighters and Log Fields panels scroll instead of stretching the panel past the window.
 - The **Search** panel shows its rules and results side by side when docked at the bottom and stacked when docked at a side.
 
@@ -241,6 +252,8 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Go to line or time | `Ctrl+G` |
 | Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
 | Next / previous warning | `F7` / `Shift+F7` |
+| Add / remove bookmark | `Ctrl+F2` |
+| Next / previous bookmark | `F2` / `Shift+F2` |
 | Go to new lines (below the screen) | `Alt+End` |
 | Toggle word wrap | `Alt+Z` |
 | Larger / smaller / default font | `Ctrl++` / `Ctrl+-` / `Ctrl+0`, `Ctrl` + wheel |
@@ -251,4 +264,4 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Expand/collapse current line | `Space` |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
-| Show/Hide panels | `Ctrl+F1…F9` |
+| Show/Hide panels | `Ctrl+F1`, `Ctrl+F3…F11` |

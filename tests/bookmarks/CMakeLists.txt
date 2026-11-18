@@ -1,0 +1,1 @@
+dendrolog_add_test(bookmarks LIBRARIES dendrolog_widgets TIMEOUT 300)

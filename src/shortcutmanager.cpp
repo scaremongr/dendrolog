@@ -35,6 +35,9 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("prevError"),   tr("Previous error"),            QKeySequence(Qt::SHIFT | Qt::Key_F8) },
         { QStringLiteral("nextWarning"), tr("Next warning"),              QKeySequence(Qt::Key_F7) },
         { QStringLiteral("prevWarning"), tr("Previous warning"),          QKeySequence(Qt::SHIFT | Qt::Key_F7) },
+        { QStringLiteral("toggleBookmark"), tr("Add / remove bookmark"),  QKeySequence(Qt::CTRL | Qt::Key_F2) },
+        { QStringLiteral("nextBookmark"),   tr("Next bookmark"),          QKeySequence(Qt::Key_F2) },
+        { QStringLiteral("prevBookmark"),   tr("Previous bookmark"),      QKeySequence(Qt::SHIFT | Qt::Key_F2) },
         { QStringLiteral("goToNewLines"), tr("Go to new lines (below the screen)"), QKeySequence(Qt::ALT | Qt::Key_End) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
@@ -49,7 +52,9 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("levelAll"),    tr("Show all levels"),           QKeySequence(Qt::ALT | Qt::Key_0) },
         { QStringLiteral("resetFilters"), tr("Reset filters of this tab"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R) },
         { QStringLiteral("panelTextFilters"),   tr("Show/Hide Text Filters panel"),       QKeySequence(Qt::CTRL | Qt::Key_F1) },
-        { QStringLiteral("panelDirScanner"),    tr("Show/Hide Directory Scanner panel"),  QKeySequence(Qt::CTRL | Qt::Key_F2) },
+        // Ctrl+F2 — закладка (как в привычной раскладке F2 / Shift+F2 /
+        // Ctrl+F2), поэтому Directory Scanner ушёл на Ctrl+F10.
+        { QStringLiteral("panelDirScanner"),    tr("Show/Hide Directory Scanner panel"),  QKeySequence(Qt::CTRL | Qt::Key_F10) },
         { QStringLiteral("panelTimeFilter"),    tr("Show/Hide Time Filter panel"),        QKeySequence(Qt::CTRL | Qt::Key_F3) },
         { QStringLiteral("panelFields"),        tr("Show/Hide Log Fields panel"),         QKeySequence(Qt::CTRL | Qt::Key_F4) },
         { QStringLiteral("panelRowHighlighters"), tr("Show/Hide Row Highlighters panel"), QKeySequence(Qt::CTRL | Qt::Key_F5) },
@@ -57,6 +62,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("panelSearchResults"),   tr("Show/Hide Search panel"),   QKeySequence(Qt::CTRL | Qt::Key_F7) },
         { QStringLiteral("panelEntryDetails"),    tr("Show/Hide Entry Details panel"),    QKeySequence(Qt::CTRL | Qt::Key_F8) },
         { QStringLiteral("panelStatistics"),      tr("Show/Hide Statistics panel"),       QKeySequence(Qt::CTRL | Qt::Key_F9) },
+        { QStringLiteral("panelBookmarks"),       tr("Show/Hide Bookmarks panel"),        QKeySequence(Qt::CTRL | Qt::Key_F11) },
         { QStringLiteral("quit"),        tr("Exit"),                      QKeySequence(Qt::CTRL | Qt::Key_Q) },
     };
 }

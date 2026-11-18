@@ -48,6 +48,7 @@ void AppTheme::load(QSettings& s)
     // UI element colors
     gutterMarker  = readColor(s, "gutterMarker",   gutterMarker);
     gutterNewEntry= readColor(s, "gutterNewEntry",  gutterNewEntry);
+    gutterBookmark= readColor(s, "gutterBookmark",  gutterBookmark);
     badgeBg       = readColor(s, "badgeBg",         badgeBg);
     badgeFg       = readColor(s, "badgeFg",         badgeFg);
     bracketMatch  = readColor(s, "bracketMatch",    bracketMatch);
@@ -88,6 +89,7 @@ void AppTheme::save(QSettings& s) const
 
     s.setValue("gutterMarker",   gutterMarker.name(QColor::HexArgb));
     s.setValue("gutterNewEntry",  gutterNewEntry.name(QColor::HexArgb));
+    s.setValue("gutterBookmark",  gutterBookmark.name(QColor::HexArgb));
     s.setValue("badgeBg",         badgeBg.name(QColor::HexArgb));
     s.setValue("badgeFg",         badgeFg.name(QColor::HexArgb));
     s.setValue("bracketMatch",    bracketMatch.name(QColor::HexArgb));

@@ -14,6 +14,7 @@
 #include "logfile.h"
 #include "LogListView.h"
 #include "filechangedetector.h"
+#include "bookmarkstore.h"
 
 class QuickSearch;
 
@@ -95,6 +96,22 @@ public:
     };
     void goToLevel(LogLevelMask levels, bool forward);
     void cancelLevelJump();
+
+    // ---- Закладки (R-2) ---------------------------------------------------------
+    // Хранилище закладок вкладки — у модели (BookmarkStore).
+    BookmarkStore& bookmarks() const { return m_model->bookmarks(); }
+    // Поставить / снять закладку на видимой строке; true — теперь стоит.
+    bool toggleBookmark(int row);
+    // Ctrl+F2: на строке, выбранной пользователем (инвариант 10); false —
+    // строка не выбрана.
+    bool toggleBookmarkAtSelection();
+    // F2 / Shift+F2: к следующей / предыдущей видимой закладке от выбранной
+    // строки, через край — заворачивает (как F8). Итог — bookmarkJumpFinished.
+    void goToBookmark(bool forward);
+    // Переход к закладке из панели: видна — к ней, скрыта фильтром — к
+    // ближайшей видимой строке; false — строки нет (Pending, Missing) или не
+    // видно ни одной строки. Переход — выбор пользователя (goToRow).
+    bool goToBookmarkId(int id);
     // Вкладка не больше стольких видимых строк ищется синхронно.
     void setLevelJumpSyncRows(int rows) { m_levelJumpSyncRows = rows; }
 
@@ -122,6 +139,12 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // Переход по уровню: прогресс долгого скана и итог.
     void levelJumpProgress(LogLevelMask levels, bool forward, int percent);
     void levelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
+    // Итог F2 / Shift+F2 (Interrupted не бывает: поиск синхронный).
+    void bookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome);
+    // Пункт контекстного меню «заметка к закладке»: закладка уже стоит,
+    // заметку спрашивает окно. created — закладку поставил сам этот пункт:
+    // отказ от заметки её снимает.
+    void bookmarkNoteEditRequested(int bookmarkId, bool created);
 
 private slots:
     void handleEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& parsedLogFile);
@@ -170,6 +193,9 @@ private:
     // заново. Используется, когда файл переписан, обрезан или удалён и создан
     // заново. Состояние файла обнуляется и помечается «загрузка в полёте».
     void startFullReload(const LogFilePtr& logFile);
+    // Загрузка файла закончилась — закладки его строк сверяются (fullLoad —
+    // файл прочитан с нуля).
+    void bookmarksFileLoaded(const LogFilePtr& logFile, bool fullLoad);
 
     LogListView *m_view;
     LogModel    *m_model;

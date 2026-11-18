@@ -778,11 +778,32 @@ QRect LogListView::textAreaScreenRect(int y, int height, int badgesWidth) const 
 // Добавить второй маркер или номер строки — только здесь.
 void LogListView::paintGutter(QPainter& painter, int row, QRect gutterRect) {
     painter.save();
-    const bool isNew = model()->data(model()->index(row, 0), LogModel::IsNewRole).toBool();
-    painter.setPen(isNew ? AppTheme::instance().gutterNewEntry : AppTheme::instance().gutterMarker);
+    const QModelIndex index = model()->index(row, 0);
+    const bool isNew = model()->data(index, LogModel::IsNewRole).toBool();
     // Маркер начала записи "›", выровненный по первой строке элемента
     QRect markerRect(gutterRect.left(), gutterRect.top(),
                      gutterRect.width() - 1, singleRowHeight());
+    // Закладка (R-2): лента-флажок цвета закладок на всю высоту первой
+    // строки, «›» поверх неё — светлым. Роль отвечает за O(1).
+    const bool bookmarked = model()->data(index, LogModel::BookmarkRole).toBool();
+    if (bookmarked) {
+        const QRectF r = QRectF(markerRect).adjusted(1, 1, 0, -1);
+        const qreal notch = qMin<qreal>(4.0, r.height() / 3.0);
+        QPolygonF ribbon;
+        ribbon << r.topLeft() << r.topRight() << r.bottomRight()
+               << QPointF(r.center().x(), r.bottom() - notch) << r.bottomLeft();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(AppTheme::instance().gutterBookmark);
+        painter.drawPolygon(ribbon);
+        // «›» — контрастным к ленте цветом: её цвет пользователь задаёт сам.
+        const QColor ribbonColor = AppTheme::instance().gutterBookmark;
+        painter.setPen(isNew ? AppTheme::instance().gutterNewEntry
+                             : (ribbonColor.lightnessF() > 0.6 ? QColor(Qt::black)
+                                                               : QColor(Qt::white)));
+    } else {
+        painter.setPen(isNew ? AppTheme::instance().gutterNewEntry : AppTheme::instance().gutterMarker);
+    }
     painter.drawText(markerRect, Qt::AlignVCenter | Qt::AlignHCenter,
                      QStringLiteral("\u203A"));
     painter.restore();
@@ -2804,6 +2825,20 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
         QAction* asEnd = menu.addAction(tr("Use as Time Filter End (%1)").arg(shown));
         connect(asEnd, &QAction::triggered, this,
                 [this, boundTime]() { emit timeFilterBoundRequested(boundTime, false); });
+    }
+
+    // Закладка на строке под курсором (R-2): поставить / снять и заметка.
+    if (haveRow && model() && m_bookmarkActions) {
+        const bool bookmarked =
+            model()->data(model()->index(row, 0), LogModel::BookmarkRole).toBool();
+        menu.addSeparator();
+        QAction* toggle = menu.addAction(bookmarked ? tr("Remove Bookmark") : tr("Add Bookmark"));
+        connect(toggle, &QAction::triggered, this,
+                [this, row]() { emit bookmarkActionRequested(row, BookmarkAction::Toggle); });
+        QAction* note = menu.addAction(bookmarked ? tr("Edit Bookmark Note…")
+                                                  : tr("Add Bookmark with Note…"));
+        connect(note, &QAction::triggered, this,
+                [this, row]() { emit bookmarkActionRequested(row, BookmarkAction::EditNote); });
     }
 
     if (haveRow && rowHasWrapToggle(row) && !hugeRowMode()) {

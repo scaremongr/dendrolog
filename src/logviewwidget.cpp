@@ -77,6 +77,20 @@ LogViewWidget::LogViewWidget(QWidget *parent)
         emit currentRowChanged(currentRow, totalRows);
     });
 
+    // Контекстное меню строки: закладка и заметка к ней.
+    m_view->setBookmarkActionsEnabled(true);
+    connect(m_view, &LogListView::bookmarkActionRequested, this,
+            [this](int row, LogListView::BookmarkAction action) {
+        if (action == LogListView::BookmarkAction::Toggle) {
+            toggleBookmark(row);
+            return;
+        }
+        const int before = bookmarks().count();
+        const int id = bookmarks().add(row);
+        if (id >= 0)
+            emit bookmarkNoteEditRequested(id, bookmarks().count() > before);
+    });
+
     // Пробрасываем сигнал фильтрации модели
     connect(m_model, &LogModel::modelFiltered, this, &LogViewWidget::handleModelFilteredRelay);
 
@@ -211,6 +225,7 @@ void LogViewWidget::dropRowsForFile(const LogFilePtr& logFile)
 {
     if (!logFile)
         return;
+    bookmarks().invalidateFile(logFile->filePath);
     if (auto* store = m_model->indexedOrNull())
         store->resetFileIndex(logFile, std::make_shared<LineIndex>());
     else
@@ -227,6 +242,8 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     // Ключ уже есть в хэше у всех вызывающих — вставки (и рехэша, который
     // инвалидировал бы их ссылку на состояние) здесь не происходит.
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    // Строки файла сбрасываются: закладки сверятся, когда строки покажутся.
+    bookmarks().invalidateFile(logFile->filePath);
 
     if (auto* store = m_model->indexedOrNull()) {
         // Строки файла сбрасываются, индексация идёт в свежий LineIndex
@@ -333,6 +350,7 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
     st.failedStamp = DiskStamp{};
     updateLoadingState();
 
+    bookmarksFileLoaded(logFile, wasInitial);
     if (wasInitial)
         emit fileParsingFinished(logFile,
                                  int(qMin<qint64>(newLines, INT_MAX)));
@@ -428,6 +446,7 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
         st.loadInFlight    = false;
         st.failedStamp     = DiskStamp{};
         updateLoadingState();
+        bookmarksFileLoaded(parsedLogFile, true);
     }
 
     emit fileParsingFinished(parsedLogFile, totalEntries);
@@ -663,6 +682,7 @@ void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFi
         if (st.endOffset >= 0)
             st.anchor = FileChangeDetector::capture(logFile->filePath, st.endOffset);
         updateLoadingState();
+        bookmarksFileLoaded(logFile, false);
     }
     emit totalRowCountChanged(m_model->rowCount());
     QModelIndex cur = m_view->currentIndex();
@@ -781,6 +801,53 @@ void LogViewWidget::finishLevelJump(int row, int startRow)
         m_view->goToRow(row);
     }
     emit levelJumpFinished(m_levelJumpLevels, outcome);
+}
+
+void LogViewWidget::bookmarksFileLoaded(const LogFilePtr& logFile, bool fullLoad)
+{
+    if (logFile)
+        bookmarks().fileLoaded(logFile->filePath, fullLoad);
+}
+
+bool LogViewWidget::toggleBookmark(int row)
+{
+    return bookmarks().toggle(row);
+}
+
+bool LogViewWidget::toggleBookmarkAtSelection()
+{
+    const int row = m_view->userSelectedRow();
+    if (row < 0)
+        return false;
+    toggleBookmark(row);
+    return true;
+}
+
+void LogViewWidget::goToBookmark(bool forward)
+{
+    // Опорная строка — выбранная пользователем (инвариант 10), как у F8.
+    const int startRow = m_view->userSelectedRow();
+    const int row = bookmarks().nextRow(startRow, forward);
+    LevelJumpOutcome outcome = LevelJumpOutcome::NotFound;
+    if (row >= 0) {
+        if (row == startRow)
+            outcome = LevelJumpOutcome::OnlyCurrent;
+        else if (startRow >= 0 && (forward ? row < startRow : row > startRow))
+            outcome = LevelJumpOutcome::Wrapped;
+        else
+            outcome = LevelJumpOutcome::Moved;
+        m_view->goToRow(row);
+    }
+    emit bookmarkJumpFinished(forward, outcome);
+}
+
+bool LogViewWidget::goToBookmarkId(int id)
+{
+    const int row = bookmarks().targetRow(id);
+    if (row < 0)
+        return false;
+    m_view->goToRow(row);
+    return true;
 }
 
 void LogViewWidget::handleQuickSearchFinished(int row)

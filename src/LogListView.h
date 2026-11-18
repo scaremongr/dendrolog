@@ -189,6 +189,10 @@ public:
     void goToRow(int row);
     void clearSearchMatch();
 
+    // Пункты закладок в контекстном меню строки. Включает вкладка
+    // (LogViewWidget), которая их исполняет; у view результатов Search их нет.
+    void setBookmarkActionsEnabled(bool enabled) { m_bookmarkActions = enabled; }
+
     // ---- Выбор пользователя (инвариант 10) ----------------------------------
     // Строка, выбранная пользователем: текущая И выделенная. Текущую без
     // выделения мог назначить Qt при возврате фокуса — она выбором не
@@ -263,6 +267,13 @@ public:
     };
     Q_ENUM(TextAction)
 
+    // Пункты контекстного меню строки про закладку (R-2). Исполняет вкладка.
+    enum class BookmarkAction {
+        Toggle,    // поставить / снять закладку на строке
+        EditNote,  // поставить при необходимости и спросить заметку
+    };
+    Q_ENUM(BookmarkAction)
+
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
 
@@ -277,6 +288,10 @@ signals:
 
     // Пункт контекстного меню над выделенным текстом (см. TextAction).
     void textActionRequested(LogListView::TextAction action, const QString& text);
+
+    // Пункт контекстного меню про закладку на строке row (см. BookmarkAction).
+    // Только если включено setBookmarkActionsEnabled (view вкладки).
+    void bookmarkActionRequested(int row, LogListView::BookmarkAction action);
 
     // Ctrl+колесо: крупнее (steps > 0) или мельче шрифт. Размер шрифта —
     // общая настройка, поэтому меняет его окно, а не сам view.
@@ -344,6 +359,7 @@ private:
     // Внутри QAbstractItemView::focusInEvent: текущую строку назначает Qt,
     // а не пользователь (см. focusInEvent).
     bool m_inFocusIn = false;
+    bool m_bookmarkActions = false; // см. setBookmarkActionsEnabled
 
     // ========== Левый отступ для маркера начала элемента ==========
     static constexpr int kLeftMarginWidth = 12; // Ширина полоски слева, где рисуется "›"

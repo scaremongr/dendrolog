@@ -7,6 +7,20 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Bookmarks with notes.** `Ctrl+F2` bookmarks the selected line (or use
+  **Add Bookmark** in a line's context menu); a ribbon in the left margin marks
+  it. `F2` / `Shift+F2` jump to the next / previous bookmark among the shown
+  lines, continuing from the other end of the tab. The **Bookmarks** panel
+  (`Ctrl+F11`, `View` menu) lists the bookmarks of the current tab with file,
+  line, the start of the line's text and a note you can edit in place; click a
+  bookmark to go to it, remove one with ✕ or all with **Clear All**. Bookmarks
+  stay through filters (a bookmark on a hidden line is marked "hidden by
+  filter" and leads to the nearest shown line), through tail updates, a full
+  reload of the file and the switch of a growing file to the large-file mode.
+  If the file is rewritten and the line is gone, the bookmark stays in the
+  panel with its text and note, marked "line not found", instead of moving to
+  another line. Bookmarks live until the tab is closed; keeping them between
+  runs comes later.
 - **Logs not in UTF-8 are readable (part 1 of 2).** A file above the
   large-file threshold in Windows-1251, IBM866 (cp866), KOI8-R or
   Windows-1252 is now shown with its real text instead of `�`, and Cyrillic in
@@ -16,6 +30,11 @@ All notable changes to DendroLog are documented here. The format follows
   tab with several files keeps its own encoding. Files below the threshold
   still read only UTF-8 — that comes in the next step, together with choosing
   the encoding by hand.
+
+### Changed
+- **Show/Hide Directory Scanner panel** moved from `Ctrl+F2` to `Ctrl+F10`:
+  `Ctrl+F2` now adds or removes a bookmark. A shortcut you set yourself in
+  Settings is kept.
 
 ### Fixed
 - A blank last line of a file is now shown in tabs below the large-file

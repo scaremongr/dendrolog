@@ -65,6 +65,7 @@ public:
 
     QColor gutterMarker  {110, 110, 110, 160}; // Маркер «›» начала записи в LogListView
     QColor gutterNewEntry{ 36, 255, 83      }; // Маркер «›» для строк из последнего auto-reload
+    QColor gutterBookmark{ 92, 110, 235     }; // Лента закладки в жёлобе и акцент панели Bookmarks
 
     // ---- Плашки (badges) в панели лога --------------------------------------
 

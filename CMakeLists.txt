@@ -65,6 +65,8 @@ set(DENDROLOG_CORE_SOURCES
     src/logmodel.cpp
     src/logstore.h
     src/recordid.h
+    src/bookmarkstore.h
+    src/bookmarkstore.cpp
     src/residentlogstore.h
     src/residentlogstore.cpp
     src/indexedlogstore.h
@@ -162,6 +164,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/filterpanelwidget.cpp
     src/markerpanelwidget.h
     src/markerpanelwidget.cpp
+    src/bookmarkpanelwidget.h
+    src/bookmarkpanelwidget.cpp
     src/entrydetailspanel.h
     src/entrydetailspanel.cpp
     src/statisticspanel.h

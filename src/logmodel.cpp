@@ -1,4 +1,5 @@
 #include "logmodel.h"
+#include "bookmarkstore.h"
 #include "indexedlogstore.h"
 #include "residentlogstore.h"
 
@@ -17,6 +18,7 @@ LogModel::LogModel(QObject* parent)
     // m_filterStartTime / m_filterEndTime default-constructed невалидными —
     // фильтр по времени выключен. Пустой m_activeLogLevels = «показывать все».
 {
+    m_bookmarks = new BookmarkStore(*this);
     // Палитра цветов для плашек файлов (при загрузке нескольких файлов в таб).
     m_predefinedFileColors << QColor(Qt::cyan).darker(220)
                            << QColor(Qt::magenta).darker(220)
@@ -59,6 +61,7 @@ ResidentLogStore* LogModel::residentOrNull() const
 
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
+    m_bookmarks->invalidateAll();
     if (auto* r = residentOrNull())
         r->setEntries(entries);
 }
@@ -77,6 +80,7 @@ void LogModel::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatc
 
 void LogModel::removeEntriesForFile(const QString& filePath)
 {
+    m_bookmarks->invalidateFile(filePath);
     if (auto* r = residentOrNull())
         r->removeEntriesForFile(filePath);
 }
@@ -150,9 +154,19 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
         const QColor color = m_rowMarkers.firstMatchColor(m_store->messageAt(index.row()));
         return color.isValid() ? QVariant(color) : QVariant();
     }
+    case BookmarkRole:
+        return m_bookmarks->isBookmarkedRow(index.row());
     default:
         return QVariant();
     }
+}
+
+void LogModel::notifyBookmarkRow(int row)
+{
+    if (row < 0 || row >= rowCount())
+        return;
+    const QModelIndex idx = index(row, 0);
+    emit dataChanged(idx, idx, { int(BookmarkRole) });
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +265,7 @@ void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
 void LogModel::clear()
 {
     cancelPendingFilter(!isIndexedBackend());
+    m_bookmarks->invalidateAll();
     beginResetModel();
     m_store = std::make_unique<ResidentLogStore>(*this);
     m_filterRules = {};
@@ -320,6 +335,8 @@ IndexedLogStore* LogModel::convertToIndexedBackend()
     // через LogIndexer. Отложенные watcher'ы старого store нейтрализует его
     // alive-guard.
     m_store->cancelPendingFilter(false);
+    // Строки перечитает индексатор: закладки сверятся, когда покажутся снова.
+    m_bookmarks->invalidateAll();
     beginResetModel();
     auto indexed = std::make_unique<IndexedLogStore>(*this);
     IndexedLogStore* raw = indexed.get();
@@ -334,6 +351,7 @@ void LogModel::convertToResidentBackend()
     if (!isIndexedBackend())
         return;
     m_store->cancelPendingFilter(false);
+    m_bookmarks->invalidateAll();
     beginResetModel();
     m_store = std::make_unique<ResidentLogStore>(*this);
     endResetModel();
