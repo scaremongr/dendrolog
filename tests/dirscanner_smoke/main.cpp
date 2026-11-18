@@ -14,6 +14,7 @@
 
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
+#include "../common/testdocuments.h"
 
 #include <QApplication>
 #include <QDir>
@@ -21,6 +22,8 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QToolButton>
+#include <QSet>
+#include <QStringEncoder>
 #include <QTreeWidget>
 
 #include <cstdio>
@@ -110,6 +113,15 @@ static bool allScanned(QTreeWidgetItem* parent)
     return true;
 }
 
+// Текст колонки W/E/F, как его показывает дерево (пустое место — ноль).
+static QString formatAlertsForTest(const LogParser::FileStats& stats)
+{
+    if (stats.warnCount == 0 && stats.errorCount == 0 && stats.fatalCount == 0)
+        return u"—"_s;
+    auto part = [](int n) { return n > 0 ? QString::number(n) : QString(); };
+    return part(stats.warnCount) + u'/' + part(stats.errorCount) + u'/' + part(stats.fatalCount);
+}
+
 // ---------------------------------------------------------------------------
 static void testNameOrdering()
 {
@@ -144,11 +156,12 @@ static void testTailAnalysis(const QString& dir)
     writeFile(path, head + tail);
 
     LogParser parser;
-    const LogParser::FileStats whole = parser.analyzeFileForStats(path);
-    const LogParser::FileStats onlyTail = parser.analyzeFileForStats(path, head.size());
+    const LogParser::FileStats whole = parser.analyzeFileForStats(path).stats;
+    const LogParser::FileStats onlyTail = parser.analyzeFileForStats(
+        path, LogParser::StatsResume{ head.size(), QStringConverter::Utf8, true }).stats;
 
     writeFile(path, head);
-    const LogParser::FileStats onlyHead = parser.analyzeFileForStats(path);
+    const LogParser::FileStats onlyHead = parser.analyzeFileForStats(path).stats;
 
     CHECK(whole.parseSuccess && onlyHead.parseSuccess && onlyTail.parseSuccess,
           "all three analyses succeed");
@@ -171,7 +184,7 @@ static void testTailAnalysis(const QString& dir)
               "2026-03-01 10:00:03 [ERR] four\n"
               "2026-03-01 10:00:04 [WRN] five\n"
               "2026-03-01 10:00:05 NOTICE six\n");
-    const LogParser::FileStats words = parser.analyzeFileForStats(path);
+    const LogParser::FileStats words = parser.analyzeFileForStats(path).stats;
     CHECK(words.fatalCount == 2 && words.errorCount == 1 && words.warnCount == 1,
           "level words count once per entry, continuation lines do not count");
     CHECK(onlyHead.firstEntryTimestamp == whole.firstEntryTimestamp,
@@ -180,6 +193,224 @@ static void testTailAnalysis(const QString& dir)
           "the tail carries the last timestamp");
 
     QFile::remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// Q-15. Счётчик записей сканера обязан совпадать с числом логических записей
+// вкладки, открывшей тот же файл (без схемы): запись начинает строка с меткой
+// времени и уровнем, остальные строки — её продолжение.
+struct TabCounts {
+    int records = 0;
+    int warn = 0;
+    int error = 0;
+    int fatal = 0;
+};
+
+static TabCounts countTabRecords(const testdocs::Document& doc)
+{
+    TabCounts counts;
+    QSet<int> seen;
+    const LogModel& model = *doc.model;
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const int id = model.keyForRow(row).logicalEntryId;
+        if (seen.contains(id))
+            continue;
+        seen.insert(id);
+        ++counts.records;
+        const LogLevel level = model.visibleLevelAt(row);
+        if (level == LogLevel::Warn) ++counts.warn;
+        if (level == LogLevel::Error) ++counts.error;
+        if (level == LogLevel::Fatal) ++counts.fatal;
+    }
+    return counts;
+}
+
+// UTF-16 индексный бэкенд не читает (вкладка отправляет его в резидентный
+// путь), поэтому для него — только резидентная вкладка.
+static void checkAgainstTab(const QString& path, const char* what, bool indexedToo = true)
+{
+    LogParser parser;
+    const LogParser::FileStats stats = parser.analyzeFileForStats(path).stats;
+    const testdocs::Document resident = testdocs::buildResident({ path }, QString());
+    CHECK(resident.errors.isEmpty(), "the resident tab loads the file");
+    const TabCounts tab = countTabRecords(resident);
+    TabCounts tabIndexed = tab;
+    if (indexedToo) {
+        const testdocs::Document indexed = testdocs::buildIndexed({ path }, QString());
+        CHECK(indexed.errors.isEmpty(), "the indexed tab loads the file");
+        tabIndexed = countTabRecords(indexed);
+    }
+    if (tab.records != tabIndexed.records || stats.totalEntries != tab.records
+        || stats.warnCount != tab.warn || stats.errorCount != tab.error
+        || stats.fatalCount != tab.fatal) {
+        ++g_failures;
+        std::fprintf(stderr,
+                     "FAIL %s: scanner %d entries (W%d E%d F%d), resident tab %d (W%d E%d F%d), "
+                     "indexed tab %d\n",
+                     what, stats.totalEntries, stats.warnCount, stats.errorCount,
+                     stats.fatalCount, tab.records, tab.warn, tab.error, tab.fatal,
+                     tabIndexed.records);
+    }
+}
+
+static const QByteArray kMultilineLog =
+    "service banner, no timestamp\n"                       // запись сама по себе
+    "second banner line\n"                                 // её продолжение
+    "2026-03-01 10:00:00 INFO  start\n"
+    "2026-03-01 10:00:01 ERROR request failed\n"
+    "java.lang.IllegalStateException: fatal error\n"
+    "    at com.example.Main.run(Main.java:42)\n"
+    "    at com.example.Main.main(Main.java:7)\n"
+    "\n"
+    "2026-03-01 10:00:02 no level on this line\n"           // продолжение: уровня нет
+    "2026-03-01 10:00:03 WARN  slow response\n"
+    "    warning: retry 1\n"
+    "2026-03-01 10:00:04 FATAL giving up\n";
+
+static void testRecordCounts(const QString& dir)
+{
+    const QString path = dir + "/records.log";
+
+    writeFile(path, kMultilineLog);
+    checkAgainstTab(path, "multi-line records");
+
+    QByteArray crlf = kMultilineLog;
+    crlf.replace("\n", "\r\n");
+    writeFile(path, crlf);
+    checkAgainstTab(path, "multi-line records, CRLF");
+
+    writeFile(path, kMultilineLog.chopped(1));
+    checkAgainstTab(path, "last line without a newline");
+
+    writeFile(path, "no timestamps here\nat all\n\n");
+    checkAgainstTab(path, "a file without a single primary line");
+
+    writeFile(path, QByteArray());
+    checkAgainstTab(path, "an empty file");
+
+    QFile::remove(path);
+}
+
+// Дозапись через сам сканер: продолжение записи, пришедшее отдельной порцией,
+// новой записью не считается; оборванная последняя строка после дозаписи не
+// считается дважды. Эталон — полный разбор того же файла заново.
+static void testScannerAppend(const QByteArray& head, const QList<QByteArray>& portions,
+                              const char* what, bool indexedToo = true)
+{
+    QTemporaryDir tmp;
+    const QString path = tmp.path() + "/grow.log";
+    writeFile(path, head);
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.scan(tmp.path());
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == 1
+                            && allScanned(tree.invisibleRootItem()); }), what);
+
+    int rescans = 0;
+    QObject::connect(&scanner, &DirectoryScanner::rescanFinished, &tree,
+                     [&](int, int, int) { ++rescans; });
+    for (const QByteArray& portion : portions) {
+        appendFile(path, portion);
+        const int before = rescans;
+        scanner.rescan();
+        CHECK(waitFor([&] { return rescans > before && allScanned(tree.invisibleRootItem()); }),
+              what);
+
+        LogParser parser;
+        const LogParser::FileStats whole = parser.analyzeFileForStats(path).stats;
+        QTreeWidgetItem* item = findItem(tree.invisibleRootItem(), u"grow.log"_s);
+        const QString shown = item ? item->text(ScanCol::Entries) : QString();
+        const QString alerts = item ? item->text(ScanCol::Alerts) : QString();
+        if (shown != QString::number(whole.totalEntries)
+            || alerts != formatAlertsForTest(whole)) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s: after appending the scanner shows %s entries [%s], "
+                                 "a full analysis gives %d [%s]\n",
+                         what, qPrintable(shown), qPrintable(alerts), whole.totalEntries,
+                         qPrintable(formatAlertsForTest(whole)));
+        }
+    }
+    checkAgainstTab(path, what, indexedToo);
+}
+
+static QByteArray encodeUtf16(const QByteArray& utf8, QStringConverter::Encoding encoding,
+                              bool withBom)
+{
+    QStringEncoder encoder(encoding, withBom ? QStringConverter::Flag::WriteBom
+                                             : QStringConverter::Flag::Default);
+    return encoder.encode(QString::fromUtf8(utf8));
+}
+
+static void testAppends()
+{
+    const QByteArray head =
+        "2026-03-01 10:00:00 INFO  start\n"
+        "2026-03-01 10:00:01 ERROR request failed\n";
+    const QByteArray trace =
+        "java.lang.IllegalStateException: fatal error\n"
+        "    at com.example.Main.run(Main.java:42)\n";
+    const QByteArray more =
+        "2026-03-01 10:00:03 WARN  slow response\n"
+        "2026-03-01 10:00:04 FATAL giving";            // строка оборвана
+    const QByteArray rest =
+        " up\n"
+        "2026-03-01 10:00:05 ERROR again\n";
+
+    testScannerAppend(head, { trace, more, rest }, "append: continuation and a torn line");
+    testScannerAppend("banner without a timestamp\n", { "more banner\n", head },
+                      "append: file that starts without a record");
+
+    for (const auto encoding : { QStringConverter::Utf16LE, QStringConverter::Utf16BE }) {
+        const char* what = encoding == QStringConverter::Utf16LE ? "append: UTF-16LE"
+                                                                 : "append: UTF-16BE";
+        testScannerAppend(encodeUtf16(head, encoding, true),
+                          { encodeUtf16(trace, encoding, false),
+                            encodeUtf16(more, encoding, false),
+                            encodeUtf16(rest, encoding, false) },
+                          what, /*indexedToo=*/false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Q-10. Ротированные логи без сжатия: расширение из настроек — компонент
+// имени, за которым идёт только «хвост ротации».
+static void testRotatedNames()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QByteArray line = "2026-01-02 03:04:05 INFO  rotated\n";
+    const QStringList wanted{
+        u"app-2026-01-01.log"_s, u"app.log"_s, u"app.log-20260101"_s, u"app.log.1"_s,
+        u"app.log.2"_s, u"app.log.10"_s, u"app.log.2026-01-01"_s, u"notes.TXT.3"_s,
+    };
+    const QStringList unwanted{
+        u"app.log.bak"_s, u"app.log.swp"_s, u"app.log.gz"_s, u"app.log.1.gz"_s,
+        u"app.log.old"_s, u"app.log~"_s, u"app.logs.1"_s, u"catalog.1"_s, u"app.log."_s,
+        u"app.log.1a"_s, u"data.2026"_s,
+    };
+    for (const QString& name : wanted + unwanted)
+        writeFile(dir + u'/' + name, line);
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFileExtensions({ u"log"_s, u"txt"_s });
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() >= 1
+                            && allScanned(tree.invisibleRootItem()); }),
+          "rotated names: scan completes");
+
+    QStringList listed;
+    for (int i = 0; i < tree.topLevelItemCount(); ++i)
+        listed << tree.topLevelItem(i)->text(ScanCol::Name);
+    if (listed != wanted) {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL rotated names: listed [%s], expected [%s]\n",
+                     qPrintable(listed.join(u", "_s)), qPrintable(wanted.join(u", "_s)));
+    }
+    CHECK(entriesOf(tree, u"app.log.1"_s) == u"1"_s, "a rotated file is analysed like any other");
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +498,9 @@ int main(int argc, char** argv)
     QDir(rootPath).mkdir(QStringLiteral("sub"));
 
     testTailAnalysis(rootPath);
+    testRecordCounts(rootPath);
+    testAppends();
+    testRotatedNames();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =

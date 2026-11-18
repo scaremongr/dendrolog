@@ -177,6 +177,50 @@ int scannerCompareNames(QStringView a, QStringView b)
     return c < 0 ? -1 : (c > 0 ? 1 : 0);
 }
 
+// ─── Which files are logs ────────────────────────────────────────────────────
+
+namespace {
+
+bool isRotationSeparator(QChar c)
+{
+    return c == u'.' || c == u'-' || c == u'_';
+}
+
+// Empty, or separator + digits, then any more (separator + digits) groups.
+bool isRotationTail(QStringView tail)
+{
+    qsizetype i = 0;
+    while (i < tail.size()) {
+        if (!isRotationSeparator(tail[i]))
+            return false;
+        ++i;
+        const qsizetype digitsStart = i;
+        while (i < tail.size() && tail[i] >= u'0' && tail[i] <= u'9')
+            ++i;
+        if (i == digitsStart)
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool scannerNameMatches(QStringView fileName, const QStringList& extensions)
+{
+    if (extensions.isEmpty())
+        return true;
+    const QString name = fileName.toString().toLower();
+    for (const QString& ext : extensions) {
+        const QString component = u'.' + ext;
+        for (qsizetype at = name.indexOf(component); at >= 0;
+             at = name.indexOf(component, at + 1)) {
+            if (isRotationTail(QStringView(name).sliced(at + component.size())))
+                return true;
+        }
+    }
+    return false;
+}
+
 // ─── Constructor / destructor ────────────────────────────────────────────────
 
 DirectoryScanner::DirectoryScanner(QTreeWidget* tree, QObject* parent)
@@ -229,12 +273,14 @@ DirectoryScanner::~DirectoryScanner()
 
 void DirectoryScanner::setFileExtensions(const QStringList& extensions)
 {
-    m_extensions = extensions;
-}
-
-void DirectoryScanner::setConversionPattern(const QString& pattern)
-{
-    m_pattern = pattern;
+    m_extensions.clear();
+    for (const QString& ext : extensions) {
+        QString e = ext.trimmed().toLower();
+        while (e.startsWith(u'.'))
+            e.remove(0, 1);
+        if (!e.isEmpty())
+            m_extensions.append(e);
+    }
 }
 
 void DirectoryScanner::scan(const QString& rootPath)
@@ -353,7 +399,6 @@ DirectoryScanner::DirListing DirectoryScanner::listDirectory(const QString& dirP
         e.isFile  = info.isFile();
         e.size    = info.size();
         e.mtimeMs = info.lastModified().toMSecsSinceEpoch();
-        e.suffix  = info.suffix().toLower();
         listing.entries.append(e);
     }
 
@@ -469,11 +514,11 @@ void DirectoryScanner::queueFileScan(QTreeWidgetItem* item, const DirEntryInfo& 
     if (allowResume) {
         const auto known = m_scanState.constFind(info.path);
         if (known != m_scanState.cend() && known->stats.parseSuccess
-            && known->resumeOffset > 0 && known->fingerprint != 0
-            && info.size > known->resumeOffset) {
-            request.resumeOffset = known->resumeOffset;
-            request.fingerprint  = known->fingerprint;
-            request.base         = known->stats;
+            && known->resume.offset > 0 && known->fingerprint != 0
+            && info.size > known->resume.offset) {
+            request.resume      = known->resume;
+            request.fingerprint = known->fingerprint;
+            request.base        = known->complete;
         }
     }
 
@@ -482,7 +527,7 @@ void DirectoryScanner::queueFileScan(QTreeWidgetItem* item, const DirEntryInfo& 
     item->setText(ScanCol::Size, QLocale().toString(info.size));
     item->setData(ScanCol::Size, ScanRole::SortKey, info.size);
     item->setText(ScanCol::Entries, tr("Queued…"));
-    if (request.resumeOffset == 0) {
+    if (request.resume.offset == 0) {
         // Full re-read: the old numbers no longer describe the file.
         m_scanState.remove(info.path);
         item->setData(ScanCol::Entries, ScanRole::SortKey, QVariant());
@@ -508,8 +553,6 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
 
     ++m_activeScans;
 
-    const QString pattern = m_pattern;  // snapshot for worker thread
-
     // Each worker creates its own LogParser to avoid any shared-state concerns.
     auto* watcher = new QFutureWatcher<ScanResult>(this);
     connect(watcher, &QFutureWatcher<ScanResult>::finished, this, [this, watcher]() {
@@ -519,9 +562,10 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         applyStats(res);
         scheduleScans();  // fill the freed slot from the queue
     });
-    watcher->setFuture(QtConcurrent::run([request, pattern]() -> ScanResult {
+    watcher->setFuture(QtConcurrent::run([request]() -> ScanResult {
+        // Records are counted the way a tab without field extraction splits
+        // them (timestamp + level), so the scanner needs no schema.
         LogParser parser;
-        parser.setPattern(pattern);
 
         ScanResult result;
         result.path = request.path;
@@ -529,46 +573,35 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         // Append-only growth: verify the already-analysed prefix is still
         // byte-identical, then read just the tail and fold it into the old
         // numbers. Anything else (rewrite, rotation) needs a full pass.
+        LogParser::StatsScan scan;
         bool resumed = false;
-        if (request.resumeOffset > 0) {
-            const FileChangeDetector::Anchor anchor{ request.resumeOffset, request.fingerprint };
+        if (request.resume.offset > 0) {
+            const FileChangeDetector::Anchor anchor{ request.resume.offset, request.fingerprint };
             if (FileChangeDetector::classify(request.path, anchor)
                 == FileChangeDetector::Change::Appended) {
-                const FileStats tail =
-                    parser.analyzeFileForStats(request.path, request.resumeOffset);
-                if (tail.parseSuccess) {
-                    FileStats merged = request.base;
-                    merged.fileSize      = tail.fileSize;
-                    merged.totalEntries += tail.totalEntries;
-                    merged.warnCount    += tail.warnCount;
-                    merged.errorCount   += tail.errorCount;
-                    merged.fatalCount   += tail.fatalCount;
-                    if (!merged.firstEntryTimestamp.isValid())
-                        merged.firstEntryTimestamp = tail.firstEntryTimestamp;
-                    if (tail.lastEntryTimestamp.isValid())
-                        merged.lastEntryTimestamp = tail.lastEntryTimestamp;
-                    result.state.stats = merged;
+                scan = parser.analyzeFileForStats(request.path, request.resume);
+                if (scan.stats.parseSuccess) {
+                    scan.stats    = LogParser::mergeStats(request.base, scan.stats);
+                    scan.complete = LogParser::mergeStats(request.base, scan.complete);
                     resumed = true;
                 }
             }
         }
         if (!resumed)
-            result.state.stats = parser.analyzeFileForStats(request.path);
+            scan = parser.analyzeFileForStats(request.path);
+
+        result.state.stats    = scan.stats;
+        result.state.complete = scan.complete;
 
         // Anchor for the *next* refresh, captured here so the GUI thread never
-        // reads from disk. Only a file that ends on a newline can be resumed:
-        // otherwise the tail read would start mid-line and count it twice.
-        if (result.state.stats.parseSuccess) {
-            QFile file(request.path);
-            const qint64 size = file.size();
-            if (size > 0 && file.open(QIODevice::ReadOnly) && file.seek(size - 1)
-                && file.read(1) == QByteArrayLiteral("\n")) {
-                const FileChangeDetector::Anchor anchor =
-                    FileChangeDetector::capture(request.path, size);
-                if (anchor.fingerprint != 0) {
-                    result.state.resumeOffset = size;
-                    result.state.fingerprint  = anchor.fingerprint;
-                }
+        // reads from disk: right after the last whole line, so a line the
+        // writer has not finished yet is read again once it is complete.
+        if (scan.stats.parseSuccess && scan.next.offset > 0) {
+            const FileChangeDetector::Anchor anchor =
+                FileChangeDetector::capture(request.path, scan.next.offset);
+            if (anchor.fingerprint != 0) {
+                result.state.resume      = scan.next;
+                result.state.fingerprint = anchor.fingerprint;
             }
         }
         return result;
@@ -796,7 +829,7 @@ void DirectoryScanner::reconcileLevel(QTreeWidgetItem* parent, const DirListing&
     QSet<QString> onDisk;
     onDisk.reserve(listing.entries.size());
     for (const DirEntryInfo& info : listing.entries) {
-        if (info.isFile && !matchesExtension(info.suffix))
+        if (info.isFile && !matchesExtension(info.name))
             continue;
         onDisk.insert(info.path);
 
@@ -1382,12 +1415,10 @@ void DirectoryScanner::onHeaderClicked(int column)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-bool DirectoryScanner::matchesExtension(const QString& lowerSuffix) const
+bool DirectoryScanner::matchesExtension(const QString& fileName) const
 {
-    if (m_extensions.isEmpty())
-        return lowerSuffix == QLatin1String("log")
-            || lowerSuffix == QLatin1String("txt");
-    return m_extensions.contains(lowerSuffix);
+    static const QStringList kDefault{ QStringLiteral("log"), QStringLiteral("txt") };
+    return scannerNameMatches(fileName, m_extensions.isEmpty() ? kDefault : m_extensions);
 }
 
 QString DirectoryScanner::formatAlerts(int fatals, int errors, int warns)

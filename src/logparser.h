@@ -21,6 +21,10 @@ public:
     explicit LogParser(QObject* parent = nullptr);
     ~LogParser() override;
 
+    // Счётчики файла для сканера каталога. Записи — ЛОГИЧЕСКИЕ, по тому же
+    // правилу, что у вкладки без схемы (LineClassifier::isPrimaryLine: метка
+    // времени И уровень); строки-продолжения (стек-трейс) записью не
+    // считаются. W/E/F — записи этого уровня, From/To — метки первичных строк.
     struct FileStats {
         qint64 fileSize = 0;
         int totalEntries = 0;
@@ -32,12 +36,37 @@ public:
         bool parseSuccess = true; 
     };
 
+    // Откуда продолжать разбор для счётчиков: сырое байтовое смещение начала
+    // строки, кодировка файла (у хвоста нет BOM — без неё UTF-16 читался бы
+    // как UTF-8) и есть ли до смещения запись, которую продолжат строки без
+    // метки. По умолчанию — начало файла, кодировка — по BOM.
+    struct StatsResume {
+        qint64 offset = 0;
+        QStringConverter::Encoding encoding = QStringConverter::Utf8;
+        bool inRecord = false;
+    };
+
+    // Итог разбора: `stats` — все прочитанные строки, включая последнюю без
+    // перевода строки (её вкладка тоже показывает); `complete` — только целые
+    // строки; `next` — продолжение сразу за последней целой строкой. Оборванная
+    // строка при дозаписи перечитывается с начала, поэтому база для слияния —
+    // `complete`, а не `stats`. При fromOffset > 0 счётчики описывают только
+    // прочитанный кусок — их складывает mergeStats.
+    struct StatsScan {
+        FileStats stats;
+        FileStats complete;
+        StatsResume next;
+    };
+
     // This method can be called from a separate thread for stat analysis.
-    // `fromOffset` > 0 analyses only the tail of the file starting at that byte
-    // offset (which the caller must know to be a line boundary) — used by the
-    // directory scanner to refresh an append-only log without re-reading it all.
-    // The returned stats then describe the tail alone and have to be merged.
-    FileStats analyzeFileForStats(const QString& filePath, qint64 fromOffset = 0);
+    // Файл читается БЕЗ QIODevice::Text: все смещения — сырые байты.
+    StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from) const;
+    StatsScan analyzeFileForStats(const QString& filePath) const
+    {
+        return analyzeFileForStats(filePath, StatsResume());
+    }
+    // Счётчики головы [0, X) плюс хвоста, прочитанного с X.
+    static FileStats mergeStats(const FileStats& head, const FileStats& tail);
 
     // Optional: configure a dynamic block schema so that the parser extracts
     // structured fields into LogEntry::fields for every primary line.

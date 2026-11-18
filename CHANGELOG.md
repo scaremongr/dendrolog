@@ -27,6 +27,11 @@ All notable changes to DendroLog are documented here. The format follows
   (`DendroLog C:\logs`) and one handed over to the already open window. Files
   dropped together with folders open as before; of several folders the first
   one is scanned.
+- **Rotated logs show up in the Directory Scanner**: `app.log.1`,
+  `app.log.10`, `app.log-20260101`, `app.log.2026-01-01` — a configured
+  extension followed only by a rotation number or date. They sort right after
+  the main file. Backups and editor files (`app.log.bak`, `app.log.swp`) and
+  compressed rotations (`app.log.gz`) stay out.
 
 ### Changed
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
@@ -42,6 +47,13 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- **The Directory Scanner counts entries, not lines.** A stack trace or any
+  other multi-line message used to add one entry per line; now the Entries
+  column equals the number of entries of the opened tab, and W/E/F and the
+  From / To span agree with it. Lines in a CRLF file are split the same way.
+- The Directory Scanner reads the appended part of a **UTF-16** log correctly
+  (it was decoded as UTF-8 and lost its counts), and a log whose last line was
+  still being written no longer gains an extra entry when the line is finished.
 - A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
   **Recent Files**: its temporary file is gone once the window closes. Such
   entries left by earlier versions are dropped on start. The **Open** dialog no

@@ -2116,7 +2116,6 @@ void MainWindow::setupDirectoryScanner()
 
     m_dirScanner = m_dirScannerPanel->scanner();
     m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
-    m_dirScanner->setConversionPattern(m_conversionPattern);
 
     connect(m_dirScannerPanel, &DirectoryScannerPanel::scanRequested,
             this, &MainWindow::onScanDirectoryClicked);
@@ -3480,7 +3479,6 @@ void MainWindow::scanDirectory(const QString& dirPath)
 {
     m_lastScanDir = dirPath;
     m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
-    m_dirScanner->setConversionPattern(m_conversionPattern);
     m_dirScannerPanel->scanDirectory(dirPath);
     // Скан из меню, со стартового экрана или брошенной папки — результат
     // должен быть виден.
