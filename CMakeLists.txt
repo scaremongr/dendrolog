@@ -5,6 +5,33 @@ project(DendroLog VERSION 0.4.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Санитайзеры (GCC/Clang): -DDENDROLOG_SANITIZER=address — ASan + UBSan,
+# -DDENDROLOG_SANITIZER=thread — TSan. Флаги ставятся на весь проект, включая
+# тесты; окружение прогона (опции рантайма, файлы подавлений из
+# tests/sanitizers/, увеличенные таймауты) задаёт tests/CMakeLists.txt.
+# По умолчанию выключено: обычная сборка и упаковка флагов не получают.
+set(DENDROLOG_SANITIZER "" CACHE STRING
+    "Собрать с санитайзером: address (ASan + UBSan) или thread (TSan)")
+set_property(CACHE DENDROLOG_SANITIZER PROPERTY STRINGS "" address thread)
+if(DENDROLOG_SANITIZER)
+    if(MSVC)
+        message(FATAL_ERROR "DENDROLOG_SANITIZER поддерживается только с GCC и Clang")
+    endif()
+    if(DENDROLOG_SANITIZER STREQUAL "address")
+        set(_dendrolog_sanitize_flags -fsanitize=address,undefined)
+    elseif(DENDROLOG_SANITIZER STREQUAL "thread")
+        set(_dendrolog_sanitize_flags -fsanitize=thread)
+    else()
+        message(FATAL_ERROR
+            "DENDROLOG_SANITIZER=${DENDROLOG_SANITIZER}: ожидается address или thread")
+    endif()
+    # Кадры стека и отладочная информация нужны для читаемых отчётов и для
+    # того, чтобы подавления по имени функции находили свои кадры.
+    add_compile_options(${_dendrolog_sanitize_flags} -fno-omit-frame-pointer -g)
+    add_link_options(${_dendrolog_sanitize_flags})
+    message(STATUS "DendroLog: сборка с санитайзером '${DENDROLOG_SANITIZER}'")
+endif()
+
 # Автоматическая обработка MOC, UIC и RCC
 set(CMAKE_AUTOMOC ON)    # Добавляем автоматическую обработку MOC
 set(CMAKE_AUTORCC ON)    # Для обработки .qrc файлов
@@ -88,6 +115,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/apptheme.cpp
     src/appsettings.h
     src/appsettings.cpp
+    src/colorschemecontroller.h
+    src/colorschemecontroller.cpp
 
     src/directoryscanner.h
     src/directoryscanner.cpp
@@ -161,6 +190,40 @@ target_link_libraries(dendrolog_core PUBLIC
     Qt6::Gui
     Qt6::Concurrent
 )
+
+# TSan не видит мьютексы неинструментированного Qt. Обёртки над вызовами в Qt
+# (линкер, --wrap) сообщают ему о передаче данных через очередь событий, пул
+# потоков и QFuture — подробности в tests/sanitizers/tsan_qt_sync.cpp. Список
+# символов здесь и обёртки там должны совпадать.
+if(DENDROLOG_SANITIZER STREQUAL "thread")
+    # Имена символов ниже — манглинг Qt 6.8 (QThreadPool::waitForDone с
+    # QDeadlineTimer появился в 6.8). Со старшей или младшей версией список
+    # нужно сверить, иначе обёртки молча перестанут срабатывать.
+    if(Qt6_VERSION VERSION_LESS 6.8)
+        message(FATAL_ERROR
+            "DENDROLOG_SANITIZER=thread: нужен Qt 6.8+, найден ${Qt6_VERSION} "
+            "(см. tests/sanitizers/tsan_qt_sync.cpp)")
+    endif()
+    target_sources(dendrolog_core PRIVATE tests/sanitizers/tsan_qt_sync.cpp)
+    set(_tsan_wrapped_symbols
+        _ZN11QMetaObject8activateEP7QObjectPKS_iPPv            # QMetaObject::activate
+        _ZN16QCoreApplication9postEventEP7QObjectP6QEventi     # QCoreApplication::postEvent
+        _ZN11QThreadPool5startEP9QRunnablei                    # QThreadPool::start
+        _ZN11QThreadPool11waitForDoneE14QDeadlineTimer         # QThreadPool::waitForDone
+        _ZN12QtConcurrent16ThreadEngineBase11startThreadEv     # ThreadEngineBase::startThread
+        _ZN12QtConcurrent16ThreadEngineBase3runEv              # ThreadEngineBase::run
+        _ZNK20QFutureInterfaceBase10isCanceledEv               # QFutureInterfaceBase::isCanceled
+        _ZN20QFutureInterfaceBase14reportFinishedEv            # QFutureInterfaceBase::reportFinished
+        _ZN20QFutureInterfaceBase18reportResultsReadyEii       # QFutureInterfaceBase::reportResultsReady
+        _ZN20QFutureInterfaceBase15waitForFinishedEv           # QFutureInterfaceBase::waitForFinished
+        _ZN20QFutureInterfaceBase13waitForResultEi             # QFutureInterfaceBase::waitForResult
+        _ZNK20QFutureInterfaceBase6derefTEv                    # QFutureInterfaceBase::derefT
+        _ZN18QFutureWatcherBase15waitForFinishedEv             # QFutureWatcherBase::waitForFinished
+    )
+    foreach(_symbol IN LISTS _tsan_wrapped_symbols)
+        target_link_options(dendrolog_core PUBLIC "LINKER:--wrap=${_symbol}")
+    endforeach()
+endif()
 
 add_library(dendrolog_widgets STATIC ${DENDROLOG_WIDGETS_SOURCES})
 target_link_libraries(dendrolog_widgets

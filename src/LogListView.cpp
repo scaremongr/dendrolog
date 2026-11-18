@@ -591,7 +591,8 @@ void LogListView::updateFontMetricsCache() {
 }
 
 // ---------------------------------------------------------------------------
-// changeEvent — реагирует на смену шрифта (например, при смене настроек).
+// changeEvent — реагирует на смену шрифта (например, при смене настроек)
+// и палитры (смена темы).
 // updateFontMetricsCache() вызывается всегда; деferred-пересчёт высот —
 // только когда таймер уже создан (в конструкторе таймер создаётся после
 // setFont, поэтому при первичной установке шрифта пересчёт не нужен —
@@ -605,6 +606,12 @@ void LogListView::changeEvent(QEvent* event)
             m_heightUpdateTimer->start(0);
             viewport()->update();
         }
+    } else if (event->type() == QEvent::PaletteChange) {
+        // Смена темы: цвет текста по умолчанию берётся из палитры и уже
+        // запечён в pixmap'ах строк. Высоты от палитры не зависят.
+        m_rowStateCache.clear();
+        clearRowPixmaps();
+        viewport()->update();
     }
 }
 

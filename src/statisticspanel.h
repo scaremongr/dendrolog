@@ -134,6 +134,7 @@ signals:
 
 protected:
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     // Немедленный асинхронный пересбор. manual — по кнопке ⟳: считает даже

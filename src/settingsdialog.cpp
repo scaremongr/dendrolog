@@ -27,6 +27,11 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     // Remove the "?" help button that Windows adds to dialogs by default.
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
+    // Тема окна; данные пункта — ThemeMode.
+    ui->themeComboBox->addItem(tr("Same as system"), int(ThemeMode::System));
+    ui->themeComboBox->addItem(tr("Light"), int(ThemeMode::Light));
+    ui->themeComboBox->addItem(tr("Dark"), int(ThemeMode::Dark));
+
     buildColorsTab();
     buildShortcutsTab();
     buildPerformanceControls();
@@ -329,6 +334,10 @@ void SettingsDialog::loadFromSettings()
 
     // --- Colors tab: working copies are already set in buildColorsTab() ---
 
+    // --- Appearance tab: theme ---
+    ui->themeComboBox->setCurrentIndex(
+        qMax(0, ui->themeComboBox->findData(int(s.themeMode()))));
+
     // --- Appearance tab: default word wrap ---
     ui->wordWrapCheckBox->setChecked(s.wordWrap());
 
@@ -376,6 +385,9 @@ void SettingsDialog::applyToSettings()
         if (ce.target)
             *ce.target = ce.value;
     }
+
+    // ---- Appearance tab: theme (применяется сразу, ColorSchemeController) - //
+    s.setThemeMode(ThemeMode(ui->themeComboBox->currentData().toInt()));
 
     // ---- Appearance tab: default word wrap -------------------------------- //
     s.setWordWrap(ui->wordWrapCheckBox->isChecked());

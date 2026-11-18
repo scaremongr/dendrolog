@@ -143,7 +143,7 @@
      </widget>
 
      <!-- ================================================================ -->
-     <!-- Tab: Appearance — font + default word wrap                      -->
+     <!-- Tab: Appearance — theme, font + default word wrap               -->
      <!-- ================================================================ -->
      <widget class="QWidget" name="fontTab">
       <attribute name="title">
@@ -162,13 +162,44 @@
           <enum>QFormLayout::ExpandingFieldsGrow</enum>
          </property>
          <item row="0" column="0">
+          <widget class="QLabel" name="themeLabel">
+           <property name="text">
+            <string>Theme:</string>
+           </property>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <layout class="QHBoxLayout" name="themeRowLayout">
+           <item>
+            <widget class="QComboBox" name="themeComboBox">
+             <property name="toolTip">
+              <string>Same as system follows the light or dark theme of the operating system; Light and Dark keep the window that way.</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="themeHSpacer">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </item>
+         <item row="1" column="0">
           <widget class="QLabel" name="fontFamilyLabel">
            <property name="text">
             <string>Family:</string>
            </property>
           </widget>
          </item>
-         <item row="0" column="1">
+         <item row="1" column="1">
           <widget class="QFontComboBox" name="fontFamilyComboBox">
            <property name="fontFilters">
             <set>QFontComboBox::MonospacedFonts</set>
@@ -178,14 +209,14 @@
            </property>
           </widget>
          </item>
-         <item row="1" column="0">
+         <item row="2" column="0">
           <widget class="QLabel" name="fontSizeLabel">
            <property name="text">
             <string>Size (pt):</string>
            </property>
           </widget>
          </item>
-         <item row="1" column="1">
+         <item row="2" column="1">
           <layout class="QHBoxLayout" name="fontSizeRowLayout">
            <item>
             <widget class="QSpinBox" name="fontSizeSpinBox">

@@ -44,7 +44,8 @@
 - **Smart text handling** — syntax highlighting, token-aware double-click
   selection, open URLs/paths from the log, per-line word wrap.
 - **Save View As** — export exactly what you see (filters + field selection).
-- Light/dark theme following the OS, fully configurable shortcuts, EN/RU help.
+- Light/dark theme: follows the OS or is picked by hand; fully configurable
+  shortcuts, EN/RU help.
 
 ## Install
 

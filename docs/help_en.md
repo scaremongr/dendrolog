@@ -176,10 +176,10 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 - **Tools → Settings** (`Ctrl+,`):
   - **General** — scan extensions, auto-reload interval, large files.
-  - **Appearance** — monospaced font family and size (live preview), default word wrap.
+  - **Appearance** — window theme, monospaced font family and size (live preview), default word wrap.
   - **Colors** — log-level, syntax, selection and UI colours.
   - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved.
-- The window follows the Windows light/dark theme automatically.
+- **Theme** (**Settings → Appearance → Theme**): **Same as system** follows the light or dark theme of the operating system and switches with it (the default); **Light** and **Dark** keep the window that way whatever the system uses. The choice applies at once, without a restart, and is remembered. The colours of the **Colors** tab are one set shared by both themes.
 
 ---
 
