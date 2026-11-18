@@ -314,8 +314,13 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // Хвост без '\n' — «предварительная» строка: переиндексируется при
     // следующей дозаписи (детерминированная замена resident-хака с пропуском
     // пустых строк).
+    // Одиночный '\r' в конце хвоста — не текст, как у резидентного пути
+    // (readLine снимает его) и как станет, когда допишут '\n'.
     if (!carry.isEmpty() && !truncatedByCap) {
-        processLine(carry.constData(), carry.size(), /*eol=*/0);
+        if (carry.endsWith('\r'))
+            processLine(carry.constData(), carry.size() - 1, LineIndex::kEolProvisionalCr);
+        else
+            processLine(carry.constData(), carry.size(), /*eol=*/0);
         carry.clear();
     }
 

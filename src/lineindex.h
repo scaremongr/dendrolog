@@ -41,8 +41,8 @@ public:
 
     struct Block {
         qint64  baseOffset = 0;              // абс. смещение начала первой строки
-        quint32 relStart[kBlockLines + 1];   // строка i: [relStart[i], relStart[i+1]) − eol
-        quint8  eolBytes[kBlockLines];
+        quint32 relStart[kBlockLines + 1];   // строка i: [relStart[i], relStart[i+1]) − eolSpan(eol)
+        quint8  eolBytes[kBlockLines];       // код конца строки, см. kEolProvisionalCr
         quint8  meta[kBlockLines];
         quint32 logicalId[kBlockLines];
     };
@@ -51,9 +51,16 @@ public:
     };
 
     // Данные одной строки для аппендера.
+    // Код конца строки в eolBytes: число байтов перевода строки (0 — хвост
+    // без \n, 1 — \n, 2 — \r\n) либо kEolProvisionalCr — хвост без \n,
+    // кончающийся одиночным \r: этот \r не текст (как у резидентного пути
+    // и как будет, когда допишут \n), но байт файла — смещения точны.
+    static constexpr quint8 kEolProvisionalCr = 3;
+    static constexpr int eolSpan(quint8 eol) { return eol == kEolProvisionalCr ? 1 : eol; }
+
     struct LineRecord {
         quint32  byteLength = 0;   // без EOL
-        quint8   eolBytes = 1;     // 0 — хвост без \n, 1 — \n, 2 — \r\n
+        quint8   eolBytes = 1;     // 0 — хвост без \n, 1 — \n, 2 — \r\n, kEolProvisionalCr
         LogLevel level = LogLevel::Unknown; // унаследованный уровень записи
         bool     isPrimary = false;
         bool     hasOwnTimestamp = false;
@@ -69,7 +76,7 @@ public:
 
     qint64  lineStartOffset(qint64 line) const;
     quint32 lineByteLength(qint64 line) const;   // без EOL
-    quint8  lineEolBytes(qint64 line) const;
+    quint8  lineEolBytes(qint64 line) const;     // байтов перевода строки
     LogLevel level(qint64 line) const;
     bool    isPrimary(qint64 line) const;
     bool    isPlainTextLine(qint64 line) const;

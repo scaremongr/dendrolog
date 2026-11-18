@@ -1,0 +1,327 @@
+#include "recordid.h"
+
+#include "stdinspooler.h"
+
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonValue>
+
+namespace {
+
+quint64 first8(const QByteArray& digest)
+{
+    quint64 v = 0;
+    for (int i = 0; i < 8 && i < digest.size(); ++i)
+        v = (v << 8) | quint8(digest.at(i));
+    return v;
+}
+
+// ASCII-скелет строки: единицы < 0x80 как есть, серия единиц ≥ 0x80 — один
+// заполнитель 0x80. Единица — символ UTF-16 (текст) или байт (сырые байты):
+// у ASCII-совместимой тотальной кодировки скелеты совпадают (recordid.h).
+template <typename Unit>
+quint64 skeletonFingerprint(const Unit* data, qsizetype len)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha1);
+    char buf[4096];
+    int used = 0;
+    bool inRun = false;
+    for (qsizetype i = 0; i < len; ++i) {
+        const auto u = static_cast<std::make_unsigned_t<Unit>>(data[i]);
+        if (u < 0x80) {
+            buf[used++] = char(u);
+            inRun = false;
+        } else if (!inRun) {
+            buf[used++] = char(0x80);
+            inRun = true;
+        } else {
+            continue;
+        }
+        if (used == int(sizeof buf)) {
+            hash.addData(QByteArrayView(buf, used));
+            used = 0;
+        }
+    }
+    hash.addData(QByteArrayView(buf, used));
+    return first8(hash.result());
+}
+
+// Область [from, from + len) файла; nullopt — не прочиталась целиком.
+std::optional<quint64> regionFingerprint(QFile& file, qint64 from, qint64 len)
+{
+    if (!file.seek(from))
+        return std::nullopt;
+    const QByteArray bytes = file.read(len);
+    if (bytes.size() != len)
+        return std::nullopt;
+    return RecordFingerprint::ofBytes(bytes);
+}
+
+qint64 headLength(qint64 size) { return qMin(size, SourceIdentity::kRegionBytes); }
+qint64 tailStart(qint64 size) { return size - qMin(size, SourceIdentity::kRegionBytes); }
+
+void setError(QString* error, const QString& text)
+{
+    if (error)
+        *error = text;
+}
+
+// Целое из JSON: число без дробной части в [min, 2^53]. nullopt — не так.
+std::optional<qint64> integerField(const QJsonObject& json, const char* key, qint64 min)
+{
+    const QJsonValue v = json.value(QLatin1String(key));
+    if (!v.isDouble())
+        return std::nullopt;
+    constexpr qint64 kMaxExact = qint64(1) << 53;
+    const qint64 sentinel = std::numeric_limits<qint64>::min();
+    const qint64 n = v.toInteger(sentinel);
+    if (n == sentinel || n < min || n > kMaxExact)
+        return std::nullopt;
+    return n;
+}
+
+// Заголовок формата: версия и имя алгоритма. false — чужой формат.
+bool checkFormat(const QJsonObject& json, int version, const char* algorithm, QString* error)
+{
+    const std::optional<qint64> got = integerField(json, "version", 0);
+    if (!got || *got != version) {
+        setError(error, QStringLiteral("unsupported format version %1")
+                            .arg(json.value(QLatin1String("version")).toVariant().toString()));
+        return false;
+    }
+    const QString hash = json.value(QLatin1String("hash")).toString();
+    if (hash != QLatin1String(algorithm)) {
+        setError(error, QStringLiteral("unsupported hash algorithm \"%1\"").arg(hash));
+        return false;
+    }
+    return true;
+}
+
+std::optional<quint64> hexField(const QJsonObject& json, const char* key)
+{
+    const QJsonValue v = json.value(QLatin1String(key));
+    if (!v.isString())
+        return std::nullopt;
+    return RecordFingerprint::fromHex(v.toString());
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// RecordFingerprint
+// ---------------------------------------------------------------------------
+
+quint64 RecordFingerprint::ofBytes(QByteArrayView bytes)
+{
+    return first8(QCryptographicHash::hash(bytes, QCryptographicHash::Sha1));
+}
+
+quint64 RecordFingerprint::ofLineText(QStringView text)
+{
+    return skeletonFingerprint(text.utf16(), text.size());
+}
+
+quint64 RecordFingerprint::ofLineBytes(QByteArrayView bytes)
+{
+    return skeletonFingerprint(bytes.data(), bytes.size());
+}
+
+QString RecordFingerprint::toHex(quint64 fingerprint)
+{
+    return QStringLiteral("%1").arg(fingerprint, 16, 16, QLatin1Char('0'));
+}
+
+std::optional<quint64> RecordFingerprint::fromHex(QStringView hex)
+{
+    if (hex.size() != 16)
+        return std::nullopt;
+    quint64 v = 0;
+    for (const QChar c : hex) {
+        const char16_t u = c.unicode();
+        int digit;
+        if (u >= u'0' && u <= u'9')
+            digit = u - u'0';
+        else if (u >= u'a' && u <= u'f')
+            digit = u - u'a' + 10;
+        else if (u >= u'A' && u <= u'F')
+            digit = u - u'A' + 10;
+        else
+            return std::nullopt;
+        v = (v << 4) | quint64(digit);
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// RecordId
+// ---------------------------------------------------------------------------
+
+RecordId RecordId::forLine(qint64 line, QStringView lineText, bool complete)
+{
+    RecordId id;
+    id.line = line;
+    id.hasText = complete;
+    if (complete)
+        id.text = RecordFingerprint::ofLineText(lineText);
+    return id;
+}
+
+bool RecordId::matchesText(QStringView lineText) const
+{
+    return !hasText || text == RecordFingerprint::ofLineText(lineText);
+}
+
+bool RecordId::matchesBytes(QByteArrayView lineBytes) const
+{
+    return !hasText || text == RecordFingerprint::ofLineBytes(lineBytes);
+}
+
+QJsonObject RecordId::toJson() const
+{
+    QJsonObject json;
+    json.insert(QStringLiteral("version"), kFormatVersion);
+    json.insert(QStringLiteral("hash"), QLatin1String(RecordFingerprint::kLineAlgorithm));
+    json.insert(QStringLiteral("line"), line);
+    if (hasText)
+        json.insert(QStringLiteral("text"), RecordFingerprint::toHex(text));
+    else
+        json.insert(QStringLiteral("partial"), true);
+    return json;
+}
+
+std::optional<RecordId> RecordId::fromJson(const QJsonObject& json, QString* error)
+{
+    if (!checkFormat(json, kFormatVersion, RecordFingerprint::kLineAlgorithm, error))
+        return std::nullopt;
+    RecordId id;
+    const std::optional<qint64> line = integerField(json, "line", 1);
+    if (!line) {
+        setError(error, QStringLiteral("bad line number"));
+        return std::nullopt;
+    }
+    id.line = *line;
+    // Недописанная строка помечена явно; пропавший отпечаток без метки —
+    // битые данные: иначе такой идентификатор совпал бы с любым текстом.
+    const QJsonValue partial = json.value(QLatin1String("partial"));
+    if (!partial.isUndefined() && !partial.isBool()) {
+        setError(error, QStringLiteral("bad partial flag"));
+        return std::nullopt;
+    }
+    if (partial.toBool()) {
+        if (json.contains(QLatin1String("text"))) {
+            setError(error, QStringLiteral("partial line with a text fingerprint"));
+            return std::nullopt;
+        }
+        return id;
+    }
+    const std::optional<quint64> text = hexField(json, "text");
+    if (!text) {
+        setError(error, QStringLiteral("bad text fingerprint"));
+        return std::nullopt;
+    }
+    id.text = *text;
+    id.hasText = true;
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// SourceIdentity
+// ---------------------------------------------------------------------------
+
+std::optional<SourceIdentity> SourceIdentity::capture(const QString& filePath, qint64 size)
+{
+    if (filePath.isEmpty())
+        return std::nullopt;
+    SourceIdentity id;
+    id.path = QFileInfo(filePath).absoluteFilePath();
+    if (StdinSpooler::isSpoolFilePath(filePath)) {
+        id.ephemeral = true;
+        return id;
+    }
+    if (!QFileInfo(filePath).isFile())
+        return std::nullopt;
+    // Без QIODevice::Text: отпечатки — по сырым байтам (инвариант 5).
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return std::nullopt;
+    const qint64 fileSize = file.size();
+    if (size < 0)
+        size = fileSize;
+    if (size > fileSize)
+        return std::nullopt;
+    // Файл не длиннее 4 КБ: начало и конец — одна область, читается раз.
+    const std::optional<quint64> head = regionFingerprint(file, 0, headLength(size));
+    const std::optional<quint64> tail = tailStart(size) == 0
+        ? head : regionFingerprint(file, tailStart(size), size - tailStart(size));
+    if (!head || !tail)
+        return std::nullopt;
+    id.size = size;
+    id.head = *head;
+    id.tail = *tail;
+    return id;
+}
+
+SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
+{
+    if (ephemeral)
+        return State::Ephemeral;
+    if (filePath.isEmpty() || !QFileInfo(filePath).isFile())
+        return State::Missing;
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return State::Missing;
+    if (size < 0 || file.size() < size)
+        return State::Changed;
+    const std::optional<quint64> h = regionFingerprint(file, 0, headLength(size));
+    if (!h || *h != head)
+        return State::Changed;
+    const std::optional<quint64> t = tailStart(size) == 0
+        ? h : regionFingerprint(file, tailStart(size), size - tailStart(size));
+    if (!t || *t != tail)
+        return State::Changed;
+    return State::Valid;
+}
+
+QJsonObject SourceIdentity::toJson() const
+{
+    if (ephemeral || !isValid())
+        return {};
+    QJsonObject json;
+    json.insert(QStringLiteral("version"), kFormatVersion);
+    json.insert(QStringLiteral("hash"), QLatin1String(RecordFingerprint::kRegionAlgorithm));
+    json.insert(QStringLiteral("path"), path);
+    json.insert(QStringLiteral("size"), size);
+    json.insert(QStringLiteral("head"), RecordFingerprint::toHex(head));
+    json.insert(QStringLiteral("tail"), RecordFingerprint::toHex(tail));
+    return json;
+}
+
+std::optional<SourceIdentity> SourceIdentity::fromJson(const QJsonObject& json, QString* error)
+{
+    if (!checkFormat(json, kFormatVersion, RecordFingerprint::kRegionAlgorithm, error))
+        return std::nullopt;
+    SourceIdentity id;
+    const QJsonValue path = json.value(QLatin1String("path"));
+    if (!path.isString() || !QDir::isAbsolutePath(path.toString())) {
+        setError(error, QStringLiteral("bad path (must be absolute)"));
+        return std::nullopt;
+    }
+    id.path = path.toString();
+    const std::optional<qint64> size = integerField(json, "size", 0);
+    if (!size) {
+        setError(error, QStringLiteral("bad size"));
+        return std::nullopt;
+    }
+    id.size = *size;
+    const std::optional<quint64> head = hexField(json, "head");
+    const std::optional<quint64> tail = hexField(json, "tail");
+    if (!head || !tail) {
+        setError(error, QStringLiteral("bad region fingerprint"));
+        return std::nullopt;
+    }
+    id.head = *head;
+    id.tail = *tail;
+    return id;
+}

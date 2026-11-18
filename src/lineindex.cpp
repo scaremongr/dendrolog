@@ -30,7 +30,7 @@ inline quint32 byteLengthOf(
 {
     const LineIndex::Block* b = blockFor(blocks, line);
     const int s = slotFor(line);
-    return b->relStart[s + 1] - b->relStart[s] - b->eolBytes[s];
+    return b->relStart[s + 1] - b->relStart[s] - LineIndex::eolSpan(b->eolBytes[s]);
 }
 
 inline qint64 tsOf(const QVector<std::shared_ptr<LineIndex::TsBlock>>& tsBlocks,
@@ -71,7 +71,8 @@ bool LineIndex::lastLineProvisional() const
     QMutexLocker lock(&m_mutex);
     if (m_lineCount <= 0)
         return false;
-    return blockFor(m_blocks, m_lineCount - 1)->eolBytes[slotFor(m_lineCount - 1)] == 0;
+    const quint8 eol = blockFor(m_blocks, m_lineCount - 1)->eolBytes[slotFor(m_lineCount - 1)];
+    return eol == 0 || eol == kEolProvisionalCr;
 }
 
 qint64 LineIndex::lineStartOffset(qint64 line) const
@@ -95,7 +96,7 @@ quint8 LineIndex::lineEolBytes(qint64 line) const
     QMutexLocker lock(&m_mutex);
     if (line < 0 || line >= m_lineCount)
         return 0;
-    return blockFor(m_blocks, line)->eolBytes[slotFor(line)];
+    return eolSpan(blockFor(m_blocks, line)->eolBytes[slotFor(line)]);
 }
 
 LogLevel LineIndex::level(qint64 line) const
@@ -163,7 +164,7 @@ void LineIndex::appendLine(const LineRecord& rec)
     const int slot = slotFor(m_pendingLines);
     Block* tail = nullptr;
 
-    const qint64 lineSpan = qint64(rec.byteLength) + rec.eolBytes;
+    const qint64 lineSpan = qint64(rec.byteLength) + eolSpan(rec.eolBytes);
 
     if (slot == 0) {
         // Новый блок: baseOffset — начало этой строки.
@@ -258,7 +259,7 @@ void LineIndex::truncateFrom(qint64 line)
     m_logicalCount = cutLogical;
     m_endOffset = line > 0 ? startOffsetOf(m_blocks, line - 1)
                                  + byteLengthOf(m_blocks, line - 1)
-                                 + blockFor(m_blocks, line - 1)->eolBytes[slotFor(line - 1)]
+                                 + eolSpan(blockFor(m_blocks, line - 1)->eolBytes[slotFor(line - 1)])
                            : (m_blocks.isEmpty() ? 0 : m_blocks.first()->baseOffset);
 }
 
@@ -284,7 +285,7 @@ quint8 LineIndexSnapshot::lineEolBytes(qint64 line) const
 {
     if (line < 0 || line >= m_lineCount)
         return 0;
-    return blockFor(m_blocks, line)->eolBytes[slotFor(line)];
+    return LineIndex::eolSpan(blockFor(m_blocks, line)->eolBytes[slotFor(line)]);
 }
 
 LogLevel LineIndexSnapshot::level(qint64 line) const

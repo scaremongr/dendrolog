@@ -68,6 +68,9 @@ All notable changes to DendroLog are documented here. The format follows
   threshold, as it already was above it. Before, the line was dropped, and
   lines appended to the file after it got line numbers one too low. A lone
   carriage return inside a line is no longer removed from its text.
+- An unfinished last line that ends with a carriage return (half of a
+  `\r\n` not yet written) no longer shows the stray `\r` in large-file tabs:
+  both modes show it the same way.
 
 ## [0.5.0] — 2026-11-18
 

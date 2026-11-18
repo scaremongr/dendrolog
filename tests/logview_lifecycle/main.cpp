@@ -166,6 +166,12 @@ static void checkLineNumbers(const QDir& dir, const QString& name, const QString
     append(QByteArray(record(3, "INFO", "crlf")).replace("\n", "\r\n") + "\r\n",
            "CRLF line and a blank CRLF line");
     append("    left\rright\n", "a lone CR inside a line");
+    // Хвост, оборванный на '\r' от "\r\n": '\r' не текст ни до, ни после
+    // дозаписи '\n' — на обоих бэкендах (R-1, шаг 2).
+    append("    cr tail\r", "a provisional tail ending with a lone CR");
+    append("\n", "the CR tail completed by LF");
+    append("    cr then\r", "another provisional tail ending with a lone CR");
+    append("text\n", "the lone CR became a CR inside the line");
     append("tail without newline", "a provisional tail");
     append("\n" + record(4, "INFO", "last"), "the tail completed");
     CHECK(tab.model()->isIndexedBackend() == (name == QStringLiteral("indexed")),
