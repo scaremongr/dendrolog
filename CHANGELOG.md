@@ -87,6 +87,13 @@ All notable changes to DendroLog are documented here. The format follows
 - An unfinished last line that ends with a carriage return (half of a
   `\r\n` not yet written) no longer shows the stray `\r` in large-file tabs:
   both modes show it the same way.
+- A bookmark or a navigation-history place whose line was hidden by a filter
+  when a rewritten file finished reloading, or when the file's encoding was
+  changed, is found again by its line number and text, instead of becoming
+  "line not found".
+- A tab with level, time or text filters that switches to the large-file mode
+  (a growing file passing the threshold) keeps filtering the lines it reads
+  again; before, every line was shown until the filter was applied again.
 
 ## [0.5.0] — 2026-11-18
 

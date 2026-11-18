@@ -73,6 +73,12 @@ public:
     // Прямой доступ для переизвлечения полей и посева результатов поиска —
     // только внутри слоя хранения/фасада.
     const QVector<std::shared_ptr<LogEntry>>& allEntries() const { return m_allEntries; }
+    // Записи файла с номерами строк из sortedLines (по возрастанию), видимые и
+    // скрытые. Один линейный проход по всем записям — O(N log K): строки
+    // резидентного бэкенда по номеру не индексированы (плотную таблицу дизайн
+    // R-1 отверг). Только поздние запросы RecordLocator — редкий путь.
+    QVector<std::shared_ptr<LogEntry>> entriesAtLines(const LogFile* file,
+                                                      const QVector<qint64>& sortedLines) const;
     const QVector<std::shared_ptr<LogEntry>>& visibleEntries() const { return m_filteredEntries; }
 
 private:

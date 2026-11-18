@@ -15,6 +15,7 @@
 
 class BookmarkStore;
 class NavHistory;
+class RecordLocator;
 class LogStore;
 class ResidentLogStore;
 class IndexedLogStore;
@@ -164,6 +165,10 @@ public:
     // LogListView::goToRow; живёт вместе с моделью, на диск не пишется.
     // Создаётся при первом обращении.
     NavHistory& navHistory() const;
+    // Разрешение сохранённых идентификаторов строк в ключи (R-1, шаг 3).
+    // Питают его вкладка и тестовая обвязка (порции, конец прохода); сброс
+    // строк (invalidateFileRows, конверсия, clear) модель передаёт сама.
+    RecordLocator& recordLocator() const { return *m_locator; }
     // Строки файла сброшены вкладкой мимо модели (индексный сброс файла,
     // полная перезагрузка): закладки и история сверят строки заново.
     void invalidateFileRows(const QString& filePath);
@@ -240,6 +245,8 @@ private:
     // фильтров через дружественный доступ.
     friend class ResidentLogStore;
     friend class IndexedLogStore;
+    // Поздний проход по резидентным записям (ResidentLogStore::entriesAtLines).
+    friend class RecordLocator;
 
     // Текущий бэкенд как резидентный; assert при несоответствии.
     ResidentLogStore* resident() const;
@@ -284,6 +291,7 @@ private:
     QVector<int> m_visibleFieldIndexes;
     bool m_fieldFilterEnabled = false;
 
+    RecordLocator* m_locator = nullptr;   // child QObject
     BookmarkStore* m_bookmarks = nullptr; // child QObject
     mutable NavHistory* m_navHistory = nullptr; // child QObject, лениво
 };

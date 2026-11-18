@@ -1,6 +1,7 @@
 #include "logmodel.h"
 #include "bookmarkstore.h"
 #include "navhistory.h"
+#include "recordlocator.h"
 #include "indexedlogstore.h"
 #include "residentlogstore.h"
 
@@ -19,6 +20,8 @@ LogModel::LogModel(QObject* parent)
     // m_filterStartTime / m_filterEndTime default-constructed невалидными —
     // фильтр по времени выключен. Пустой m_activeLogLevels = «показывать все».
 {
+    // Локатор — раньше закладок: они подписываются на его ответы.
+    m_locator = new RecordLocator(*this);
     m_bookmarks = new BookmarkStore(*this);
     // Палитра цветов для плашек файлов (при загрузке нескольких файлов в таб).
     m_predefinedFileColors << QColor(Qt::cyan).darker(220)
@@ -62,6 +65,7 @@ ResidentLogStore* LogModel::residentOrNull() const
 
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
+    m_locator->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();
@@ -91,6 +95,7 @@ NavHistory& LogModel::navHistory() const
 
 void LogModel::invalidateFileRows(const QString& filePath)
 {
+    m_locator->fileReset(filePath);
     m_bookmarks->invalidateFile(filePath);
     if (m_navHistory)
         m_navHistory->invalidateFile(filePath);
@@ -290,6 +295,7 @@ void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
 void LogModel::clear()
 {
     cancelPendingFilter(!isIndexedBackend());
+    m_locator->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();
@@ -363,6 +369,7 @@ IndexedLogStore* LogModel::convertToIndexedBackend()
     // alive-guard.
     m_store->cancelPendingFilter(false);
     // Строки перечитает индексатор: закладки сверятся, когда покажутся снова.
+    m_locator->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();
@@ -380,6 +387,7 @@ void LogModel::convertToResidentBackend()
     if (!isIndexedBackend())
         return;
     m_store->cancelPendingFilter(false);
+    m_locator->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();

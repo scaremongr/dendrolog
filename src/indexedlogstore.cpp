@@ -59,6 +59,10 @@ IndexedLogStore::IndexedLogStore(LogModel& model)
     : LogStore(model)
     , m_filterProgress(std::make_shared<std::atomic<int>>(0))
 {
+    // Фильтры модели переживают конверсию вкладки (рост файла за порог,
+    // сохранённое состояние, поставленное до данных): строки индексатора
+    // идут через фильтр с первой порции, а не «видно всё» до переприменения.
+    m_identityVisible = !hasActiveFilterSettings();
     m_progressTimer = new QTimer(&model);
     m_progressTimer->setInterval(200);
     std::weak_ptr<int> alive = m_aliveGuard;
@@ -1017,6 +1021,30 @@ bool IndexedLogStore::refForKey(const RecordKey& key, RowRef* ref) const
         return false;
     *ref = makeRef(fileId, line);
     return true;
+}
+
+RecordKey IndexedLogStore::keyForLine(const LogFile* file, qint64 line, qint64* offset,
+                                      quint32* length) const
+{
+    const int fileId = fileIdOf(file);
+    if (fileId < 0 || line < 1)
+        return {};
+    const IndexedFile& f = m_files[fileId];
+    const qint64 l = line - 1;
+    if (l >= f.index->lineCount() || !refShown(makeRef(fileId, l)))
+        return {};
+    const quint32 logical = f.index->logicalId(l);
+    const qint64 ms = f.index->timestampMs(logical);
+    RecordKey key;
+    key.file = f.logFile;
+    key.line = line;
+    key.logicalEntryId = int(logical);
+    key.timestampMs = ms >= 0 ? ms : RecordKey::kNoTimestamp;
+    if (offset)
+        *offset = f.index->lineStartOffset(l);
+    if (length)
+        *length = f.index->lineByteLength(l);
+    return key;
 }
 
 RecordKey IndexedLogStore::keyAt(int visibleRow) const

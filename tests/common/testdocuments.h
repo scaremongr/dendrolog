@@ -20,6 +20,7 @@
 #include "logmodel.h"
 #include "logparser.h"
 #include "logpattern.h"
+#include "recordlocator.h"
 #include "textencoding.h"
 
 #include <QCoreApplication>
@@ -391,11 +392,16 @@ inline void addResidentFiles(Document& doc, const QStringList& paths, const QStr
         QVector<std::shared_ptr<LogEntry>> entries = parseResidentWhole(doc, logFile, schema);
         // Порядок подачи как в production: батчи по 5000 сортируются и
         // сливаются.
+        // Локатору (R-1) — порция в порядке файла, после слияния, и конец
+        // прохода: как LogViewWidget::handleEntriesParsed / handleParsingFinished.
         for (qsizetype from = 0; from < entries.size(); from += 5000) {
-            QVector<std::shared_ptr<LogEntry>> batch = entries.mid(from, 5000);
+            const QVector<std::shared_ptr<LogEntry>> fileOrder = entries.mid(from, 5000);
+            QVector<std::shared_ptr<LogEntry>> batch = fileOrder;
             std::sort(batch.begin(), batch.end(), logEntryPtrLess);
             doc.model->mergeEntries(batch);
+            doc.model->recordLocator().residentBatch(fileOrder);
         }
+        doc.model->recordLocator().fileLoaded(logFile);
     }
 }
 
@@ -490,12 +496,17 @@ inline void addIndexedFiles(Document& doc, const QStringList& paths, const QStri
         store->attachFile(job->logFile, job->index);
 
         Job* raw = job.get();
+        LogModel* model = doc.model.get();
         QObject::connect(raw->indexer.get(), &LogIndexer::indexBatchReady, &relay,
-                         [store](const LogFilePtr& lf, qint64 first, qint64 count) {
+                         [store, model](const LogFilePtr& lf, qint64 first, qint64 count) {
                              store->appendIndexedRows(lf, first, count, false);
+                             model->recordLocator().indexedRange(lf, first, count);
                          });
         QObject::connect(raw->indexer.get(), &LogIndexer::indexingFinished, &relay,
-                         [raw](qint64, const LogFilePtr&) { raw->done = true; });
+                         [raw, model](qint64, const LogFilePtr& lf) {
+                             model->recordLocator().fileLoaded(lf, raw->index->endOffset());
+                             raw->done = true;
+                         });
         QObject::connect(raw->indexer.get(), &LogIndexer::indexingFailed, &relay,
                          [raw](const LogFilePtr&) { raw->done = true; });
         QObject::connect(raw->indexer.get(), &LogIndexer::needsResidentFallback, &relay,
@@ -575,12 +586,17 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
     bool ok = true;
     QObject relay;
     configureIndexer(indexer, store, schema, &relay);
+    LogModel* model = doc.model.get();
     QObject::connect(&indexer, &LogIndexer::indexBatchReady, &relay,
-                     [store](const LogFilePtr& lf, qint64 first, qint64 count) {
+                     [store, model](const LogFilePtr& lf, qint64 first, qint64 count) {
                          store->appendIndexedRows(lf, first, count, /*markNew*/ true);
+                         model->recordLocator().indexedRange(lf, first, count);
                      });
     QObject::connect(&indexer, &LogIndexer::indexingFinished, &relay,
-                     [&done](qint64, const LogFilePtr&) { done = true; });
+                     [&done, model, index](qint64, const LogFilePtr& lf) {
+                         model->recordLocator().fileLoaded(lf, index->endOffset());
+                         done = true;
+                     });
     QObject::connect(&indexer, &LogIndexer::indexingFailed, &relay,
                      [&](const LogFilePtr&) { ok = false; done = true; });
     indexer.startIndexingFrom(logFile, index, index->lastLineProvisional(),
@@ -645,8 +661,11 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
                             doc.encodings.value(logFile->filePath));
     if (!waitFor([&done] { return done; }))
         return false;
-    for (const auto& batch : batches)
+    for (const auto& batch : batches) {
         doc.model->appendEntries(batch);
+        doc.model->recordLocator().residentBatch(batch);
+    }
+    doc.model->recordLocator().fileLoaded(logFile);
     if (revised) {
         // Пересмотр кодировки хвостом (шаг 3а): файл перечитывается целиком и
         // его записи подменяются под одним reset — LogViewWidget::startReencode.

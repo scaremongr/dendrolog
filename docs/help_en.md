@@ -202,7 +202,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - A bookmark belongs to one physical line, not to the whole entry: a bookmark on a line of a stack trace stays on that line.
 - The **Bookmarks** panel (`Ctrl+F11`) lists the bookmarks of the current tab: file and line number, the start of the line's text and a note you can edit right there. Click the file and line to go to the bookmark, ✕ removes it, **Clear All** removes every bookmark of the tab.
 - A bookmark on a line hidden by the filters is marked **hidden by filter**; clicking it goes to the nearest shown line. When the filter is removed, the margin mark is back.
-- Bookmarks stay through tail updates, a full reload of the file and the switch of a growing file to the large-file mode. If the file is rewritten and the line is gone or has different text, the bookmark stays in the panel with its text and note, marked **line not found**, and is not moved to another line. Bookmarking that line again reattaches the bookmark and keeps its note. While the file is being read again the bookmark is marked **line not loaded**.
+- Bookmarks stay through tail updates, a full reload of the file and the switch of a growing file to the large-file mode. If the file is rewritten and the line is gone or has different text, the bookmark stays in the panel with its text and note, marked **line not found**, and is not moved to another line. Bookmarking that line again reattaches the bookmark and keeps its note. While the file is being read again the bookmark is marked **line not loaded**. A bookmark is found again by its line number and text, also when a filter hides that line at the moment.
 - Bookmarks live until the tab is closed.
 
 ## Reloading
