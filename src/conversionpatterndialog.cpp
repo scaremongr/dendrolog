@@ -130,7 +130,7 @@ the colour of its card while you edit.</p>
 <tr><td><code>Text</code></td><td>Shortest text until the next separator / block. May be empty — a missing field does not break the line.</td></tr>
 <tr><td><code>Greedy text</code></td><td>Longest text before the next separator; use when the value may contain the separator text.</td></tr>
 <tr><td><code>Timestamp</code></td><td>Date/time token (ISO, EU, US, time-only). Anchor.</td></tr>
-<tr><td><code>Level</code></td><td>TRACE / DEBUG / INFO / WARN / ERROR / FATAL… Anchor.</td></tr>
+<tr><td><code>Level</code></td><td>TRACE / DEBUG / INFO / WARN / ERROR / FATAL, also CRITICAL, SEVERE, ERR, NOTICE, VERBOSE… Anchor.</td></tr>
 <tr><td><code>Integer</code>, <code>Hex</code></td><td>Numeric tokens; suffix optional.</td></tr>
 <tr><td><code>IP address</code></td><td>IPv4 with optional :port. Anchor.</td></tr>
 <tr><td><code>File path</code></td><td>Windows / UNC / Unix-like path.</td></tr>

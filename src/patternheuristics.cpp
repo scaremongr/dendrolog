@@ -1,5 +1,7 @@
 #include "patternheuristics.h"
 
+#include "logentry.h"
+
 #include <QHash>
 #include <QRegularExpression>
 #include <QSet>
@@ -71,10 +73,38 @@ QString timestampRegex()
         R"((?:\d{4}[-/.]\d{2}[-/.]\d{2}[T ]|\d{2}[-/.]\d{2}[-/.]\d{4}[ ])?\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:[Zz]|[+-]\d{2}(?::?\d{2})?)?)");
 }
 
+namespace {
+
+// Альтернативы из словаря kLevelWords: "[Ff][Aa][Tt][Aa][Ll]|…". Регистр
+// сворачивается здесь же и только для ASCII — опция CaseInsensitive в
+// UTF-режиме приравняла бы «ſ» к S и знак Кельвина к K, а ручной сканер
+// LineClassifier считает их разделителями. Порядок альтернатив не важен: с
+// обеих сторон стоит \b, поэтому ERR не «съедает» начало ERROR.
+const QString& levelAlternation()
+{
+    static const QString alternation = [] {
+        QString alt;
+        for (const LevelWord& w : kLevelWords) {
+            if (!alt.isEmpty())
+                alt += QLatin1Char('|');
+            for (const char* c = w.word; *c; ++c) {
+                const QChar upper = QLatin1Char(*c);
+                alt += QLatin1Char('[');
+                alt += upper;
+                alt += upper.toLower();
+                alt += QLatin1Char(']');
+            }
+        }
+        return alt;
+    }();
+    return alternation;
+}
+
+} // namespace
+
 QString levelRegex()
 {
-    return QStringLiteral(
-        R"(\b(?i:TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL|NOTICE|VERBOSE)\b)");
+    return QStringLiteral(R"(\b(?:)") + levelAlternation() + QStringLiteral(R"()\b)");
 }
 
 QString hexRegex()
@@ -125,7 +155,7 @@ QString isoTimestampDetectPattern()
 
 QString levelDetectPattern()
 {
-    return QStringLiteral(R"(\b(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b)");
+    return QStringLiteral(R"(\b()") + levelAlternation() + QStringLiteral(R"()\b)");
 }
 
 // ---------------------------------------------------------------- //

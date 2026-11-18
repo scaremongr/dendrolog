@@ -23,6 +23,19 @@ All notable changes to DendroLog are documented here. The format follows
   the OS as before), **Light** or **Dark**. The choice applies at once to the
   whole window and is remembered.
 
+### Changed
+- **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
+  and `FTL` count as Fatal; `ERR` as Error; `WRN` as Warn;
+  `INF` and `NOTICE` as Info; `DBG` as Debug; `VERBOSE` and `VRB` as Trace.
+  Lines with these words used to have no level: they were not coloured, the
+  level buttons, `F7` / `F8` and the error counters ignored them, and without
+  a field schema they were glued to the previous entry. The **Level** block of
+  a field schema accepts the same words. The full table is in Quick Help
+  (`F1`), “Which word means which level”.
+- The directory scanner counts Fatal, Error and Warn per entry: a level word
+  in a continuation line (a stack trace, a dumped message) no longer adds to
+  the counters, so they agree with the opened tab.
+
 ### Fixed
 - Switching between the light and dark theme while a log is open no longer
   leaves lines drawn in the previous theme's text colour, and the Entry Details

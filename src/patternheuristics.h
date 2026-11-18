@@ -31,7 +31,8 @@ namespace PatternHeuristics {
 // Optional date part (ISO / EU / US) followed by a mandatory time part,
 // optional fraction and an optional zone glued to it (Z, ±hh, ±hh:mm, ±hhmm).
 QString timestampRegex();
-// TRACE/DEBUG/INFO/WARN(ING)/ERROR/FATAL/… with word boundaries.
+// Any word of the level vocabulary (kLevelWords in logentry.h) with word
+// boundaries; case-insensitive for ASCII letters only.
 QString levelRegex();
 QString hexRegex();
 QString integerRegex();

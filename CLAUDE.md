@@ -71,7 +71,7 @@ ctest --test-dir build -C Release --output-on-failure
 | Тест | Что проверяет |
 | --- | --- |
 | `tests/pattern_smoke` | движок схем `LogPattern` + автоопределение |
-| `tests/lineindex_smoke` | `LineIndex`/`LogIndexer`: смещения, дозапись, золотое сравнение с `LogParser`; классификатор: регекс-эталон и политика времени (зоны, дробь) |
+| `tests/lineindex_smoke` | `LineIndex`/`LogIndexer`: смещения, дозапись, золотое сравнение с `LogParser`; классификатор: регекс-эталон, словарь уровней и политика времени (зоны, дробь) |
 | `tests/dirscanner_smoke` | `DirectoryScanner` и панель: скан, фильтры, режимы обновления |
 | `tests/logstore_equivalence` | **дифференциальный**: резидентный и индексный бэкенды на одних данных обязаны давать одно и то же |
 | `tests/logview_state` | **табличный**: состояние `LogListView` (выделение, прокрутка, геометрия, клавиатура) переживает изменения данных |
@@ -116,7 +116,8 @@ Qt DLL на Windows) плюс `add_subdirectory` там же.
 ограниченным, а не расти по строке на промах.
 
 У `lineindex_smoke` есть режимы профилирования: `--bench <file> [pattern]` и
-`--bench-stages <file>` (ступенчатая атрибуция I/O → декод → timestamp → level).
+`--bench-stages <file>` (ступенчатая атрибуция I/O → декод → timestamp → level,
+плюс стадия 4 — декод + level без timestamp, цена классификации уровня отдельно).
 
 ### Санитайзеры
 
@@ -210,6 +211,14 @@ cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-f
 `PatternHeuristics` (автоопределение схемы по строке), `SchemaStore`
 (`patterns/*.json`), `LineClassifier` (уровень и timestamp в горячем пути
 индексации, без построения `QDateTime`), `LogParser`.
+
+Словарь уровней («какое слово — какой уровень») записан один раз:
+`kLevelWords` в `src/logentry.h`. Из него строятся регексы `PatternHeuristics`
+(блок Level схемы и эталон `levelDetectPattern`), `StrToLevel` и подсветка
+ключевых слов; `LineClassifier::detectLogLevel` повторяет его вручную ради
+скорости. Регистр сворачивается только для ASCII. Новое слово — это таблица,
+ручной сканер, заданное соответствие в `lineindex_smoke`
+(`testLevelVocabulary`) и таблица в обеих справках.
 
 Политика времени — одна на всё приложение и живёт только в
 `LineClassifier`: метка без зоны — локальное время машины, явная зона (`Z`,

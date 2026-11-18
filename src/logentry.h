@@ -154,15 +154,59 @@ inline QString LevelToStr(LogLevel lvl) {
     }
 }
 
-// Преобразование QString → enum (регистронезависимо)
-inline LogLevel StrToLevel(const QString &s) {
-    const QString u = s.trimmed().toUpper();
-    if (u == QLatin1String("TRACE"))   return LogLevel::Trace;
-    if (u == QLatin1String("DEBUG"))   return LogLevel::Debug;
-    if (u == QLatin1String("INFO"))    return LogLevel::Info;
-    if (u == QLatin1String("WARN") || u == QLatin1String("WARNING")) return LogLevel::Warn;
-    if (u == QLatin1String("ERROR"))   return LogLevel::Error;
-    if (u == QLatin1String("FATAL"))   return LogLevel::Fatal;
+// Словарь уровней: какое слово в строке лога какой уровень означает.
+// Единственное место, где он записан. Отсюда строятся регексы
+// PatternHeuristics (блок Level схемы и эталон классификатора), StrToLevel и
+// подсветка ключевых слов; LineClassifier::detectLogLevel повторяет его
+// вручную ради скорости, а tests/lineindex_smoke сверяет их между собой и с
+// заранее заданным соответствием. Меняя таблицу, править классификатор, тест
+// и таблицу в обеих справках.
+//
+// Слова — только ASCII в верхнем регистре; сравнение везде регистронезависимое
+// и только по ASCII («ſ» и знак Кельвина — не S и не K). Новых значений
+// LogLevel словарь не заводит: чужие шкалы отображаются на шесть уровней.
+//   CRITICAL/CRIT, EMERG — syslog, nginx, Python; SEVERE —
+//   java.util.logging; NOTICE — syslog, PostgreSQL; VERBOSE — Android,
+//   Serilog; ERR/WRN/INF/DBG/VRB/FTL — Serilog.
+// Намеренно НЕ в словаре: ALERT, PANIC, FAIL, FINE/FINER/FINEST и CONFIG
+// (java.util.logging). Это обычные слова сообщений и имён компонентов, а
+// уровень задаёт САМОЕ ЛЕВОЕ слово словаря: «alert.manager - ERROR» стал бы
+// Fatal вместо Error. Каждое новое слово несёт этот риск — добавлять только
+// те, что вне меток уровня почти не встречаются.
+struct LevelWord {
+    const char* word;
+    LogLevel level;
+};
+
+inline constexpr LevelWord kLevelWords[] = {
+    { "FATAL", LogLevel::Fatal },    { "CRITICAL", LogLevel::Fatal },
+    { "CRIT", LogLevel::Fatal },     { "SEVERE", LogLevel::Fatal },
+    { "EMERG", LogLevel::Fatal },    { "FTL", LogLevel::Fatal },
+    { "ERROR", LogLevel::Error },    { "ERR", LogLevel::Error },
+    { "WARNING", LogLevel::Warn },   { "WARN", LogLevel::Warn },
+    { "WRN", LogLevel::Warn },
+    { "INFO", LogLevel::Info },      { "INF", LogLevel::Info },
+    { "NOTICE", LogLevel::Info },
+    { "DEBUG", LogLevel::Debug },    { "DBG", LogLevel::Debug },
+    { "TRACE", LogLevel::Trace },    { "VERBOSE", LogLevel::Trace },
+    { "VRB", LogLevel::Trace },
+};
+
+// Слово уровня → enum (регистронезависимо по ASCII, пробелы по краям не в счёт)
+inline LogLevel StrToLevel(QStringView s) {
+    s = s.trimmed();
+    for (const LevelWord& w : kLevelWords) {
+        qsizetype k = 0;
+        for (; k < s.size() && w.word[k] != '\0'; ++k) {
+            char16_t c = s[k].unicode();
+            if (c >= u'a' && c <= u'z')
+                c = char16_t(c - (u'a' - u'A'));
+            if (c != char16_t(w.word[k]))
+                break;
+        }
+        if (k == s.size() && w.word[k] == '\0' && k > 0)
+            return w.level;
+    }
     return LogLevel::Unknown;
 }
 

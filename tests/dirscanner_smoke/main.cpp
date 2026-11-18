@@ -157,6 +157,23 @@ static void testTailAnalysis(const QString& dir)
     CHECK(onlyHead.warnCount + onlyTail.warnCount == whole.warnCount, "warn counts add up");
     CHECK(onlyHead.errorCount + onlyTail.errorCount == whole.errorCount, "error counts add up");
     CHECK(onlyHead.fatalCount + onlyTail.fatalCount == whole.fatalCount, "fatal counts add up");
+    CHECK(whole.warnCount == 1 && whole.errorCount == 1 && whole.fatalCount == 1,
+          "one entry of each level");
+
+    // Счётчики идут по записям: слово уровня в строке без метки времени
+    // (продолжение записи) не считается, слова расширенного словаря — считаются.
+    writeFile(path,
+              "2026-03-01 10:00:00 INFO  one\n"
+              "    caused by: fatal error in critical section\n"
+              "    err: connection reset, warning ignored\n"
+              "2026-03-01 10:00:01 [crit] two\n"
+              "2026-03-01 10:00:02 SEVERE three\n"
+              "2026-03-01 10:00:03 [ERR] four\n"
+              "2026-03-01 10:00:04 [WRN] five\n"
+              "2026-03-01 10:00:05 NOTICE six\n");
+    const LogParser::FileStats words = parser.analyzeFileForStats(path);
+    CHECK(words.fatalCount == 2 && words.errorCount == 1 && words.warnCount == 1,
+          "level words count once per entry, continuation lines do not count");
     CHECK(onlyHead.firstEntryTimestamp == whole.firstEntryTimestamp,
           "the head keeps the first timestamp");
     CHECK(onlyTail.lastEntryTimestamp == whole.lastEntryTimestamp,

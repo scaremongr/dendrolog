@@ -267,6 +267,47 @@ static void testGolden(const QDir& dir)
     }
 }
 
+// Слова словаря уровней на обоих путях загрузки: запись с таким словом после
+// метки времени — первичная, её уровень одинаков у LogParser и LogIndexer и
+// равен заданному; строка-продолжение наследует его.
+static void testLevelVocabularyBackends(const QDir& dir)
+{
+    const struct { const char* word; LogLevel level; } cases[] = {
+        { "CRITICAL", LogLevel::Fatal }, { "crit", LogLevel::Fatal },
+        { "SEVERE", LogLevel::Fatal },   { "emerg", LogLevel::Fatal },
+        { "FTL", LogLevel::Fatal },      { "ERR", LogLevel::Error },
+        { "WRN", LogLevel::Warn },       { "INF", LogLevel::Info },
+        { "Notice", LogLevel::Info },    { "DBG", LogLevel::Debug },
+        { "VERBOSE", LogLevel::Trace },  { "VRB", LogLevel::Trace },
+    };
+    QByteArray b;
+    int second = 0;
+    for (const auto& c : cases) {
+        b += QByteArray("2026-07-10 09:00:") + QByteArray::number(10 + second++)
+           + ",000 [" + c.word + "] record\n";
+        b += "    continuation of the record\n";
+    }
+    const QString path = writeFile(dir, QStringLiteral("level_words.log"), b);
+    auto lf = std::make_shared<LogFile>(path);
+    const auto entries = parseFile(lf);
+    const auto index = indexFile(lf);
+    compareParserVsIndex(QStringLiteral("level_words"), path, lf, entries, *index);
+
+    const int n = int(std::size(cases));
+    CHECK(entries.size() == 2 * n && index->lineCount() == 2 * n, "level_words: line count");
+    for (int i = 0; i < n && 2 * i + 1 < entries.size(); ++i) {
+        const bool ok = entries[2 * i]->level() == cases[i].level
+                     && entries[2 * i + 1]->level() == cases[i].level
+                     && entries[2 * i + 1]->logicalEntryId() == entries[2 * i]->logicalEntryId()
+                     && (i == 0 || entries[2 * i]->logicalEntryId()
+                                       != entries[2 * i - 1]->logicalEntryId());
+        if (!ok) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL level_words: record with '%s'\n", cases[i].word);
+        }
+    }
+}
+
 static void testBom(const QDir& dir)
 {
     // UTF-8 BOM: пропускается, первая строка начинается после него.
@@ -566,7 +607,7 @@ static bool refDetectLogLevel(const QRegularExpression& levelRe,
 {
     const auto match = levelRe.match(line);
     if (match.hasMatch()) {
-        level = StrToLevel(match.captured(1).toUpper());
+        level = StrToLevel(match.captured(1));
         return true;
     }
     return false;
@@ -618,9 +659,11 @@ static void testClassifierRegexEquivalence()
     const LineClassifier classifier;
     const QRegularExpression isoRe(PatternHeuristics::isoTimestampDetectPattern());
     const QRegularExpression suffixRe(PatternHeuristics::timestampSuffixDetectPattern());
-    const QRegularExpression levelRe(PatternHeuristics::levelDetectPattern(),
-                                     QRegularExpression::CaseInsensitiveOption);
-    CHECK(isoRe.isValid() && suffixRe.isValid(), "reference timestamp regexes compile");
+    // Регистр сворачивается в самом шаблоне и только для ASCII: опция
+    // CaseInsensitive приравняла бы «ſ» к S, а знак Кельвина — к K.
+    const QRegularExpression levelRe(PatternHeuristics::levelDetectPattern());
+    CHECK(isoRe.isValid() && suffixRe.isValid() && levelRe.isValid(),
+          "reference timestamp and level regexes compile");
     const auto check = [&](const QString& line) {
         checkClassifierLine(classifier, isoRe, suffixRe, levelRe, line);
     };
@@ -671,6 +714,32 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("İNFO turkish dotted I"),
         QStringLiteral("2026-07-11 10:22:33,123 WARN [net] полная строка"),
         QStringLiteral("\ttab\tINFO\ttabs"),
+        QStringLiteral("2026-07-11 10:22:33 CRITICAL disk full"),
+        QStringLiteral("2026-07-11 10:22:33 [crit] nginx style"),
+        QStringLiteral("SEVERE: java.util.logging"),
+        QStringLiteral("<3>ERR syslog"),
+        QStringLiteral("ERR0R not a word"),
+        QStringLiteral("ERRO four letters"),
+        QStringLiteral("errors plural"),
+        QStringLiteral("[10:22:33 INF] serilog"),
+        QStringLiteral("[10:22:33 WRN] serilog"),
+        QStringLiteral("[10:22:33 DBG] serilog"),
+        QStringLiteral("[10:22:33 VRB] serilog"),
+        QStringLiteral("[10:22:33 FTL] serilog"),
+        QStringLiteral("loss=inf value"),
+        QStringLiteral("notice lowercase"),
+        QStringLiteral("NOTICED not a word"),
+        QStringLiteral("Verbose mode"),
+        QStringLiteral("verbo\u017Fe long s is not S"),
+        QStringLiteral("\u017Fevere long s first"),
+        QStringLiteral("\u212AERNEL kelvin"),
+        QStringLiteral("[emerg] system is unusable"),
+        QStringLiteral("[alert] action required"),
+        QStringLiteral("panic: runtime error"),
+        QStringLiteral("CRITICALITY then CRIT"),
+        QStringLiteral("critical_section then severe"),
+        QStringLiteral("FINE CONFIG FINER FINEST are not levels"),
+        QStringLiteral("a ab abc abcd abcde abcdef abcdefg abcdefgh abcdefghi"),
         QStringLiteral("00000000-0000-0000 00:00:00"),
         QStringLiteral("2026-07-11T10:22:33Z INFO utc"),
         QStringLiteral("2026-07-11T10:22:33.5z lowercase z"),
@@ -735,6 +804,145 @@ static void testClassifierRegexEquivalence()
             check(line);
         }
     }
+
+    // Фаззинг слов уровней: строка из ключевых слов, их обрезков и склеек со
+    // случайным регистром и разделителями. Случайный алфавит выше собирает
+    // трёхбуквенные слова, но почти никогда — CRITICAL или VERBOSE.
+    const QStringList pieces = {
+        QStringLiteral("TRACE"), QStringLiteral("DEBUG"), QStringLiteral("INFO"),
+        QStringLiteral("WARN"), QStringLiteral("WARNING"), QStringLiteral("ERROR"),
+        QStringLiteral("FATAL"), QStringLiteral("CRITICAL"), QStringLiteral("CRIT"),
+        QStringLiteral("SEVERE"), QStringLiteral("EMERG"), QStringLiteral("ALERT"),
+        QStringLiteral("PANIC"), QStringLiteral("FTL"), QStringLiteral("ERR"),
+        QStringLiteral("WRN"), QStringLiteral("INF"), QStringLiteral("NOTICE"),
+        QStringLiteral("DBG"), QStringLiteral("VERBOSE"), QStringLiteral("VRB"),
+        QStringLiteral("FINE"), QStringLiteral("CONFIG"), QStringLiteral("LOG"),
+        QStringLiteral("x"), QStringLiteral("S"), QStringLiteral("_"),
+        QStringLiteral("7"), QStringLiteral("\u017F"), QStringLiteral("\u212A"),
+        QStringLiteral("я"),
+    };
+    const QString seps = QStringLiteral("  [],:.-=/");
+    for (int iter = 0; iter < 20000; ++iter) {
+        QString line;
+        const int count = 1 + int(rng.bounded(5));
+        for (int k = 0; k < count; ++k) {
+            QString piece = pieces.at(int(rng.bounded(pieces.size())));
+            const int mode = int(rng.bounded(6));
+            if (mode == 0)
+                piece = piece.toLower();
+            else if (mode == 1 && piece.size() > 1)
+                piece = piece.left(1) + piece.mid(1).toLower();
+            else if (mode == 2 && piece.size() > 1)
+                piece.chop(1);                       // обрезок: «CRITICA»
+            else if (mode == 3)
+                piece[int(rng.bounded(piece.size()))] =
+                    alphabet.at(int(rng.bounded(alphabet.size())));
+            line += piece;
+            // Иногда без разделителя — склейка: «ERRWARN» не уровень.
+            if (rng.bounded(4) != 0)
+                line += seps.at(int(rng.bounded(seps.size())));
+        }
+        check(line);
+    }
+}
+
+// Словарь уровней на заранее заданном соответствии — независимо от таблицы
+// kLevelWords, из которой построены регексы: ошибку в самой таблице сверка
+// сканера с регексом не увидит. Это же соответствие описано в справке.
+static void testLevelVocabulary()
+{
+    const struct { const char* word; LogLevel level; } expected[] = {
+        { "FATAL", LogLevel::Fatal },    { "CRITICAL", LogLevel::Fatal },
+        { "CRIT", LogLevel::Fatal },     { "SEVERE", LogLevel::Fatal },
+        { "EMERG", LogLevel::Fatal },    { "FTL", LogLevel::Fatal },
+        { "ERROR", LogLevel::Error },    { "ERR", LogLevel::Error },
+        { "WARNING", LogLevel::Warn },   { "WARN", LogLevel::Warn },
+        { "WRN", LogLevel::Warn },
+        { "INFO", LogLevel::Info },      { "INF", LogLevel::Info },
+        { "NOTICE", LogLevel::Info },
+        { "DEBUG", LogLevel::Debug },    { "DBG", LogLevel::Debug },
+        { "TRACE", LogLevel::Trace },    { "VERBOSE", LogLevel::Trace },
+        { "VRB", LogLevel::Trace },
+    };
+    const LineClassifier classifier;
+    const QRegularExpression blockRe(
+        QRegularExpression::anchoredPattern(PatternHeuristics::levelRegex()));
+    CHECK(blockRe.isValid(), "Level block regex compiles");
+
+    const auto classify = [&](const QString& line) {
+        LogLevel lvl = LogLevel::Unknown;
+        return classifier.detectLogLevel(line, lvl) ? lvl : LogLevel::Unknown;
+    };
+    const auto expectLevel = [&](const QString& line, LogLevel want) {
+        const LogLevel got = classify(line);
+        if (got != want) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL level of '%s': got %s, want %s\n", qPrintable(line),
+                         qPrintable(LevelToStr(got)), qPrintable(LevelToStr(want)));
+        }
+    };
+
+    int count = 0;
+    for (const auto& e : expected) {
+        ++count;
+        const QString upper = QString::fromLatin1(e.word);
+        const QString lower = upper.toLower();
+        const QString title = upper.left(1) + lower.mid(1);
+        for (const QString& w : { upper, lower, title }) {
+            expectLevel(w, e.level);
+            expectLevel(QStringLiteral("2026-07-11 10:22:33 [%1] message").arg(w), e.level);
+            expectLevel(QStringLiteral("%1: message").arg(w), e.level);
+            if (StrToLevel(w) != e.level || StrToLevel(QStringLiteral(" %1 ").arg(w)) != e.level) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL StrToLevel('%s')\n", qPrintable(w));
+            }
+            if (!blockRe.match(w).hasMatch()) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL Level block does not accept '%s'\n", qPrintable(w));
+            }
+        }
+        // Слово внутри идентификатора — не уровень.
+        expectLevel(upper + QStringLiteral("X"), LogLevel::Unknown);
+        expectLevel(QStringLiteral("X") + upper, LogLevel::Unknown);
+        expectLevel(upper + QStringLiteral("_1"), LogLevel::Unknown);
+    }
+    // Таблица приложения и это соответствие — одно и то же множество.
+    int tableSize = 0;
+    for (const LevelWord& w : kLevelWords) {
+        ++tableSize;
+        bool found = false;
+        for (const auto& e : expected)
+            found = found || (qstrcmp(e.word, w.word) == 0 && e.level == w.level);
+        if (!found) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL kLevelWords has unexpected '%s'\n", w.word);
+        }
+    }
+    CHECK(tableSize == count, "kLevelWords size matches the documented vocabulary");
+
+    // Намеренно НЕ уровни (решение Q-2): обычные слова и чужие обрезки.
+    for (const char* w : { "ALERT", "PANIC", "FINE", "FINER", "FINEST", "CONFIG", "FAIL", "LOG", "ERRO",
+                           "WARNINGS", "INFORM", "NOTE", "CRITIC", "EMERGENCY", "DBUG" }) {
+        const QString word = QString::fromLatin1(w);
+        expectLevel(word, LogLevel::Unknown);
+        CHECK(StrToLevel(word) == LogLevel::Unknown, "non-level word has no level");
+        CHECK(!blockRe.match(word).hasMatch(), "Level block rejects a non-level word");
+    }
+    // Не-ASCII «двойники» букв — не буквы ключевых слов.
+    expectLevel(QStringLiteral("verbo\u017Fe"), LogLevel::Unknown);
+    CHECK(StrToLevel(QStringLiteral("verbo\u017Fe")) == LogLevel::Unknown, "long s is not S");
+    CHECK(!blockRe.match(QStringLiteral("verbo\u017Fe")).hasMatch(), "Level block: long s is not S");
+
+    // Побеждает самое левое слово.
+    expectLevel(QStringLiteral("notice: fatal error"), LogLevel::Info);
+    expectLevel(QStringLiteral("ERR while handling WARNING"), LogLevel::Error);
+    expectLevel(QStringLiteral("errors 3, crit 1"), LogLevel::Fatal);
+    // Обычное слово перед настоящим уровнем его не перебивает — поэтому
+    // ALERT и PANIC в словарь не взяты.
+    expectLevel(QStringLiteral("2026-07-11 10:22:33,123 - alert.manager - ERROR - failed"),
+                LogLevel::Error);
+    expectLevel(QStringLiteral("2026-07-11 10:22:33 [panic-handler] WARN recovered"),
+                LogLevel::Warn);
 }
 
 // Политика времени на заранее известных моментах — независимо от эталонной
@@ -855,7 +1063,10 @@ static int runBench(const QString& path, const QString& patternString)
 // 3 — +detectLogLevel. Дельты между ступенями = цена каждого шага.
 static int runBenchStages(const QString& path)
 {
-    for (int stage = 0; stage <= 3; ++stage) {
+    // Стадии 0–3 накопительные: I/O → декод → timestamp → level. Стадия 4 —
+    // декод + level без timestamp: цена классификации уровня отдельно, без
+    // шума самой дорогой стадии.
+    for (int stage = 0; stage <= 4; ++stage) {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) {
             std::fprintf(stderr, "cannot open %s\n", qPrintable(path));
@@ -900,7 +1111,7 @@ static int runBenchStages(const QString& path)
                 if (stage >= 1) {
                     text = QString::fromUtf8(data, int(len));
                     sink += text.size();
-                    if (stage >= 2) {
+                    if (stage == 2 || stage == 3) {
                         QDateTime ts;
                         if (classifier.detectTimestamp(text, ts)) {
                             ++tsCount;
@@ -919,7 +1130,7 @@ static int runBenchStages(const QString& path)
             }
         }
         std::fprintf(stderr,
-                     "stage %d: %6.1f s  (lines=%lld ts=%lld lvl=%lld sink=%lld)\n",
+                     "stage %d: %7.3f s  (lines=%lld ts=%lld lvl=%lld sink=%lld)\n",
                      stage, t.elapsed() / 1000.0, (long long)lines,
                      (long long)tsCount, (long long)lvlCount, (long long)sink);
     }
@@ -1050,8 +1261,10 @@ int main(int argc, char** argv)
     const QDir dir(tmp.path());
 
     testClassifierRegexEquivalence();
+    testLevelVocabulary();
     testTimestampGolden();
     testGolden(dir);
+    testLevelVocabularyBackends(dir);
     testBom(dir);
     testBlockBoundaries(dir);
     testAppendReindex(dir);

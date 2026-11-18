@@ -1,5 +1,6 @@
 #include "syntaxhighlighter.h"
 #include "apptheme.h"
+#include "logentry.h"
 #include "texttoken.h"
 
 // =============================================================================
@@ -325,34 +326,35 @@ int ruleTimestamp(const QString& text, int pos, const RuleColors& colors, QColor
     return i;
 }
 
-// ── Ключевые слова уровней лога: FATAL, ERROR, WARN(ING), INFO, DEBUG, TRACE ─────
+// ── Ключевые слова уровней лога: словарь kLevelWords (logentry.h) ───────────
+// Красится только слово, целиком набранное ЗАГЛАВНЫМИ: уровень строки
+// классификатор определяет без учёта регистра, но «error» посреди текста
+// сообщения цветом не выделяется.
 int ruleLogKeyword(const QString& text, int pos, const RuleColors& colors, QColor& outColor)
 {
+    const char16_t c0 = text[pos].unicode();
+    if (c0 < u'A' || c0 > u'Z') return pos;
     if (!isTokenStart(text, pos)) return pos;
-    const QChar c0 = text[pos];
-    if (c0 != 'D' && c0 != 'E' && c0 != 'F' && c0 != 'I' && c0 != 'T' && c0 != 'W')
-        return pos;
 
     const int len = text.length();
-    // Проверяет слово kw в позиции pos; возвращает конец токена или -1
-    const auto tryKw = [&](QLatin1String kw, const QColor& col) -> int {
-        const int kwLen = kw.size();
-        if (pos + kwLen > len) return -1;
-        if (QStringView(text).sliced(pos, kwLen) != kw) return -1;
-        const int end = pos + kwLen;
-        if (end < len && (text[end].isLetterOrNumber() || text[end] == '_')) return -1;
-        outColor = col;
+    for (const LevelWord& w : kLevelWords) {
+        if (char16_t(w.word[0]) != c0) continue;
+        const QLatin1String kw(w.word);
+        const int end = pos + int(kw.size());
+        if (end > len) continue;
+        if (QStringView(text).sliced(pos, kw.size()) != kw) continue;
+        if (end < len && (text[end].isLetterOrNumber() || text[end] == '_')) continue;
+        switch (w.level) {
+        case LogLevel::Fatal: outColor = colors.kwFatal; break;
+        case LogLevel::Error: outColor = colors.kwError; break;
+        case LogLevel::Warn:  outColor = colors.kwWarn;  break;
+        case LogLevel::Info:  outColor = colors.kwInfo;  break;
+        case LogLevel::Debug: outColor = colors.kwDebug; break;
+        case LogLevel::Trace: outColor = colors.kwTrace; break;
+        default: continue;
+        }
         return end;
-    };
-
-    int r;
-    if ((r = tryKw(QLatin1String("FATAL"),   colors.kwFatal)) >= 0) return r;
-    if ((r = tryKw(QLatin1String("ERROR"),   colors.kwError)) >= 0) return r;
-    if ((r = tryKw(QLatin1String("WARNING"), colors.kwWarn))  >= 0) return r;
-    if ((r = tryKw(QLatin1String("WARN"),    colors.kwWarn))  >= 0) return r;
-    if ((r = tryKw(QLatin1String("INFO"),    colors.kwInfo))  >= 0) return r;
-    if ((r = tryKw(QLatin1String("DEBUG"),   colors.kwDebug)) >= 0) return r;
-    if ((r = tryKw(QLatin1String("TRACE"),   colors.kwTrace)) >= 0) return r;
+    }
     return pos;
 }
 

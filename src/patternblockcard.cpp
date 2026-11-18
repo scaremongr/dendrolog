@@ -28,7 +28,7 @@ const KindEntry kKindEntries[] = {
       "Date/time token. Acts as an anchor: it is found even after leading garbage,\n"
       "and needs no separator after it." },
     { PatternBlock::MatchKind::Level, "Level",
-      "TRACE / DEBUG / INFO / WARN / ERROR / FATAL... Acts as an anchor." },
+      "TRACE / DEBUG / INFO / WARN / ERROR / FATAL, also CRITICAL, SEVERE, ERR, NOTICE, VERBOSE... Acts as an anchor." },
     { PatternBlock::MatchKind::Integer, "Integer",
       "One or more digits with an optional sign." },
     { PatternBlock::MatchKind::HexText, "Hex",

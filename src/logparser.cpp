@@ -234,7 +234,8 @@ LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath, qin
         line = in.readLine();
         stats.totalEntries++; // Count each line as a potential entry for simplicity in stats
 
-        if (m_classifier.detectTimestamp(line, currentTs)) {
+        const bool hasTimestamp = m_classifier.detectTimestamp(line, currentTs);
+        if (hasTimestamp) {
             if (!firstTsFound) {
                 stats.firstEntryTimestamp = currentTs;
                 firstTsFound = true;
@@ -242,7 +243,10 @@ LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath, qin
             stats.lastEntryTimestamp = currentTs; // Keep updating last timestamp
         }
 
-        if (m_classifier.detectLogLevel(line, currentLevel)) {
+        // Счётчики — по ЗАПИСЯМ, как во вкладке без схемы: уровень даёт только
+        // строка с меткой времени (isPrimaryLine). Слово «err» или «critical»
+        // в строке-продолжении (стек-трейс) ошибкой не считается.
+        if (hasTimestamp && m_classifier.detectLogLevel(line, currentLevel)) {
             switch (currentLevel) {
             case LogLevel::Warn:
                 stats.warnCount++;

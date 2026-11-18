@@ -59,6 +59,21 @@ filtering, highlighting and live reload.
 - **How line times are read.** A timestamp without a time zone is taken as local time on this computer. An explicit zone is honoured: `Z`, `+02:00`, `+0200`, `+02` right after the time, and `+02:00`, `+0200`, `UTC`, `GMT` after a single space (for example, `2026-09-20 10:00:00 +0200`). So `10:00:00Z` and `12:00:00+02:00` are the same moment, and files from different zones merge correctly in one tab. Fractional seconds of any length are truncated to milliseconds (`.1` is 100 ms, `.123456` is 123 ms). The time filter, the timeline and the details panel show moments in local time; the line text is not changed.
 - **Text Filters** panel — hides the lines that do not match its rules (Include/Exclude, AND/OR, case sensitivity and regex per rule, optionally bound to a field). It acts on the **active tab** with **Apply** / **Reset**. To *find* lines without hiding the rest, use the **Search** panel — see **[Text Filters and Search](#text-filters-and-search)** below.
 
+### Which word means which level
+
+The level of an entry comes from the **leftmost** word of the table below in the line the entry starts with. The word must stand on its own (`[ERROR]`, `ERROR:`, `level=error` count; `ERRORS`, `error_code` do not); case does not matter. Continuation lines (a stack trace) take the level of their entry. Without a field schema an entry starts at a line that has both a timestamp and such a word.
+
+| Level | Words |
+|---|---|
+| **Fatal** | `FATAL`, `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`, `FTL` |
+| **Error** | `ERROR`, `ERR` |
+| **Warn** | `WARN`, `WARNING`, `WRN` |
+| **Info** | `INFO`, `INF`, `NOTICE` |
+| **Debug** | `DEBUG`, `DBG` |
+| **Trace** | `TRACE`, `VERBOSE`, `VRB` |
+
+The level buttons, the line colour, the `F7` / `F8` jumps and the counters in Statistics all use this level; the directory scanner counts Fatal, Error and Warn over the lines that have a timestamp and such a word; the **Level** block of a field schema accepts the same words. Only a word written in capitals is coloured inside the text. `ALERT`, `PANIC`, `FAIL`, `FINE`, `FINER`, `FINEST`, `CONFIG` and one-letter levels (`E`, `W` in logcat) are not treated as levels: they are ordinary message words, and the leftmost word of the table decides. For the same reason a component name that equals a table word and stands before the level (`[notice-worker] ERROR …`) gives the level of that word.
+
 ## Text Filters and Search
 
 Two panels work with text, and they differ in **what happens to the log**:

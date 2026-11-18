@@ -11,14 +11,14 @@
 // в tests/lineindex_smoke):
 //   isoTimestampDetectPattern():  (\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})
 //                                 + timestampSuffixDetectPattern() (дробь, зона)
-//   levelDetectPattern():         \b(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b
-//                                 (CaseInsensitive)
+//   levelDetectPattern():         \b(слово из kLevelWords, logentry.h)\b,
+//                                 регистр сворачивается только для ASCII
 // Важные детали эквивалентности:
 //   • \d и \w у QRegularExpression без UseUnicodePropertiesOption — только
 //     ASCII; не-ASCII символы (включая суррогаты) для сканера — разделители;
-//   • регистронезависимость достаточна ASCII-сворачиванием: ни один
-//     не-ASCII символ simple-case-fold'ом не совпадает с буквами ключевых
-//     слов (K и S, у которых такие пары есть, в словах не встречаются).
+//   • регистр сворачивается только для ASCII, и в эталонном регексе тоже
+//     (классы [Ss] вместо опции CaseInsensitive): в словах есть S, а «ſ»
+//     (U+017F) опция приравняла бы к ней. Для сканера «ſ» — разделитель.
 //
 // Политика времени: метка без зоны — локальное время машины; явная зона
 // (Z, ±hh[:mm] вплотную, ±hh[:]mm или UTC/GMT через пробел, в пределах
@@ -381,7 +381,10 @@ bool LineClassifier::detectLogLevel(const QString &line, LogLevel &level) const
     const qsizetype n = line.size();
 
     // Самое левое ЦЕЛОЕ слово (границы — не-\w символы), равное одному из
-    // ключевых. Альтернативы регекса различимы по длине — неоднозначности нет.
+    // слов словаря kLevelWords (logentry.h). Словарь повторён здесь вручную:
+    // разбор по длине слова, затем по первой букве — на слово текста обычно
+    // приходится одно сравнение длины и одно — буквы. Совпадение со словарём
+    // закреплено в tests/lineindex_smoke.
     qsizetype i = 0;
     while (i < n) {
         if (!isWordChar(d[i].unicode())) {
@@ -394,29 +397,64 @@ bool LineClassifier::detectLogLevel(const QString &line, LogLevel &level) const
         const qsizetype len = j - i;
 
         LogLevel found = LogLevel::Unknown;
-        if (len >= 4 && len <= 7) {
-            char16_t w[7];
-            for (qsizetype k = 0; k < len; ++k)
-                w[k] = toUpperAscii(d[i + k].unicode());
-            const auto is = [&](const char16_t* kw) {
-                for (qsizetype k = 0; k < len; ++k)
-                    if (w[k] != kw[k])
+        if (len >= 3 && len <= 8) {
+            const QChar* w = d + i;
+            // Хвост слова (со второй буквы) против kw; длины равны.
+            const auto rest = [w, len](const char16_t* kw) {
+                for (qsizetype k = 1; k < len; ++k)
+                    if (toUpperAscii(w[k].unicode()) != kw[k])
                         return false;
                 return true;
             };
+            const char16_t first = toUpperAscii(w[0].unicode());
             switch (len) {
+            case 3:
+                switch (first) {
+                case u'E': if (rest(u"ERR")) found = LogLevel::Error; break;
+                case u'W': if (rest(u"WRN")) found = LogLevel::Warn;  break;
+                case u'I': if (rest(u"INF")) found = LogLevel::Info;  break;
+                case u'D': if (rest(u"DBG")) found = LogLevel::Debug; break;
+                case u'V': if (rest(u"VRB")) found = LogLevel::Trace; break;
+                case u'F': if (rest(u"FTL")) found = LogLevel::Fatal; break;
+                default: break;
+                }
+                break;
             case 4:
-                if (is(u"INFO"))         found = LogLevel::Info;
-                else if (is(u"WARN"))    found = LogLevel::Warn;
+                switch (first) {
+                case u'I': if (rest(u"INFO")) found = LogLevel::Info;  break;
+                case u'W': if (rest(u"WARN")) found = LogLevel::Warn;  break;
+                case u'C': if (rest(u"CRIT")) found = LogLevel::Fatal; break;
+                default: break;
+                }
                 break;
             case 5:
-                if (is(u"ERROR"))        found = LogLevel::Error;
-                else if (is(u"DEBUG"))   found = LogLevel::Debug;
-                else if (is(u"TRACE"))   found = LogLevel::Trace;
-                else if (is(u"FATAL"))   found = LogLevel::Fatal;
+                switch (first) {
+                case u'E':
+                    if (rest(u"ERROR"))      found = LogLevel::Error;
+                    else if (rest(u"EMERG")) found = LogLevel::Fatal;
+                    break;
+                case u'D': if (rest(u"DEBUG")) found = LogLevel::Debug; break;
+                case u'T': if (rest(u"TRACE")) found = LogLevel::Trace; break;
+                case u'F': if (rest(u"FATAL")) found = LogLevel::Fatal; break;
+                default: break;
+                }
+                break;
+            case 6:
+                switch (first) {
+                case u'S': if (rest(u"SEVERE")) found = LogLevel::Fatal; break;
+                case u'N': if (rest(u"NOTICE")) found = LogLevel::Info;  break;
+                default: break;
+                }
                 break;
             case 7:
-                if (is(u"WARNING"))      found = LogLevel::Warn;
+                switch (first) {
+                case u'W': if (rest(u"WARNING")) found = LogLevel::Warn;  break;
+                case u'V': if (rest(u"VERBOSE")) found = LogLevel::Trace; break;
+                default: break;
+                }
+                break;
+            case 8:
+                if (first == u'C' && rest(u"CRITICAL")) found = LogLevel::Fatal;
                 break;
             default:
                 break;
