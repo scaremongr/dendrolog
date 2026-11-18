@@ -288,18 +288,10 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
     toggleRow->setSpacing(2);
     toggleRow->addWidget(new QLabel(tr("Show:"), card));
 
-    const QColor hl = palette().color(QPalette::Highlight);
-    const QString toggleStyle = QStringLiteral(
-        "QToolButton { padding: 0px 5px; border: 1px solid transparent; border-radius: 3px; }"
-        "QToolButton:hover { background-color: rgba(%1,%2,%3,30); }"
-        "QToolButton:checked { background-color: rgba(%1,%2,%3,60);"
-        " border: 1px solid rgba(%1,%2,%3,120); }")
-        .arg(hl.red()).arg(hl.green()).arg(hl.blue());
     const auto makeToggle = [&](const QString& text, const QString& toolTip) {
         QToolButton* btn = card->makeToolButton(text, toolTip);
         btn->setCheckable(true);
         btn->setChecked(true);
-        btn->setStyleSheet(toggleStyle);
         connect(btn, &QToolButton::toggled, this, [this]() {
             saveSectionSettings();
             scheduleRebuild();
@@ -318,6 +310,7 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
     toggleRow->addStretch(1);
     card->rowsLayout()->addLayout(toggleRow);
     layout->addWidget(card);
+    applyToggleStyle();
 
     m_browser = new QTextBrowser(this);
     m_browser->setOpenLinks(false);
@@ -357,13 +350,31 @@ void EntryDetailsPanel::showEvent(QShowEvent* event)
         rebuildNow();
 }
 
-// Смена темы: цвета HTML посчитаны из палитры браузера — перестроить.
-// Отложенно: дочерний браузер получает новую палитру позже панели.
+// Включённая секция тонируется цветом выделения текущей палитры.
+void EntryDetailsPanel::applyToggleStyle()
+{
+    const QColor hl = palette().color(QPalette::Highlight);
+    const QString toggleStyle = QStringLiteral(
+        "QToolButton { padding: 0px 5px; border: 1px solid transparent; border-radius: 3px; }"
+        "QToolButton:hover { background-color: rgba(%1,%2,%3,30); }"
+        "QToolButton:checked { background-color: rgba(%1,%2,%3,60);"
+        " border: 1px solid rgba(%1,%2,%3,120); }")
+        .arg(hl.red()).arg(hl.green()).arg(hl.blue());
+    for (QToolButton* btn : {m_headerButton, m_fieldsButton, m_messageButton, m_jsonButton}) {
+        if (btn)
+            btn->setStyleSheet(toggleStyle);
+    }
+}
+
+// Смена темы: стиль тумблеров секций и цвета HTML посчитаны из палитры.
+// HTML — отложенно: дочерний браузер получает новую палитру позже панели.
 void EntryDetailsPanel::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
-    if (event->type() == QEvent::PaletteChange && m_browser)
+    if (event->type() == QEvent::PaletteChange && m_browser) {
+        applyToggleStyle();
         QTimer::singleShot(0, this, &EntryDetailsPanel::scheduleRebuild);
+    }
 }
 
 void EntryDetailsPanel::scheduleRebuild()
