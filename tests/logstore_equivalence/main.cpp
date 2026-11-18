@@ -334,6 +334,30 @@ static void compareEntryLookup(const LogModel& res, const LogModel& idx,
         CHECK_EQ(res.nearestVisibleRow(key.logicalEntryId, key.sourceFile),
                  idx.nearestVisibleRow(key.logicalEntryId, idxFile),
                  QStringLiteral("nearestVisibleRow(%1)").arg(what));
+
+        // Место записи среди видимых строк (старт быстрого поиска): одинаково
+        // на обоих бэкендах и согласовано с rowForEntry / nearestVisibleRow —
+        // nearest это то же место, прижатое к последней строке.
+        bool resVisible = false, idxVisible = false;
+        const int resPlace = res.placeAmongVisible(key.logicalEntryId, key.sourceFile, &resVisible);
+        const int idxPlace = idx.placeAmongVisible(key.logicalEntryId, idxFile, &idxVisible);
+        CHECK_EQ(resPlace, idxPlace, QStringLiteral("placeAmongVisible(%1)").arg(what));
+        CHECK_EQ(resVisible, idxVisible, QStringLiteral("placeAmongVisible visible(%1)").arg(what));
+        for (const LogModel* m : {&res, &idx}) {
+            const LogFile* file = m == &res ? key.sourceFile : idxFile;
+            bool visible = false;
+            const int place = m->placeAmongVisible(key.logicalEntryId, file, &visible);
+            const int exact = m->rowForEntry(key.logicalEntryId, file);
+            const int nearest = m->nearestVisibleRow(key.logicalEntryId, file);
+            const int rows = m->rowCount();
+            const bool consistent = visible
+                ? place == exact && exact >= 0
+                : exact < 0 && place <= rows
+                      && (rows == 0 || place < 0 || nearest == qMin(place, rows - 1));
+            CHECK(consistent, QStringLiteral("placeAmongVisible согласовано с rowForEntry/"
+                                             "nearestVisibleRow (%1): place=%2 exact=%3 nearest=%4 rows=%5")
+                                  .arg(what).arg(place).arg(exact).arg(nearest).arg(rows));
+        }
     }
 }
 

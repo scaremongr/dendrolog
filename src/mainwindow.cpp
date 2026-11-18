@@ -1961,14 +1961,7 @@ void MainWindow::setupStatisticsDock()
                 if (!m_activeLogView || !m_activeLogView->model()
                     || !m_activeLogView->view())
                     return;
-                const int row = m_activeLogView->model()->nearestVisibleRow(
-                    logicalEntryId, file.get());
-                if (row < 0)
-                    return;
-                const QModelIndex idx = m_activeLogView->model()->index(row, 0);
-                m_activeLogView->view()->setCurrentIndex(idx);
-                m_activeLogView->view()->scrollTo(idx,
-                                                  QAbstractItemView::PositionAtCenter);
+                m_activeLogView->goToEntry(logicalEntryId, file.get());
             });
 
     if (ui->menuView) {
@@ -3191,9 +3184,8 @@ void MainWindow::onTimelineTimeClicked(const QDateTime& time, bool preferErrors)
         // ни одной ошибки в видимом списке — остаёмся на строке по времени
     }
 
-    const QModelIndex idx = model->index(row, 0);
-    m_activeLogView->view()->setCurrentIndex(idx);
-    m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+    // Общий путь переходов: строка — выбор пользователя, follow-tail снимается.
+    m_activeLogView->view()->goToRow(row);
 }
 
 void MainWindow::onTimelineRangeSelected(const QDateTime& from, const QDateTime& to)
@@ -3301,9 +3293,7 @@ void MainWindow::showGoToDialog()
     // Опорная строка — выбранная пользователем: текущую без выделения мог
     // назначить Qt при возврате фокуса (инвариант 10).
     const QModelIndex current = tab->view()->currentIndex();
-    const int currentRow = current.isValid() && tab->view()->selectionModel()
-            && tab->view()->selectionModel()->isRowSelected(current.row(), QModelIndex())
-        ? current.row() : -1;
+    const int currentRow = tab->view()->userSelectedRow();
 
     GoToDialog dialog(tab->model(), tab->loadedFiles(), currentRow, this);
     if (dialog.exec() != QDialog::Accepted)
@@ -3409,16 +3399,9 @@ void MainWindow::onSearchResultActivated(const QModelIndex& current)
     if (key.logicalEntryId < 0)
         return;
 
-    const int mainRow = m_activeLogView->model()->nearestVisibleRow(
-        key.logicalEntryId, key.sourceFile);
-    if (mainRow < 0)
-        return;
-
-    const QModelIndex idx = m_activeLogView->model()->index(mainRow, 0);
     // Двигаем текущую строку и центрируем — фокус остаётся на панели результатов,
     // так что стрелками можно продолжать листать совпадения.
-    m_activeLogView->view()->setCurrentIndex(idx);
-    m_activeLogView->view()->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+    m_activeLogView->goToEntry(key.logicalEntryId, key.sourceFile);
 }
 
 void MainWindow::applyRowMarkersToActiveView()

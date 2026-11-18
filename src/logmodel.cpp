@@ -350,6 +350,12 @@ int LogModel::nearestVisibleRow(int logicalEntryId, const LogFile* sourceFile) c
     return m_store->nearestVisibleRow(logicalEntryId, sourceFile);
 }
 
+int LogModel::placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
+                                bool* visible) const
+{
+    return m_store->placeAmongVisible(logicalEntryId, sourceFile, visible);
+}
+
 int LogModel::nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const
 {
     return m_store->nearestVisibleRowForLine(lineNumber, sourceFile);

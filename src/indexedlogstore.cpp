@@ -814,6 +814,31 @@ int IndexedLogStore::nearestVisibleRow(int logicalEntryId, const LogFile* source
     return j < int(m_visibleRefs.size()) ? j : j - 1;
 }
 
+int IndexedLogStore::placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
+                                       bool* visible) const
+{
+    const int exact = rowForEntry(logicalEntryId, sourceFile);
+    if (visible)
+        *visible = exact >= 0;
+    if (exact >= 0)
+        return exact;
+
+    const int fileId = fileIdOf(sourceFile);
+    if (fileId < 0)
+        return -1;
+    const qint64 first = firstLineOfRecord(*m_files[fileId].index, quint32(logicalEntryId));
+    if (first < 0 || m_identityVisible)
+        return -1; // записи нет в данных (при тождестве скрытых не бывает)
+
+    // Запись скрыта: её место — нижняя граница в видимом списке, как в
+    // nearestVisibleRow, но без прижатия к последней строке.
+    const RowRef ref = makeRef(fileId, first);
+    const auto it = std::lower_bound(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
+                                     ref,
+                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
+    return int(it - m_visibleRefs.constBegin());
+}
+
 int IndexedLogStore::nearestVisibleRowForLine(qint64 lineNumber,
                                               const LogFile* sourceFile) const
 {

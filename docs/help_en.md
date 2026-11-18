@@ -144,7 +144,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Quick find (toolbar)
 
-- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The match row expands and the term is highlighted. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
+- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
 - To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). The Search panel also takes several rules at once.
 
 ## Go to line or time
@@ -168,7 +168,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
 - **Auto-reload** — the toggle next to Reload, `File → Auto-reload This Tab` or `Ctrl+Shift+F5` (right-clicking Reload still works); per tab. Tabs with auto-reload on carry a small icon. The interval is set in **Settings → General**.
-- **Follow tail** — the toggle with the down arrow or `Shift+F5`: keeps the newest lines in view; scrolling up turns it off.
+- **Follow tail** — the toggle with the down arrow or `Shift+F5`: keeps the newest lines in view; scrolling up turns it off, and so does any jump to a line (Go to, a search match, a Search result, the timeline, Statistics, next error).
 
 ## Directory Scanner
 
