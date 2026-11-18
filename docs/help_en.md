@@ -140,6 +140,15 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - The line becomes the selected one, so it stays in place when filters change afterwards.
 - A large file opened alone is shown in file order; if its timestamps are not in order, a jump to a time is approximate there.
 
+## Next and previous error
+
+- `F8` / `Shift+F8` (`View → Next Error` / `Previous Error`) jump from the selected line to the nearest entry of level **Error** or **Fatal**; `F7` / `Shift+F7` do the same for **Warn**. With nothing selected the search starts from the top (or, backwards, from the bottom).
+- A multi-line entry (a stack trace) counts once: the jump goes to its first shown line, not through every line of the trace.
+- Only the lines the tab shows are considered: what the filters hide is skipped.
+- Past the last such line the jump continues from the other end of the tab; the status bar says so. It also says when there are no such lines at all, or when the selected line is the only one.
+- The line becomes the selected one and Follow tail is switched off, as with Go to.
+- On a very large log the lookup runs in the background (the level is taken from the line index, the text is not read), so the window stays responsive; a long lookup shows its progress in the status bar, and pressing the key again starts over. If the shown lines change while it runs (a filter finishes, the file is reloaded), the status bar asks to press the key again.
+
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
@@ -190,6 +199,8 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Search next / previous | `F3` / `Shift+F3` |
 | Find all (Search panel) | `Ctrl+Shift+F` |
 | Go to line or time | `Ctrl+G` |
+| Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
+| Next / previous warning | `F7` / `Shift+F7` |
 | Toggle word wrap | `Alt+Z` |
 | Larger / smaller / default font | `Ctrl++` / `Ctrl+-` / `Ctrl+0`, `Ctrl` + wheel |
 | Show only Fatal … Trace (toggle) | `Alt+1` … `Alt+6` |

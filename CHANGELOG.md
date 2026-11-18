@@ -7,6 +7,13 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
+  Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
+  the nearest shown entry of level Error or Fatal (or Warn). A multi-line
+  entry such as a stack trace counts once. Past the last one the jump
+  continues from the other end of the tab and says so in the status bar.
+  Lines hidden by filters are skipped. On a huge log the lookup runs in the
+  background and reads no text from disk.
 - **Go to Line / Time** (`Ctrl+G`, `View` menu): one box takes a line number
   of the file or a time (`10:02`, `10:02:03.250`, `2026-03-05 10:02`) and shows
   where the jump lands before you confirm. A line hidden by the filters leads

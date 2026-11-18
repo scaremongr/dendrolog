@@ -39,6 +39,19 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     // ищем заново от текущей строки.
     connect(m_quickSearch, &QuickSearch::invalidated, this, &LogViewWidget::startQuickSearch);
 
+    m_levelJump = new QuickSearch(this);
+    connect(m_levelJump, &QuickSearch::finished, this,
+            [this](int row) { finishLevelJump(row, m_levelJump->startRowNow()); });
+    connect(m_levelJump, &QuickSearch::progress, this, [this](int percent) {
+        emit levelJumpProgress(m_levelJumpLevels, m_levelJumpForward, percent);
+    });
+    // Модель перестроилась посреди скана: номер из снапшота ничего не значит,
+    // а опорная строка могла исчезнуть — честно сообщаем, а не гадаем, откуда
+    // искать заново (view восстанавливает выделение отложенно).
+    connect(m_levelJump, &QuickSearch::invalidated, this, [this]() {
+        emit levelJumpFinished(m_levelJumpLevels, LevelJumpOutcome::Interrupted);
+    });
+
     // Соединяем сигналы парсера со слотами (начальная загрузка)
     connect(m_logParser, &LogParser::entriesParsed,   this, &LogViewWidget::handleEntriesParsed);
     connect(m_logParser, &LogParser::parsingStarted,  this, [this](const LogFilePtr& f){ emit fileParsingStarted(f); });
@@ -687,6 +700,49 @@ void LogViewWidget::cancelQuickSearch()
 bool LogViewWidget::isQuickSearchRunning() const
 {
     return m_quickSearch->isRunning();
+}
+
+void LogViewWidget::goToLevel(LogLevelMask levels, bool forward)
+{
+    if (!m_model || !levels)
+        return;
+    m_levelJumpLevels = levels;
+    m_levelJumpForward = forward;
+    // Опорная строка — выбранная пользователем: текущую без выделения мог
+    // назначить Qt при возврате фокуса (инвариант 10). Без неё вперёд ищем с
+    // начала, назад — с конца.
+    int startRow = -1;
+    const QModelIndex current = m_view->currentIndex();
+    if (current.isValid() && m_view->selectionModel()
+        && m_view->selectionModel()->isRowSelected(current.row(), QModelIndex()))
+        startRow = current.row();
+    m_levelJump->cancel();
+    if (m_model->rowCount() <= m_levelJumpSyncRows) {
+        finishLevelJump(m_model->findRowWithLevel(levels, startRow, forward), startRow);
+        return;
+    }
+    m_levelJump->startLevel(m_model, levels, forward, startRow);
+}
+
+
+void LogViewWidget::cancelLevelJump()
+{
+    m_levelJump->cancel();
+}
+
+void LogViewWidget::finishLevelJump(int row, int startRow)
+{
+    LevelJumpOutcome outcome = LevelJumpOutcome::NotFound;
+    if (row >= 0 && row < m_model->rowCount()) {
+        if (row == startRow)
+            outcome = LevelJumpOutcome::OnlyCurrent;
+        else if (startRow >= 0 && (m_levelJumpForward ? row < startRow : row > startRow))
+            outcome = LevelJumpOutcome::Wrapped;
+        else
+            outcome = LevelJumpOutcome::Moved;
+        m_view->goToRow(row);
+    }
+    emit levelJumpFinished(m_levelJumpLevels, outcome);
 }
 
 void LogViewWidget::handleQuickSearchFinished(int row)

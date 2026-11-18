@@ -35,6 +35,8 @@
   to show only, hide, highlight or find lines with it.
 - **Go to line or time** — `Ctrl+G` jumps to a line number of the file or to a
   moment; with filters on it lands on the nearest shown line.
+- **Next / previous error** — `F8` / `Shift+F8` step through Error and Fatal
+  lines, `F7` / `Shift+F7` through warnings, without freezing the window on a huge log.
 - **Row highlighters** — colour matching rows without hiding anything.
 - **Timeline histogram** — entry density over time; click to jump, drag to filter.
 - **Statistics panel** — level counts, top repeated messages, rate, anomalies.

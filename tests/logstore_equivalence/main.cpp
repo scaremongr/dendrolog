@@ -381,6 +381,90 @@ static void compareSearch(const LogModel& res, const LogModel& idx)
     }
 }
 
+// Переход по уровню (F8 / Shift+F8): оба бэкенда против эталона, а не друг
+// против друга — общую ошибку семантики сравнение бэкендов не увидело бы.
+// Эталон задан иначе, чем реализация: «кандидаты в порядке обхода, первый
+// подходящий». Подходящая строка — нужного уровня и первая показанная строка
+// своей записи (продолжения наследуют уровень и целью не служат).
+static int expectedRowWithLevel(const QVector<bool>& target, int startRow, bool forward,
+                                bool wrap)
+{
+    const int n = int(target.size());
+    QVector<int> order;
+    const bool inside = startRow >= 0 && startRow < n;
+    if (forward) {
+        for (int r = 0; r < n; ++r)
+            if (r > startRow) order << r;
+        if (wrap)
+            for (int r = 0; r < n; ++r)
+                if (r <= startRow) order << r;
+    } else if (!inside) {
+        for (int r = n - 1; r >= 0; --r)
+            order << r;               // без опорной строки — с конца, всё подряд
+    } else {
+        for (int r = n - 1; r >= 0; --r)
+            if (r < startRow) order << r;
+        if (wrap)
+            for (int r = n - 1; r >= 0; --r)
+                if (r >= startRow) order << r;
+    }
+    for (const int r : std::as_const(order))
+        if (target[r]) return r;
+    return -1;
+}
+
+static void compareLevelSearch(const LogModel& res, const LogModel& idx)
+{
+    const int rows = res.rowCount();
+    if (rows != idx.rowCount())
+        return; // уже сообщено в compareVisibleRows
+    // Уровни и записи строк — один раз (их равенство между бэкендами сверено
+    // там же).
+    QVector<LogLevel> rowLevels(rows);
+    QVector<bool> startsRecord(rows);
+    LogModel::EntryKey previous;
+    for (int row = 0; row < rows; ++row) {
+        rowLevels[row] = res.visibleLevelAt(row);
+        const LogModel::EntryKey key = res.keyForRow(row);
+        startsRecord[row] = row == 0 || key.logicalEntryId != previous.logicalEntryId
+                            || key.sourceFile != previous.sourceFile;
+        previous = key;
+    }
+    // Ошибки (F8), предупреждения, уровень без строк в части конфигураций,
+    // пустая маска и «все уровни».
+    const QVector<LogLevelMask> masks = {
+        levelBit(LogLevel::Error) | levelBit(LogLevel::Fatal),
+        levelBit(LogLevel::Warn),
+        levelBit(LogLevel::Fatal),
+        levelBit(LogLevel::Unknown),
+        0,
+        ~LogLevelMask(0),
+    };
+    const QVector<int> starts = { -1, 0, 1, rows / 3, rows / 2, qMax(0, rows - 2),
+                                  qMax(0, rows - 1), rows, rows + 7 };
+    for (const LogLevelMask mask : masks) {
+        QVector<bool> target(rows);
+        for (int row = 0; row < rows; ++row)
+            target[row] = startsRecord[row] && (levelBit(rowLevels[row]) & mask);
+        for (const int start : starts) {
+            for (const bool forward : { true, false }) {
+                for (const bool wrap : { true, false }) {
+                    const QString what =
+                        QStringLiteral("findRowWithLevel(маска %1, от %2, %3, wrap=%4)")
+                            .arg(mask, 0, 16).arg(start)
+                            .arg(forward ? QStringLiteral("вперёд") : QStringLiteral("назад"))
+                            .arg(wrap ? QStringLiteral("да") : QStringLiteral("нет"));
+                    const int expected = expectedRowWithLevel(target, start, forward, wrap);
+                    CHECK_EQ(res.findRowWithLevel(mask, start, forward, wrap), expected,
+                             what + QStringLiteral(": резидентный против эталона"));
+                    CHECK_EQ(idx.findRowWithLevel(mask, start, forward, wrap), expected,
+                             what + QStringLiteral(": индексный против эталона"));
+                }
+            }
+        }
+    }
+}
+
 // Снапшоты сканов — путь статистики и таймлайна (воркеры читают их целиком).
 static void compareScanSnapshots(const LogModel& res, const LogModel& idx)
 {
@@ -503,7 +587,7 @@ static QStringList visibleTextsSorted(const LogModel& model)
 // стоимость должна быть видна, а не выясняться таймаутом CTest.
 struct StageTiming {
     qint64 rows = 0, navigation = 0, search = 0, snapshots = 0,
-           records = 0, divergence = 0, apply = 0, load = 0;
+           records = 0, divergence = 0, apply = 0, load = 0, levelSearch = 0;
 };
 static StageTiming g_timing;
 
@@ -513,13 +597,14 @@ static void printTiming(const QString& tag)
 {
     std::fprintf(stdout,
                  "  [%s] накопленно, мс: загрузка=%lld фильтры=%lld строки=%lld "
-                 "навигация=%lld поиск=%lld снапшоты=%lld записи=%lld оценки=%lld\n",
+                 "навигация=%lld поиск=%lld уровни=%lld снапшоты=%lld записи=%lld оценки=%lld\n",
                  U8(tag),
                  static_cast<long long>(g_timing.load),
                  static_cast<long long>(g_timing.apply),
                  static_cast<long long>(g_timing.rows),
                  static_cast<long long>(g_timing.navigation),
                  static_cast<long long>(g_timing.search),
+                 static_cast<long long>(g_timing.levelSearch),
                  static_cast<long long>(g_timing.snapshots),
                  static_cast<long long>(g_timing.records),
                  static_cast<long long>(g_timing.divergence));
@@ -536,6 +621,8 @@ static void compareAll(const Document& res, const Document& idx)
     g_timing.navigation += t.restart();
     compareSearch(*res.model, *idx.model);
     g_timing.search += t.restart();
+    compareLevelSearch(*res.model, *idx.model);
+    g_timing.levelSearch += t.restart();
     compareScanSnapshots(*res.model, *idx.model);
     g_timing.snapshots += t.restart();
     compareLogicalRecords(*res.model, *idx.model);

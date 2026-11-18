@@ -175,6 +175,10 @@ public:
     // Видимая строка для строки lineNumber (с 1) файла; см. LogStore.
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const;
 
+    // Ближайшая видимая строка с уровнем из levels или -1 (LogStore::findRowWithLevel).
+    int findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
+                         bool wrapAround = true) const;
+
     // Search methods
     QModelIndex findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;
     QModelIndex findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;
