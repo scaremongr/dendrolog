@@ -11,7 +11,10 @@
 //     возвращает вид к хвосту;
 //   • быстрый поиск стартует от строки, выбранной пользователем, даже когда
 //     её скрыл фильтр, — а не от строки, назначенной Qt по фокусу, и не с
-//     начала файла; то же после перестройки модели посреди поиска.
+//     начала файла; то же после перестройки модели посреди поиска;
+//   • «↓ N новых строк» при выключенном Follow Tail: счёт только видимых
+//     дописанных строк, сброс у хвоста, по Follow Tail, фильтру и перезагрузке
+//     переписанного файла, переход к первой новой строке.
 // ============================================================================
 
 #include "appsettings.h"
@@ -20,6 +23,7 @@
 
 #include "LogListView.h"
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QFocusEvent>
 #include <QScrollBar>
@@ -265,6 +269,145 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
     }
 }
 
+// «↓ N новых строк» при выключенном Follow Tail: счёт дописанных видимых строк
+// ниже экрана, сброс у хвоста и по Follow Tail, переход к первой новой строке.
+static void checkNewLinesIndicator(const QDir& dir, const QString& name, const QString& schema)
+{
+    const QString path = testdocs::writeFile(dir, name + "-newlines.log", jumpFixture());
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), name + ": new lines: initial load");
+    testdocs::pump(300);
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    QScrollBar* bar = view.verticalScrollBar();
+    auto* indicator = view.findChild<QAbstractButton*>(QStringLiteral("newLinesIndicator"));
+    CHECK(indicator, name + ": new lines: the indicator exists");
+    if (!indicator)
+        return;
+    const auto shown = [&] { return indicator->isVisible(); };
+
+    CHECK(view.newLinesBelow() == 0 && !shown(),
+          name + ": the initial load is not counted as new lines");
+
+    int appended = 0;
+    const auto append = [&](int count, const char* level = "INFO") {
+        QByteArray bytes;
+        for (int i = 0; i < count; ++i, ++appended)
+            bytes += record(400 + appended, level, "tail " + QByteArray::number(appended));
+        CHECK(testdocs::appendToFile(path, bytes), name + ": new lines: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + ": new lines: reload settles");
+        testdocs::pump(50);
+    };
+    const auto toTop = [&] {
+        bar->setValue(0);
+        testdocs::pump(20);
+    };
+
+    // --- Дозапись при выключенном Follow Tail увеличивает счёт ------------
+    toTop();
+    CHECK(!view.followTail() && !view.isScrolledToBottom(), name + ": new lines: reading the top");
+    append(3);
+    CHECK(view.newLinesBelow() == 3 && shown(),
+          name + QStringLiteral(": three appended lines are counted: %1").arg(view.newLinesBelow()));
+    CHECK(indicator->text().contains(QStringLiteral("3 new lines")),
+          name + ": the indicator says how many: " + indicator->text());
+    CHECK(view.firstNewLineRow() == model.rowCount() - 3, name + ": the first new line is known");
+    append(2);
+    CHECK(view.newLinesBelow() == 5, name + ": the next append adds to the count");
+    CHECK(view.firstNewLineRow() == model.rowCount() - 5, name + ": the first new line stays");
+
+    // --- Прокрутка к низу сбрасывает ----------------------------------------
+    bar->setValue(bar->maximum());
+    testdocs::pump(20);
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": reaching the bottom clears the count");
+    append(2);
+    CHECK(view.newLinesBelow() == 0 && !shown() && view.isScrolledToBottom(),
+          name + ": at the bottom the view sticks to the tail, nothing to count");
+
+    // --- Follow Tail сбрасывает ----------------------------------------------
+    toTop();
+    append(4);
+    CHECK(view.newLinesBelow() == 4, name + ": counting again after leaving the bottom");
+    view.setFollowTail(true);
+    testdocs::pump(20);
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": Follow Tail clears the count");
+    append(2);
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": Follow Tail shows the lines itself");
+    view.setFollowTail(false);
+
+    // --- Переход: к первой новой строке, Follow Tail не включается -----------
+    toTop();
+    append(60);
+    CHECK(view.newLinesBelow() == 60, name + ": sixty new lines");
+    const int firstNew = model.rowCount() - 60;
+    CHECK(view.firstNewLineRow() == firstNew, name + ": jump target is the first new line");
+    indicator->click();
+    testdocs::pump(50);
+    CHECK(view.currentIndex().row() == firstNew
+              && view.selectionModel()->isRowSelected(firstNew, QModelIndex()),
+          name + ": the click goes to the first new line and selects it");
+    CHECK(view.viewport()->rect().intersects(view.visualRect(model.index(firstNew, 0))),
+          name + ": the first new line is on screen");
+    CHECK(!view.followTail(), name + ": the jump does not turn Follow Tail on");
+    const int left = view.newLinesBelow();
+    CHECK(left > 0 && left < 60 && shown(),
+          name + QStringLiteral(": lines seen on screen are no longer counted: %1 left").arg(left));
+    CHECK(view.firstNewLineRow() > firstNew, name + ": the next unseen line is below the screen");
+    view.goToNewLines(); // команда (шорткат) — тот же путь
+    testdocs::pump(50);
+    CHECK(view.newLinesBelow() < left, name + ": the command pages through the rest");
+    while (view.newLinesBelow() > 0 && view.firstNewLineRow() >= 0) {
+        const int before = view.newLinesBelow();
+        view.goToNewLines();
+        testdocs::pump(20);
+        if (view.newLinesBelow() >= before)
+            break;
+    }
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": paging through reaches the end");
+
+    // --- Фильтр: считаются только видимые строки ---------------------------
+    model.setLogLevelFilter({LogLevel::Error});
+    CHECK(settled(tab), name + ": new lines: filter settles");
+    testdocs::pump(50);
+    toTop();
+    CHECK(view.newLinesBelow() == 0, name + ": a filter change starts the count afresh");
+    append(3, "INFO");
+    append(2, "ERROR");
+    CHECK(view.newLinesBelow() == 2,
+          name + QStringLiteral(": only lines the filter shows are counted: %1").arg(view.newLinesBelow()));
+    CHECK(view.firstNewLineRow() == model.rowCount() - 2
+              && model.messageAt(view.firstNewLineRow()).contains("ERROR"),
+          name + ": the first new visible line is the first new ERROR");
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), name + ": new lines: filter reset settles");
+    testdocs::pump(50);
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": a model reset leaves no stale count");
+
+    // --- Файл переписан: полная перезагрузка, ложного счёта нет --------------
+    toTop();
+    append(5);
+    CHECK(view.newLinesBelow() == 5, name + ": counted before the rewrite");
+    QByteArray rewritten;
+    for (int i = 0; i < 300; ++i)
+        rewritten += record(i, "INFO", "rewritten " + QByteArray::number(i));
+    testdocs::writeFile(dir, name + "-newlines.log", rewritten);
+    tab.reloadChangedFiles(/*force=*/true);
+    CHECK(settled(tab), name + ": new lines: rewrite settles");
+    testdocs::pump(100);
+    CHECK(model.rowCount() == 300, name + ": the rewritten file is reloaded");
+    CHECK(view.newLinesBelow() == 0 && !shown(), name + ": a rewritten file leaves no stale count");
+    toTop();
+    appended = 0;
+    append(2);
+    CHECK(view.newLinesBelow() == 2, name + ": counting works after the rewrite");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -280,9 +423,11 @@ int main(int argc, char** argv)
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
     checkJumps(dir, QStringLiteral("resident"), schema);
+    checkNewLinesIndicator(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkJumps(dir, QStringLiteral("indexed"), schema);
+    checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

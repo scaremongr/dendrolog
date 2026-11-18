@@ -367,16 +367,24 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
         }
     }
 
-    // Подсветка «новых» строк переходит на этот батч. Зовётся, когда view
-    // уже знает о вставленных строках.
-    const auto markBatchNew = [&]() {
-        if (!markNew)
-            return;
-        const bool hadPrevious = !m_newRefs.isEmpty();
-        m_newRefs.clear();
+    // Подсветка «новых» строк переходит на этот батч. Пометка ставится ДО
+    // вставки: view на rowsInserted уже видит строки новыми (по ним считается
+    // «↓ N new lines»); перерисовка прежних — когда view знает о вставке.
+    // При активном фильтре строки прежних батчей ещё могут ждать своей
+    // очереди в диапазонном джобе: их пометку не снимаем, иначе джоб вставит
+    // их уже «старыми» (без маркера и мимо счёта новых строк).
+    bool hadPreviousNew = false;
+    if (markNew) {
+        hadPreviousNew = !m_newRefs.isEmpty();
+        const bool earlierBatchPending = !m_identityVisible
+            && (m_filterJobActive || !m_pendingRanges.isEmpty());
+        if (!earlierBatchPending)
+            m_newRefs.clear();
         for (qint64 l = freshFirst; l < firstLine + count; ++l)
             m_newRefs.insert(makeRef(fileId, l));
-        if (hadPrevious && visibleCount() > 0)
+    }
+    const auto markBatchNew = [&]() {
+        if (hadPreviousNew && visibleCount() > 0)
             emit m_model.dataChanged(m_model.index(0, 0),
                                      m_model.index(visibleCount() - 1, 0),
                                      {LogModel::IsNewRole});

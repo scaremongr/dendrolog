@@ -40,7 +40,8 @@
 - **Row highlighters** — colour matching rows without hiding anything.
 - **Timeline histogram** — entry density over time; click to jump, drag to filter.
 - **Statistics panel** — level counts, top repeated messages, rate, anomalies.
-- **Live reload** — re-read appended lines manually (`F5`) or automatically.
+- **Live reload** — re-read appended lines manually (`F5`) or automatically;
+  reading further up, a `↓ N new lines` badge counts what arrived below.
 - **Smart text handling** — syntax highlighting, token-aware double-click
   selection, open URLs/paths from the log, per-line word wrap.
 - **Save View As** — export exactly what you see (filters + field selection).

@@ -169,6 +169,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
 - **Auto-reload** — the toggle next to Reload, `File → Auto-reload This Tab` or `Ctrl+Shift+F5` (right-clicking Reload still works); per tab. Tabs with auto-reload on carry a small icon. The interval is set in **Settings → General**.
 - **Follow tail** — the toggle with the down arrow or `Shift+F5`: keeps the newest lines in view; scrolling up turns it off, and so does any jump to a line (Go to, a search match, a Search result, the timeline, Statistics, next error).
+- **↓ N new lines** — while you read further up with Follow tail off, lines appended below the screen are counted in a small badge at the bottom of the view. Only lines the tab's filters show are counted; above 99,999 the number is shortened (`120K`, `3.4M`), the tooltip has the exact one. Click the badge, or press `Alt+End` (`View → Go to New Lines`), to jump to the first new line: it becomes the selected line, Follow tail stays off, and lines that come on screen drop out of the count, so pressing again pages through the rest. The badge goes away when you scroll to the bottom or turn Follow tail on. A filter change or a reload of a rewritten file starts the count afresh; each tab keeps its own.
 
 ## Directory Scanner
 
@@ -216,6 +217,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Go to line or time | `Ctrl+G` |
 | Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
 | Next / previous warning | `F7` / `Shift+F7` |
+| Go to new lines (below the screen) | `Alt+End` |
 | Toggle word wrap | `Alt+Z` |
 | Larger / smaller / default font | `Ctrl++` / `Ctrl+-` / `Ctrl+0`, `Ctrl` + wheel |
 | Show only Fatal … Trace (toggle) | `Alt+1` … `Alt+6` |

@@ -7,6 +7,12 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **↓ N new lines.** When the log grows while you read further up with Follow
+  tail off, a badge at the bottom of the view counts the lines appended below
+  the screen (only those the tab's filters show). Click it, or press `Alt+End`
+  (`View → Go to New Lines`), to jump to the first new line; lines you scroll
+  past drop out of the count, and the badge goes away at the bottom or when
+  Follow tail is turned on.
 - **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
   Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
   the nearest shown entry of level Error or Fatal (or Warn). A multi-line
