@@ -55,6 +55,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QHash>
 #include <QMap>
 #include <QObject>
@@ -224,9 +225,20 @@ static void applyConfig(LogModel& model, const FilterConfig& cfg,
 // Сравнение бэкендов
 // ---------------------------------------------------------------------------
 
+// Сравнение двух индексных вкладок на одинаковом тексте в разных кодировках
+// (F-1): файлы лежат в разных каталогах под одним именем, сверяется имя.
+static bool g_fileNameOnly = false;
+
+static QString filePathForCompare(const LogFile* file)
+{
+    if (!file)
+        return QString();
+    return g_fileNameOnly ? QFileInfo(file->filePath).fileName() : file->filePath;
+}
+
 static QString fileOf(const LogModel::EntryKey& key)
 {
-    return key.sourceFile ? key.sourceFile->filePath : QStringLiteral("<null>");
+    return key.sourceFile ? filePathForCompare(key.sourceFile) : QStringLiteral("<null>");
 }
 
 // Построчное сравнение видимой выдачи и точечных запросов к ней.
@@ -543,6 +555,10 @@ static void compareSearch(const LogModel& res, const LogModel& idx)
         { QStringLiteral("timeout"),        Qt::CaseInsensitive },
         { QStringLiteral("Timeout"),        Qt::CaseSensitive   },
         { QStringLiteral("Кэш"),            Qt::CaseInsensitive },
+        // Кириллица в регистре, отличном от текста (F-1: фикстуры кодировок).
+        { QStringLiteral("ОШИБКА"),         Qt::CaseInsensitive },
+        { QStringLiteral("ошибка"),         Qt::CaseSensitive   },
+        { QStringLiteral("пользователь"),   Qt::CaseInsensitive },
         { QStringLiteral("at com.example"), Qt::CaseInsensitive },
         { QStringLiteral("нет такой строки"), Qt::CaseInsensitive },
     };
@@ -682,8 +698,7 @@ static void compareScanSnapshots(const LogModel& res, const LogModel& idx)
             CHECK_EQ(rm.logicalEntryId, im.logicalEntryId,
                      what + QStringLiteral(": logicalEntryId"));
             CHECK_EQ(rm.isPlainText, im.isPlainText, what + QStringLiteral(": isPlainText"));
-            CHECK_EQ(rm.sourceFile ? rm.sourceFile->filePath : QString(),
-                     im.sourceFile ? im.sourceFile->filePath : QString(),
+            CHECK_EQ(filePathForCompare(rm.sourceFile), filePathForCompare(im.sourceFile),
                      what + QStringLiteral(": sourceFile"));
         }
 
@@ -1403,6 +1418,170 @@ static void testAttachWithActiveFilter(const QString& unsortedPath, const QStrin
 // сверка бэкендов не увидит.
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Кодировки на индексном бэкенде (F-1, шаг 2). Эталон — та же индексная
+// вкладка на ТОМ ЖЕ тексте в UTF-8: файл в однобайтной кодировке обязан дать
+// строка в строку тот же текст, поля, фильтры (кириллица без учёта регистра,
+// регекс, правило по полю), поиск, переходы по уровню, снапшоты и Find All.
+// Сверка с резидентным бэкендом — шаг 3 (резидентный путь однобайтных
+// кодировок пока не понимает).
+// ---------------------------------------------------------------------------
+
+static QVector<FilterConfig> encodingConfigs()
+{
+    QVector<FilterConfig> cfgs;
+    const auto add = [&](const QString& name, QVector<FilterRule> rules,
+                         QSet<LogLevel> levels = {}) {
+        FilterConfig c;
+        c.name = name;
+        c.levels = levels;
+        c.rules.rules = std::move(rules);
+        c.fieldScopeActive = true;
+        cfgs << c;
+    };
+    add(QStringLiteral("без фильтров"), {});
+    add(QStringLiteral("кириллица без учёта регистра"),
+        { rule(FilterRule::Action::Include, QStringLiteral("ОШИБКА")) });
+    add(QStringLiteral("кириллица с учётом регистра"),
+        { rule(FilterRule::Action::Include, QStringLiteral("Ошибка"), FilterRule::Connector::And,
+               QString(), false, true) });
+    add(QStringLiteral("кириллица, регекс"),
+        { rule(FilterRule::Action::Include, QStringLiteral("пользовател[а-я]+\\s+[а-я]+ов"),
+               FilterRule::Connector::And, QString(), true) });
+    add(QStringLiteral("кириллица, исключение + ИЛИ"),
+        { rule(FilterRule::Action::Include, QStringLiteral("диск")),
+          rule(FilterRule::Action::Include, QStringLiteral("повторная"), FilterRule::Connector::Or),
+          rule(FilterRule::Action::Exclude, QStringLiteral("ascii")) });
+    add(QStringLiteral("кириллица в поле Message"),
+        { rule(FilterRule::Action::Include, QStringLiteral("сервер"), FilterRule::Connector::And,
+               QStringLiteral("Message")) });
+    add(QStringLiteral("уровень Error + кириллица"),
+        { rule(FilterRule::Action::Include, QStringLiteral("соединения")) },
+        { LogLevel::Error });
+    add(QStringLiteral("кириллица, ничего не найдено"),
+        { rule(FilterRule::Action::Include, QStringLiteral("нет такой строки")) });
+    return cfgs;
+}
+
+static void runEncodingFixture(const QString& name, const QStringList& utf8Paths,
+                               const QStringList& encodedPaths, const QString& schema,
+                               const QStringList& fieldNames,
+                               IndexedLoad mode = IndexedLoad::Sequential)
+{
+    g_context = name + QStringLiteral(" / загрузка");
+    g_contextFailures = 0;
+    g_fileNameOnly = true;
+
+    Document ref = loadIndexed(utf8Paths, schema, mode);
+    Document enc = loadIndexed(encodedPaths, schema, mode);
+    std::fprintf(stdout, "фикстура «%s»: %d файл(ов), %d строк(и)\n",
+                 U8(name), int(encodedPaths.size()), enc.model->rowCount());
+    std::fflush(stdout);
+    CHECK(enc.model->rowCount() > 0, QStringLiteral("вкладка пуста"));
+
+    for (const FilterConfig& cfg : encodingConfigs()) {
+        g_context = name + QStringLiteral(" / ") + cfg.name;
+        g_contextFailures = 0;
+        applyConfig(*ref.model, cfg, fieldNames);
+        applyConfig(*enc.model, cfg, fieldNames);
+        if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
+            CHECK(enc.model->rowCount() > 0,
+                  QStringLiteral("правило с кириллицей ничего не нашло — фикстура не проверяет фильтр"));
+        compareAll(ref, enc);
+
+        // Find All (панель Search): база из видимых строк и тот же запрос.
+        if (!cfg.rules.rules.isEmpty()) {
+            FilterRuleSet query;
+            query.rules = { rule(FilterRule::Action::Include, QStringLiteral("журнал")) };
+            query.bindFields(fieldNames, true);
+            LogModel refResults;
+            LogModel encResults;
+            refResults.searchVisible(*ref.model, query);
+            encResults.searchVisible(*enc.model, query);
+            settleChecked(refResults);
+            settleChecked(encResults);
+            g_context = name + QStringLiteral(" / ") + cfg.name + QStringLiteral(" / Find All");
+            compareVisibleRows(refResults, encResults);
+        }
+    }
+    g_fileNameOnly = false;
+}
+
+static void testEncodings(const QDir& dir, const QString& schema, const QStringList& fieldNames)
+{
+    // Файл A — ASCII-голова перед кириллицей (решение в середине файла),
+    // файл B — кириллица с первых строк, метки перекрываются с A.
+    const QString textA = cyrillicLogText(40);
+    const QString textB = cyrillicLogText(0, 7);
+    QDir().mkpath(dir.filePath(QStringLiteral("enc-utf8")));
+    const QDir utf8Dir(dir.filePath(QStringLiteral("enc-utf8")));
+    const QString utf8A = writeFile(utf8Dir, QStringLiteral("a.log"), encodeText(textA, TextEncoding::Utf8));
+    const QString utf8B = writeFile(utf8Dir, QStringLiteral("b.log"), encodeText(textB, TextEncoding::Utf8));
+
+    for (const TextEncoding enc : { TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                    TextEncoding::Koi8R }) {
+        const QString encName = TextEncodings::displayName(enc);
+        QDir().mkpath(dir.filePath(encName));
+        const QDir encDir(dir.filePath(encName));
+        const QString encA = writeFile(encDir, QStringLiteral("a.log"), encodeText(textA, enc));
+        const QString encB = writeFile(encDir, QStringLiteral("b.log"), encodeText(textB, enc));
+
+        runEncodingFixture(QStringLiteral("кодировка %1, один файл").arg(encName),
+                           { utf8A }, { encA }, schema, fieldNames);
+
+        // Кодировка определена сама и записана на файл.
+        Document doc = loadIndexed({ encA }, schema);
+        const FileEncoding state = doc.model->indexedOrNull()->fileEncoding(doc.files.value(0));
+        CHECK(state.source == FileEncoding::Source::Auto && state.decoder.encoding() == enc,
+              QStringLiteral("%1: стор не запомнил определённую кодировку (%2)")
+                  .arg(encName, TextEncodings::displayName(state.decoder.encoding())));
+    }
+
+    // Слитая вкладка: файлы в разных кодировках, каждый читается своим
+    // декодером — «кодировки вкладки» нет.
+    QDir().mkpath(dir.filePath(QStringLiteral("enc-mixed")));
+    const QDir mixedDir(dir.filePath(QStringLiteral("enc-mixed")));
+    const QString mixedA = writeFile(mixedDir, QStringLiteral("a.log"), encodeText(textA, TextEncoding::Utf8));
+    const QString mixedB = writeFile(mixedDir, QStringLiteral("b.log"),
+                                     encodeText(textB, TextEncoding::Windows1251));
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        runEncodingFixture(QStringLiteral("слитая вкладка UTF-8 + Windows-1251, ") + describe(mode),
+                           { utf8A, utf8B }, { mixedA, mixedB }, schema, fieldNames, mode);
+
+    // Кириллица пришла дозаписью в файл, начавшийся ASCII: «не решено»
+    // переживает загрузку, решение — на первой не-ASCII строке хвоста.
+    {
+        g_context = QStringLiteral("кодировка в дозаписи");
+        g_contextFailures = 0;
+        QString head;
+        for (int i = 0; i < 30; ++i)
+            head += QStringLiteral("2026-03-05 09:%1:00.000 [main] INFO - ascii only %2\n")
+                        .arg(i, 2, 10, QChar('0')).arg(i);
+        const QString path = writeFile(dir, QStringLiteral("enc-tail.log"),
+                                       encodeText(head, TextEncoding::Koi8R));
+        Document doc = loadIndexed({ path }, schema);
+        IndexedLogStore* store = doc.model->indexedOrNull();
+        CHECK(!store->fileEncoding(doc.files.value(0)).decided(),
+              QStringLiteral("ASCII-файл не должен быть «решён»"));
+        const QString tail = cyrillicLogText(0, 4000);
+        CHECK(appendIndexedTail(doc, 0, encodeText(tail, TextEncoding::Koi8R), schema),
+              QStringLiteral("дозапись не прочитана"));
+        settleChecked(*doc.model);
+        const FileEncoding state = store->fileEncoding(doc.files.value(0));
+        CHECK(state.decoder.encoding() == TextEncoding::Koi8R,
+              QStringLiteral("дозапись не решила KOI8-R: %1")
+                  .arg(TextEncodings::displayName(state.decoder.encoding())));
+        QStringList want = (head + tail).split(QLatin1Char('\n'));
+        want.removeLast();
+        QStringList got;
+        for (int row = 0; row < doc.model->rowCount(); ++row)
+            got << doc.model->messageAt(row);
+        CHECK_EQ(got.join(QLatin1Char('\n')), want.join(QLatin1Char('\n')),
+                 QStringLiteral("текст после дозаписи"));
+    }
+}
+
 static void checkLineNumbers(const QString& what, const Document& res, const Document& idx,
                              const QByteArray& bytes)
 {
@@ -1604,6 +1783,7 @@ int main(int argc, char** argv)
     testZonedMerge(dir, schema);
     testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);
     testLineNumbers(dir, schema);
+    testEncodings(dir, schema, fieldNames);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

@@ -53,6 +53,13 @@ public:
     // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
     void setParserPattern(const QString& pattern);
     void setExtractionEnabled(bool enabled);
+    // Запасная кодировка автоопределения (F-1): однобайтная, которую
+    // индексатор выбирает, если окно у первого байта ≥ 0x80 не похоже на
+    // UTF-8. Действует на проходы индексатора, начатые после вызова, — новые
+    // файлы и дозапись файлов, кодировка которых ещё не решена; решённые не
+    // меняются. Резидентный путь её пока не читает (шаг 3). Умолчание — по
+    // локали системы.
+    void setFallbackEncoding(TextEncoding encoding);
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
@@ -239,6 +246,7 @@ private:
     LogIndexer* m_indexer = nullptr;
     // Зеркало флага извлечения полей (для индексатора/индексного store).
     bool m_extractionEnabled = false;
+    TextEncoding m_fallbackEncoding = TextEncodings::systemFallback();
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.
     bool m_autoReload = false;

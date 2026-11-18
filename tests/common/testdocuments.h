@@ -20,6 +20,7 @@
 #include "logmodel.h"
 #include "logparser.h"
 #include "logpattern.h"
+#include "textencoding.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -27,6 +28,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QMap>
 #include <QObject>
 #include <QRandomGenerator>
@@ -165,6 +167,75 @@ inline QByteArray makeLogBytes(int records, quint32 seed, const QByteArray& eol,
 
     if (!trailingNewline && out.endsWith(eol))
         out.chop(eol.size());
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Кодировки (F-1): фикстуры в однобайтных кодировках
+// ---------------------------------------------------------------------------
+
+// Текст → байты кодировки. Однобайтные — по обратной таблице TextDecoder
+// (сама таблица сверена с эталоном в tests/textencoding); символ, которого в
+// кодировке нет, — '?' (типографских «» — № нет в IBM866 и KOI8-R: в
+// фикстурах их не использовать). UTF-8 — toUtf8.
+inline QByteArray encodeText(const QString& text, TextEncoding encoding)
+{
+    if (!TextEncodings::isSingleByte(encoding))
+        return text.toUtf8();
+    const TextDecoder decoder(encoding);
+    QHash<char16_t, char> reverse;
+    for (int b = 0x80; b <= 0xFF; ++b) {
+        const char byte = char(b);
+        const QString ch = decoder.decode(&byte, 1);
+        if (ch.size() == 1)
+            reverse.insert(ch.at(0).unicode(), byte);
+    }
+    QByteArray out;
+    out.reserve(text.size());
+    for (const QChar c : text) {
+        if (c.unicode() < 0x80)
+            out += char(c.unicode());
+        else
+            out += reverse.value(c.unicode(), '?');
+    }
+    return out;
+}
+
+// Лог с кириллицей: ASCII-преамбула из asciiRecords записей (решать нечего),
+// затем записи с русским текстом разного регистра, многострочная запись и
+// ещё ASCII. Метки возрастают — одно-файловый порядок совпадает с временным.
+// secondBase — сдвиг меток (слитая вкладка из двух таких файлов).
+inline QString cyrillicLogText(int asciiRecords, int secondBase = 0)
+{
+    static const char16_t* const kMessages[] = {
+        u"Ошибка соединения с базой данных: таймаут",
+        u"Пользователь Иванов вошёл в систему",
+        u"ПРЕДУПРЕЖДЕНИЕ: диск заполнен на 95%",
+        u"Запись в журнал: щёлкнул (Сохранить) - успешно",
+        u"повторная попытка 3 после сбоя",
+        u"Сервер ответил: ошибка 500, повтор",
+    };
+    static const char* const kLevels[] = { "ERROR", "INFO", "WARN", "INFO", "DEBUG", "ERROR" };
+    const QDateTime base = fixtureBaseTime();
+    QString out;
+    int second = secondBase;
+    const auto stamp = [&]() {
+        return base.addSecs(second++).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz"));
+    };
+    for (int i = 0; i < asciiRecords; ++i)
+        out += QStringLiteral("%1 [main] INFO - ascii preamble line %2\n").arg(stamp()).arg(i);
+    for (int round = 0; round < 3; ++round) {
+        for (int m = 0; m < 6; ++m) {
+            out += QStringLiteral("%1 [worker-%2] %3 - %4\n")
+                       .arg(stamp())
+                       .arg(m % 3)
+                       .arg(QLatin1String(kLevels[m]))
+                       .arg(QString::fromUtf16(kMessages[m]));
+            if (m == 0)
+                out += QStringLiteral("    в модуле Хранилище.Подключение (строка %1)\n").arg(100 + round);
+        }
+        out += QStringLiteral("%1 [main] INFO - plain ascii between rounds %2\n").arg(stamp()).arg(round);
+    }
     return out;
 }
 
@@ -312,6 +383,25 @@ inline QString describe(IndexedLoad mode)
                                            : QStringLiteral("разом");
 }
 
+// Запасная кодировка автоопределения в тестах (F-1): как у машины с
+// кириллической локалью — тогда decide выбирает между Windows-1251, IBM866 и
+// KOI8-R. UTF-8-фикстуры от неё не зависят.
+constexpr TextEncoding kTestFallbackEncoding = TextEncoding::Windows1251;
+
+// Индексатор в тестах: схема, извлечение полей и запасная кодировка — как
+// у вкладки, плюс решение о кодировке → стор (LogViewWidget::ensureIndexer).
+inline void configureIndexer(LogIndexer& indexer, IndexedLogStore* store,
+                             const QString& schema, QObject* context)
+{
+    indexer.setPattern(schema);
+    indexer.setExtractionEnabled(true);
+    indexer.setFallbackEncoding(kTestFallbackEncoding);
+    QObject::connect(&indexer, &LogIndexer::encodingDecided, context,
+                     [store](const LogFilePtr& lf, const FileEncoding& encoding) {
+                         store->adoptDetectedEncoding(lf, encoding);
+                     });
+}
+
 // Индексный путь: LogIndexer → attachFile/appendIndexedRows, как в
 // LogViewWidget::startIndexedLoad + handleIndexBatchReady. Сигналы индексатора
 // приходят из воркера очередью — порядок «батчи, затем finished» сохраняется.
@@ -340,8 +430,7 @@ inline void addIndexedFiles(Document& doc, const QStringList& paths, const QStri
         job->logFile = std::make_shared<LogFile>(path);
         job->index = std::make_shared<LineIndex>();
         job->indexer = std::make_unique<LogIndexer>();
-        job->indexer->setPattern(schema);
-        job->indexer->setExtractionEnabled(true);
+        configureIndexer(*job->indexer, store, schema, &relay);
         doc.files.append(job->logFile);
         store->attachFile(job->logFile, job->index);
 
@@ -427,11 +516,10 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
         return false;
 
     LogIndexer indexer;
-    indexer.setPattern(schema);
-    indexer.setExtractionEnabled(true);
     bool done = false;
     bool ok = true;
     QObject relay;
+    configureIndexer(indexer, store, schema, &relay);
     QObject::connect(&indexer, &LogIndexer::indexBatchReady, &relay,
                      [store](const LogFilePtr& lf, qint64 first, qint64 count) {
                          store->appendIndexedRows(lf, first, count, /*markNew*/ true);
@@ -440,7 +528,8 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
                      [&done](qint64, const LogFilePtr&) { done = true; });
     QObject::connect(&indexer, &LogIndexer::indexingFailed, &relay,
                      [&](const LogFilePtr&) { ok = false; done = true; });
-    indexer.startIndexingFrom(logFile, index, index->lastLineProvisional());
+    indexer.startIndexingFrom(logFile, index, index->lastLineProvisional(),
+                              store->fileEncoding(logFile));
     return waitFor([&done] { return done; }) && ok;
 }
 

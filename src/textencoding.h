@@ -3,6 +3,7 @@
 
 #include <QByteArrayView>
 #include <QString>
+#include <QMetaType>
 #include <QStringConverter>
 
 #include <optional>
@@ -80,6 +81,11 @@ struct Bom {
 };
 std::optional<Bom> detectBom(QByteArrayView head);
 
+// Запасная кодировка для файлов не в UTF-8 по локали системы: кириллическая
+// письменность — Windows-1251, иначе Windows-1252. Пока нет настройки
+// (шаг 4 F-1), это и есть умолчание индексатора.
+TextEncoding systemFallback();
+
 } // namespace TextEncodings
 
 class TextDecoder
@@ -94,8 +100,12 @@ public:
     TextEncoding encoding() const { return m_encoding; }
     bool isUtf8() const { return m_table == nullptr; }
 
-    // Байты строки (без EOL) → текст.
-    QString decode(const char* data, qsizetype len) const;
+    // Байты строки (без EOL) → текст. Ветка UTF-8 — в заголовке: это горячий
+    // путь индексатора и сканов, вызов на строку не должен стоить лишнего.
+    QString decode(const char* data, qsizetype len) const
+    {
+        return m_table ? decodeSingleByte(data, len) : QString::fromUtf8(data, len);
+    }
     QString decode(QByteArrayView bytes) const { return decode(bytes.data(), bytes.size()); }
 
     // Строка, прочитанная как Latin-1 (байт = символ U+0000–U+00FF, так её
@@ -112,6 +122,8 @@ public:
     friend bool operator!=(const TextDecoder& a, const TextDecoder& b) { return !(a == b); }
 
 private:
+    QString decodeSingleByte(const char* data, qsizetype len) const;
+
     // Таблица байтов 0x80–0xFF; nullptr — UTF-8.
     const char16_t* m_table = nullptr;
     TextEncoding m_encoding = TextEncoding::Utf8;
@@ -119,6 +131,27 @@ private:
 
 static_assert(std::is_trivially_copyable_v<TextDecoder>,
               "TextDecoder is copied into worker snapshots");
+
+// Кодировка файла вкладки и откуда она взялась (F-1, шаг 2). Пока source ==
+// Undecided, в файле встречались только ASCII-байты: текст одинаков в любой
+// кодировке, decoder — UTF-8, и индексатор проверяет каждый новый буфер на
+// байт ≥ 0x80. Состояние живёт в IndexedLogStore на файл и переживает
+// дозапись хвоста; переписанный файл начинает с Undecided (кроме выбора
+// пользователя).
+struct FileEncoding {
+    enum class Source : quint8 {
+        Undecided, // только ASCII — решать нечего
+        Auto,      // EncodingDetector::decide по окну
+        Bom,       // BOM UTF-8
+        User,      // выбор пользователя; автоматика его не меняет
+    };
+    TextDecoder decoder;
+    Source source = Source::Undecided;
+
+    bool decided() const { return source != Source::Undecided; }
+};
+
+Q_DECLARE_METATYPE(FileEncoding)
 
 namespace EncodingDetector {
 

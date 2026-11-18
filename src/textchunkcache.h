@@ -1,6 +1,8 @@
 #ifndef TEXTCHUNKCACHE_H
 #define TEXTCHUNKCACHE_H
 
+#include "textencoding.h"
+
 #include <QByteArray>
 #include <QFile>
 #include <QHash>
@@ -13,7 +15,8 @@
 // TextChunkCache — чтение текста строк большого файла по требованию.
 // Файл разбивается на выровненные байтовые чанки по 4 МБ; чанки держатся в
 // LRU-кэше с бюджетом по байтам. lineText() собирает строку из 1–2 чанков и
-// декодирует UTF-8 (строки длиннее двух чанков читаются напрямую с диска).
+// декодирует декодером файла (строки длиннее двух чанков читаются напрямую с
+// диска). В чанках — сырые байты: смена декодера кэш не инвалидирует.
 //
 // ТОЛЬКО GUI-поток (путь отображения). Последовательные сканы (фильтр,
 // статистика, поиск) НЕ ходят сюда — у них свой SequentialLineReader с
@@ -32,11 +35,13 @@ public:
     qint64 budgetBytes() const { return m_budgetBytes; }
 
     // Зарегистрировать файл и получить его id для lineText().
-    int addFile(const QString& filePath);
+    int addFile(const QString& filePath, TextDecoder decoder = TextDecoder());
+    // Сменить декодер файла (F-1): чанки остаются — в них сырые байты.
+    void setFileDecoder(int fileId, TextDecoder decoder);
     void clear();
 
     // Текст строки [offset, offset+byteLength) файла fileId, декодированный
-    // из UTF-8. Пустая строка при ошибке чтения.
+    // декодером файла. Пустая строка при ошибке чтения.
     QString lineText(int fileId, qint64 offset, quint32 byteLength) const;
 
     // Сбросить кэшированные чанки одного файла (файл заменён/переписан).
@@ -49,6 +54,7 @@ private:
     };
     struct FileSlot {
         QString path;
+        TextDecoder decoder;
         // Ручка файла НЕ хранится: см. chunkAt() — лог не должен быть залочен.
     };
 

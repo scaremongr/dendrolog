@@ -6,6 +6,17 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Logs not in UTF-8 are readable (part 1 of 2).** A file above the
+  large-file threshold in Windows-1251, IBM866 (cp866), KOI8-R or
+  Windows-1252 is now shown with its real text instead of `�`, and Cyrillic in
+  it is found by quick find, Text Filters and the Search panel, case-insensitive
+  too. The encoding is detected by the file itself at its first non-ASCII line,
+  wherever that is, also when it arrives as an appended tail. Every file of a
+  tab with several files keeps its own encoding. Files below the threshold
+  still read only UTF-8 — that comes in the next step, together with choosing
+  the encoding by hand.
+
 ### Fixed
 - A blank last line of a file is now shown in tabs below the large-file
   threshold, as it already was above it. Before, the line was dropped, and

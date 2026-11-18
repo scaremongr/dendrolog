@@ -15,12 +15,19 @@ void TextChunkCache::setBudgetBytes(qint64 budget)
     evictIfNeeded();
 }
 
-int TextChunkCache::addFile(const QString& filePath)
+int TextChunkCache::addFile(const QString& filePath, TextDecoder decoder)
 {
     FileSlot slot;
     slot.path = filePath;
+    slot.decoder = decoder;
     m_files.push_back(std::move(slot));
     return int(m_files.size()) - 1;
+}
+
+void TextChunkCache::setFileDecoder(int fileId, TextDecoder decoder)
+{
+    if (fileId >= 0 && size_t(fileId) < m_files.size())
+        m_files[size_t(fileId)].decoder = decoder;
 }
 
 void TextChunkCache::clear()
@@ -144,7 +151,8 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
         const QByteArray* bytes = chunkCovering(fileId, firstChunk, local + byteLength);
         if (!bytes || local + byteLength > bytes->size())
             return QString();
-        return QString::fromUtf8(bytes->constData() + local, int(byteLength));
+        return m_files[size_t(fileId)].decoder.decode(bytes->constData() + local,
+                                                      qsizetype(byteLength));
     }
 
     if (lastChunk == firstChunk + 1) {
@@ -166,12 +174,12 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
         if (remain > second->size())
             return QString();
         assembled.append(second->constData(), int(remain));
-        return QString::fromUtf8(assembled);
+        return m_files[size_t(fileId)].decoder.decode(assembled);
     }
 
     // Гигантская строка (> 2 чанков) — мимо кэша, напрямую с диска.
     QByteArray raw;
     if (!readRange(fileId, offset, byteLength, raw))
         return QString();
-    return QString::fromUtf8(raw);
+    return m_files[size_t(fileId)].decoder.decode(raw);
 }

@@ -1,10 +1,13 @@
 #ifndef SEQUENTIALLINEREADER_H
 #define SEQUENTIALLINEREADER_H
 
+#include "textencoding.h"
+
 #include <QByteArray>
 #include <QFile>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <memory>
 #include <vector>
 
@@ -13,13 +16,16 @@
 // смещениям LineIndex для сканов в воркерах (фильтр, статистика, поиск).
 // Собственное скользящее окно (8 МБ), НЕ через TextChunkCache — скан не
 // вымывает кэш вьюпорта и не требует синхронизации с GUI-потоком.
-// Использовать строго из одного потока.
+// Использовать строго из одного потока. Декодер файла (F-1) — копия из
+// снапшота стора: смена кодировки на GUI-потоке читателя не задевает.
 // ============================================================================
 class SequentialLineReader {
 public:
     explicit SequentialLineReader(const QString& filePath,
+                                  TextDecoder decoder = TextDecoder(),
                                   qint64 windowBytes = 8 * 1024 * 1024)
         : m_file(filePath)
+        , m_decoder(decoder)
         , m_windowBytes(qMax<qint64>(windowBytes, 64 * 1024))
     {
     }
@@ -45,7 +51,7 @@ public:
             }
         }
         const qint64 local = offset - m_winStart;
-        m_scratch = QString::fromUtf8(m_window.constData() + local, int(byteLength));
+        m_scratch = m_decoder.decode(m_window.constData() + local, qsizetype(byteLength));
         return m_scratch;
     }
 
@@ -78,6 +84,7 @@ private:
     }
 
     QFile m_file;
+    TextDecoder m_decoder;
     qint64 m_windowBytes;
     QByteArray m_window;
     qint64 m_winStart = 0;
@@ -88,10 +95,14 @@ private:
 // Скан по нескольким файлам слитой вкладки: по SequentialLineReader на файл,
 // файл открывается при первом обращении к нему. Контракт тот же — один поток;
 // ссылка из lineAt() валидна до следующего вызова для ТОГО ЖЕ файла.
+// decoders — по декодеру на файл в том же порядке (слитая вкладка может
+// смешивать кодировки); короче списка путей — недостающим UTF-8.
 class SequentialLineReaders {
 public:
-    explicit SequentialLineReaders(QStringList filePaths)
+    explicit SequentialLineReaders(QStringList filePaths,
+                                   QVector<TextDecoder> decoders = {})
         : m_paths(std::move(filePaths))
+        , m_decoders(std::move(decoders))
         , m_readers(size_t(m_paths.size()))
     {
     }
@@ -100,7 +111,8 @@ public:
     {
         std::unique_ptr<SequentialLineReader>& reader = m_readers[size_t(fileId)];
         if (!reader) {
-            reader = std::make_unique<SequentialLineReader>(m_paths.at(fileId));
+            reader = std::make_unique<SequentialLineReader>(
+                m_paths.at(fileId), m_decoders.value(fileId));
             reader->open();
         }
         return reader->lineAt(offset, byteLength);
@@ -108,6 +120,7 @@ public:
 
 private:
     QStringList m_paths;
+    QVector<TextDecoder> m_decoders;
     std::vector<std::unique_ptr<SequentialLineReader>> m_readers;
 };
 

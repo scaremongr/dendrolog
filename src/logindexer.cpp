@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QByteArrayView>
 #include <QtConcurrent>
 #include <cstring>
 
@@ -31,33 +32,41 @@ void LogIndexer::setPattern(const QString& schemaString)
 }
 
 void LogIndexer::startIndexing(const LogFilePtr& logFile,
-                               const std::shared_ptr<LineIndex>& index)
+                               const std::shared_ptr<LineIndex>& index,
+                               FileEncoding encoding)
 {
     // Снапшот схемы на GUI-потоке — воркер не читает мутируемые члены.
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, index, patternSnapshot, extraction]() {
+    const TextEncoding fallback = m_fallbackEncoding;
+    (void)QtConcurrent::run(&m_pool, [this, logFile, index, patternSnapshot, extraction,
+                                      encoding, fallback]() {
         this->doIndex(logFile, index, patternSnapshot, extraction,
-                      /*initial=*/true, /*reindexProvisionalTail=*/false);
+                      /*initial=*/true, /*reindexProvisionalTail=*/false,
+                      encoding, fallback);
     });
 }
 
 void LogIndexer::startIndexingFrom(const LogFilePtr& logFile,
                                    const std::shared_ptr<LineIndex>& index,
-                                   bool reindexProvisionalTail)
+                                   bool reindexProvisionalTail,
+                                   FileEncoding encoding)
 {
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
+    const TextEncoding fallback = m_fallbackEncoding;
     (void)QtConcurrent::run(&m_pool, [this, logFile, index, patternSnapshot,
-                                      extraction, reindexProvisionalTail]() {
+                                      extraction, reindexProvisionalTail, encoding,
+                                      fallback]() {
         this->doIndex(logFile, index, patternSnapshot, extraction,
-                      /*initial=*/false, reindexProvisionalTail);
+                      /*initial=*/false, reindexProvisionalTail, encoding, fallback);
     });
 }
 
 void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index,
                          const LogPattern& pattern, bool extraction,
-                         bool initial, bool reindexProvisionalTail)
+                         bool initial, bool reindexProvisionalTail,
+                         FileEncoding encoding, TextEncoding fallback)
 {
     if (initial)
         emit indexingStarted(logFile);
@@ -104,24 +113,25 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
 
     // ---- BOM ----------------------------------------------------------------
     if (startOffset == 0 && fileSize >= 2) {
-        char bom[4] = {0, 0, 0, 0};
-        const qint64 got = file.read(bom, qMin<qint64>(4, fileSize));
-        const auto b = [&](int i) { return quint8(bom[i]); };
-        if (got >= 2) {
-            const bool utf16 = (b(0) == 0xFF && b(1) == 0xFE && !(got >= 4 && b(2) == 0 && b(3) == 0))
-                            || (b(0) == 0xFE && b(1) == 0xFF);
-            const bool utf32 = (got >= 4)
-                            && ((b(0) == 0xFF && b(1) == 0xFE && b(2) == 0 && b(3) == 0)
-                                || (b(0) == 0 && b(1) == 0 && b(2) == 0xFE && b(3) == 0xFF));
-            if (utf16 || utf32) {
+        char head[4] = {0, 0, 0, 0};
+        const qint64 got = file.read(head, qMin<qint64>(4, fileSize));
+        if (const auto bom = TextEncodings::detectBom(QByteArrayView(head, qMax<qint64>(got, 0)))) {
+            if (bom->encoding != TextEncoding::Utf8) {
+                // UTF-16/32 — только резидентный путь (QTextStream по BOM).
+                const bool utf32 = bom->encoding == TextEncoding::Utf32LE
+                                || bom->encoding == TextEncoding::Utf32BE;
                 emit needsResidentFallback(
                     logFile,
                     utf32 ? QStringLiteral("UTF-32 BOM")
                           : QStringLiteral("UTF-16 BOM"));
                 return;
             }
-            if (got >= 3 && b(0) == 0xEF && b(1) == 0xBB && b(2) == 0xBF)
-                startOffset = 3; // строки начинаются после UTF-8 BOM
+            startOffset = bom->length; // строки начинаются после UTF-8 BOM
+            if (encoding.source != FileEncoding::Source::User) {
+                encoding = FileEncoding{TextDecoder(TextEncoding::Utf8),
+                                        FileEncoding::Source::Bom};
+                emit encodingDecided(logFile, encoding);
+            }
         }
     }
 
@@ -164,9 +174,40 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
 
+    // Автоопределение кодировки (F-1): буфер, в котором впервые встретился
+    // байт ≥ 0x80, решает до разбора своих строк. Строки, разобранные раньше,
+    // — ASCII (иначе решение было бы принято на их буфере). Окно — от этого
+    // байта: ASCII до него в decide ничего не добавил бы.
+    const auto decideOn = [&](const char* data, qint64 len, qint64 dataFileOffset) {
+        const qsizetype high = EncodingDetector::firstHighByte(data, len);
+        if (high < 0)
+            return;
+        const qint64 windowStart = dataFileOffset + high;
+        QByteArray windowBytes;
+        QByteArrayView window;
+        if (len - high >= EncodingDetector::kWindowBytes) {
+            window = QByteArrayView(data + high, EncodingDetector::kWindowBytes);
+        } else {
+            // Окно выходит за буфер: дочитываем вторым дескриптором, позиция
+            // основного чтения не трогается.
+            QFile windowFile(logFile->filePath);
+            if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
+                windowBytes = windowFile.read(EncodingDetector::kWindowBytes);
+            if (windowBytes.size() < len - high) // файл укоротили — что есть в буфере
+                windowBytes = QByteArray(data + high, int(len - high));
+            window = QByteArrayView(windowBytes);
+        }
+        if (const auto decided = EncodingDetector::decide(window, fallback)) {
+            encoding = FileEncoding{TextDecoder(*decided), FileEncoding::Source::Auto};
+            emit encodingDecided(logFile, encoding);
+        }
+        // nullopt — единственная последовательность оборвана концом файла:
+        // остаёмся «не решёнными», решит следующий буфер или дозапись.
+    };
+
     // Классификация и запись одной строки (bytes БЕЗ EOL-байт).
     const auto processLine = [&](const char* data, qint64 len, quint8 eol) {
-        text = QString::fromUtf8(data, int(len));
+        text = encoding.decoder.decode(data, qsizetype(len));
 
         qint64 tsMs = -1;
         LogLevel lvl = LogLevel::Unknown;
@@ -237,6 +278,8 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
             break; // EOF
 
         const char* p = buf.constData();
+        if (!encoding.decided())
+            decideOn(p, got, file.pos() - got);
         qint64 pos = 0;
         while (pos < got) {
             if (m_abort.load(std::memory_order_relaxed))

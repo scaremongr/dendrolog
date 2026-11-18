@@ -117,6 +117,13 @@ void LogViewWidget::setExtractionEnabled(bool enabled)
         store->setFieldPattern(m_logParser->pattern().patternString(), enabled);
 }
 
+void LogViewWidget::setFallbackEncoding(TextEncoding encoding)
+{
+    m_fallbackEncoding = encoding;
+    if (m_indexer)
+        m_indexer->setFallbackEncoding(encoding);
+}
+
 QString LogViewWidget::parserPattern() const
 {
     return m_logParser->pattern().patternString();
@@ -229,7 +236,9 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
         store->resetFileIndex(logFile, fresh);
         st = FileReloadState{};
         st.loadInFlight = true;
-        m_indexer->startIndexing(logFile, fresh);
+        // resetFileIndex вернул автоматике «не решено», выбор пользователя
+        // оставил — с ним и перечитываем.
+        m_indexer->startIndexing(logFile, fresh, store->fileEncoding(logFile));
         updateLoadingState();
         return;
     }
@@ -250,6 +259,7 @@ void LogViewWidget::ensureIndexer()
     m_indexer = new LogIndexer(this);
     m_indexer->setPattern(m_logParser->pattern().patternString());
     m_indexer->setExtractionEnabled(m_extractionEnabled);
+    m_indexer->setFallbackEncoding(m_fallbackEncoding);
     connect(m_indexer, &LogIndexer::indexingStarted, this,
             [this](const LogFilePtr& f) { emit fileParsingStarted(f); });
     connect(m_indexer, &LogIndexer::indexingProgress, this,
@@ -262,6 +272,14 @@ void LogViewWidget::ensureIndexer()
             this, &LogViewWidget::handleIndexingFailed);
     connect(m_indexer, &LogIndexer::needsResidentFallback,
             this, &LogViewWidget::handleResidentFallback);
+    // Решение о кодировке приходит раньше порции с первой не-ASCII строкой
+    // (очередь сигналов воркера сохраняет порядок): стор читает её уже новым
+    // декодером. Прежние строки — ASCII, reset не нужен.
+    connect(m_indexer, &LogIndexer::encodingDecided, this,
+            [this](const LogFilePtr& logFile, const FileEncoding& encoding) {
+                if (auto* store = m_model->indexedOrNull())
+                    store->adoptDetectedEncoding(logFile, encoding);
+            });
 }
 
 void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile)
@@ -544,8 +562,11 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                 if (auto index = indexedStore->indexForFile(logFile->filePath)) {
                     ensureIndexer();
                     st.loadInFlight = true;
+                    // Кодировка файла (F-1): «не решено» переживает дозапись —
+                    // индексатор продолжит проверять новые байты.
                     m_indexer->startIndexingFrom(logFile, index,
-                                                 index->lastLineProvisional());
+                                                 index->lastLineProvisional(),
+                                                 indexedStore->fileEncoding(logFile));
                     // Re-anchor: следующий тик поллинга не должен снова
                     // классифицировать этот же диапазон как дозапись.
                     const qint64 newSize = QFileInfo(logFile->filePath).size();

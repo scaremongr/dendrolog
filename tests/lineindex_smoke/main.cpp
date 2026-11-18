@@ -23,6 +23,7 @@
 #include "logparser.h"
 #include "patternheuristics.h"
 #include "sequentiallinereader.h"
+#include "textchunkcache.h"
 #include "textencoding.h"
 
 #include <QCoreApplication>
@@ -1501,7 +1502,7 @@ static int runBench(const QString& path, const QString& patternString)
     indexer.startIndexing(lf, index);
     while (!done)
         QThread::msleep(20);
-    std::fprintf(stderr, "bench: %lld lines, %lld logical, %.1f s\n",
+    std::fprintf(stderr, "bench: %lld lines, %lld logical, %.3f s\n",
                  (long long)index->lineCount(),
                  (long long)index->logicalEntryCount(), t.elapsed() / 1000.0);
     return 0;
@@ -1714,7 +1715,7 @@ static void testSequentialReaderDirections(const QDir& dir)
 
     QByteArray summary;
     for (const Order& order : orders) {
-        SequentialLineReader reader(path, window);
+        SequentialLineReader reader(path, TextDecoder(), window);
         CHECK(reader.open(), "reader: open");
         int mismatches = 0;
         for (const qint64 l : order.lines) {
@@ -1736,6 +1737,314 @@ static void testSequentialReaderDirections(const QDir& dir)
     std::fprintf(stderr, "reader window reads over %lld lines (bound %lld): %s\n",
                  static_cast<long long>(n), static_cast<long long>(slideBound),
                  summary.constData());
+}
+
+
+// ---------------------------------------------------------------------------
+// Кодировки (F-1, шаг 2): определение в индексаторе
+// ---------------------------------------------------------------------------
+
+// Текст → байты однобайтной кодировки по обратной таблице декодера.
+static QByteArray encodeAs(const QString& text, TextEncoding encoding)
+{
+    if (!TextEncodings::isSingleByte(encoding))
+        return text.toUtf8();
+    const TextDecoder decoder(encoding);
+    QByteArray out;
+    for (const QChar c : text) {
+        if (c.unicode() < 0x80) {
+            out += char(c.unicode());
+            continue;
+        }
+        char found = '?';
+        for (int b = 0x80; b <= 0xFF; ++b) {
+            const char byte = char(b);
+            if (decoder.decode(&byte, 1) == QString(c)) {
+                found = byte;
+                break;
+            }
+        }
+        out += found;
+    }
+    return out;
+}
+
+// Прогон индексатора с записью событий: решения о кодировке и порции, в том
+// порядке, в каком воркер их выпустил (DirectConnection — в его потоке).
+struct EncodingRun {
+    std::shared_ptr<LineIndex> index;
+    QVector<FileEncoding> decisions;
+    // Строк опубликовано к моменту первого решения (-1 — решения не было).
+    qint64 publishedAtFirstDecision = -1;
+};
+
+static EncodingRun indexWithEncoding(const LogFilePtr& lf, FileEncoding start,
+                                     std::shared_ptr<LineIndex> index = nullptr,
+                                     bool append = false,
+                                     TextEncoding fallback = TextEncoding::Windows1251)
+{
+    EncodingRun run;
+    run.index = index ? index : std::make_shared<LineIndex>();
+    std::atomic_bool done{false};
+    qint64 published = append ? run.index->lineCount() : 0;
+    if (append && run.index->lastLineProvisional())
+        published -= 1;
+    LogIndexer indexer;
+    indexer.setFallbackEncoding(fallback);
+    QObject::connect(&indexer, &LogIndexer::encodingDecided, &indexer,
+                     [&](const LogFilePtr&, const FileEncoding& enc) {
+                         if (run.decisions.isEmpty())
+                             run.publishedAtFirstDecision = published;
+                         run.decisions.append(enc);
+                     }, Qt::DirectConnection);
+    QObject::connect(&indexer, &LogIndexer::indexBatchReady, &indexer,
+                     [&](const LogFilePtr&, qint64 first, qint64 count) {
+                         published = qMax(published, first + count);
+                     }, Qt::DirectConnection);
+    QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
+                     [&](qint64, const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+    QObject::connect(&indexer, &LogIndexer::indexingFailed, &indexer,
+                     [&](const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+    if (append)
+        indexer.startIndexingFrom(lf, run.index, run.index->lastLineProvisional(), start);
+    else
+        indexer.startIndexing(lf, run.index, start);
+    QElapsedTimer t; t.start();
+    while (!done && t.elapsed() < 60000)
+        QThread::msleep(2);
+    CHECK(done.load(), "encoding: indexing did not finish in time");
+    return run;
+}
+
+static FileEncoding forcedUtf8()
+{
+    return FileEncoding{TextDecoder(TextEncoding::Utf8), FileEncoding::Source::User};
+}
+
+// Текст строк файла: эталонные строки (split по '\n') против чтения по
+// индексу ридером воркера и кэшем отображения с декодером кодировки.
+static void checkIndexedText(const QString& tag, const QString& path, const LineIndex& index,
+                             const QStringList& expected, TextEncoding encoding)
+{
+    CHECK(index.lineCount() == expected.size(),
+          qPrintable(QString("%1: line count %2, expected %3")
+                         .arg(tag).arg(index.lineCount()).arg(expected.size())));
+    SequentialLineReader reader(path, TextDecoder(encoding));
+    CHECK(reader.open(), "encoding: reader open");
+    TextChunkCache cache;
+    const int cacheId = cache.addFile(path, TextDecoder(encoding));
+    int wrong = 0;
+    for (qint64 i = 0; i < qMin<qint64>(index.lineCount(), expected.size()); ++i) {
+        const QString viaReader = reader.lineAt(index.lineStartOffset(i), index.lineByteLength(i));
+        const QString viaCache = cache.lineText(cacheId, index.lineStartOffset(i),
+                                                index.lineByteLength(i));
+        if (viaReader != expected[int(i)] || viaCache != expected[int(i)]) {
+            if (++wrong <= 3)
+                std::fprintf(stderr, "%s line %lld:\n  want   '%s'\n  reader '%s'\n  cache  '%s'\n",
+                             qPrintable(tag), (long long)i, qPrintable(expected[int(i)]),
+                             qPrintable(viaReader), qPrintable(viaCache));
+        }
+    }
+    CHECK(wrong == 0, qPrintable(tag + ": decoded text of every line"));
+}
+
+static QStringList linesOf(const QString& text)
+{
+    QStringList lines = text.split(QLatin1Char('\n'));
+    if (!lines.isEmpty() && lines.last().isEmpty())
+        lines.removeLast();
+    return lines;
+}
+
+static QString cyrLine(int second, const char* level, const char16_t* message)
+{
+    return QStringLiteral("2026-07-10 12:%1:%2,000 %3 [db] %4\n")
+        .arg((second / 60) % 60, 2, 10, QChar('0'))
+        .arg(second % 60, 2, 10, QChar('0'))
+        .arg(QLatin1String(level))
+        .arg(QString::fromUtf16(message));
+}
+
+static void testEncodingDetection(const QDir& dir)
+{
+    // ASCII-преамбула длиннее буфера чтения индексатора (8 МБ): первая
+    // не-ASCII строка — в середине файла, во втором буфере.
+    QString prefix;
+    int second = 0;
+    while (prefix.size() < 9 * 1024 * 1024) {
+        prefix += QStringLiteral("2026-07-10 12:%1:%2,000 INFO [app] ascii filler line %3\n")
+                      .arg((second / 60) % 60, 2, 10, QChar('0'))
+                      .arg(second % 60, 2, 10, QChar('0'))
+                      .arg(second);
+        ++second;
+    }
+    const qint64 firstHighLine = linesOf(prefix).size();
+    QString body;
+    body += cyrLine(1, "ERROR", u"Ошибка соединения с базой данных: таймаут");
+    body += QStringLiteral("    в модуле Хранилище.Подключение\n");
+    body += cyrLine(2, "INFO", u"Пользователь Иванов вошёл в систему");
+    body += cyrLine(3, "WARN", u"ПРЕДУПРЕЖДЕНИЕ: диск заполнен (срочно)");
+    body += QStringLiteral("2026-07-10 12:00:04,000 INFO [app] ascii after\n");
+    const QString text = prefix + body;
+    const QStringList expected = linesOf(text);
+
+    for (const TextEncoding enc : {TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                   TextEncoding::Koi8R, TextEncoding::Utf8}) {
+        const QString tag = QStringLiteral("encoding mid-file %1").arg(TextEncodings::displayName(enc));
+        const QString path = writeFile(dir, QStringLiteral("enc_mid_%1.log").arg(int(enc)),
+                                       encodeAs(text, enc));
+        auto lf = std::make_shared<LogFile>(path);
+        const EncodingRun run = indexWithEncoding(lf, FileEncoding());
+        CHECK(run.decisions.size() == 1,
+              qPrintable(tag + QStringLiteral(": one decision, got %1").arg(run.decisions.size())));
+        if (!run.decisions.isEmpty()) {
+            CHECK(run.decisions.first().decoder.encoding() == enc,
+                  qPrintable(tag + ": detected " + TextEncodings::displayName(
+                                 run.decisions.first().decoder.encoding())));
+            CHECK(run.decisions.first().source == FileEncoding::Source::Auto,
+                  qPrintable(tag + ": source is auto"));
+        }
+        CHECK(run.publishedAtFirstDecision >= 0 && run.publishedAtFirstDecision <= firstHighLine,
+              qPrintable(tag + QStringLiteral(": decided before the batch with the first non-ASCII "
+                                              "line (published %1, line %2)")
+                                   .arg(run.publishedAtFirstDecision).arg(firstHighLine)));
+        checkIndexedText(tag, path, *run.index, expected, enc);
+
+        // Индекс от кодировки не зависит: тот же файл, прочитанный как UTF-8,
+        // даёт те же смещения, длины, уровни, записи и метки.
+        const EncodingRun asUtf8 = indexWithEncoding(lf, forcedUtf8());
+        CHECK(asUtf8.decisions.isEmpty(), qPrintable(tag + ": a user choice is not re-decided"));
+        compareIndexes(tag + " vs read as UTF-8", *run.index, *asUtf8.index);
+    }
+
+    // Только ASCII — решать нечего, решения нет.
+    {
+        QByteArray ascii;
+        for (int i = 0; i < 100; ++i)
+            ascii += "2026-07-10 12:00:" + QByteArray::number(i % 60).rightJustified(2, '0')
+                     + ",000 INFO [app] plain ascii " + QByteArray::number(i) + '\n';
+        const QString path = writeFile(dir, "enc_ascii.log", ascii);
+        const EncodingRun run = indexWithEncoding(std::make_shared<LogFile>(path), FileEncoding());
+        CHECK(run.decisions.isEmpty(), "encoding: ASCII-only file stays undecided");
+    }
+
+    // BOM UTF-8 — решение «BOM», даже если дальше только ASCII.
+    {
+        const QString path = writeFile(dir, "enc_bom.log",
+                                       QByteArray("\xEF\xBB\xBF") + sampleLog(false, true));
+        const EncodingRun run = indexWithEncoding(std::make_shared<LogFile>(path), FileEncoding());
+        CHECK(run.decisions.size() == 1
+                  && run.decisions.first().source == FileEncoding::Source::Bom
+                  && run.decisions.first().decoder.isUtf8(),
+              "encoding: UTF-8 BOM decides UTF-8 by BOM");
+    }
+}
+
+static void testEncodingInTail(const QDir& dir)
+{
+    // Файл начинается ASCII — «не решено»; кириллица приходит дозаписью.
+    // Состояние «не решено» переживает первую дозапись (тоже ASCII).
+    for (const TextEncoding enc : {TextEncoding::Windows1251, TextEncoding::Koi8R}) {
+        const QString tag = QStringLiteral("encoding tail %1").arg(TextEncodings::displayName(enc));
+        QString text = QStringLiteral("2026-07-10 12:00:00,000 INFO [app] start\n");
+        const QString path = writeFile(dir, QStringLiteral("enc_tail_%1.log").arg(int(enc)),
+                                       encodeAs(text, enc));
+        auto lf = std::make_shared<LogFile>(path);
+        EncodingRun run = indexWithEncoding(lf, FileEncoding());
+        CHECK(run.decisions.isEmpty(), qPrintable(tag + ": ASCII head undecided"));
+
+        const QString ascii = QStringLiteral("2026-07-10 12:00:01,000 INFO [app] still ascii\n");
+        text += ascii;
+        appendToFile(path, encodeAs(ascii, enc));
+        const EncodingRun second = indexWithEncoding(lf, FileEncoding(), run.index, /*append=*/true);
+        CHECK(second.decisions.isEmpty(), qPrintable(tag + ": ASCII tail keeps it undecided"));
+
+        const QString cyr = cyrLine(2, "ERROR", u"Ошибка записи в журнал: нет места")
+                          + QStringLiteral("    повтор через 5 секунд\n");
+        text += cyr;
+        appendToFile(path, encodeAs(cyr, enc));
+        const qint64 before = run.index->lineCount();
+        const EncodingRun third = indexWithEncoding(lf, FileEncoding(), run.index, true);
+        CHECK(third.decisions.size() == 1 && third.decisions.first().decoder.encoding() == enc,
+              qPrintable(tag + ": the appended non-ASCII line decides"));
+        CHECK(third.publishedAtFirstDecision >= 0 && third.publishedAtFirstDecision <= before,
+              qPrintable(tag + ": decided before the tail batch is published"));
+        checkIndexedText(tag, path, *run.index, linesOf(text), enc);
+
+        // Решённая кодировка продолжает дозапись без нового решения.
+        const QString more = cyrLine(3, "INFO", u"Журнал очищен");
+        text += more;
+        appendToFile(path, encodeAs(more, enc));
+        const EncodingRun fourth = indexWithEncoding(lf, third.decisions.value(0), run.index, true);
+        CHECK(fourth.decisions.isEmpty(), qPrintable(tag + ": a decided file is not re-decided"));
+        checkIndexedText(tag + " after decision", path, *run.index, linesOf(text), enc);
+    }
+}
+
+static void testEncodingCutWindow(const QDir& dir)
+{
+    // Порция оборвана внутри окна определения: файл кончается посреди
+    // единственной многобайтной последовательности (растущий лог, строка без
+    // '\n'). Решать нечего — «не решено», строка предварительная; дозапись
+    // перечитывает её с начала и решает по полному окну.
+    {
+        const QByteArray full = QString(QStringLiteral("2026-07-10 12:00:00,000 INFO [app] head\n")
+                                        + cyrLine(1, "ERROR", u"Ёжик")).toUtf8();
+        const qsizetype cut = full.indexOf("\xD0\x81") + 1; // внутри «Ё»
+        const QString path = writeFile(dir, "enc_cut_utf8.log", full.left(cut));
+        auto lf = std::make_shared<LogFile>(path);
+        EncodingRun run = indexWithEncoding(lf, FileEncoding());
+        CHECK(run.decisions.isEmpty(), "encoding cut utf8: truncated sequence decides nothing");
+        CHECK(run.index->lastLineProvisional(), "encoding cut utf8: tail provisional");
+        appendToFile(path, full.mid(cut));
+        const EncodingRun next = indexWithEncoding(lf, FileEncoding(), run.index, true);
+        CHECK(next.decisions.size() == 1 && next.decisions.first().decoder.isUtf8(),
+              "encoding cut utf8: completed line decides UTF-8");
+        checkIndexedText("encoding cut utf8", path, *run.index,
+                         linesOf(QString::fromUtf8(full)), TextEncoding::Utf8);
+    }
+    {
+        // cp1251: первый байт ≥ 0x80 похож на ведущий байт UTF-8 и оборван —
+        // тоже nullopt; дозапись решает Windows-1251.
+        const QString text = QStringLiteral("2026-07-10 12:00:00,000 INFO [app] head\n")
+                           + cyrLine(1, "ERROR", u"Ошибка чтения файла настроек");
+        const QByteArray full = encodeAs(text, TextEncoding::Windows1251);
+        const qsizetype cut = full.indexOf(char(0xCE)) + 1; // «О»
+        const QString path = writeFile(dir, "enc_cut_1251.log", full.left(cut));
+        auto lf = std::make_shared<LogFile>(path);
+        EncodingRun run = indexWithEncoding(lf, FileEncoding());
+        CHECK(run.decisions.isEmpty(), "encoding cut cp1251: lone lead byte decides nothing");
+        appendToFile(path, full.mid(cut));
+        const EncodingRun next = indexWithEncoding(lf, FileEncoding(), run.index, true);
+        CHECK(next.decisions.size() == 1
+                  && next.decisions.first().decoder.encoding() == TextEncoding::Windows1251,
+              "encoding cut cp1251: completed line decides Windows-1251");
+        checkIndexedText("encoding cut cp1251", path, *run.index, linesOf(text),
+                         TextEncoding::Windows1251);
+    }
+    {
+        // Окно у границы буфера: первый не-ASCII байт — в последних байтах
+        // 8-МБ буфера, окно дочитывается вторым дескриптором.
+        QByteArray bytes;
+        int second = 0;
+        const QByteArray filler = " INFO [app] filler to the buffer edge\n";
+        const qint64 buffer = 8 * 1024 * 1024;
+        while (bytes.size() < buffer - 200)
+            bytes += "2026-07-10 12:00:" + QByteArray::number(second++ % 60).rightJustified(2, '0')
+                     + ",000" + filler;
+        const QByteArray pad(int(buffer - 40 - bytes.size()), 'x');
+        bytes += pad + '\n';
+        const QString cyr = cyrLine(5, "ERROR", u"Сбой: очередь сообщений переполнена, ожидание");
+        QString tail;
+        for (int i = 0; i < 50; ++i)
+            tail += cyr;
+        bytes += encodeAs(tail, TextEncoding::Ibm866);
+        const QString path = writeFile(dir, "enc_edge_866.log", bytes);
+        const EncodingRun run = indexWithEncoding(std::make_shared<LogFile>(path), FileEncoding());
+        CHECK(run.decisions.size() == 1
+                  && run.decisions.first().decoder.encoding() == TextEncoding::Ibm866,
+              "encoding edge: window past the buffer decides IBM866");
+    }
 }
 
 int main(int argc, char** argv)
@@ -1768,6 +2077,9 @@ int main(int argc, char** argv)
     testAppendReindex(dir);
     testSnapshotStability(dir);
     testSequentialReaderDirections(dir);
+    testEncodingDetection(dir);
+    testEncodingInTail(dir);
+    testEncodingCutWindow(dir);
 
     if (g_failures == 0)
         std::fprintf(stderr, "lineindex_smoke: all checks passed\n");

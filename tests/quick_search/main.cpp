@@ -181,21 +181,27 @@ static void checkStartRows(const QString& name, LogModel& model,
 // перебор indexOf с проверкой соседей вручную, регекс — QRegularExpression
 // по тексту запроса с тем же перебором соседей.
 
-static QByteArray flagsFixture()
+static QByteArray flagsFixture(bool cyrillicOnly = false)
 {
     // Строки, на которых «слово целиком», регистр и регекс расходятся.
+    // cyrillicOnly — без латиницы с диакритикой: такой текст представим в
+    // Windows-1251, IBM866 и KOI8-R (F-1).
     static const char* texts[] = {
         "plain error here", "errors 7 counted", "[error] bracketed", "my_error underscore",
         "ERROR-1 upper dash", "xerror glued", "Ошибка error cyrillic", "ошибкаerror glued",
         "value a.b.c dotted", "call x(y) parens", "abc code 123", "code123 glued",
         "456 leading", "Error capital", "nothing here", "tab\terror\tsep", "érror accent",
-        "errorй cyr after",
+        "errorй cyr after", "ОШИБКА диска", "Ёжик ошибкой назван", "предошибка склеена",
+        "ошибка, запятая", // число строк не кратно 7 — шаг (i * 7) обходит все
     };
     QByteArray out;
     const int kinds = int(sizeof(texts) / sizeof(texts[0]));
-    for (int i = 0; i < 400; ++i)
-        out += line(i / 4, i % 2 ? "INFO" : "ERROR",
-                    QByteArray(texts[(i * 7) % kinds]) + " #" + QByteArray::number(i));
+    for (int i = 0; i < 400; ++i) {
+        QByteArray text(texts[(i * 7) % kinds]);
+        if (cyrillicOnly && text.startsWith("\xC3\xA9")) // «é»
+            text = "ёrror accent";
+        out += line(i / 4, i % 2 ? "INFO" : "ERROR", text + " #" + QByteArray::number(i));
+    }
     return out;
 }
 
@@ -284,6 +290,10 @@ static QVector<TextQuery> flagQueries()
             add("\\d{3}", cs, word, true);
             add("ERROR-\\d", cs, word, true);
             add("absent", cs, word, false);
+            // Кириллица (F-1: те же запросы на индексной вкладке в cp1251,
+            // cp866 и KOI8-R): регистр сворачивается по Unicode.
+            add("ошибка", cs, word, false);
+            add("ош[а-яё]+а", cs, word, true);
         }
     }
     return out;
@@ -558,6 +568,44 @@ int main(int argc, char** argv)
             CHECK(testdocs::settle(*m.model), "flags filter settles");
             checkFlags(QString::fromLatin1(m.name) + " filtered", *m.model);
         }
+    }
+
+    // --- Кириллица в однобайтных кодировках на индексной вкладке (F-1) -------
+    // TextMatcher получает уже декодированный текст: тот же лог в cp1251,
+    // cp866 и KOI8-R обязан показать строка в строку тот же текст, что в
+    // UTF-8, и найтись теми же запросами (без учёта регистра, слово целиком,
+    // регекс) синхронно, сканом снапшота и правилом Find All.
+    {
+        const QByteArray utf8 = flagsFixture(/*cyrillicOnly=*/true);
+        const QString text = QString::fromUtf8(utf8);
+        const QString ref = testdocs::writeFile(dir, "cyr-utf8.log", utf8);
+        auto refDoc = testdocs::buildIndexed({ref}, schema);
+        QStringList want;
+        for (int row = 0; row < refDoc.model->rowCount(); ++row)
+            want << refDoc.model->messageAt(row);
+        QString cp1251Path;
+        for (const TextEncoding enc : {TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                       TextEncoding::Koi8R}) {
+            const QString name = QStringLiteral("cyrillic indexed %1").arg(TextEncodings::displayName(enc));
+            const QString path = testdocs::writeFile(
+                dir, QStringLiteral("cyr-%1.log").arg(int(enc)), testdocs::encodeText(text, enc));
+            if (enc == TextEncoding::Windows1251)
+                cp1251Path = path;
+            auto doc = testdocs::buildIndexed({path}, schema);
+            QStringList got;
+            for (int row = 0; row < doc.model->rowCount(); ++row)
+                got << doc.model->messageAt(row);
+            CHECK(got == want, name + ": text equals the UTF-8 file's");
+            checkFlags(name, *doc.model);
+        }
+        auto merged = testdocs::buildIndexed({ref, cp1251Path}, schema,
+                                             testdocs::IndexedLoad::Concurrent);
+        int replacement = 0;
+        for (int row = 0; row < merged.model->rowCount(); ++row)
+            replacement += merged.model->messageAt(row).contains(QChar::ReplacementCharacter);
+        CHECK(merged.model->rowCount() == 2 * int(want.size()) && replacement == 0,
+              "cyrillic merged UTF-8 + Windows-1251: every file read with its own decoder");
+        checkFlags(QStringLiteral("cyrillic indexed merged UTF-8 + Windows-1251"), *merged.model);
     }
 
     // --- Пересчёт номера через вставки ---------------------------------------

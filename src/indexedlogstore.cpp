@@ -88,7 +88,7 @@ IndexedLogStore::IndexedLogStore(LogModel& model, const IndexedLogStore& source)
     m_textCache.setBudgetBytes(source.m_textCache.budgetBytes());
     for (const auto& file : source.m_files) {
         IndexedFile copy = file;
-        copy.cacheFileId = m_textCache.addFile(file.logFile->filePath);
+        copy.cacheFileId = m_textCache.addFile(file.logFile->filePath, file.encoding.decoder);
         m_files.append(std::move(copy));
     }
 }
@@ -109,9 +109,10 @@ bool IndexedLogStore::appendSearchRows(const IndexedLogStore& source, int first,
         if (m_files[i].index != source.m_files[i].index)
             return false;
     }
+    syncEncodingsFrom(source);
     for (int i = int(m_files.size()); i < source.m_files.size(); ++i) {
         IndexedFile copy = source.m_files[i];
-        copy.cacheFileId = m_textCache.addFile(copy.logFile->filePath);
+        copy.cacheFileId = m_textCache.addFile(copy.logFile->filePath, copy.encoding.decoder);
         m_files.append(std::move(copy));
     }
 
@@ -155,11 +156,29 @@ bool IndexedLogStore::refreshSearchRow(const IndexedLogStore& source, int row)
     const int fileId = refFile(ref);
     if (fileId >= m_files.size() || m_files[fileId].index != source.m_files[fileId].index)
         return false;
+    // Перечитанная предварительная строка могла и решить кодировку файла.
+    syncEncodingsFrom(source);
     m_textCache.invalidateFile(m_files[fileId].cacheFileId);
     // Если строка ещё в очереди поиска, джоб проверит её сам; вставку,
     // сделанную здесь раньше него, insertSortedRefs не задублирует.
     reevaluateVisibleRef(ref);
     return true;
+}
+
+void IndexedLogStore::syncEncodingsFrom(const IndexedLogStore& source)
+{
+    // Кодировка у источника могла решиться с последней порции (индексатор
+    // дошёл до первой не-ASCII строки). Строки базы, проверенные прежде, —
+    // ASCII (кроме предварительной, которую вызывающий переоценивает), их
+    // текст от этого не меняется; новые строки читаются уже новым декодером.
+    // Смена пользователем идёт через reset источника — полный поиск.
+    const int common = int(qMin(m_files.size(), source.m_files.size()));
+    for (int i = 0; i < common; ++i) {
+        if (m_files[i].encoding.decoder != source.m_files[i].encoding.decoder)
+            m_textCache.setFileDecoder(m_files[i].cacheFileId,
+                                       source.m_files[i].encoding.decoder);
+        m_files[i].encoding = source.m_files[i].encoding;
+    }
 }
 
 void IndexedLogStore::reevaluateVisibleRef(RowRef ref)
@@ -215,7 +234,7 @@ int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineI
     IndexedFile f;
     f.logFile = logFile;
     f.index = std::move(index);
-    f.cacheFileId = m_textCache.addFile(logFile->filePath);
+    f.cacheFileId = m_textCache.addFile(logFile->filePath, f.encoding.decoder);
     m_files.append(std::move(f));
 
     if (reorder)
@@ -431,6 +450,12 @@ void IndexedLogStore::resetFileIndex(const LogFilePtr& logFile,
     if (const int fileId = fileIdOf(logFile.get()); fileId >= 0) {
         m_files[fileId].index = std::move(fresh);
         m_textCache.invalidateFile(m_files[fileId].cacheFileId);
+        // Переписанный файл — новый текст: автоматика решает заново, выбор
+        // пользователя остаётся.
+        if (m_files[fileId].encoding.source != FileEncoding::Source::User) {
+            m_files[fileId].encoding = FileEncoding();
+            m_textCache.setFileDecoder(m_files[fileId].cacheFileId, TextDecoder());
+        }
         if (!identityAll()) {
             m_allRefs.erase(std::remove_if(m_allRefs.begin(), m_allRefs.end(),
                                            [fileId](RowRef r) {
@@ -457,6 +482,57 @@ std::shared_ptr<LineIndex> IndexedLogStore::indexForFile(const QString& filePath
             return f.index;
     }
     return nullptr;
+}
+
+FileEncoding IndexedLogStore::fileEncoding(const LogFilePtr& logFile) const
+{
+    const int fileId = fileIdOf(logFile.get());
+    return fileId >= 0 ? m_files[fileId].encoding : FileEncoding();
+}
+
+void IndexedLogStore::adoptDetectedEncoding(const LogFilePtr& logFile,
+                                            const FileEncoding& encoding)
+{
+    const int fileId = fileIdOf(logFile.get());
+    if (fileId < 0)
+        return;
+    IndexedFile& f = m_files[fileId];
+    if (f.encoding.source == FileEncoding::Source::User)
+        return;
+    f.encoding = encoding;
+    m_textCache.setFileDecoder(f.cacheFileId, encoding.decoder);
+}
+
+void IndexedLogStore::setFileEncoding(const LogFilePtr& logFile, TextDecoder decoder)
+{
+    const int fileId = fileIdOf(logFile.get());
+    if (fileId < 0)
+        return;
+    IndexedFile& f = m_files[fileId];
+    const bool changed = f.encoding.decoder != decoder;
+    f.encoding = FileEncoding{decoder, FileEncoding::Source::User};
+    if (!changed)
+        return;
+    m_textCache.setFileDecoder(f.cacheFileId, decoder);
+
+    // Видимый набор зависит от текста только через текстовые правила. Без
+    // них уровни и время те же, m_visibleRefs остаётся; с ними — пересчёт
+    // заново (applyFilter отменяет джоб со старым декодером поколением и
+    // сбрасывает очередь диапазонов: полный пересчёт покрывает и их).
+    const bool refilter = m_model.filterRules().isActive();
+    if (refilter)
+        cancelPendingFilter(false);
+    // Reset: строки те же, текст другой — view сбрасывает кэш отрисовки и
+    // высот и возвращается к якорю-записи; подписчики (быстрый поиск, Search
+    // Results, статистика, таймлайн) перезапускаются.
+    m_model.beginResetModel();
+    m_model.endResetModel();
+    // С перефильтрацией итог сообщит джоб (modelFiltered по завершении):
+    // число строк старого видимого набора — не результат.
+    if (refilter)
+        applyFilter();
+    else
+        emit m_model.modelFiltered(visibleCount());
 }
 
 void IndexedLogStore::setFieldPattern(const QString& patternString, bool extractionEnabled)
@@ -969,7 +1045,23 @@ public:
         LineIndexSnapshot index;
         QString path;
         LogFilePtr logFile;
+        TextDecoder decoder; // кодировка на момент снапшота (F-1)
     };
+
+    QStringList paths() const
+    {
+        QStringList out;
+        for (const FileSnap& f : files)
+            out.append(f.path);
+        return out;
+    }
+    QVector<TextDecoder> decoders() const
+    {
+        QVector<TextDecoder> out;
+        for (const FileSnap& f : files)
+            out.append(f.decoder);
+        return out;
+    }
 
     QVector<FileSnap> files;
     QVector<IndexedLogStore::RowRef> refs; // пуст = тождество по файлу 0
@@ -1021,10 +1113,7 @@ public:
                      const std::function<bool(qint64, const LogEntryMeta&,
                                               QStringView)>& visit) const override
     {
-        QStringList paths;
-        for (const FileSnap& f : files)
-            paths.append(f.path);
-        SequentialLineReaders readers(std::move(paths));
+        SequentialLineReaders readers(paths(), decoders());
         const qint64 n = rowCount();
         for (qint64 i = qMax<qint64>(0, fromRow); i < n; ++i) {
             int fileId; qint64 line;
@@ -1043,10 +1132,7 @@ public:
     {
         // SequentialLineReader сам ставит окно по направлению скана — обход
         // назад не перечитывает окно на каждой строке.
-        QStringList paths;
-        for (const FileSnap& f : files)
-            paths.append(f.path);
-        SequentialLineReaders readers(std::move(paths));
+        SequentialLineReaders readers(paths(), decoders());
         for (qint64 i = qMin<qint64>(fromRow, rowCount() - 1); i >= 0; --i) {
             int fileId; qint64 line;
             resolve(i, fileId, line);
@@ -1064,7 +1150,7 @@ public:
             return QString();
         int fileId; qint64 line;
         resolve(row, fileId, line);
-        SequentialLineReader reader(files[fileId].path);
+        SequentialLineReader reader(files[fileId].path, files[fileId].decoder);
         if (!reader.open())
             return QString();
         const FileSnap& f = files[fileId];
@@ -1078,8 +1164,8 @@ public:
         // направлению скана, обход назад не перечитывает окно на строку.
         class Cursor final : public LogScanSnapshot::LineCursor {
         public:
-            Cursor(const IndexedScanSnapshotImpl& snapshot, QStringList paths)
-                : m_snapshot(snapshot), m_readers(std::move(paths)) {}
+            explicit Cursor(const IndexedScanSnapshotImpl& snapshot)
+                : m_snapshot(snapshot), m_readers(snapshot.paths(), snapshot.decoders()) {}
             QStringView lineAt(qint64 row) override
             {
                 if (row < 0 || row >= m_snapshot.rowCount())
@@ -1094,10 +1180,7 @@ public:
             const IndexedScanSnapshotImpl& m_snapshot;
             SequentialLineReaders m_readers;
         };
-        QStringList paths;
-        for (const FileSnap& f : files)
-            paths.append(f.path);
-        return std::make_unique<Cursor>(*this, std::move(paths));
+        return std::make_unique<Cursor>(*this);
     }
 
     LogFilePtr sourceFilePtrAt(qint64 row) const override
@@ -1145,7 +1228,8 @@ LogScanSnapshot IndexedLogStore::scanSnapshot(bool filteredOnly) const
     auto impl = std::make_shared<IndexedScanSnapshotImpl>();
     impl->files.reserve(m_files.size());
     for (const auto& f : m_files)
-        impl->files.append({f.index->snapshot(), f.logFile->filePath, f.logFile});
+        impl->files.append({f.index->snapshot(), f.logFile->filePath, f.logFile,
+                            f.encoding.decoder});
     impl->pattern = m_fieldPattern;
     impl->extraction = m_extractionEnabled;
 
@@ -1243,10 +1327,11 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
     struct FileInput {
         LineIndexSnapshot index;
         QString path;
+        TextDecoder decoder; // копия: смена кодировки отменяет джоб поколением
     };
     auto filesIn = std::make_shared<QVector<FileInput>>();
     for (const auto& f : m_files)
-        filesIn->append({f.index->snapshot(), f.logFile->filePath});
+        filesIn->append({f.index->snapshot(), f.logFile->filePath, f.encoding.decoder});
 
     // Диапазон работы: весь документ, свежий батч одного файла или явный
     // список новых строк поисковой базы.
@@ -1287,9 +1372,12 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
             passing.reserve(int(qMin<qint64>(n, 4096)));
 
             QStringList paths;
-            for (const FileInput& f : *filesIn)
+            QVector<TextDecoder> decoders;
+            for (const FileInput& f : *filesIn) {
                 paths.append(f.path);
-            SequentialLineReaders readers(std::move(paths));
+                decoders.append(f.decoder);
+            }
+            SequentialLineReaders readers(std::move(paths), std::move(decoders));
             const bool needText = rules.isActive();
 
             for (qint64 i = 0; i < n; ++i) {

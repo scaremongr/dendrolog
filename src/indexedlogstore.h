@@ -5,6 +5,7 @@
 #include "logpattern.h"
 #include "logstore.h"
 #include "textchunkcache.h"
+#include "textencoding.h"
 
 #include <QFuture>
 #include <QSet>
@@ -26,6 +27,12 @@ class SequentialLineReaders;
 //   attachFile → appendIndexedRows(батчи) → … reload: appendIndexedRows с
 //   перекрытием одной строки (переиндексация предварительного хвоста) или
 //   resetFileIndex (файл заменён).
+//
+// Кодировка (F-1) — на файл: FileEncoding в IndexedFile, декодер копией
+// уходит в слот TextChunkCache, в снапшоты (статистика, таймлайн, поиск,
+// LineCursor), во вход фильтр-воркера и в поисковую базу. «Кодировки
+// вкладки» нет: слитая вкладка читает каждый файл своим декодером. Индекс от
+// кодировки не зависит, поэтому смена — без переиндексации.
 // ============================================================================
 class IndexedLogStore final : public LogStore {
 public:
@@ -61,6 +68,23 @@ public:
     // Файл заменён: сброс его строк и индекса (свежий index начнёт с нуля).
     void resetFileIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> fresh);
     std::shared_ptr<LineIndex> indexForFile(const QString& filePath) const;
+
+    // ---- Кодировка файла (F-1) -------------------------------------------------
+    // Текущая кодировка файла и её источник; для неподключённого — «не решено».
+    FileEncoding fileEncoding(const LogFilePtr& logFile) const;
+    // Решение индексатора (LogIndexer::encodingDecided). Строки файла,
+    // показанные до него, — ASCII: их текст не меняется, поэтому ни reset, ни
+    // перефильтрации нет — новый декодер читает следующие строки. Выбор
+    // пользователя (Source::User) решением автоматики не заменяется.
+    void adoptDetectedEncoding(const LogFilePtr& logFile, const FileEncoding& encoding);
+    // Смена кодировки пользователем: без переиндексации (индекс от кодировки
+    // не зависит) и без сброса кэша чанков (там сырые байты). Модель — reset,
+    // при активных текстовых правилах — перефильтрация; позицию и выделение
+    // возвращает якорь view (инвариант 10). Фоновый фильтр со старым
+    // декодером отменяется поколением; поиск, статистика и таймлайн
+    // перезапускаются своими подписчиками на modelReset. Тот же декодер —
+    // ничего не делает (кроме отметки «выбрано пользователем»).
+    void setFileEncoding(const LogFilePtr& logFile, TextDecoder decoder);
 
     // Схема полей: для отображения/фильтрации извлекается по требованию.
     void setFieldPattern(const QString& patternString, bool extractionEnabled);
@@ -101,6 +125,7 @@ private:
         LogFilePtr logFile;
         std::shared_ptr<LineIndex> index;
         int cacheFileId = -1;
+        FileEncoding encoding; // decoder — копией во все читатели текста
     };
 
     static RowRef makeRef(int fileId, qint64 line)
@@ -143,6 +168,9 @@ private:
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;
+    // Поисковая база: перенять кодировки файлов источника (решение
+    // индексатора на последней порции). Зовётся из обоих входов живой базы.
+    void syncEncodingsFrom(const IndexedLogStore& source);
     // Переоценить одну строку при активном фильтре: вставить, убрать или
     // перерисовать её в m_visibleRefs.
     void reevaluateVisibleRef(RowRef ref);

@@ -26,6 +26,8 @@
 #include "testdocuments.h"
 
 #include "LogListView.h"
+#include "indexedlogstore.h"
+#include "logindexer.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -668,6 +670,135 @@ static void checkWideAboveThreshold(const QDir& dir, const QString& schema)
               .arg(fullReads - readsAfterLoad));
 }
 
+
+// Смена кодировки на индексной вкладке (F-1, шаг 2): индексатор не
+// запускается, текущая запись, выделение и позиция вьюпорта остаются, текст
+// читается новым декодером; при активном текстовом правиле видимый набор
+// пересчитывается. Кодировка определяется сама: файл в Windows-1251 с
+// ASCII-головой открывается читаемым.
+static void checkEncodingSwitch(const QDir& dir, const QString& schema)
+{
+    QString text;
+    for (int i = 0; i < 1500; ++i) {
+        const QString second = QString::number(i % 60).rightJustified(2, QLatin1Char('0'));
+        const QString minute = QString::number(i / 60).rightJustified(2, QLatin1Char('0'));
+        if (i < 20)
+            text += QStringLiteral("2026-03-05 10:%1:%2.000 [w] INFO - ascii head %3\n").arg(minute, second).arg(i);
+        else
+            text += QStringLiteral("2026-03-05 10:%1:%2.000 [worker-%3] %4 - Запись номер %5: ошибка диска\n")
+                        .arg(minute, second).arg(i % 3).arg(QLatin1String(i % 2 ? "ERROR" : "INFO")).arg(i);
+    }
+    const QString path = testdocs::writeFile(dir, "encoding-switch.log",
+                                             testdocs::encodeText(text, TextEncoding::Windows1251));
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), "encoding: initial load");
+    testdocs::pump(200);
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    IndexedLogStore* store = model.indexedOrNull();
+    CHECK(store != nullptr, "encoding: the tab is indexed");
+    if (!store)
+        return;
+    const auto first = model.entryAt(0);
+    const LogFilePtr file = first ? first->sourceFile() : LogFilePtr();
+    CHECK(file && store->fileEncoding(file).decoder.encoding() == TextEncoding::Windows1251,
+          "encoding: Windows-1251 detected on load");
+    CHECK(model.messageAt(700).endsWith(QStringLiteral("Запись номер 700: ошибка диска")),
+          "encoding: text is readable after detection: " + model.messageAt(700));
+
+    // Шпионы: ни один индексатор вкладки не стартует и не публикует строк.
+    int indexerEvents = 0;
+    QObject spies;
+    for (LogIndexer* indexer : tab.findChildren<LogIndexer*>()) {
+        QObject::connect(indexer, &LogIndexer::indexingStarted, &spies, [&] { ++indexerEvents; });
+        QObject::connect(indexer, &LogIndexer::indexBatchReady, &spies, [&] { ++indexerEvents; });
+    }
+    int startedSignals = 0;
+    QObject::connect(&tab, &LogViewWidget::fileParsingStarted, &spies, [&] { ++startedSignals; });
+
+    const auto switchTo = [&](TextEncoding encoding, const QString& what) {
+        const int row = 700;
+        view.goToRow(row);
+        testdocs::pump(100);
+        const auto entry = model.entryAt(view.currentIndex().row());
+        const qint64 lineNumber = entry ? entry->originalLineNumber() : -1;
+        const int scroll = view.verticalScrollBar()->value();
+        const QRect rect = view.visualRect(view.currentIndex());
+        store->setFileEncoding(file, TextDecoder(encoding));
+        CHECK(settled(tab), what + ": settles");
+        testdocs::pump(100);
+        const QModelIndex cur = view.currentIndex();
+        const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
+        CHECK(now && lineNumber == 701 && now->originalLineNumber() == lineNumber,
+              what + ": the current line is kept");
+        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
+              what + ": the current row stays selected");
+        CHECK(view.verticalScrollBar()->value() == scroll && view.visualRect(cur) == rect,
+              what + QStringLiteral(": the viewport stays put (scroll %1 → %2)")
+                         .arg(scroll).arg(view.verticalScrollBar()->value()));
+        CHECK(store->fileEncoding(file).source == FileEncoding::Source::User
+                  && store->fileEncoding(file).decoder.encoding() == encoding,
+              what + ": the store records the user's choice");
+        return cur.row();
+    };
+
+    // Неверная кодировка: текст другой, строки и места те же.
+    int row = switchTo(TextEncoding::Koi8R, "encoding KOI8-R");
+    const QString koi = model.messageAt(row);
+    CHECK(!koi.contains(QStringLiteral("Запись")) && koi.contains(QStringLiteral(": ")),
+          "encoding KOI8-R: the text is read with the new decoder: " + koi);
+    // Обратно: исходный текст.
+    row = switchTo(TextEncoding::Windows1251, "encoding back to Windows-1251");
+    CHECK(model.messageAt(row).endsWith(QStringLiteral("Запись номер 700: ошибка диска")),
+          "encoding back: original text: " + model.messageAt(row));
+
+    // Активное текстовое правило с кириллицей: при смене кодировки видимый
+    // набор пересчитывается (под KOI8-R «ошибка» не находится нигде).
+    FilterRuleSet rules;
+    FilterRule rule;
+    rule.text = QStringLiteral("ОШИБКА");
+    rules.rules.append(rule);
+    rules.bindFields({}, false);
+    model.setFilterRules(rules);
+    CHECK(settled(tab), "encoding filter: settles");
+    const int filteredRows = model.rowCount();
+    CHECK(filteredRows == 1480, QStringLiteral("encoding filter: Cyrillic rule matches (%1 rows)").arg(filteredRows));
+    store->setFileEncoding(file, TextDecoder(TextEncoding::Koi8R));
+    CHECK(settled(tab), "encoding filter: switch settles");
+    CHECK(model.rowCount() == 0, QStringLiteral("encoding filter: rows re-filtered with the new decoder (%1)")
+                                     .arg(model.rowCount()));
+    store->setFileEncoding(file, TextDecoder(TextEncoding::Windows1251));
+    CHECK(settled(tab), "encoding filter: switch back settles");
+    CHECK(model.rowCount() == filteredRows, "encoding filter: rows come back");
+    model.setFilterRules(FilterRuleSet());
+    CHECK(settled(tab), "encoding filter: cleared");
+
+    CHECK(indexerEvents == 0 && startedSignals == 0,
+          QStringLiteral("encoding: switching never runs the indexer (%1 indexer event(s), %2 start(s))")
+              .arg(indexerEvents).arg(startedSignals));
+
+    // Выбор пользователя переживает дозапись: хвост читается им же, автоматика
+    // его не перерешает.
+    store->setFileEncoding(file, TextDecoder(TextEncoding::Ibm866));
+    CHECK(settled(tab), "encoding tail: switch settles");
+    CHECK(testdocs::appendToFile(path, testdocs::encodeText(
+              QStringLiteral("2026-03-05 11:00:00.000 [w] INFO - хвост после выбора\n"), TextEncoding::Ibm866)),
+          "encoding tail: append");
+    tab.reloadChangedFiles(/*force=*/true);
+    CHECK(settled(tab), "encoding tail: reload settles");
+    CHECK(model.messageAt(model.rowCount() - 1).endsWith(QStringLiteral("хвост после выбора")),
+          "encoding tail: the tail is read with the user's encoding: " + model.messageAt(model.rowCount() - 1));
+    CHECK(store->fileEncoding(file).source == FileEncoding::Source::User
+              && store->fileEncoding(file).decoder.encoding() == TextEncoding::Ibm866,
+          "encoding tail: the user's choice stands");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -698,6 +829,7 @@ int main(int argc, char** argv)
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);
     checkJumps(dir, QStringLiteral("indexed"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);
+    checkEncodingSwitch(dir, schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

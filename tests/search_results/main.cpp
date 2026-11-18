@@ -213,6 +213,73 @@ static void testLiveSearch(const QDir& dir, const QString& schema, const QString
     }
 }
 
+
+// Кодировки (F-1, шаг 2): лог начинается ASCII, кириллица в Windows-1251
+// приходит дозаписью. Индексатор решает кодировку на хвосте, поисковая база
+// перенимает декодер источника и находит кириллицу без учёта регистра —
+// вставками, без полного поиска. Смена кодировки пользователем перестраивает
+// источник (reset) — выдача ищется заново новым декодером.
+static void testEncodingLiveSearch(const QDir& dir, const QString& schema)
+{
+    // Решение пришло вместе с перечитанной предварительной строкой: ASCII-хвост
+    // без '\n' дописан кириллицей. Порция — только dataChanged этой строки,
+    // без вставок: выдача переоценивает её (refreshSearchRow) уже новым
+    // декодером.
+    {
+        const QString path = testdocs::writeFile(dir, "provisional-cp1251.log", growingBase(0));
+        auto doc = testdocs::buildIndexed({path}, schema);
+        SearchResultsController c;
+        c.setSource(doc.model.get());
+        c.search(query(QStringLiteral("ошибка")));
+        CHECK(waitResults(c, 0), "encoding provisional: nothing in the ASCII head");
+        CHECK(testdocs::appendIndexedTail(doc, 0, logLine(100, "ERROR", "partial").chopped(1), schema),
+              "encoding provisional: append a provisional ASCII line");
+        CHECK(waitResults(c, 0), "encoding provisional: still nothing");
+        CHECK(testdocs::appendIndexedTail(
+                  doc, 0, testdocs::encodeText(QStringLiteral(" ОШИБКА хвоста\n"), TextEncoding::Windows1251),
+                  schema),
+              "encoding provisional: complete the line in Windows-1251");
+        CHECK(waitResults(c, 1), "encoding provisional: the completed Cyrillic line is found");
+        CHECK(c.model()->rowCount() == 1
+                  && c.model()->messageAt(0).endsWith(QStringLiteral("partial ОШИБКА хвоста")),
+              "encoding provisional: the result is decoded with the decided encoding");
+    }
+
+    const QString path = testdocs::writeFile(dir, "grow-cp1251.log", growingBase(0));
+    auto doc = testdocs::buildIndexed({path}, schema);
+    IndexedLogStore* store = doc.model->indexedOrNull();
+    CHECK(store && !store->fileEncoding(doc.files.value(0)).decided(), "encoding: ASCII source undecided");
+    SearchResultsController c;
+    int resets = 0;
+    QObject::connect(c.model(), &QAbstractItemModel::modelReset, [&] { ++resets; });
+    c.setSource(doc.model.get());
+    c.search(query(QStringLiteral("ошибка")));
+    CHECK(waitResults(c, 0), "encoding: nothing found in the ASCII head");
+
+    const int before = resets;
+    QString tail;
+    for (int i = 0; i < 3; ++i)
+        tail += QString::fromUtf8(logLine(100, "ERROR", "ОШИБКА диска " + QByteArray::number(i)));
+    tail += QString::fromUtf8(logLine(100, "INFO", "обычная строка"));
+    CHECK(testdocs::appendIndexedTail(doc, 0, testdocs::encodeText(tail, TextEncoding::Windows1251),
+                                      schema),
+          "encoding: append Windows-1251 tail");
+    CHECK(store->fileEncoding(doc.files.value(0)).decoder.encoding() == TextEncoding::Windows1251,
+          "encoding: the tail decided Windows-1251");
+    CHECK(waitResults(c, 3), "encoding: Cyrillic tail found case-insensitively");
+    CHECK(resets == before, "encoding: results grow without reset after the decision");
+    CHECK(c.model()->messageAt(2).endsWith(QStringLiteral("ОШИБКА диска 2")),
+          "encoding: result text decoded with the source file's encoding");
+
+    // Смена кодировки пользователем: источник — reset, выдача — заново.
+    store->setFileEncoding(doc.files.value(0), TextDecoder(TextEncoding::Koi8R));
+    CHECK(waitResults(c, 0), "encoding: KOI8-R reading of Windows-1251 bytes finds nothing");
+    store->setFileEncoding(doc.files.value(0), TextDecoder(TextEncoding::Windows1251));
+    CHECK(waitResults(c, 3), "encoding: back to Windows-1251 finds the tail again");
+    CHECK(c.model()->messageAt(0).endsWith(QStringLiteral("ОШИБКА диска 0")),
+          "encoding: result text after the switch back");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -374,6 +441,7 @@ int main(int argc, char** argv)
     CHECK(indexed.model->rowCount() == 200005, "closing results leaves source intact");
 
     testLiveSearch(dir, schema, path);
+    testEncodingLiveSearch(dir, schema);
     std::fprintf(stdout, "Search results: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

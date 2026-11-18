@@ -1,5 +1,6 @@
 #include "textencoding.h"
 
+#include <QLocale>
 #include <QSysInfo>
 
 #include <cstring>
@@ -212,6 +213,12 @@ std::optional<Bom> detectBom(QByteArrayView head)
     return std::nullopt;
 }
 
+TextEncoding systemFallback()
+{
+    return QLocale::system().script() == QLocale::CyrillicScript ? TextEncoding::Windows1251
+                                                                  : TextEncoding::Windows1252;
+}
+
 } // namespace TextEncodings
 
 // ============================================================================
@@ -225,10 +232,8 @@ TextDecoder::TextDecoder(TextEncoding encoding)
     Q_ASSERT(TextEncodings::isDecodable(encoding));
 }
 
-QString TextDecoder::decode(const char* data, qsizetype len) const
+QString TextDecoder::decodeSingleByte(const char* data, qsizetype len) const
 {
-    if (!m_table)
-        return QString::fromUtf8(data, len);
     // fromLatin1 — векторизованный перенос байтов в UTF-16; по таблице
     // переписываются только символы с первого байта ≥ 0x80. Строка из одних
     // ASCII-байтов второго прохода не получает.
