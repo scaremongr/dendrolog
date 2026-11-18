@@ -28,6 +28,14 @@ if(DENDROLOG_SANITIZER)
     # Кадры стека и отладочная информация нужны для читаемых отчётов и для
     # того, чтобы подавления по имени функции находили свои кадры.
     add_compile_options(${_dendrolog_sanitize_flags} -fno-omit-frame-pointer -g)
+    if(DENDROLOG_SANITIZER STREQUAL "thread")
+        # Счётчик ссылок контейнеров Qt читается relaxed, и TSan не видит, что
+        # запись «на месте» идёт после чтения воркером, отпустившим свою копию.
+        # Заголовок подключается во все единицы трансляции раньше любого
+        # заголовка Qt — подробности в нём самом.
+        add_compile_options(
+            "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/tests/sanitizers/tsan_qt_refcount.h")
+    endif()
     add_link_options(${_dendrolog_sanitize_flags})
     message(STATUS "DendroLog: сборка с санитайзером '${DENDROLOG_SANITIZER}'")
 endif()
