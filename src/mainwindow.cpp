@@ -20,6 +20,7 @@
 #include "apptheme.h"
 #include "updatechecker.h"
 #include "stdinspooler.h"
+#include "openrouting.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
 #include "fieldreextraction.h"
@@ -736,13 +737,12 @@ void MainWindow::dropEvent(QDropEvent* event)
 {
     QStringList paths;
     for (const QUrl& url : event->mimeData()->urls()) {
-        if (!url.isLocalFile())
-            continue;
-        const QFileInfo info(url.toLocalFile());
-        if (info.isFile())
-            paths << info.absoluteFilePath();
+        if (url.isLocalFile())
+            paths << url.toLocalFile();
     }
-    if (!paths.isEmpty()) {
+    // Файлы открываются, папка уходит в Directory Scanner — правило одно на
+    // drop, командную строку и второй экземпляр (OpenRouting::plan).
+    if (!OpenRouting::plan(paths).isEmpty()) {
         event->acceptProposedAction();
         openFilesFromCommandLine(paths);
     }
@@ -973,7 +973,7 @@ void MainWindow::saveSettings()
     s.endGroup();
 
     s.beginGroup("RecentFiles");
-    s.setValue("files", m_recentFiles);
+    s.setValue("files", m_recentFiles.paths());
     s.endGroup();
 
     // Sync the current word-wrap toggle state back to AppSettings and persist
@@ -1147,7 +1147,7 @@ void MainWindow::loadSettings()
     updateFilterPanelFieldNames();
 
     s.beginGroup("RecentFiles");
-    m_recentFiles = s.value("files").toStringList();
+    m_recentFiles.setPaths(s.value("files").toStringList());
     s.endGroup();
 
     updateRecentFilesMenu();
@@ -2166,7 +2166,6 @@ void MainWindow::setupDirectoryScanner()
 
     m_dirScanner = m_dirScannerPanel->scanner();
     m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
-    m_dirScanner->setConversionPattern(m_conversionPattern);
 
     connect(m_dirScannerPanel, &DirectoryScannerPanel::scanRequested,
             this, &MainWindow::onScanDirectoryClicked);
@@ -3522,15 +3521,19 @@ void MainWindow::onScanDirectoryClicked()
     QString dirPath = QFileDialog::getExistingDirectory(this, tr("Select Directory to Scan"),
         m_lastScanDir.isEmpty() ? QDir::homePath() : m_lastScanDir,
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-    if (!dirPath.isEmpty()) {
-        m_lastScanDir = dirPath;
-        m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
-        m_dirScanner->setConversionPattern(m_conversionPattern);
-        m_dirScannerPanel->scanDirectory(dirPath);
-        // Скан из меню или со стартового экрана — результат должен быть виден.
-        ui->directoryScannerDockWidget->show();
-        ui->directoryScannerDockWidget->raise();
-    }
+    if (!dirPath.isEmpty())
+        scanDirectory(dirPath);
+}
+
+void MainWindow::scanDirectory(const QString& dirPath)
+{
+    m_lastScanDir = dirPath;
+    m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
+    m_dirScannerPanel->scanDirectory(dirPath);
+    // Скан из меню, со стартового экрана или брошенной папки — результат
+    // должен быть виден.
+    ui->directoryScannerDockWidget->show();
+    ui->directoryScannerDockWidget->raise();
 }
 
 void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
@@ -3615,29 +3618,27 @@ void MainWindow::toggleTimeFilterDock()
     }
 }
 
-static const int MaxRecentFiles = 10;
-
 void MainWindow::addToRecentFiles(const QString& filePath)
 {
-    m_recentFiles.removeAll(filePath);
-    m_recentFiles.prepend(filePath);
-    while (m_recentFiles.size() > MaxRecentFiles)
-        m_recentFiles.removeLast();
-    updateRecentFilesMenu();
+    // Спул stdin в недавние не попадает (RecentFiles::accepts): после выхода
+    // временного файла нет, запись была бы мёртвой.
+    if (m_recentFiles.add(filePath))
+        updateRecentFilesMenu();
 }
 
 void MainWindow::updateRecentFilesMenu()
 {
+    const QStringList recent = m_recentFiles.paths();
     if (m_welcome)
-        m_welcome->setRecentFiles(m_recentFiles);
+        m_welcome->setRecentFiles(recent);
     ui->menuRecentFiles->clear();
-    if (m_recentFiles.isEmpty()) {
+    if (recent.isEmpty()) {
         QAction* empty = ui->menuRecentFiles->addAction(tr("(No recent files)"));
         empty->setEnabled(false);
         return;
     }
-    for (int i = 0; i < m_recentFiles.size(); ++i) {
-        const QString filePath = m_recentFiles.at(i);
+    for (int i = 0; i < recent.size(); ++i) {
+        const QString filePath = recent.at(i);
         // Мнемоники 1…9 и 0 для десятого пункта.
         const QString number = i < 9 ? QStringLiteral("&%1").arg(i + 1)
                                      : QStringLiteral("1&0");
@@ -3660,10 +3661,19 @@ void MainWindow::clearRecentFiles()
 
 void MainWindow::openFilesFromCommandLine(const QStringList& paths)
 {
-    for (const QString& path : paths) {
-        const QFileInfo fi(path);
-        if (fi.isFile())
-            openRecentFile(fi.absoluteFilePath());
+    // Что куда идёт, решает OpenRouting::plan: файлы — вкладками, как раньше;
+    // папка — в Directory Scanner (из нескольких — первая).
+    const OpenRouting::Plan plan = OpenRouting::plan(paths);
+    for (const QString& file : plan.files)
+        openRecentFile(file);
+    if (plan.scanDirectory.isEmpty())
+        return;
+    scanDirectory(plan.scanDirectory);
+    if (!plan.skippedDirectories.isEmpty()) {
+        m_statusLabel->setText(
+            tr("Scanning %1. The Directory Scanner shows one folder at a time: %n other folder(s) skipped.",
+               nullptr, int(plan.skippedDirectories.size()))
+                .arg(QDir::toNativeSeparators(plan.scanDirectory)));
     }
 }
 
@@ -3703,7 +3713,7 @@ void MainWindow::openRecentFile(const QString& filePath)
     if (!QFileInfo::exists(filePath)) {
         QMessageBox::warning(this, tr("File Not Found"),
             tr("The file '%1' no longer exists.").arg(filePath));
-        m_recentFiles.removeAll(filePath);
+        m_recentFiles.remove(filePath);
         updateRecentFilesMenu();
         return;
     }
@@ -3734,7 +3744,10 @@ void MainWindow::openRecentFile(const QString& filePath)
     view->addLogFile(filePath);
     updateTabLabel(view);
 
-    m_lastOpenDir = QFileInfo(filePath).absolutePath();
+    // Спул stdin — временный файл: ни в недавние, ни в «последнюю папку»
+    // диалога Open он не идёт.
+    if (RecentFiles::accepts(filePath))
+        m_lastOpenDir = QFileInfo(filePath).absolutePath();
     addToRecentFiles(filePath);
 }
 
@@ -4018,8 +4031,9 @@ void MainWindow::changeEvent(QEvent* event)
     const bool restored  = (type == QEvent::WindowStateChange && !isMinimized());
     if (activated || restored)
         onAutoReloadTimerTick();
-    // Смена светлой/тёмной темы: иконки и стили кнопок уровней считаются
-    // из палитры — перекрасить.
+    // Смена светлой/тёмной темы: иконки, стили кнопок уровней и фон поля
+    // быстрого поиска «не найдено» считаются из палитры — перекрасить (поле —
+    // в refreshToolIcons).
     if (type == QEvent::PaletteChange && m_constructed) {
         refreshToolIcons();
         updateLogLevelFilterButtons();

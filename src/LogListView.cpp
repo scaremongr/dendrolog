@@ -49,7 +49,19 @@ LogListView::LogListView(QWidget *parent)
     
     // Подключаем сигнал скроллбара для плавной прокрутки
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        // Прокрутка в окне дебаунса resize (переход, восстановление после
+        // фильтра, колесо) новее якоря, снятого в resizeEvent: якорь —
+        // то, что на экране сейчас, иначе отложенный пересчёт вернул бы вид
+        // к позиции на момент resize.
+        if (m_resizeDebounceTimer && m_resizeDebounceTimer->isActive())
+            captureResizeAnchor();
         viewport()->update();
+    });
+
+    // Пользователь сам крутит ползунок (drag, стрелки, клик по жёлобу) —
+    // позиция после перехода больше не удерживается (см. goToRow).
+    connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this]() {
+        m_holdAfterGoTo = false;
     });
 
     // Перетаскивание ползунка вверх снимает follow-tail (пользователь ушёл
@@ -197,6 +209,11 @@ void LogListView::setModel(QAbstractItemModel *model) {
 
         m_modelConnections << connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
+            // Якорь resize — номер строки, после reset он указывает на чужую
+            // строку. Позицию ниже восстанавливает сам reset; якорь снимается
+            // заново, когда она установлена.
+            m_anchorRow = -1;
+            m_anchorOffsetInViewport = 0;
             // Поисковая подсветка привязана к индексу строки — после reset
             // индексы невалидны.
             m_searchMatchRow = -1;
@@ -276,6 +293,9 @@ void LogListView::setModel(QAbstractItemModel *model) {
                     }
                     if (target < 0) return;
                     verticalScrollBar()->setValue(target);
+                    // Значение могло не измениться, а строки под ним — другие.
+                    if (m_resizeDebounceTimer->isActive())
+                        captureResizeAnchor();
                     viewport()->update();
                 });
             } else {
@@ -516,7 +536,10 @@ void LogListView::handleRowsInserted(int first, int last)
     // каждое обновление файла показывает свежие записи, пока пользователь не
     // уйдёт вверх). Замер — ДО пересчёта высот и скроллбара, т.е. по старой
     // геометрии: вопрос именно в том, где пользователь был до этого батча.
-    const bool followScrollAfterAppend = m_followTail || isScrolledToBottom();
+    // Исключение — вид, поставленный у низа ПЕРЕХОДОМ к строке (goToRow в
+    // последние полэкрана): пользователь смотрит на строку, а не на хвост.
+    const bool followScrollAfterAppend =
+        m_followTail || (!m_holdAfterGoTo && isScrolledToBottom());
 
     if (!isAppend) {
         // Вставка в середину (слияние файлов по времени): полная инвалидация.
@@ -1387,6 +1410,10 @@ void LogListView::goToRow(int row)
         }
     }
     scrollTo(index, QAbstractItemView::PositionAtCenter);
+    // Строку из последних полэкрана отцентрировать нельзя — вид встаёт у
+    // самого низа, и «прилипание» к хвосту увело бы его на первой же
+    // дозаписи. Переход к самой последней строке — это переход к хвосту.
+    m_holdAfterGoTo = row < model()->rowCount() - 1;
 }
 
 int LogListView::userSelectedRow() const
@@ -1987,16 +2014,26 @@ void LogListView::paintEvent(QPaintEvent *event) {
 void LogListView::resizeEvent(QResizeEvent *event) {
     QListView::resizeEvent(event);
     
-    if (m_anchorRow < 0 && model() && model()->rowCount() > 0) {
-        const qint64 scrollY = scrollContentY();
-        qint64 rowTop = 0;
-        if (getRowAtContentY(scrollY, m_anchorRow, rowTop)) {
-            m_anchorOffsetInViewport = int(rowTop - scrollY);
-        }
-    }
+    if (m_anchorRow < 0)
+        captureResizeAnchor();
 
     // Debounce: отложенный пересчёт после окончания resize
     m_resizeDebounceTimer->start(150);
+}
+
+// Якорь отложенного пересчёта после resize: первая видимая строка и её
+// смещение — по текущей (ещё не пересчитанной) геометрии.
+void LogListView::captureResizeAnchor() {
+    m_anchorRow = -1;
+    m_anchorOffsetInViewport = 0;
+    if (!model() || model()->rowCount() <= 0)
+        return;
+    const qint64 scrollY = scrollContentY();
+    qint64 rowTop = 0;
+    if (getRowAtContentY(scrollY, m_anchorRow, rowTop))
+        m_anchorOffsetInViewport = int(rowTop - scrollY);
+    else
+        m_anchorRow = -1;
 }
 
 void LogListView::enterEvent(QEnterEvent *event) {
@@ -2375,6 +2412,8 @@ void LogListView::setFollowTail(bool enabled)
     if (m_followTail == enabled)
         return;
     m_followTail = enabled;
+    if (enabled)
+        m_holdAfterGoTo = false;
     emit followTailChanged(enabled);
     if (enabled)
         scrollToBottomFollow();
@@ -2392,6 +2431,11 @@ bool LogListView::isScrolledToBottom() const
     if (maximum <= 0)
         return false; // контент влезает целиком — прокручивать было нечего
     return sb->value() >= maximum - qMax(1, sb->singleStep());
+}
+
+bool LogListView::hasPendingLayout() const
+{
+    return m_resizeDebounceTimer->isActive() || m_heightUpdateTimer->isActive();
 }
 
 void LogListView::wheelEvent(QWheelEvent *event)
@@ -2412,10 +2456,23 @@ void LogListView::wheelEvent(QWheelEvent *event)
     // Пользователь листает вверх — он хочет читать историю, а не хвост.
     if (m_followTail && event->angleDelta().y() > 0)
         setFollowTail(false);
+    m_holdAfterGoTo = false;   // пользователь сам выбирает позицию
     QListView::wheelEvent(event);
 }
 
 void LogListView::keyPressEvent(QKeyEvent *event) {
+    // Навигация вниз — пользователь сам идёт к хвосту: позиция после
+    // перехода (goToRow) больше не удерживается.
+    switch (event->key()) {
+    case Qt::Key_Down:
+    case Qt::Key_PageDown:
+    case Qt::Key_End:
+        m_holdAfterGoTo = false;
+        break;
+    default:
+        break;
+    }
+
     if (m_followTail) {
         switch (event->key()) {
         case Qt::Key_Up:

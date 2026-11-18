@@ -1,9 +1,9 @@
 #include "quicksearchfield.h"
 
 #include "apptheme.h"
-#include "cardframe.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QFontMetrics>
 #include <QKeyEvent>
 #include <QMenu>
@@ -158,7 +158,9 @@ void QuickSearchField::refreshStyle()
     if (!m_error.isEmpty()) {
         style = QStringLiteral("QLineEdit { border: 1px solid %1; }").arg(theme.logError.name());
     } else if (m_notFound) {
-        const QColor bg = CardFrame::mixedColor(theme.logError, palette().color(QPalette::Base), 0.72);
+        // Палитра окна, а не своя: свою меняет собственный стиль поля.
+        const QPalette base = parentWidget() ? parentWidget()->palette() : QApplication::palette();
+        const QColor bg = AppTheme::searchNotFoundBackground(base);
         style = QStringLiteral("QLineEdit { background-color: %1; }").arg(bg.name());
     }
     if (styleSheet() != style)

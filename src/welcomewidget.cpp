@@ -83,7 +83,7 @@ WelcomeWidget::WelcomeWidget(QWidget* parent)
     buttons->addStretch(1);
     col->addLayout(buttons);
 
-    m_dropHint = new QLabel(tr("…or drop log files anywhere in this window."), column);
+    m_dropHint = new QLabel(tr("…or drop log files or a folder anywhere in this window."), column);
     col->addWidget(m_dropHint, 0, Qt::AlignHCenter);
     col->addSpacing(12);
 

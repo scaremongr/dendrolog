@@ -28,6 +28,14 @@ if(DENDROLOG_SANITIZER)
     # Кадры стека и отладочная информация нужны для читаемых отчётов и для
     # того, чтобы подавления по имени функции находили свои кадры.
     add_compile_options(${_dendrolog_sanitize_flags} -fno-omit-frame-pointer -g)
+    if(DENDROLOG_SANITIZER STREQUAL "thread")
+        # Счётчик ссылок контейнеров Qt читается relaxed, и TSan не видит, что
+        # запись «на месте» идёт после чтения воркером, отпустившим свою копию.
+        # Заголовок подключается во все единицы трансляции раньше любого
+        # заголовка Qt — подробности в нём самом.
+        add_compile_options(
+            "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/tests/sanitizers/tsan_qt_refcount.h")
+    endif()
     add_link_options(${_dendrolog_sanitize_flags})
     message(STATUS "DendroLog: сборка с санитайзером '${DENDROLOG_SANITIZER}'")
 endif()
@@ -99,6 +107,8 @@ set(DENDROLOG_CORE_SOURCES
     src/textquery.cpp
     src/gotolocation.h
     src/gotolocation.cpp
+    src/openrouting.h
+    src/openrouting.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES
@@ -136,6 +146,19 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/toggleswitch.h
     src/toggleswitch.cpp
     src/highlightpalette.h
+
+    # Панели и стартовый экран: в библиотеке ради tests/theme_mode
+    # (перекраска при смене темы).
+    src/welcomewidget.h
+    src/welcomewidget.cpp
+    src/filterpanelwidget.h
+    src/filterpanelwidget.cpp
+    src/markerpanelwidget.h
+    src/markerpanelwidget.cpp
+    src/entrydetailspanel.h
+    src/entrydetailspanel.cpp
+    src/statisticspanel.h
+    src/statisticspanel.cpp
 )
 
 set(PROJECT_SOURCES
@@ -148,8 +171,6 @@ set(PROJECT_SOURCES
     src/logtabbar.cpp
     src/logtabwidget.h
     src/logtabwidget.cpp
-    src/welcomewidget.h
-    src/welcomewidget.cpp
 
     src/schemastore.h
     src/schemastore.cpp
@@ -168,16 +189,8 @@ set(PROJECT_SOURCES
     src/settingsdialog.cpp
     src/settingsdialog.ui
 
-    src/filterpanelwidget.h
-    src/filterpanelwidget.cpp
-    src/markerpanelwidget.h
-    src/markerpanelwidget.cpp
     src/searchpanelwidget.h
     src/searchpanelwidget.cpp
-    src/entrydetailspanel.h
-    src/entrydetailspanel.cpp
-    src/statisticspanel.h
-    src/statisticspanel.cpp
     src/timelinehistogramwidget.h
     src/timelinehistogramwidget.cpp
 

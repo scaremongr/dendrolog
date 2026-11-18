@@ -6,6 +6,7 @@
 #include "lineclassifier.h"
 #include <QVector>
 #include <QString>
+#include <QStringConverter>
 #include <QDateTime>
 #include <QThreadPool>
 #include <atomic>
@@ -20,6 +21,10 @@ public:
     explicit LogParser(QObject* parent = nullptr);
     ~LogParser() override;
 
+    // Счётчики файла для сканера каталога. Записи — ЛОГИЧЕСКИЕ, по тому же
+    // правилу, что у вкладки без схемы (LineClassifier::isPrimaryLine: метка
+    // времени И уровень); строки-продолжения (стек-трейс) записью не
+    // считаются. W/E/F — записи этого уровня, From/To — метки первичных строк.
     struct FileStats {
         qint64 fileSize = 0;
         int totalEntries = 0;
@@ -31,12 +36,37 @@ public:
         bool parseSuccess = true; 
     };
 
+    // Откуда продолжать разбор для счётчиков: сырое байтовое смещение начала
+    // строки, кодировка файла (у хвоста нет BOM — без неё UTF-16 читался бы
+    // как UTF-8) и есть ли до смещения запись, которую продолжат строки без
+    // метки. По умолчанию — начало файла, кодировка — по BOM.
+    struct StatsResume {
+        qint64 offset = 0;
+        QStringConverter::Encoding encoding = QStringConverter::Utf8;
+        bool inRecord = false;
+    };
+
+    // Итог разбора: `stats` — все прочитанные строки, включая последнюю без
+    // перевода строки (её вкладка тоже показывает); `complete` — только целые
+    // строки; `next` — продолжение сразу за последней целой строкой. Оборванная
+    // строка при дозаписи перечитывается с начала, поэтому база для слияния —
+    // `complete`, а не `stats`. При fromOffset > 0 счётчики описывают только
+    // прочитанный кусок — их складывает mergeStats.
+    struct StatsScan {
+        FileStats stats;
+        FileStats complete;
+        StatsResume next;
+    };
+
     // This method can be called from a separate thread for stat analysis.
-    // `fromOffset` > 0 analyses only the tail of the file starting at that byte
-    // offset (which the caller must know to be a line boundary) — used by the
-    // directory scanner to refresh an append-only log without re-reading it all.
-    // The returned stats then describe the tail alone and have to be merged.
-    FileStats analyzeFileForStats(const QString& filePath, qint64 fromOffset = 0);
+    // Файл читается БЕЗ QIODevice::Text: все смещения — сырые байты.
+    StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from) const;
+    StatsScan analyzeFileForStats(const QString& filePath) const
+    {
+        return analyzeFileForStats(filePath, StatsResume());
+    }
+    // Счётчики головы [0, X) плюс хвоста, прочитанного с X.
+    static FileStats mergeStats(const FileStats& head, const FileStats& tail);
 
     // Optional: configure a dynamic block schema so that the parser extracts
     // structured fields into LogEntry::fields for every primary line.
@@ -62,8 +92,11 @@ public slots:
     void startParsing(const LogFilePtr& logFile);
     // Incremental parse: read only bytes starting at startOffset (a line
     // boundary), continuing the numbering and the current record of context.
+    // encoding is the one the file was first read in (tailState reports it):
+    // there is no BOM in the middle of a file, so a tail cannot detect it.
     void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
-                          const ResumeContext& context);
+                          const ResumeContext& context,
+                          QStringConverter::Encoding encoding = QStringConverter::Utf8);
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
@@ -71,9 +104,12 @@ signals:
     // Right before parsingFinished of a successful parse: the exact byte
     // offset reading stopped at (the next incremental parse starts there), and
     // whether the last line had no newline yet — then lastLineStart is its
-    // byte offset, to read it again once the writer completes it.
+    // byte offset, to read it again once the writer completes it. Both offsets
+    // fall on a code unit boundary (UTF-16: even, UTF-32: multiple of four).
+    // encoding (a QStringConverter::Encoding) is what the bytes were decoded
+    // as — pass it to startParsingFrom for the tail.
     void tailState(const LogFilePtr& logFile, qint64 endOffset, bool lastLinePartial,
-                   qint64 lastLineStart);
+                   qint64 lastLineStart, int encoding);
     void parsingFinished(int totalEntries, const LogFilePtr& logFile);
     void parsingFailed(const LogFilePtr& logFile);
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
@@ -88,7 +124,8 @@ private:
     // parsingStarted/Failed) and an incremental read.
     void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                    const ResumeContext& context, const LogPattern& pattern,
-                   bool extraction, bool initial);
+                   bool extraction, bool initial,
+                   QStringConverter::Encoding encoding);
 
     // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
     // безопасно читается воркерами пула (см. LineClassifier).

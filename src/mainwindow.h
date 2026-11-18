@@ -14,6 +14,7 @@
 #include "LogListView.h"
 #include "logviewwidget.h"
 #include "filterruleset.h"
+#include "openrouting.h"
 
 // Forward declarations for Qt classes used in members or method signatures
 class QuickSearchField;
@@ -71,7 +72,9 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    // Открыть файлы, переданные в командной строке (DendroLog.exe a.log b.log).
+    // Открыть пути, переданные в командной строке (DendroLog.exe a.log logs/),
+    // брошенные в окно или присланные вторым экземпляром: файлы — вкладками,
+    // папка — в Directory Scanner (правило — OpenRouting::plan).
     void openFilesFromCommandLine(const QStringList& paths);
 
 protected:
@@ -288,7 +291,7 @@ private:
     // Directory Scanner related members
     QString m_lastOpenDir;
     QString m_lastScanDir;
-    QStringList m_recentFiles;
+    RecentFiles m_recentFiles;   // что в недавние не попадает — openrouting.h
 
     // Other members
     LogViewWidget*     m_activeLogView;
@@ -316,6 +319,8 @@ private:
     void saveSettings();
     void loadSettings();
     void addToRecentFiles(const QString& filePath);
+    // Запустить скан каталога и показать панель Directory Scanner.
+    void scanDirectory(const QString& dirPath);
     void updateRecentFilesMenu();
 
     // Auto-reload support

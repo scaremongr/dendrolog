@@ -10,10 +10,11 @@ filtering, highlighting and live reload.
 ## Opening logs
 
 - **Open log file(s)** — `File → Open` (`Ctrl+O`) or the folder button on the toolbar. Multiple files open into one tab and are merged by timestamp; such a tab is named after the first file, e.g. `app.log +2`.
-- **Drop files** anywhere in the window to open them.
+- **Drop files** anywhere in the window to open them. **Drop a folder** to open it in the Directory Scanner: the panel comes up and the scan starts. Files and folders dropped together: the files open, the folder is scanned. The scanner shows one folder at a time, so of several folders the first one is scanned.
+- **Command line** — `DendroLog app.log other.log` opens the files, `DendroLog C:\logs` scans the folder; the same rules as for a drop. `program | DendroLog -` reads the program's output as a growing log.
 - **Start screen** — while no tab is open, the window shows buttons to open files or scan a folder and the recent files as links.
 - **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once (`File → Scan Directory…`).
-- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list.
+- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list. A piped stream (`program | DendroLog -`) is not remembered: it does not exist after the window closes.
 - **Close Tab** — `Ctrl+W`, the tab's cross or the middle mouse button.
 - **Save View As** — `File → Save View As…` (`Ctrl+Shift+S`). Writes exactly what the view currently shows (active filters **and** the Log Fields selection) to a **new** file. Open files are never overwritten.
 - The view is saved in the background: the window stays usable, the status bar shows the progress, and **Cancel Save** next to it stops the export. The rows are taken as they were when saving started, so filtering or scrolling meanwhile does not change the file. A cancelled export leaves an existing destination file as it was.
@@ -175,6 +176,8 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 ## Directory Scanner
 
 - The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.
+- **Rotated logs are listed too**: besides `app.log`, the tree shows `app.log.1`, `app.log.10`, `app.log-20260101`, `app.log.2026-01-01` and `app-2026-01-01.log` — a configured extension followed by nothing but a rotation number or date (digits joined by `.`, `-` or `_`). Backups and editor files (`app.log.bak`, `app.log.swp`, `app.log~`) and compressed rotations (`app.log.gz`, `app.log.1.gz`) are not listed. Rotated files sort right after the main one, by number: `app.log`, `app.log.1`, `app.log.2`, `app.log.10`. The **Open** dialog's “Log files” filter lists plain extensions only; pick “All files” there to open a rotated file, or open it from the scanner.
+- **Entries are counted the way an opened tab counts them**: an entry starts at a line with a timestamp and a level, and the lines after it (a stack trace, a multi-line message) belong to it. The W/E/F counters count such entries, the From / To span comes from their timestamps. A field schema does not change the count: the scanner counts the way a tab does without field extraction. A file in UTF-16 is recognised by its byte-order mark, and a growing log whose last line was still being written is counted again correctly once the line is finished.
 - Names sort **case-insensitively** and naturally: `log2` comes before `log10`. Clicking a column header re-sorts (name ascending, numeric columns largest-first).
 - **The ⟳ button refreshes.** It re-reads the directory but not the files: only new and modified ones are analysed again, and a log that merely grew is read from where the previous scan stopped (unless it was rewritten). Deleted files leave the tree.
 - **Right-click ⟳** to pick the refresh mode:

@@ -32,6 +32,16 @@ All notable changes to DendroLog are documented here. The format follows
 - **Theme** in `Settings → Appearance`: **Same as system** (the default, follows
   the OS as before), **Light** or **Dark**. The choice applies at once to the
   whole window and is remembered.
+- **A folder dropped on the window opens in the Directory Scanner**: the panel
+  comes up and the scan starts. The same goes for a folder on the command line
+  (`DendroLog C:\logs`) and one handed over to the already open window. Files
+  dropped together with folders open as before; of several folders the first
+  one is scanned.
+- **Rotated logs show up in the Directory Scanner**: `app.log.1`,
+  `app.log.10`, `app.log-20260101`, `app.log.2026-01-01` — a configured
+  extension followed only by a rotation number or date. They sort right after
+  the main file. Backups and editor files (`app.log.bak`, `app.log.swp`) and
+  compressed rotations (`app.log.gz`) stay out.
 
 ### Changed
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
@@ -47,6 +57,46 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- **The Directory Scanner counts entries, not lines.** A stack trace or any
+  other multi-line message used to add one entry per line; now the Entries
+  column equals the number of entries of the opened tab, and W/E/F and the
+  From / To span agree with it. Lines in a CRLF file are split the same way.
+- The Directory Scanner reads the appended part of a **UTF-16** log correctly
+  (it was decoded as UTF-8 and lost its counts), and a log whose last line was
+  still being written no longer gains an extra entry when the line is finished.
+- A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
+  **Recent Files**: its temporary file is gone once the window closes. Such
+  entries left by earlier versions are dropped on start. The **Open** dialog no
+  longer starts in the temporary folder after a piped stream either.
+- A relative path passed on the command line while a window is already open
+  is resolved against the folder the command was run in, not the folder of
+  the open window.
+- **UTF-16 logs that grow.** Lines appended to an open UTF-16 file (and
+  UTF-32) used to show as garbage: the new part was read as UTF-8. It is now
+  read in the file's encoding, a line written in several parts stays one
+  line, and a line continuing a multi-line entry stays in that entry.
+- A UTF-16 file larger than the indexed-backend threshold is no longer read
+  again from the start on every auto-reload tick and every `F5`; only the
+  appended part is read.
+- **Switching between the light and dark theme repaints the panels.** Rule
+  and marker cards in Text Filters, Search and Row Highlighters, the header
+  cards of Entry Details and the Directory Scanner kept the colours of the
+  theme the window was opened in — white boxes and black labels on a dark
+  window, or the reverse — until a restart. The same happened when the OS
+  theme changed while DendroLog was running. The section toggles of Entry
+  Details, the muted captions, the Statistics placeholder, the scanner's
+  refresh icon and the "not found" tint of the quick-search box now follow
+  the theme as well.
+- The dark theme no longer depends on which theme was active before it: it
+  looks the same after a switch from light as on a start under a dark OS.
+- A jump to a line near the end of a growing log (Go to, timeline, Search,
+  quick search, `F8`) no longer slides to the tail on the next appended lines
+  when Follow tail is off. The view follows the tail again once you scroll
+  down to it yourself or switch Follow tail on.
+- A jump or a filter applied right after a tab was shown or the window was
+  resized no longer loses the scroll position: the view used to return to
+  where it stood at the moment of the resize, leaving the selected line off
+  screen.
 - With **Follow tail** on, a jump no longer snaps back to the end of a growing
   log on the next appended lines. A click on the timeline, a jump from
   Statistics, a result picked in the Search panel and a quick-search match
