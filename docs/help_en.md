@@ -140,6 +140,23 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 ## Field schemas (Log Fields)
 
 - *Log Fields* panel — define a **schema** (ordered blocks: timestamp, level, integer, text, regex, remainder…) via **Manage…** or `Tools → Field Schemas…` (auto-detect from a sample line or import a Grok expression).
+- **Built-in schemas** for common formats are in the list from the first start; pick one in the combo box of the *Log Fields* panel (nothing is selected by default):
+
+| Schema | A line it reads |
+| --- | --- |
+| Logback / Log4j | `2026-11-18 13:55:36.123 [main] INFO  com.example.App - Started` |
+| Spring Boot | `2026-11-18T13:55:36.130Z  INFO 34786 --- [main] o.s.b.App : Started` |
+| nginx / Apache access (combined) | `203.0.113.42 - - [18/Nov/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 64 "-" "curl/8.5.0"` (the common format too) |
+| nginx error | `2026/11/18 13:55:36 [error] 1234#1234: *99 open() failed` |
+| Syslog (RFC 3164) | `Nov 18 13:55:36 web01 sshd[2231]: Accepted publickey` |
+| Syslog / journalctl (ISO timestamp) | `2026-11-18T13:55:38+0100 web01 systemd[1]: Starting nginx` |
+| Serilog (console) | `[13:55:36 INF] Starting web host` |
+| Serilog (file, with date) | `2026-11-18 13:55:36.123 +01:00 [INF] Starting web host` |
+| Python logging | `2026-11-18 13:55:36,123 - myapp.db - INFO - Connected` |
+| Python logging (basicConfig) | `WARNING:root:Watch out!` |
+
+  Stack traces and Python tracebacks stay inside their entry. Built-in schemas are ordinary files in the `patterns` folder next to your settings and can be edited, renamed or deleted like your own: an edited one is never overwritten, a deleted one does not come back, and a schema of yours with the same file name or name is left as it is. A new version of DendroLog updates only built-in schemas you have not changed. To get deleted built-in schemas back, delete the `.builtin-schemas` file in that folder and restart.
+- Timestamps that the time filter, the timeline and the merge of several files understand are dates in ISO form (`2026-11-18 13:55:36`, also with `T`, a fraction and a zone). The time of syslog (`Nov 18 13:55:36`), of access logs (`18/Nov/2026:13:55:36 +0000`), of nginx error (`2026/11/18 …`) and a time without a date (Serilog console) is shown in the field but does not position the entry in time yet.
 - Tick **Filter blocks** to show only selected blocks; the selection is reflected in **Save View As** and in field-bound text filters.
 
 ## Quick find (toolbar)

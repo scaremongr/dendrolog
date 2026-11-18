@@ -1,12 +1,14 @@
 #include "schemastore.h"
 
 #include "appsettings.h"
+#include "builtinschemas.h"
 #include "logpattern.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
@@ -26,26 +28,10 @@ bool parseSchemaBlob(const QByteArray& bytes,
                      QString* name,
                      QString* canonical)
 {
-    const QString text = QString::fromUtf8(bytes).trimmed();
-    if (text.isEmpty())
-        return false;
-
-    PatternDefinition def;
     // Lenient (strict=false): an in-progress schema that was saved must load
     // without being silently replaced; real validity is enforced at use time.
-    if (!LogPattern::deserializeDefinition(text, &def, /*allowLegacy=*/true, /*strict=*/false))
-        return false;
-
-    QString embeddedName;
-    const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
-    if (doc.isObject())
-        embeddedName = doc.object().value(QStringLiteral("name")).toString().trimmed();
-
-    if (name)
-        *name = embeddedName.isEmpty() ? fallbackName.trimmed() : embeddedName;
-    if (canonical)
-        *canonical = LogPattern::serializeDefinition(def);
-    return true;
+    return BuiltinSchemas::parseSchemaFile(bytes, fallbackName, name, canonical,
+                                           /*strict=*/false);
 }
 
 // Serializes one schema for on-disk storage: the canonical schema JSON with
@@ -134,6 +120,18 @@ QString suggestedFileName(const QString& name)
     if (base.isEmpty())
         base = QStringLiteral("schema");
     return base + QStringLiteral(".json");
+}
+
+BuiltinSchemas::InstallReport installBuiltins()
+{
+    const QString dirPath = patternsDir();
+    if (dirPath.isEmpty())
+        return {};
+    BuiltinSchemas::InstallReport report =
+        BuiltinSchemas::install(QStringLiteral(":/patterns"), dirPath);
+    for (const QString& error : std::as_const(report.errors))
+        qWarning().noquote() << "Built-in schemas:" << error;
+    return report;
 }
 
 SchemaList loadAll(const QStringList& orderNames)

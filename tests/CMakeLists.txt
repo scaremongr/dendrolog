@@ -71,6 +71,7 @@ add_subdirectory(logview_lifecycle)
 add_subdirectory(goto_location)
 add_subdirectory(level_jump)
 add_subdirectory(theme_mode)
+add_subdirectory(builtin_schemas)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
 # пропускать правильные передачи через Qt как гонки, ни прятать настоящие.

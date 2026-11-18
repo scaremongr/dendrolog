@@ -13,4 +13,16 @@
         <file alias="help_en.md">../docs/help_en.md</file>
         <file alias="help_ru.md">../docs/help_ru.md</file>
     </qresource>
+    <qresource prefix="/patterns">
+        <file alias="access-combined.json">patterns/access-combined.json</file>
+        <file alias="logback.json">patterns/logback.json</file>
+        <file alias="nginx-error.json">patterns/nginx-error.json</file>
+        <file alias="python-basicconfig.json">patterns/python-basicconfig.json</file>
+        <file alias="python-logging.json">patterns/python-logging.json</file>
+        <file alias="serilog-console.json">patterns/serilog-console.json</file>
+        <file alias="serilog-file.json">patterns/serilog-file.json</file>
+        <file alias="spring-boot.json">patterns/spring-boot.json</file>
+        <file alias="syslog-iso.json">patterns/syslog-iso.json</file>
+        <file alias="syslog-rfc3164.json">patterns/syslog-rfc3164.json</file>
+    </qresource>
 </RCC>

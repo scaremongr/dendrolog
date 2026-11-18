@@ -1,0 +1,51 @@
+{
+    "name": "Syslog / journalctl (ISO timestamp)",
+    "description": "Syslog with an ISO 8601 timestamp: rsyslog RFC 3339 files and journalctl -o short-iso / short-iso-precise: timestamp host program[pid]: message.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "timestamp",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Host",
+            "kind": "text",
+            "leadingText": "",
+            "closingText": "",
+            "separator": " ",
+            "customRegex": ""
+        },
+        {
+            "name": "Program",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "\\[?",
+            "customRegex": "[^\\s\\[:]+",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "PID",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "\\]?:",
+            "customRegex": "\\d*",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

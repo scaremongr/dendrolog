@@ -7,6 +7,16 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Built-in field schemas** for common formats, in the list from the first
+  start: Logback / Log4j, Spring Boot, nginx / Apache access (combined),
+  nginx error, Syslog (RFC 3164), Syslog / journalctl (ISO timestamp),
+  Serilog (console and file), Python logging (default and `basicConfig`).
+  Stack traces stay inside their entry. They are ordinary schema files: an
+  edited one is never overwritten, a deleted one does not come back, and a
+  schema of yours with the same name is left alone; a new version updates
+  only the built-in schemas you have not changed. Nothing is selected by
+  default — the schema box now says `(none)` instead of showing the first
+  schema while no schema is active.
 - **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
   Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
   the nearest shown entry of level Error or Fatal (or Warn). A multi-line

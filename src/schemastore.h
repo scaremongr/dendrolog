@@ -1,6 +1,8 @@
 #ifndef SCHEMASTORE_H
 #define SCHEMASTORE_H
 
+#include "builtinschemas.h"
+
 #include <QList>
 #include <QPair>
 #include <QString>
@@ -29,6 +31,12 @@ using SchemaList  = QList<SchemaEntry>;
 /// Absolute path to <exeDir>/patterns, created on demand.
 /// Returns an empty string if the directory could not be created.
 QString patternsDir();
+
+/// Installs the built-in schemas shipped as resources (:/patterns) into the
+/// folder — see BuiltinSchemas for the rules (user files are never
+/// overwritten, deleted built-ins are not resurrected). Errors are logged and
+/// returned in the report.
+BuiltinSchemas::InstallReport installBuiltins();
 
 /// Every readable schema in the folder, normalised to canonical JSON.
 /// Files that do not parse as a schema are skipped. Entries whose display

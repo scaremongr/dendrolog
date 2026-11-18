@@ -1008,11 +1008,26 @@ void MainWindow::loadSettings()
                 s.remove("conversionPatternList");
             }
         }
+        // Built-in schemas (Logback, nginx, syslog, …) — after the migration
+        // above, which only runs on an empty folder. Never overwrites the
+        // user's files; a corrected built-in replaces only an untouched copy,
+        // and the active schema follows it.
+        const BuiltinSchemas::InstallReport builtins = SchemaStore::installBuiltins();
+        if (builtins.changed()) {
+            for (const auto& replaced : builtins.replaced) {
+                if (m_conversionPattern == replaced.first)
+                    m_conversionPattern = replaced.second;
+            }
+            m_patternList = SchemaStore::loadAll(order);
+        }
         if (m_conversionPatternCombo) {
             m_conversionPatternCombo->blockSignals(true);
             m_conversionPatternCombo->clear();
             for (const auto& e : m_patternList)
                 m_conversionPatternCombo->addItem(e.first);
+            // No active schema (the default — extraction off) must show as
+            // none, not as the first schema that addItem() selects by itself.
+            m_conversionPatternCombo->setCurrentIndex(-1);
             // Restore the active selection
             for (int i = 0; i < m_patternList.size(); ++i) {
                 if (m_patternList[i].second == m_conversionPattern) {
@@ -1130,6 +1145,7 @@ void MainWindow::setupFieldVisibilityDock()
     m_conversionPatternCombo->setToolTip(patternLabel->toolTip());
     m_conversionPatternCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_conversionPatternCombo->setMinimumContentsLength(8);
+    m_conversionPatternCombo->setPlaceholderText(tr("(none)"));
     connect(m_conversionPatternCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onPatternComboChanged);
