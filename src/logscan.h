@@ -102,6 +102,10 @@ public:
         // Только уровень строки: дешевле metaAt (переход по уровню идёт по
         // сотням миллионов строк). Текст не читается.
         virtual LogLevel levelAt(qint64 row) const { return metaAt(row).level; }
+        // Файл и номер физической строки в нём (с 1; 0 — строки нет): по ним
+        // сопоставляются строки двух снапшотов (выдача поиска ↔ вкладка,
+        // R-6). Текст и метка не читаются.
+        virtual qint64 lineAt(qint64 row, const LogFile** file) const = 0;
         virtual void forEachMeta(
             qint64 fromRow,
             const std::function<bool(qint64, const LogEntryMeta&)>& visit) const = 0;
@@ -143,6 +147,15 @@ public:
     LogLevel levelAt(qint64 row) const
     {
         return m_impl ? m_impl->levelAt(row) : LogLevel::Unknown;
+    }
+
+    // Файл и номер строки в файле (с 1); 0 и nullptr — строки нет. O(1).
+    qint64 lineAt(qint64 row, const LogFile** file) const
+    {
+        if (m_impl)
+            return m_impl->lineAt(row, file);
+        *file = nullptr;
+        return 0;
     }
 
     // Ближайшая от startRow строка, с которой начинается запись уровня из

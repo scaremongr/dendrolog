@@ -14,6 +14,8 @@
 //     перекрашивается вместе с темой.
 //   • тёмная палитра задаёт все роли сама и не зависит от прежней палитры
 //     приложения; её вид при обычном старте закреплён значениями;
+//   • отметки на полосе прокрутки (R-6) нарисованы цветами AppTheme, а
+//     скроллбар с ними после смены темы выглядит как созданный в новой теме;
 //   • открытые панели (Text Filters, Search, Row Highlighters, Entry Details,
 //     Statistics, сканер каталога, стартовый экран) после смены темы выглядят так же, как
 //     созданные сразу в новой теме, — сравнением картинок.
@@ -33,6 +35,9 @@
 #include "logviewwidget.h"
 #include "statisticspanel.h"
 #include "welcomewidget.h"
+#include "scrollbarmarks.h"
+#include "scrollbarmarksoverlay.h"
+#include <QScrollBar>
 #include "testdocuments.h"
 
 #include <QApplication>
@@ -472,6 +477,80 @@ static void checkRepaintsOnThemeChange(const char* name, const WidgetFactory& ma
     s.setThemeMode(ThemeMode::System);
 }
 
+// ---------------------------------------------------------------------------
+// Отметки на полосе прокрутки (R-6): цвета — AppTheme; скроллбар открытого
+// view после смены темы — как у view, созданного в новой теме.
+// ---------------------------------------------------------------------------
+static void checkScrollbarMarks(const QDir& dir)
+{
+    AppSettings& s = AppSettings::instance();
+    ColorSchemeController controller;
+    QByteArray bytes;
+    for (int i = 0; i < 400; ++i) {
+        const char* level = i % 37 == 5 ? "ERROR" : i % 23 == 3 ? "WARN" : "INFO";
+        bytes += QStringLiteral("2026-03-05 10:%1:%2.000 [w] %3 - row %4\n")
+                     .arg(i / 60, 2, 10, QLatin1Char('0')).arg(i % 60, 2, 10, QLatin1Char('0'))
+                     .arg(QLatin1String(level)).arg(i).toUtf8();
+    }
+    const QString path = testdocs::writeFile(dir, QStringLiteral("marks.log"), bytes);
+    testdocs::Document doc = testdocs::buildResident({path}, testdocs::buildSchema());
+    CHECK(doc.errors.isEmpty(), "marks fixture loads");
+
+    const auto makeView = [&]() {
+        auto view = std::make_unique<LogListView>();
+        view->setAttribute(Qt::WA_ShowWithoutActivating);
+        view->resize(600, 300);
+        view->move(300, 300);
+        view->setModel(doc.model.get());
+        view->show();
+        testdocs::waitFor([&] { return view->scrollbarMarks()->isUpToDate(); });
+        testdocs::pump(50);
+        return view;
+    };
+    const auto barImage = [](LogListView& view) {
+        return view.verticalScrollBar()->grab().toImage().convertToFormat(QImage::Format_RGB32);
+    };
+    const auto countColour = [](const QImage& image, const QColor& colour) {
+        int n = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                if (image.pixelColor(x, y) == colour)
+                    ++n;
+        return n;
+    };
+    const AppTheme& theme = AppTheme::instance();
+    const struct { ThemeMode from; ThemeMode to; const char* name; } directions[] = {
+        {ThemeMode::Light, ThemeMode::Dark, "light -> dark"},
+        {ThemeMode::Dark, ThemeMode::Light, "dark -> light"},
+    };
+    for (const auto& d : directions) {
+        s.setThemeMode(d.from);
+        testdocs::pump(20);
+        std::unique_ptr<LogListView> survivor = makeView();
+        const QImage before = barImage(*survivor);
+        CHECK(!survivor->scrollbarMarksOverlay()->pixels(ScrollbarMarkSet::Error).isEmpty(),
+              QStringLiteral("%1: error marks computed").arg(QLatin1String(d.name)));
+        CHECK(countColour(before, theme.forLevel(LogLevel::Error)) > 0
+                  && countColour(before, theme.forLevel(LogLevel::Warn)) > 0,
+              QStringLiteral("%1: marks are drawn in the AppTheme level colours").arg(QLatin1String(d.name)));
+
+        s.setThemeMode(d.to);
+        testdocs::pump(80);
+        const QImage switched = barImage(*survivor);
+        std::unique_ptr<LogListView> fresh = makeView();
+        const QImage reference = barImage(*fresh);
+        QString where;
+        CHECK(differingPixels(before, reference, &where) != 0,
+              QStringLiteral("scrollbar marks, %1: the themes look different at all").arg(QLatin1String(d.name)));
+        const int n = differingPixels(switched, reference, &where);
+        CHECK(n == 0, QStringLiteral("scrollbar marks, %1: %2 px keep the previous theme (%3)")
+                          .arg(QLatin1String(d.name)).arg(n).arg(where));
+        CHECK(countColour(switched, theme.forLevel(LogLevel::Error)) > 0,
+              QStringLiteral("%1: marks are repainted after the switch").arg(QLatin1String(d.name)));
+    }
+    s.setThemeMode(ThemeMode::System);
+}
+
 static void checkOpenPanels(const QDir& dir)
 {
     ColorSchemeController controller;
@@ -609,6 +688,7 @@ int main(int argc, char** argv)
     checkController();
     checkOpenView(QDir(temporary.path()));
     checkOpenPanels(QDir(temporary.path()));
+    checkScrollbarMarks(QDir(temporary.path()));
 
     QFile::remove(AppSettings::iniFilePath());
     if (failures) {

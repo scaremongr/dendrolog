@@ -1098,6 +1098,18 @@ public:
         return files[fileId].index.level(line);
     }
 
+    qint64 lineAt(qint64 row, const LogFile** file) const override
+    {
+        if (row < 0 || row >= rowCount()) {
+            *file = nullptr;
+            return 0;
+        }
+        int fileId; qint64 line;
+        resolve(row, fileId, line);
+        *file = files[fileId].logFile.get();
+        return line + 1;
+    }
+
     void forEachMeta(qint64 fromRow,
                      const std::function<bool(qint64, const LogEntryMeta&)>& visit)
         const override

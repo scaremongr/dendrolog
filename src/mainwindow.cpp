@@ -1,4 +1,5 @@
 ﻿#include "mainwindow.h"
+#include "scrollbarmarks.h"
 #include "bookmarkpanelwidget.h"
 #include "quicksearchfield.h"
 #include "ui_mainwindow.h"
@@ -1691,6 +1692,8 @@ LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
     view->setParserPattern(m_conversionPattern);
+    // Отметки поиска на скроллбаре (R-6): view сам решает, источник ли он.
+    view->view()->scrollbarMarks()->setSearch(m_searchController);
     const bool filterEnabled = m_fieldFilterEnabledCheckBox
         && m_fieldFilterEnabledCheckBox->isChecked()
         && !m_fieldCheckBoxes.isEmpty();

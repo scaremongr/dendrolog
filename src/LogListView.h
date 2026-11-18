@@ -150,6 +150,8 @@ struct TextSelection {
 };
 
 class NewLinesIndicator;
+class ScrollbarMarks;
+class ScrollbarMarksOverlay;
 
 class LogListView : public QListView {
     Q_OBJECT
@@ -192,6 +194,18 @@ public:
     // Пункты закладок в контекстном меню строки. Включает вкладка
     // (LogViewWidget), которая их исполняет; у view результатов Search их нет.
     void setBookmarkActionsEnabled(bool enabled) { m_bookmarkActions = enabled; }
+
+    // ---- Отметки на полосе прокрутки (R-6, docs/design/R-6.md) -------------
+    // Расчёт отметок по модели view; поиск подключает окно (setSearch).
+    ScrollbarMarks* scrollbarMarks() const { return m_scrollbarMarks; }
+    ScrollbarMarksOverlay* scrollbarMarksOverlay() const { return m_scrollbarMarksOverlay; }
+    // Значение скроллбара (дробное, не обрезанное по максимуму), при котором
+    // строка row стоит наверху вида. Без O(N): uniform — row · h, с переносом —
+    // префикс-сумма, пока высоты не построены — пропорциональная оценка.
+    qreal markScrollValue(int row) const;
+    // Меняется, когда может смениться markScrollValue при тех же строках
+    // (высоты, их уточнение): ключ кэша пикселей отметок.
+    qint64 markGeometryStamp() const;
 
     // ---- Выбор пользователя (инвариант 10) ----------------------------------
     // Строка, выбранная пользователем: текущая И выделенная. Текущую без
@@ -360,6 +374,8 @@ private:
     // а не пользователь (см. focusInEvent).
     bool m_inFocusIn = false;
     bool m_bookmarkActions = false; // см. setBookmarkActionsEnabled
+    ScrollbarMarks* m_scrollbarMarks = nullptr;               // child, R-6
+    ScrollbarMarksOverlay* m_scrollbarMarksOverlay = nullptr; // child скроллбара
 
     // ========== Левый отступ для маркера начала элемента ==========
     static constexpr int kLeftMarginWidth = 12; // Ширина полоски слева, где рисуется "›"
