@@ -1,0 +1,1 @@
+dendrolog_add_test(encoding_ui LIBRARIES dendrolog_widgets TIMEOUT 180)

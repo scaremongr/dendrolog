@@ -2,10 +2,80 @@
 
 #include "stdinspooler.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 
 namespace OpenRouting {
+
+static const QString kEncodingOption = QStringLiteral("--encoding");
+
+CommandLine parseCommandLine(const QStringList& arguments)
+{
+    CommandLine cl;
+    bool encodingGiven = false;
+    for (qsizetype i = 0; i < arguments.size(); ++i) {
+        const QString& arg = arguments.at(i);
+        if (arg == QLatin1String("--new-instance")) {
+            cl.newInstance = true;
+        } else if (arg == QLatin1String("-") || arg == QLatin1String("--stdin")) {
+            cl.readStdin = true;
+        } else if (arg == kEncodingOption) {
+            encodingGiven = true;
+            // Имя пропущено: следующий аргумент — флаг («-», «--stdin», …) или
+            // существующий файл, а не кодировка, — его не съедаем.
+            if (i + 1 < arguments.size()) {
+                const QString& next = arguments.at(i + 1);
+                const bool looksLikeName = !next.startsWith(QLatin1Char('-'))
+                    && (TextEncodings::fromName(next.trimmed()) || !QFileInfo::exists(next));
+                if (looksLikeName)
+                    cl.encodingName = arguments.at(++i);
+            }
+        } else if (arg.startsWith(kEncodingOption + QLatin1Char('='))) {
+            encodingGiven = true;
+            cl.encodingName = arg.mid(kEncodingOption.size() + 1);
+        } else {
+            cl.paths << arg;
+        }
+    }
+    if (!encodingGiven)
+        return cl;
+
+    QStringList known;
+    for (const TextEncoding e : TextEncodings::selectable())
+        known << TextEncodings::displayName(e);
+    const QString knownList = known.join(QStringLiteral(", "));
+    if (cl.encodingName.trimmed().isEmpty()) {
+        cl.error = QCoreApplication::translate("OpenRouting",
+            "--encoding needs an encoding name (%1). Files are opened with automatic "
+            "detection.").arg(knownList);
+        return cl;
+    }
+    cl.encoding = TextEncodings::fromName(cl.encodingName.trimmed());
+    if (!cl.encoding) {
+        cl.error = QCoreApplication::translate("OpenRouting",
+            "Unknown encoding \"%1\" in --encoding (known: %2; cp1251, cp866, koi8r, "
+            "cp1252 also work). Files are opened with automatic detection.")
+            .arg(cl.encodingName, knownList);
+    }
+    return cl;
+}
+
+FileEncoding initialEncoding(const CommandLine& commandLine)
+{
+    if (!commandLine.encoding)
+        return {};
+    return FileEncoding().withUserChoice(TextDecoder(*commandLine.encoding));
+}
+
+QStringList forwardedArguments(const CommandLine& commandLine)
+{
+    QStringList out;
+    if (!commandLine.encodingName.isEmpty() || !commandLine.error.isEmpty())
+        out << kEncodingOption + QLatin1Char('=') + commandLine.encodingName;
+    out << absolutePaths(commandLine.paths);
+    return out;
+}
 
 static QString absoluteClean(const QString& path)
 {

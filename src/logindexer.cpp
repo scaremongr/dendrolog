@@ -127,11 +127,13 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
                 return;
             }
             startOffset = bom->length; // строки начинаются после UTF-8 BOM
-            if (encoding.source != FileEncoding::Source::User) {
-                encoding = FileEncoding{TextDecoder(TextEncoding::Utf8),
-                                        FileEncoding::Source::Bom};
-                emit encodingDecided(logFile, encoding);
-            }
+            // Под выбором пользователя BOM решает только автоматику рядом
+            // (для «Определить автоматически»), декодер остаётся выбранным.
+            const FileEncoding bomDecision{TextDecoder(TextEncoding::Utf8),
+                                           FileEncoding::Source::Bom};
+            encoding = encoding.source == FileEncoding::Source::User
+                ? encoding.withAutomatic(bomDecision) : bomDecision;
+            emit encodingDecided(logFile, encoding);
         }
     }
 
@@ -327,7 +329,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // Свидетельство предварительного решения подросло без смены решения —
     // отдаём его стору: следующий проход (дозапись, переход порога)
     // продолжит копить с этого места, а не с прошлого.
-    if (!encoding.settled() && encoding.evidence.end != reportedEvidenceEnd)
+    if (!encoding.detectionSettled() && encoding.evidence.end != reportedEvidenceEnd)
         emit encodingDecided(logFile, encoding);
     publishPending(/*force=*/true);
     if (initial && lastReportedProgress < 100)

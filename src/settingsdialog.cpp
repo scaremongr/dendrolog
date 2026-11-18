@@ -5,6 +5,7 @@
 #include "shortcutmanager.h"
 
 #include <QColorDialog>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
@@ -295,18 +296,39 @@ void SettingsDialog::buildPerformanceControls()
     m_textCacheSpinBox->setToolTip(
         tr("Memory budget for cached text of indexed files."));
 
+    // Запасная кодировка (F-1): что автоматика берёт для файла не в UTF-8.
+    m_fallbackEncodingCombo = new QComboBox(page);
+    m_fallbackEncodingCombo->setObjectName(QStringLiteral("fallbackEncodingComboBox"));
+    m_fallbackEncodingCombo->addItem(
+        tr("By system language (%1)").arg(TextEncodings::displayName(TextEncodings::systemFallback())),
+        -1);
+    for (const TextEncoding e : TextEncodings::selectable())
+        if (TextEncodings::isSingleByte(e))
+            m_fallbackEncodingCombo->addItem(TextEncodings::displayName(e), int(e));
+    m_fallbackEncodingCombo->setToolTip(
+        tr("Encoding for files that are not UTF-8. With a Cyrillic choice, Windows-1251,\n"
+           "IBM866 and KOI8-R are told apart automatically. Applies to new files and to\n"
+           "open files whose encoding is not settled yet; a file's encoding can always\n"
+           "be changed from the status bar."));
+
     auto* thresholdLabel = new QLabel(tr("Index files larger than:"), page);
     auto* cacheLabel = new QLabel(tr("Indexed text cache:"), page);
+    auto* encodingLabel = new QLabel(tr("Non-UTF-8 files:"), page);
 
     if (auto* form = qobject_cast<QFormLayout*>(page->layout())) {
         form->addRow(thresholdLabel, m_indexedThresholdSpinBox);
         form->addRow(cacheLabel, m_textCacheSpinBox);
+        form->addRow(encodingLabel, m_fallbackEncodingCombo);
     } else if (QLayout* layout = page->layout()) {
         auto* group = new QGroupBox(tr("Large files"), page);
         auto* groupForm = new QFormLayout(group);
         groupForm->addRow(thresholdLabel, m_indexedThresholdSpinBox);
         groupForm->addRow(cacheLabel, m_textCacheSpinBox);
         layout->addWidget(group);
+        auto* encodingGroup = new QGroupBox(tr("Encoding"), page);
+        auto* encodingForm = new QFormLayout(encodingGroup);
+        encodingForm->addRow(encodingLabel, m_fallbackEncodingCombo);
+        layout->addWidget(encodingGroup);
     }
 }
 
@@ -351,6 +373,11 @@ void SettingsDialog::loadFromSettings()
         m_indexedThresholdSpinBox->setValue(s.indexedThresholdMB());
     if (m_textCacheSpinBox)
         m_textCacheSpinBox->setValue(s.textCacheBudgetMB());
+    if (m_fallbackEncodingCombo) {
+        const auto choice = s.fallbackEncodingChoice();
+        m_fallbackEncodingCombo->setCurrentIndex(
+            qMax(0, m_fallbackEncodingCombo->findData(choice ? int(*choice) : -1)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +429,11 @@ void SettingsDialog::applyToSettings()
         s.setIndexedThresholdMB(m_indexedThresholdSpinBox->value());
     if (m_textCacheSpinBox)
         s.setTextCacheBudgetMB(m_textCacheSpinBox->value());
+    if (m_fallbackEncodingCombo) {
+        const int data = m_fallbackEncodingCombo->currentData().toInt();
+        s.setFallbackEncodingChoice(data < 0 ? std::nullopt
+                                             : std::optional<TextEncoding>(TextEncoding(data)));
+    }
 
     // ---- Shortcuts tab ---------------------------------------------------- //
     ShortcutManager& sm = ShortcutManager::instance();

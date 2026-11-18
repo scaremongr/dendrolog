@@ -89,6 +89,13 @@ public:
     // перезапускаются своими подписчиками на modelReset. Тот же декодер —
     // ничего не делает (кроме отметки «выбрано пользователем»).
     void setFileEncoding(const LogFilePtr& logFile, TextDecoder decoder);
+    // Состояние кодировки файла целиком (F-1, шаг 4): «Определить
+    // автоматически» (FileEncoding::automatic), состояние, перенесённое из
+    // другой вкладки при объединении, выбор из --encoding до первой строки.
+    // Декодер сменился у файла, чьи строки уже показаны, — тем же путём, что
+    // setFileEncoding (reset, при текстовых правилах перефильтрация); у
+    // только что подключённого — без reset.
+    void setFileEncodingState(const LogFilePtr& logFile, const FileEncoding& encoding);
 
     // Схема полей: для отображения/фильтрации извлекается по требованию.
     void setFieldPattern(const QString& patternString, bool extractionEnabled);

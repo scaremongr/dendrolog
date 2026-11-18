@@ -40,23 +40,31 @@ All notable changes to DendroLog are documented here. The format follows
   panel with its text and note, marked "line not found", instead of moving to
   another line. Bookmarks live until the tab is closed; keeping them between
   runs comes later.
-- **Logs not in UTF-8 are readable (part 1 of 2).** A log in Windows-1251,
-  IBM866 (cp866), KOI8-R or Windows-1252 is now shown with its real text
-  instead of `�`, and Cyrillic in it is found by quick find, Text Filters and
-  the Search panel, case-insensitive too. This works the same for small files
-  and for files above the large-file threshold: one file shows the same text
-  on both sides of the threshold, and a growing log keeps its encoding when it
-  crosses the threshold. The encoding is detected by the file itself at its
-  first non-ASCII line, wherever that is, also when it arrives as an appended
-  tail; the tail of a growing log is read in the file's encoding. While a file
-  has only a little non-ASCII text so far (a stray broken byte, a single
-  word), the guess stays open: when more text further on or in the appended
-  tail shows another encoding, the file is reread in it, keeping the selected
-  line and its place on screen — a UTF-8 log that starts with one broken byte
-  is no longer shown as garbage. Every file
-  of a tab with several files keeps its own encoding. **Save View As** writes
-  the text as shown, in UTF-8. Choosing the encoding by hand when detection
-  guesses wrong comes in the next step (part 2).
+- **Logs not in UTF-8 are readable, and the encoding can be chosen by hand.**
+  A log in Windows-1251, IBM866 (cp866), KOI8-R or Windows-1252 is now shown
+  with its real text instead of `�`, and Cyrillic in it is found by quick
+  find, Text Filters and the Search panel, case-insensitive too. This works the
+  same for small files and for files above the large-file threshold, and a
+  growing log keeps its encoding when it crosses the threshold. The encoding is
+  detected by the file itself at its first non-ASCII line, wherever that is,
+  also when it arrives as an appended tail. While a file has only a little
+  non-ASCII text so far (a stray broken byte, a single word), the guess stays
+  open: when more text further on or in the appended tail shows another
+  encoding, the file is reread in it, keeping the selected line and its place
+  on screen — a UTF-8 log that starts with one broken byte is no longer shown
+  as garbage. Every file of a tab with several files keeps its own encoding.
+  The **status bar** shows the encoding of the current line's file and where
+  it comes from (auto, provisional, byte-order mark, manual); click it to
+  choose UTF-8, Windows-1251, IBM866, KOI8-R or Windows-1252, or **Detect
+  automatically** to go back to the detected one. A large file is not
+  re-indexed for that, and the selected line, its place on screen, bookmarks
+  and the navigation history stay. The choice lasts while the tab is open,
+  also through reloads and merging tabs. **Settings → General → Non-UTF-8
+  files** sets the fallback encoding (by default, by the system language).
+  `--encoding <name>` (`cp1251`, `cp866`, `koi8-r`, …) opens the files of the
+  command line or a piped stream in that encoding, also through an already
+  open window; an unknown name is reported instead of being read as UTF-8.
+  **Save View As** writes the text as shown, in UTF-8.
 
 ### Changed
 - **Show/Hide Directory Scanner panel** moved from `Ctrl+F2` to `Ctrl+F10`:
@@ -64,6 +72,9 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- A UTF-16 or UTF-32 file added to a tab with other files (or to a large-file
+  tab) now says why it is not shown and what to do — open it in a tab of its
+  own — instead of a bare "Failed to parse".
 - A blank last line of a file is now shown in tabs below the large-file
   threshold, as it already was above it. Before, the line was dropped, and
   lines appended to the file after it got line numbers one too low. A lone

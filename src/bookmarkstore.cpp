@@ -288,26 +288,38 @@ bool BookmarkStore::verifyPending()
     return anyChange;
 }
 
+bool BookmarkStore::updateVisiblePreviews(const QString& filePath)
+{
+    bool anyChange = false;
+    for (Item& item : m_items) {
+        if (item.bookmark.filePath != filePath || !item.verified || item.lost)
+            continue;
+        const int row = m_model.rowForKey(item.bookmark.key);
+        if (row < 0)
+            continue;
+        const QString preview = previewOf(row);
+        if (preview != item.bookmark.preview) {
+            item.bookmark.preview = preview;
+            anyChange = true;
+        }
+    }
+    return anyChange;
+}
+
+void BookmarkStore::refreshPreviews(const QString& filePath)
+{
+    if (updateVisiblePreviews(filePath))
+        emit changed();
+}
+
 void BookmarkStore::fileLoaded(const QString& filePath, bool fullLoad)
 {
     bool anyChange = verifyPending();
     // Дочитан хвост: строка закладки могла быть предварительной (без '\n') и
     // дописаться — ключ тот же, текст длиннее. Фрагмент обновляется, иначе
     // следующая полная перезагрузка сочла бы строку чужой.
-    if (!fullLoad) {
-        for (Item& item : m_items) {
-            if (item.bookmark.filePath != filePath || !item.verified || item.lost)
-                continue;
-            const int row = m_model.rowForKey(item.bookmark.key);
-            if (row < 0)
-                continue;
-            const QString preview = previewOf(row);
-            if (preview != item.bookmark.preview) {
-                item.bookmark.preview = preview;
-                anyChange = true;
-            }
-        }
-    }
+    if (!fullLoad)
+        anyChange = updateVisiblePreviews(filePath) || anyChange;
     // Без видимых строк nearestRowForKey не скажет, есть ли строка в данных.
     if (m_model.rowCount() > 0) {
         for (Item& item : m_items) {

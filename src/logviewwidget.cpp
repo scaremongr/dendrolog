@@ -5,9 +5,11 @@
 #include "quicksearch.h"
 #include <QVBoxLayout>
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QDebug>
 #include <algorithm>
+#include <utility>
 
 
 
@@ -65,6 +67,11 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_reloadParser, &LogParser::entriesParsed, this, &LogViewWidget::handleIncrementalEntriesParsed);
     connect(m_reloadParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
     connect(m_reloadParser, &LogParser::encodingDecided, this, &LogViewWidget::handleEncodingDecided);
+    // Запасная кодировка — настройка приложения; её смену вкладка применяет
+    // сама (новые проходы и предварительные решения), окну тут делать нечего.
+    m_fallbackEncoding = AppSettings::instance().fallbackEncoding();
+    connect(&AppSettings::instance(), &AppSettings::fallbackEncodingChanged,
+            this, &LogViewWidget::setFallbackEncoding);
     m_logParser->setFallbackEncoding(m_fallbackEncoding);
     m_reloadParser->setFallbackEncoding(m_fallbackEncoding);
     connect(m_reloadParser, &LogParser::parsingFinished, this, &LogViewWidget::handleIncrementalParsingFinished);
@@ -147,6 +154,33 @@ void LogViewWidget::setFallbackEncoding(TextEncoding encoding)
     m_reloadParser->setFallbackEncoding(encoding);
     if (m_indexer)
         m_indexer->setFallbackEncoding(encoding);
+    // Предварительные решения (шаг 3а) — по уже накопленному свидетельству с
+    // новой запасной, путём пересмотра. «Не решено» решат следующие проходы,
+    // окончательные и выбор пользователя не трогаются. Проход в полёте
+    // решает со своей (прежней) запасной и вернул бы прежний ответ — тогда
+    // пересматриваем, когда загрузка закончится (updateLoadingState).
+    if (m_loading) {
+        m_reconsiderPending = true;
+        return;
+    }
+    reconsiderProvisional();
+}
+
+void LogViewWidget::reconsiderProvisional()
+{
+    m_reconsiderPending = false;
+    const TextEncoding encoding = m_fallbackEncoding;
+    for (const LogFilePtr& lf : std::as_const(m_loadedFiles)) {
+        if (!lf)
+            continue;
+        FileEncoding state = fileEncoding(lf);
+        if (!EncodingDetector::reconsider(state, encoding))
+            continue;
+        if (m_model->isIndexedBackend())
+            adoptIndexedEncoding(lf, state, /*wholeState=*/false);
+        else
+            handleEncodingDecided(lf, state);
+    }
 }
 
 FileEncoding LogViewWidget::fileEncoding(const LogFilePtr& logFile) const
@@ -162,11 +196,12 @@ TextEncoding LogViewWidget::fileStreamEncoding(const LogFilePtr& logFile) const
 {
     if (!logFile)
         return TextEncoding::Utf8;
-    if (!m_model->isIndexedBackend()) {
-        const auto st = m_fileReloadStates.constFind(logFile->filePath);
-        if (st != m_fileReloadStates.constEnd() && !TextEncodings::isDecodable(st->encoding))
-            return st->encoding;
-    }
+    // Резидентный путь держит кодировку потока (UTF-16/32); индексная вкладка
+    // — только у файла, который она не смогла загрузить (unsupported).
+    const auto st = m_fileReloadStates.constFind(logFile->filePath);
+    if (st != m_fileReloadStates.constEnd() && (!m_model->isIndexedBackend() || st->unsupported)
+        && !TextEncodings::isDecodable(st->encoding))
+        return st->encoding;
     return fileEncoding(logFile).decoder.encoding();
 }
 
@@ -176,16 +211,42 @@ void LogViewWidget::setFileEncoding(const LogFilePtr& logFile, TextEncoding enco
         || !m_loadedFiles.contains(logFile))
         return;
     const TextDecoder decoder(encoding);
-    if (auto* store = m_model->indexedOrNull()) {
-        store->setFileEncoding(logFile, decoder);
-        return;
-    }
-    // UTF-16/32 читает QTextStream по BOM — выбирать там нечего.
+    // UTF-16/32 читает QTextStream по BOM — выбирать там нечего (в индексной
+    // вкладке такой файл не загружен вовсе).
     if (!TextEncodings::isDecodable(fileStreamEncoding(logFile)))
         return;
+    if (m_model->isIndexedBackend()) {
+        adoptIndexedEncoding(logFile, fileEncoding(logFile).withUserChoice(decoder),
+                             /*wholeState=*/true);
+        return;
+    }
+    applyResidentEncoding(logFile, m_fileEncodings.value(logFile->filePath).withUserChoice(decoder));
+}
+
+void LogViewWidget::restoreAutomaticEncoding(const LogFilePtr& logFile)
+{
+    if (!logFile || !m_loadedFiles.contains(logFile))
+        return;
+    const FileEncoding current = fileEncoding(logFile);
+    if (current.source != FileEncoding::Source::User)
+        return;
+    if (!TextEncodings::isDecodable(fileStreamEncoding(logFile)))
+        return;
+    if (m_model->isIndexedBackend()) {
+        adoptIndexedEncoding(logFile, current.automatic(), /*wholeState=*/true);
+        return;
+    }
+    // Автоматика под выбором решала рядом; «не решено» — файл до сих пор
+    // ASCII либо перечитывание решит само (парсер стартует «не решённым»).
+    applyResidentEncoding(logFile, current.automatic());
+}
+
+void LogViewWidget::applyResidentEncoding(const LogFilePtr& logFile, const FileEncoding& encoding)
+{
     FileEncoding& current = m_fileEncodings[logFile->filePath];
-    const bool changed = current.decoder != decoder;
-    current = current.withUserChoice(decoder);
+    const bool changed = current.decoder != encoding.decoder;
+    current = encoding;
+    emit fileEncodingChanged(logFile);
     if (!changed)
         return;
     // Текст записей резидентного пути уже декодирован — файл перечитывается.
@@ -197,6 +258,32 @@ void LogViewWidget::setFileEncoding(const LogFilePtr& logFile, TextEncoding enco
         return;
     }
     startReencode(logFile);
+}
+
+void LogViewWidget::adoptIndexedEncoding(const LogFilePtr& logFile, const FileEncoding& encoding,
+                                         bool wholeState)
+{
+    auto* store = m_model->indexedOrNull();
+    if (!store || !logFile)
+        return;
+    const TextDecoder before = store->fileEncoding(logFile).decoder;
+    if (wholeState)
+        store->setFileEncodingState(logFile, encoding);
+    else
+        store->adoptDetectedEncoding(logFile, encoding);
+    if (store->fileEncoding(logFile).decoder != before)
+        refreshTextFragments(logFile->filePath);
+    emit fileEncodingChanged(logFile);
+}
+
+void LogViewWidget::refreshTextFragments(const QString& filePath)
+{
+    bookmarks().refreshPreviews(filePath);
+    navHistory().refreshPreviews(filePath);
+    // Перефильтрация (текстовые правила) ещё идёт: строки, которые она
+    // откроет, получат фрагменты по её окончании (handleModelFilteredRelay).
+    if (m_model->isFiltering())
+        m_previewRefreshFiles.insert(filePath);
 }
 
 void LogViewWidget::startReencode(const LogFilePtr& logFile)
@@ -245,6 +332,10 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
             st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
     rememberLastLines(st, entries);
     m_model->replaceEntriesForFile(logFile->filePath, entries);
+    // Текст строк файла другой при тех же ключах — фрагменты закладок и
+    // истории переходов, иначе сверка после следующей загрузки их потеряет.
+    refreshTextFragments(logFile->filePath);
+    emit fileEncodingChanged(logFile);
     const qint64 consumed = st.endOffset >= 0 ? st.endOffset
                                               : QFileInfo(logFile->filePath).size();
     st.anchor = FileChangeDetector::capture(logFile->filePath, consumed);
@@ -286,7 +377,9 @@ void LogViewWidget::handleEncodingDecided(const LogFilePtr& logFile,
     // Пересмотр предварительного решения (шаг 3а): записи, отданные прежде,
     // декодированы прежней кодировкой — перечитываем файл тем же путём, что
     // ручную смену (подмена записей под одним reset), источник — «авто».
-    if (!m_fileEncodings[logFile->filePath].adopt(encoding))
+    const bool revised = m_fileEncodings[logFile->filePath].adopt(encoding);
+    emit fileEncodingChanged(logFile);
+    if (!revised)
         return;
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     if (st.loadInFlight) {
@@ -341,9 +434,39 @@ QStringList LogViewWidget::parserFieldNames() const
 
 void LogViewWidget::addLogFile(const QString &filePath)
 {
+    addLogFile(filePath, FileEncoding());
+}
+
+void LogViewWidget::addFilesFrom(const LogViewWidget& other)
+{
+    for (const LogFilePtr& lf : other.loadedFiles())
+        if (lf)
+            addLogFile(lf->filePath, other.fileEncoding(lf));
+}
+
+QString LogViewWidget::loadFailureMessage(const LogFilePtr& logFile) const
+{
+    if (!logFile)
+        return tr("Failed to parse");
+    const auto st = m_fileReloadStates.constFind(logFile->filePath);
+    if (st == m_fileReloadStates.constEnd() || !st->unsupported)
+        return tr("Failed to parse: %1").arg(logFile->shortName());
+    return tr("%1 is %2: a UTF-16/UTF-32 file can only be shown on its own tab. "
+              "Open it in a separate tab (merged tabs and large files read UTF-8 "
+              "and single-byte encodings only).")
+        .arg(logFile->shortName(), st->unsupportedReason);
+}
+
+void LogViewWidget::addLogFile(const QString &filePath, const FileEncoding& initial)
+{
     for (const auto &file : m_loadedFiles) {
-        if (file->filePath == filePath)
-            return; // Файл уже загружен или в процессе загрузки
+        if (file->filePath == filePath) {
+            // Файл уже загружен или в процессе загрузки: --encoding для него —
+            // обычный выбор пользователя.
+            if (initial.source == FileEncoding::Source::User)
+                setFileEncoding(file, initial.decoder.encoding());
+            return;
+        }
     }
 
     auto logFile = std::make_shared<LogFile>(filePath);
@@ -365,14 +488,16 @@ void LogViewWidget::addLogFile(const QString &filePath)
             // Вкладка могла уже держать резидентные файлы — перечитываем все,
             // с уже решёнными кодировками (F-1): решение, а тем более выбор
             // пользователя, на пороге не теряется.
-            const QHash<QString, FileEncoding> encodings = takeEncodingsForIndexed();
+            QHash<QString, FileEncoding> encodings = takeEncodingsForIndexed();
+            if (initial.decided())
+                encodings.insert(filePath, initial);
             for (const auto& lf : m_loadedFiles)
                 startIndexedLoad(lf, encodings.value(lf->filePath));
             qDebug() << "LogViewWidget: Indexed backend enabled for tab,"
                      << m_loadedFiles.size() << "file(s)";
             return;
         }
-        startIndexedLoad(logFile);
+        startIndexedLoad(logFile, initial);
         qDebug() << "LogViewWidget: Started indexing for" << filePath;
         return;
     }
@@ -382,6 +507,8 @@ void LogViewWidget::addLogFile(const QString &filePath)
     FileReloadState& st = m_fileReloadStates[filePath];
     st = FileReloadState{};
     st.loadInFlight = true;
+    if (initial.decided())
+        m_fileEncodings.insert(filePath, initial);
     m_logParser->startParsing(logFile, m_fileEncodings.value(filePath));
     updateLoadingState();
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
@@ -402,6 +529,8 @@ void LogViewWidget::updateLoadingState()
         return;
     m_loading = loading;
     emit loadingChanged(m_loading);
+    if (!m_loading && m_reconsiderPending)
+        reconsiderProvisional(); // запасную сменили посреди загрузки
 }
 
 LogViewWidget::DiskStamp LogViewWidget::DiskStamp::of(const QString& filePath)
@@ -452,6 +581,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
         // оставил — с ним и перечитываем.
         m_indexer->startIndexing(logFile, fresh, store->fileEncoding(logFile));
         updateLoadingState();
+        emit fileEncodingChanged(logFile);
         return;
     }
 
@@ -465,6 +595,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     forgetAutoEncoding(logFile->filePath);
     m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath));
     updateLoadingState();
+    emit fileEncodingChanged(logFile);
 }
 
 void LogViewWidget::ensureIndexer()
@@ -494,8 +625,7 @@ void LogViewWidget::ensureIndexer()
     // перефильтрация, как ручная смена (IndexedLogStore::adoptDetectedEncoding).
     connect(m_indexer, &LogIndexer::encodingDecided, this,
             [this](const LogFilePtr& logFile, const FileEncoding& encoding) {
-                if (auto* store = m_model->indexedOrNull())
-                    store->adoptDetectedEncoding(logFile, encoding);
+                adoptIndexedEncoding(logFile, encoding, /*wholeState=*/false);
             });
 }
 
@@ -513,8 +643,10 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile, FileEncoding enc
     // решение EncodingDetector::advance не трогает (BOM UTF-8 — то же
     // решение), предварительное (шаг 3а) продолжает копить свидетельство с
     // того места, где остановился резидентный путь, и может быть пересмотрено.
+    // Выбор пользователя (--encoding, объединение вкладок, порог) — тоже
+    // состояние целиком: файл только подключён, reset не нужен.
     if (encoding.decided())
-        store->adoptDetectedEncoding(logFile, encoding);
+        store->setFileEncodingState(logFile, encoding);
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st = FileReloadState{};
     st.loadInFlight = true;
@@ -610,6 +742,13 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
     // переиндексировало его впустую на каждое изменение.
     st.initialLoadDone = false;
     st.unsupported = true;
+    st.unsupportedReason = reason.section(QLatin1Char(' '), 0, 0); // "UTF-16 BOM" → "UTF-16"
+    // Кодировка по BOM — для индикатора (подпись без меню) и чтобы выбор
+    // кодировки для такого файла игнорировался.
+    QFile head(logFile->filePath);
+    if (head.open(QIODevice::ReadOnly))
+        if (const auto bom = TextEncodings::detectBom(head.read(4)))
+            st.encoding = bom->encoding;
     updateLoadingState();
     emit fileParsingFailed(logFile);
 }
@@ -721,6 +860,13 @@ void LogViewWidget::handleTailState(const LogFilePtr& logFile, qint64 endOffset,
 
 void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
 {
+    // Перефильтрация после смены кодировки закончилась: строки, которые она
+    // открыла, — с новым текстом; их фрагменты закладок и истории тоже.
+    if (!m_previewRefreshFiles.isEmpty() && !m_model->isFiltering()) {
+        const QSet<QString> files = std::exchange(m_previewRefreshFiles, {});
+        for (const QString& path : files)
+            refreshTextFragments(path);
+    }
     emit modelFiltered(totalRowsAfterFilter);
 }
 

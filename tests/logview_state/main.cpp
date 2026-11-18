@@ -258,6 +258,14 @@ static QString firstMessageWord(const QString& line)
     return message.section(QLatin1Char(' '), 0, 0, QString::SectionSkipEmpty);
 }
 
+// Состояние кодировки файла документа — как LogViewWidget::fileEncoding.
+static FileEncoding documentEncoding(const Document& doc, const LogFilePtr& lf)
+{
+    if (const IndexedLogStore* store = doc.model->indexedOrNull())
+        return store->fileEncoding(lf);
+    return doc.encodings.value(lf->filePath);
+}
+
 struct Trigger {
     QString name;
     std::function<void(Backend&, const EntryInfo&)> apply;
@@ -265,6 +273,11 @@ struct Trigger {
     std::function<void(Backend&)> undo;
     // I6: видимый набор не меняется — прокрутка обязана остаться на месте.
     bool visibleSetUnchanged = false;
+    // Видимый набор тот же, но текст строк другой (смена кодировки): у
+    // резидентного бэкенда с переносом высоты строк законно меняются, и
+    // значение скроллбара тоже. Инвариант — место текущей строки на экране
+    // (visualRect), а не пиксели прокрутки.
+    bool rowPlaceUnchanged = false;
     // Триггер меняет фильтр несколькими шагами, и на промежуточных
     // шагах запись скрыта. Якорь вьюпорта транзиентный: он снимается
     // заново на каждый reset, поэтому за серию шагов вьюпорт законно
@@ -405,6 +418,27 @@ static QVector<Trigger> triggers()
                       m.setFilterRules(FilterRuleSet());
                   } });
 
+    // Смена кодировки файла записи (F-1, шаг 4): выбор пользователя, затем
+    // «Определить автоматически». Строки те же, текст другой — reset модели.
+    {
+        Trigger t{ QStringLiteral("кодировка: файл записи — KOI8-R вручную"),
+                   [](Backend& b, const EntryInfo& e) {
+                       for (const LogFilePtr& lf : b.doc.files)
+                           if (lf.get() == e.key.sourceFile)
+                               setDocumentEncoding(b.doc, lf,
+                                   documentEncoding(b.doc, lf).withUserChoice(
+                                       TextDecoder(TextEncoding::Koi8R)),
+                                   b.schema);
+                   },
+                   [](Backend& b) {
+                       for (const LogFilePtr& lf : b.doc.files)
+                           setDocumentEncoding(b.doc, lf, documentEncoding(b.doc, lf).automatic(),
+                                               b.schema);
+                   } };
+        t.rowPlaceUnchanged = true;
+        list.append(t);
+    }
+
     return list;
 }
 
@@ -495,9 +529,19 @@ static void runSelectionScenario(Backend& b, LogListView& view, const Trigger& t
           QStringLiteral("предусловие: запись выбрана и видна %1").arg(viewState(view)));
     const int scrollBefore = view.verticalScrollBar()->value();
 
+    const QRect placeBefore = rowRect(view, start);
     t.apply(b, e);
     settleChecked(model);
+    if (t.rowPlaceUnchanged)
+        pump(kViewTimersMs); // отложенное уточнение высот после reset
     checkEntryPreserved(view, model, e, QStringLiteral("после изменения"));
+    if (t.rowPlaceUnchanged) {
+        const int cur = currentRow(view);
+        CHECK(cur >= 0 && rowRect(view, cur).top() == placeBefore.top(),
+              QStringLiteral("текущая строка осталась на том же месте экрана (верх %1 → %2) %3")
+                  .arg(placeBefore.top()).arg(cur >= 0 ? rowRect(view, cur).top() : -1)
+                  .arg(viewState(view)));
+    }
     if (t.visibleSetUnchanged) {
         CHECK(view.verticalScrollBar()->value() == scrollBefore,
               QStringLiteral("I6 видимый набор не менялся, а прокрутка сдвинулась с %1 %2")

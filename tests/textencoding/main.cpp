@@ -724,7 +724,7 @@ static FeedResult feedLines(const FeedFile& f, FileEncoding state, qint64 from =
         if (complete && len > 0 && f.bytes.at(lineEnd - 1) == '\r')
             --len;
         QByteArray portion = f.bytes.mid(pos, len);
-        if (!state.settled() && EncodingDetector::firstHighByte(portion) >= 0) {
+        if (!state.detectionSettled() && EncodingDetector::firstHighByte(portion) >= 0) {
             if (complete)
                 portion.append('\n');
             if (EncodingDetector::advance(state, portion, pos, f.path, TextEncoding::Windows1251))
@@ -841,8 +841,20 @@ static void testProvisionalScenarios()
         FileEncoding bom{TextDecoder(TextEncoding::Utf8), FileEncoding::Source::Bom};
         for (const FileEncoding& start : {user, bom}) {
             const FeedResult r = feedChunks(f, start, rng);
-            CHECK(r.changes.isEmpty() && r.state.decoder.isUtf8() && r.state.source == start.source,
+            CHECK((start.source == FileEncoding::Source::User || r.changes.isEmpty())
+                      && r.state.decoder.isUtf8() && r.state.source == start.source,
                   "provisional: user choice and BOM are never revised");
+        }
+        // Под выбором пользователя автоматика решает рядом (шаг 4) — так же,
+        // как без выбора, строками и буферами.
+        {
+            const FileEncoding plain = feedLines(f, {}).state;
+            const FeedResult byLines = feedLines(f, user);
+            const FeedResult byChunks = feedChunks(f, user, rng);
+            CHECK(byLines.state.decoder.isUtf8() && byChunks.state.decoder.isUtf8()
+                      && sameDecision(byLines.state.automatic(), plain)
+                      && sameDecision(byChunks.state.automatic(), plain),
+                  "provisional: detection under a user choice decides alongside, the choice stays");
         }
         // Выбор пользователя хранит решение автоматики рядом.
         FileEncoding autoState = feedLines(f, {}).state;

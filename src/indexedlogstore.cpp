@@ -524,6 +524,22 @@ void IndexedLogStore::setFileEncoding(const LogFilePtr& logFile, TextDecoder dec
     rereadWithNewDecoder();
 }
 
+void IndexedLogStore::setFileEncodingState(const LogFilePtr& logFile,
+                                           const FileEncoding& encoding)
+{
+    const int fileId = fileIdOf(logFile.get());
+    if (fileId < 0)
+        return;
+    IndexedFile& f = m_files[fileId];
+    const bool changed = f.encoding.decoder != encoding.decoder;
+    f.encoding = encoding;
+    if (!changed)
+        return;
+    m_textCache.setFileDecoder(f.cacheFileId, encoding.decoder);
+    if (f.index && f.index->lineCount() > 0)
+        rereadWithNewDecoder();
+}
+
 void IndexedLogStore::rereadWithNewDecoder()
 {
     // Видимый набор зависит от текста только через текстовые правила. Без

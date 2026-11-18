@@ -58,21 +58,25 @@ int main(int argc, char *argv[])
     QApplication::setApplicationVersion(QStringLiteral(DENDROLOG_VERSION));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/dendrolog.svg")));
 
-    // Разбираем аргументы: файлы логов + служебный флаг --new-instance,
-    // позволяющий принудительно открыть отдельное окно, и «-»/«--stdin» —
-    // чтение потокового ввода (program | DendroLog -).
-    QStringList cliFiles = a.arguments().mid(1);
-    const bool forceNewInstance = cliFiles.removeAll(QStringLiteral("--new-instance")) > 0;
-    const bool readStdin = (cliFiles.removeAll(QStringLiteral("-"))
-                            + cliFiles.removeAll(QStringLiteral("--stdin"))) > 0;
+    // Разбираем аргументы (OpenRouting::parseCommandLine): файлы логов,
+    // --new-instance (принудительно отдельное окно), «-»/«--stdin» — чтение
+    // потокового ввода (program | DendroLog -), --encoding <имя> — кодировка
+    // файлов этой командной строки и stdin.
+    const OpenRouting::CommandLine commandLine =
+        OpenRouting::parseCommandLine(a.arguments().mid(1));
+    if (!commandLine.error.isEmpty()) {
+        std::fprintf(stderr, "DendroLog: %s\n", qPrintable(commandLine.error));
+        std::fflush(stderr);
+    }
 
     // Один экземпляр на пользователя: повторный запуск (например, двойной клик
     // по ассоциированному .log) передаёт файлы в уже открытое окно и выходит.
     // Пайп stdin передать нельзя — при «-» всегда открываем своё окно.
     SingleInstance guard(QStringLiteral("DendroLog"));
-    if (!forceNewInstance && !readStdin && guard.isSecondary()) {
+    if (!commandLine.newInstance && !commandLine.readStdin && guard.isSecondary()) {
         // Пути разрешаем здесь: у первичного экземпляра другой текущий каталог.
-        if (guard.sendToPrimary(OpenRouting::absolutePaths(cliFiles)))
+        // --encoding едет вместе с ними (ошибку имени покажет окно первичного).
+        if (guard.sendToPrimary(OpenRouting::forwardedArguments(commandLine)))
             return 0;
         // Первичный экземпляр не ответил (завис/умер) — продолжаем как обычно.
     }
@@ -92,25 +96,20 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
-    // Файлы от вторичных экземпляров: открыть и поднять окно поверх остальных.
+    // Файлы от вторичных экземпляров (с их --encoding): открыть и поднять
+    // окно поверх остальных.
     QObject::connect(&guard, &SingleInstance::filesReceived,
-                     &w, [&w](const QStringList& files) {
-        if (!files.isEmpty())
-            w.openFilesFromCommandLine(files);
+                     &w, [&w](const QStringList& arguments) {
+        w.openCommandLine(OpenRouting::parseCommandLine(arguments));
         w.setWindowState((w.windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
         w.raise();
         w.activateWindow();
     });
 
     // Пути из командной строки: файлы открываются как обычные, папка — в
-    // Directory Scanner.
-    if (!cliFiles.isEmpty())
-        w.openFilesFromCommandLine(cliFiles);
-
-    // Потоковый ввод: stdin спулится во временный файл и открывается
+    // Directory Scanner; stdin спулится во временный файл и открывается
     // вкладкой-растущим логом (auto-reload + follow-tail).
-    if (readStdin)
-        w.openStdinStream();
+    w.openCommandLine(commandLine);
 
     return a.exec();
 }

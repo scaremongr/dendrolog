@@ -128,6 +128,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/LogListView.cpp
     src/newlinesindicator.h
     src/newlinesindicator.cpp
+    src/encodingindicator.h
+    src/encodingindicator.cpp
     src/scrollbarmarksoverlay.h
     src/scrollbarmarksoverlay.cpp
     src/logviewwidget.h

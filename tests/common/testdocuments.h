@@ -409,6 +409,24 @@ inline Document buildResident(const QStringList& paths, const QString& schema)
     return doc;
 }
 
+// Смена состояния кодировки файла документа — как LogViewWidget::
+// setFileEncoding / restoreAutomaticEncoding (F-1, шаг 4): индексный —
+// IndexedLogStore::setFileEncodingState (без переиндексации, reset);
+// резидентный — файл перечитывается в сторону и его записи подменяются под
+// одним reset (LogModel::replaceEntriesForFile), как startReencode.
+inline void setDocumentEncoding(Document& doc, const LogFilePtr& lf, const FileEncoding& encoding,
+                                const QString& schema)
+{
+    if (IndexedLogStore* store = doc.model->indexedOrNull()) {
+        store->setFileEncodingState(lf, encoding);
+        return;
+    }
+    doc.encodings[lf->filePath] = encoding;
+    QVector<std::shared_ptr<LogEntry>> entries = parseResidentWhole(doc, lf, schema);
+    std::sort(entries.begin(), entries.end(), logEntryPtrLess);
+    doc.model->replaceEntriesForFile(lf->filePath, entries);
+}
+
 // Как файлы попадают в индексную вкладку. Порядок строк у стора собирается
 // по-разному, поэтому оба сценария проверяются отдельно:
 //   • Sequential — файл полностью проиндексирован, затем добавлен следующий

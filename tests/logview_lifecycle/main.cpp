@@ -1247,8 +1247,8 @@ static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, co
           name + " no extra work: text readable: " + late.row);
 
     // Выбор пользователя на предварительном решении: дозапись, которая
-    // пересмотрела бы автоматику, его не трогает; решение автоматики
-    // хранится рядом (для «Определить автоматически» шага 4).
+    // пересмотрела бы автоматику, его не трогает; автоматика под выбором
+    // продолжает решать рядом (шаг 4) — для «Определить автоматически».
     {
         const QString path = testdocs::writeFile(dir, name + "-user.log",
                                                  testdocs::encodeText(withWord, TextEncoding::Windows1251));
@@ -1267,8 +1267,14 @@ static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, co
         CHECK(settled(tab), name + " user: reload settles");
         const FileEncoding enc = tab.fileEncoding(file);
         CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Koi8R
-                  && enc.automatic().decoder.encoding() == TextEncoding::Windows1251,
-              name + " user: the choice stands, the automatic decision is kept beside it");
+                  && enc.automatic().decoder.encoding() == TextEncoding::Utf8
+                  && enc.automatic().source == FileEncoding::Source::Auto,
+              name + " user: the choice stands, the automatic decision beside it is revised");
+        tab.restoreAutomaticEncoding(file);
+        CHECK(settled(tab), name + " user: «detect automatically» settles");
+        CHECK(tab.fileEncoding(file).source == FileEncoding::Source::Auto
+                  && tab.fileEncoding(file).decoder.isUtf8(),
+              name + " user: «detect automatically» returns the automatic decision");
     }
 }
 

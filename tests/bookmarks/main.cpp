@@ -533,6 +533,54 @@ static void checkPlainRewrite(const QDir& dir, const QString& name, const QStrin
           QStringLiteral("F2 ходит только к живой"));
 }
 
+// Смена кодировки (F-1, шаг 4): фрагмент закладки переписывается текстом,
+// который показан после смены, — иначе сверка после следующей полной
+// загрузки (тем же выбранным декодером) объявила бы строку «не найдена».
+static void checkEncodingChange(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / смена кодировки");
+    QString text;
+    for (int i = 0; i < 40; ++i)
+        text += QString::fromLatin1(record(i, i % 5 ? "INFO" : "ERROR", QByteArray()).chopped(1))
+              + QStringLiteral("Запись номер %1: ошибка диска\n").arg(i);
+    QByteArray bytes = encodeText(text, TextEncoding::Windows1251);
+    const QString path = writeFile(dir, name + "-cp1251.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    BookmarkStore& store = tab.bookmarks();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    const int id = store.add(rowOfLine(model, path, 10));
+    CHECK(id >= 0 && store.find(id)->preview.contains(QStringLiteral("Запись номер 9")),
+          QStringLiteral("фрагмент — текст Windows-1251"));
+
+    tab.setFileEncoding(file, TextEncoding::Koi8R);
+    CHECK(settled(tab), QStringLiteral("смена на KOI8-R"));
+    const int row = rowOfLine(model, path, 10);
+    CHECK(row >= 0 && store.find(id)->preview == model.messageAt(row).left(BookmarkStore::kPreviewLength)
+              && !store.find(id)->preview.contains(QStringLiteral("Запись")),
+          QStringLiteral("фрагмент — новый текст строки: ") + store.find(id)->preview);
+
+    // Файл переписан (последний байт другой) — полная загрузка тем же
+    // выбранным декодером: закладка сверяется по обновлённому фрагменту.
+    bytes[bytes.size() - 2] = 'X';
+    CHECK(writeBytes(path, bytes), QStringLiteral("переписан"));
+    reload(tab);
+    CHECK(tab.fileEncoding(file).source == FileEncoding::Source::User,
+          QStringLiteral("выбор пережил перечитывание"));
+    CHECK(waitFor([&] { return store.status(id) == BookmarkStore::Status::Visible; }, 5000),
+          QStringLiteral("после перезагрузки закладка жива, статус %1").arg(int(store.status(id))));
+
+    // Возврат к автоматике — тот же путь: фрагмент снова в Windows-1251.
+    tab.restoreAutomaticEncoding(file);
+    CHECK(settled(tab), QStringLiteral("«Определить автоматически»"));
+    CHECK(store.find(id)->preview.contains(QStringLiteral("Запись номер 9")),
+          QStringLiteral("фрагмент после «авто»: ") + store.find(id)->preview);
+}
+
 // Панель переключается между вкладками и переживает закрытие вкладки.
 static void checkPanelLifecycle(const QDir& dir, const QString& schema)
 {
@@ -651,9 +699,11 @@ int main(int argc, char** argv)
     settings.setIndexedThresholdMB(512);
     checkTab(dir, QStringLiteral("resident"), schema);
     checkPlainRewrite(dir, QStringLiteral("resident"), schema);
+    checkEncodingChange(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
     checkPlainRewrite(dir, QStringLiteral("indexed"), schema);
+    checkEncodingChange(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
     checkPanelLifecycle(dir, schema);
     checkConversion(dir, schema);

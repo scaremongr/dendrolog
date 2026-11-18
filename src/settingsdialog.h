@@ -12,6 +12,7 @@ class QLabel;
 class QPushButton;
 class QKeySequenceEdit;
 class QSpinBox;
+class QComboBox;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class SettingsDialog; }
@@ -89,4 +90,7 @@ private:
     // ---- Performance (большие файлы; создаются в коде, не в .ui) ----------
     QSpinBox* m_indexedThresholdSpinBox = nullptr;
     QSpinBox* m_textCacheSpinBox = nullptr;
+    // Запасная кодировка автоопределения (F-1); данные пункта — int
+    // TextEncoding, -1 — по локали системы.
+    QComboBox* m_fallbackEncodingCombo = nullptr;
 };

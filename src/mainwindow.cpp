@@ -4,6 +4,7 @@
 #include "quicksearchfield.h"
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
+#include "encodingindicator.h"
 #include "logtabwidget.h"
 #include "conversionpatterndialog.h"
 #include "gotodialog.h"
@@ -178,7 +179,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_welcome, &WelcomeWidget::scanDirectoryRequested,
             this, &MainWindow::onScanDirectoryClicked);
     connect(m_welcome, &WelcomeWidget::recentFileRequested,
-            this, &MainWindow::openRecentFile);
+            this, [this](const QString& path) { openRecentFile(path); });
     connect(m_welcome, &WelcomeWidget::clearRecentRequested,
             this, &MainWindow::clearRecentFiles);
 
@@ -1763,6 +1764,8 @@ void MainWindow::setupStatusBar()
     m_progressBar->setFixedWidth(200);
     m_progressBar->hide();
     ui->statusbar->addPermanentWidget(m_progressBar);
+    m_encodingIndicator = new EncodingIndicator(this); // логика — во вкладке (F-1)
+    ui->statusbar->addPermanentWidget(m_encodingIndicator);
 
     // Save View As пишет в фоне: прогресс — в строке статуса, рядом отмена.
     m_exportJob = new ViewExportJob(this);
@@ -2496,6 +2499,7 @@ void MainWindow::onCurrentTabChanged(int index)
         updateLineInfoLabel(-1, 0);
         updateNavHistoryActions();
     }
+    m_encodingIndicator->setTab(currentView);
     // Переключение на вкладку — тоже «фокус на view»: с авто-обновлением она
     // должна показывать актуальные данные сразу, а не со следующего тика.
     if (currentView && currentView->autoReload())
@@ -2603,14 +2607,8 @@ void MainWindow::mergeTabs(int fromIndex, int toIndex)
     if (!src || !dst)
         return;
 
-    // Файлы источника перезагружаем в приёмник через штатный addLogFile —
-    // он сам выберет бэкенд (резидентный/индексный) и отсеет дубликаты.
-    QStringList paths;
-    for (const auto& lf : src->loadedFiles())
-        if (lf)
-            paths << lf->filePath;
-    for (const QString& p : paths)
-        dst->addLogFile(p);
+    // Файлы — в приёмник штатным addLogFile (бэкенд, дубли), с их кодировкой.
+    dst->addFilesFrom(*src);
 
     updateTabLabel(dst);
 
@@ -2629,19 +2627,9 @@ void MainWindow::mergeAllTabsInto(int keepIndex)
     if (!dst)
         return;
 
-    QStringList paths;
-    for (int i = 0; i < ui->tabWidget->count(); ++i) {
-        if (i == keepIndex)
-            continue;
-        auto* v = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
-        if (!v)
-            continue;
-        for (const auto& lf : v->loadedFiles())
-            if (lf)
-                paths << lf->filePath;
-    }
-    for (const QString& p : paths)
-        dst->addLogFile(p);
+    for (int i = 0; i < ui->tabWidget->count(); ++i)
+        if (auto* v = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)); v && i != keepIndex)
+            dst->addFilesFrom(*v);
 
     updateTabLabel(dst);
 
@@ -3021,7 +3009,8 @@ void MainWindow::handleFileParsingFailed(const LogFilePtr &logFile)
 {
     if (!logFile)
         return;
-    m_statusLabel->setText(tr("Failed to parse: %1").arg(logFile->shortName()));
+    const auto* view = qobject_cast<LogViewWidget*>(sender()); // причина — у вкладки (UTF-16 и др.)
+    m_statusLabel->setText(view ? view->loadFailureMessage(logFile) : tr("Failed to parse: %1").arg(logFile->shortName()));
     m_progressBar->hide();
     QTimer::singleShot(3000, this, [this]()
                        {
@@ -3804,13 +3793,23 @@ void MainWindow::clearRecentFiles()
     updateRecentFilesMenu();
 }
 
-void MainWindow::openFilesFromCommandLine(const QStringList& paths)
+void MainWindow::openCommandLine(const OpenRouting::CommandLine& commandLine)
+{
+    const FileEncoding initial = OpenRouting::initialEncoding(commandLine);
+    openFilesFromCommandLine(commandLine.paths, initial);
+    if (commandLine.readStdin)
+        openStdinStream(initial);
+    if (!commandLine.error.isEmpty()) // неизвестная кодировка: файлы открыты с автоопределением
+        QMessageBox::warning(this, tr("Command line"), commandLine.error);
+}
+
+void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEncoding& initial)
 {
     // Что куда идёт, решает OpenRouting::plan: файлы — вкладками, как раньше;
     // папка — в Directory Scanner (из нескольких — первая).
     const OpenRouting::Plan plan = OpenRouting::plan(paths);
     for (const QString& file : plan.files)
-        openRecentFile(file);
+        openRecentFile(file, initial);
     if (plan.scanDirectory.isEmpty())
         return;
     scanDirectory(plan.scanDirectory);
@@ -3822,7 +3821,7 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths)
     }
 }
 
-void MainWindow::openStdinStream()
+void MainWindow::openStdinStream(const FileEncoding& initial)
 {
     if (m_stdinSpooler)
         return;
@@ -3836,7 +3835,7 @@ void MainWindow::openStdinStream()
     }
 
     const QString path = m_stdinSpooler->spoolFilePath();
-    openRecentFile(path);
+    openRecentFile(path, initial);
 
     auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
     if (!lv)
@@ -3853,7 +3852,7 @@ void MainWindow::openStdinStream()
             [lv](qint64) { lv->reloadChangedFiles(); });
 }
 
-void MainWindow::openRecentFile(const QString& filePath)
+void MainWindow::openRecentFile(const QString& filePath, const FileEncoding& initial)
 {
     if (!QFileInfo::exists(filePath)) {
         QMessageBox::warning(this, tr("File Not Found"),
@@ -3886,7 +3885,7 @@ void MainWindow::openRecentFile(const QString& filePath)
     if (!view)
         return;
 
-    view->addLogFile(filePath);
+    view->addLogFile(filePath, initial);
     updateTabLabel(view);
 
     // Спул stdin — временный файл: ни в недавние, ни в «последнюю папку»

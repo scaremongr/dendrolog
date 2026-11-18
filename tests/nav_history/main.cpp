@@ -561,6 +561,50 @@ static void checkConversion(const QDir& dir, const QString& schema)
     settings.setIndexedThresholdMB(512);
 }
 
+// Смена кодировки (F-1, шаг 4): фрагменты записей истории переписываются
+// новым текстом — после полной перезагрузки тем же выбранным декодером
+// места не пропадают.
+static void checkEncodingChange(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / смена кодировки");
+    QString text;
+    for (int i = 0; i < 60; ++i)
+        text += QString::fromLatin1(record(i, "INFO", QByteArray()).chopped(1))
+              + QStringLiteral("Запись номер %1: ошибка диска\n").arg(i);
+    QByteArray bytes = encodeText(text, TextEncoding::Windows1251);
+    const QString path = writeFile(dir, name + "-cp1251.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    NavHistory& h = tab.navHistory();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    select(tab, rowOfLine(model, 5));
+    tab.view()->goToRow(rowOfLine(model, 40), NavKind::GoTo);
+    CHECK(historyLines(h) == QVector<qint64>({ 5, 40 }), QStringLiteral("два места"));
+
+    tab.setFileEncoding(file, TextEncoding::Koi8R);
+    CHECK(settled(tab), QStringLiteral("смена на KOI8-R"));
+    for (const NavEntry& e : h.entries()) {
+        const int row = rowOfLine(model, e.line);
+        CHECK(row >= 0 && e.preview == model.messageAt(row).left(NavHistory::kPreviewLength),
+              QStringLiteral("фрагмент строки %1 — новый текст: %2").arg(e.line).arg(e.preview));
+    }
+
+    bytes[bytes.size() - 2] = 'X';
+    CHECK(writeBytes(path, bytes), QStringLiteral("переписан"));
+    reload(tab);
+    select(tab, rowOfLine(model, 40));
+    CHECK(tab.navigateHistory(false) && selectedLine(tab) == 5,
+          QStringLiteral("после перезагрузки Alt+← — к строке 5, а не %1").arg(selectedLine(tab)));
+    bool anyLost = false;
+    for (const NavEntry& e : h.entries())
+        anyLost = anyLost || e.lost;
+    CHECK(!anyLost, QStringLiteral("ни одно место не пропало"));
+}
+
 // Закрытие вкладки отбрасывает историю: она у модели, модель — у вкладки.
 static void checkTabClose(const QDir& dir, const QString& schema)
 {
@@ -632,8 +676,10 @@ int main(int argc, char** argv)
     AppSettings& settings = AppSettings::instance();
     settings.setIndexedThresholdMB(512);
     checkTab(dir, QStringLiteral("resident"), schema);
+    checkEncodingChange(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
+    checkEncodingChange(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
     checkConversion(dir, schema);
     checkTabClose(dir, schema);

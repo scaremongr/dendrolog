@@ -1941,7 +1941,18 @@ static void testEncodingDetection(const QDir& dir)
         // Индекс от кодировки не зависит: тот же файл, прочитанный как UTF-8,
         // даёт те же смещения, длины, уровни, записи и метки.
         const EncodingRun asUtf8 = indexWithEncoding(lf, forcedUtf8());
-        CHECK(asUtf8.decisions.isEmpty(), qPrintable(tag + ": a user choice is not re-decided"));
+        // Под выбором пользователя автоматика решает рядом (F-1, шаг 4):
+        // декодер остаётся выбранным, решение автоматики — то же, что без
+        // выбора.
+        bool keepsChoice = true;
+        for (const FileEncoding& d : asUtf8.decisions)
+            keepsChoice = keepsChoice && d.source == FileEncoding::Source::User
+                && d.decoder.isUtf8();
+        CHECK(keepsChoice, qPrintable(tag + ": a user choice is not re-decided"));
+        CHECK(!asUtf8.decisions.isEmpty()
+                  && asUtf8.decisions.last().automatic().decoder.encoding() == enc
+                  && asUtf8.decisions.last().automatic().source == FileEncoding::Source::Auto,
+              qPrintable(tag + ": detection under a user choice decides alongside"));
         compareIndexes(tag + " vs read as UTF-8", *run.index, *asUtf8.index);
     }
 

@@ -142,6 +142,12 @@ QString displayName(TextEncoding encoding)
     return QString();
 }
 
+QList<TextEncoding> selectable()
+{
+    return { TextEncoding::Utf8, TextEncoding::Windows1251, TextEncoding::Ibm866,
+             TextEncoding::Koi8R, TextEncoding::Windows1252 };
+}
+
 std::optional<TextEncoding> fromName(QStringView name)
 {
     // Сравнение без учёта регистра, дефисов и подчёркиваний: «utf8», «UTF-8»,
@@ -523,6 +529,18 @@ void decideOnEvidence(FileEncoding& state, TextEncoding encoding)
 bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
              const QString& filePath, TextEncoding fallback)
 {
+    if (state.source == FileEncoding::Source::User) {
+        // Под выбором пользователя автоматика решает рядом: декодер остаётся
+        // выбранным, решение и свидетельство — в autoDecoder/autoSource.
+        if (state.detectionSettled())
+            return false;
+        FileEncoding detection = state.automatic();
+        const qint64 endBefore = detection.evidence.end;
+        const bool changed = advance(detection, data, dataFileOffset, filePath, fallback);
+        if (changed || detection.evidence.end != endBefore)
+            state = detection.withUserChoice(state.decoder);
+        return changed;
+    }
     if (state.settled())
         return false;
     const qint64 dataEnd = dataFileOffset + data.size();
@@ -583,6 +601,25 @@ bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
     const TextDecoder previous = state.decoder;
     decideOnEvidence(state, *decide(QByteArrayView(evidence.bytes), fallback));
     return state.decoder != previous || !state.provisional;
+}
+
+bool reconsider(FileEncoding& state, TextEncoding fallback)
+{
+    if (state.source == FileEncoding::Source::User) {
+        FileEncoding detection = state.automatic();
+        if (!reconsider(detection, fallback))
+            return false;
+        state = detection.withUserChoice(state.decoder);
+        return true;
+    }
+    if (state.source != FileEncoding::Source::Auto || !state.provisional)
+        return false;
+    const std::optional<TextEncoding> decided =
+        decide(QByteArrayView(state.evidence.bytes), fallback);
+    if (!decided || TextDecoder(*decided) == state.decoder)
+        return false;
+    decideOnEvidence(state, *decided);
+    return true;
 }
 
 } // namespace EncodingDetector

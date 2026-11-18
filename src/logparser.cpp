@@ -169,11 +169,13 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         if (const auto bom = TextEncodings::detectBom(head)) {
             linesBegin = bom->length; // у UTF-16/32 — ровно одна кодовая единица
             if (bom->encoding == TextEncoding::Utf8) {
-                if (fileEncoding.source != FileEncoding::Source::User) {
-                    fileEncoding = FileEncoding{TextDecoder(TextEncoding::Utf8),
-                                                FileEncoding::Source::Bom};
-                    emit encodingDecided(logFile, fileEncoding);
-                }
+                // Под выбором пользователя BOM решает только автоматику
+                // рядом, декодер остаётся выбранным (как у индексатора).
+                const FileEncoding bomDecision{TextDecoder(TextEncoding::Utf8),
+                                               FileEncoding::Source::Bom};
+                fileEncoding = fileEncoding.source == FileEncoding::Source::User
+                    ? fileEncoding.withAutomatic(bomDecision) : bomDecision;
+                emit encodingDecided(logFile, fileEncoding);
             } else {
                 // UTF-16/32: QTextStream сам узнаёт BOM и снимает его.
                 byteMode = false;
@@ -272,7 +274,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             // подаётся с '\n', если кончилась переводом строки — как в
             // буфере индексатора (оборванная последовательность в конце
             // строки — битая, а не «оборвана краем»).
-            if (!fileEncoding.settled()) {
+            if (!fileEncoding.detectionSettled()) {
                 const LinePlace place = placeOf(line);
                 if (place.start >= 0) {
                     QByteArray raw = line.toLatin1();
@@ -388,7 +390,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     }
     // Свидетельство предварительного решения подросло без смены решения —
     // отдаём его вкладке: следующий проход продолжит копить с этого места.
-    if (byteMode && !fileEncoding.settled() && fileEncoding.evidence.end != reportedEvidenceEnd)
+    if (byteMode && !fileEncoding.detectionSettled() && fileEncoding.evidence.end != reportedEvidenceEnd)
         emit encodingDecided(logFile, fileEncoding);
     emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, reported);
     emit parsingFinished(totalParsedEntries, logFile);

@@ -30,6 +30,21 @@ public:
 
     // Добавляет файл в текущий view
     void addLogFile(const QString &filePath);
+    // То же с начальным состоянием кодировки файла (F-1, шаг 4): выбор из
+    // --encoding (FileEncoding().withUserChoice) или состояние, перенесённое
+    // из другой вкладки при объединении. Файл читается этим состоянием с
+    // первой строки — без лишнего перечитывания. Файл уже во вкладке — к нему
+    // применяется выбор пользователя из initial (если он есть).
+    void addLogFile(const QString &filePath, const FileEncoding& initial);
+    // Объединение вкладок: файлы other добавляются сюда со своими состояниями
+    // кодировки (выбор пользователя и решение автоматики не теряются).
+    void addFilesFrom(const LogViewWidget& other);
+    // Сообщение для строки статуса, почему файл не загрузился
+    // (fileParsingFailed): понятная причина — UTF-16/32 во вкладке с
+    // несколькими файлами (индексный путь его не читает, а откат в
+    // резидентный возможен, только пока файл во вкладке один), иначе общее
+    // «Failed to parse: <файл>».
+    QString loadFailureMessage(const LogFilePtr& logFile) const;
     
     // Возвращает список загруженных файлов
     QList<LogFilePtr> loadedFiles() const { return m_loadedFiles.toList(); }
@@ -59,8 +74,13 @@ public:
     // индексатор и резидентный парсер выбирают, если окно у первого байта
     // ≥ 0x80 не похоже на UTF-8. Действует на проходы, начатые после вызова,
     // — новые файлы и дозапись файлов, кодировка которых ещё не решена;
-    // решённые не меняются. Умолчание — по локали системы.
+    // ПРЕДВАРИТЕЛЬНОЕ решение (шаг 3а) пересчитывается по накопленному
+    // свидетельству сразу (EncodingDetector::reconsider) и, если ответ
+    // сменился, перечитывается путём пересмотра; окончательные решения и
+    // выбор пользователя не меняются. Умолчание — настройка приложения
+    // (AppSettings::fallbackEncoding); её смену вкладка применяет сама.
     void setFallbackEncoding(TextEncoding encoding);
+    TextEncoding fallbackEncoding() const { return m_fallbackEncoding; }
     // Кодировка файла вкладки и откуда она (F-1) — на любом бэкенде: у
     // индексного её держит стор, у резидентного — вкладка (m_fileEncodings).
     // Файл UTF-16/32 (только резидентный путь) — «не решено»; как он читается,
@@ -78,6 +98,11 @@ public:
     // переход порога в обе стороны. UTF-16/32 и недекодируемые кодировки
     // игнорируются.
     void setFileEncoding(const LogFilePtr& logFile, TextEncoding encoding);
+    // «Определить автоматически» (F-1, шаг 4): выбор пользователя снимается,
+    // действует решение автоматики (FileEncoding::automatic — под выбором она
+    // продолжала решать рядом). Тем же путём, что выбор: индексная —
+    // без переиндексации, резидентная — перечитывание с подменой записей.
+    void restoreAutomaticEncoding(const LogFilePtr& logFile);
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
@@ -170,6 +195,10 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void bookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome);
     // История переходов изменилась: состояние пунктов Back / Forward.
     void navHistoryChanged();
+    // Состояние кодировки файла могло измениться (решение автоматики,
+    // пересмотр, выбор пользователя, «авто», перечитывание переписанного
+    // файла) — индикатор кодировки перечитывает fileEncoding.
+    void fileEncodingChanged(const LogFilePtr& logFile);
     // Пункт контекстного меню «заметка к закладке»: закладка уже стоит,
     // заметку спрашивает окно. created — закладку поставил сам этот пункт:
     // отказ от заметки её снимает.
@@ -284,6 +313,7 @@ private:
         // Ни один бэкенд не тянет этот файл (например UTF-16 во вкладке с
         // несколькими файлами) — повторять загрузку бессмысленно.
         bool   unsupported = false;
+        QString unsupportedReason; // "UTF-16" / "UTF-32" — для loadFailureMessage
         // Подпись файла на момент исчезновения/неудачной загрузки.
         DiskStamp failedStamp;
         // Резидентный путь (LogParser::tailState): где кончилось прочитанное,
@@ -318,6 +348,22 @@ private:
     // индексной вкладки не используется: там состояние держит стор.
     QHash<QString, FileEncoding> m_fileEncodings;
     void handleEncodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
+    // Состояние кодировки резидентного файла целиком: декодер сменился —
+    // перечитывание (startReencode; загрузка в полёте — после неё).
+    void applyResidentEncoding(const LogFilePtr& logFile, const FileEncoding& encoding);
+    // Индексная вкладка: решение индексатора / новое состояние в сторе;
+    // текст показанных строк сменился — фрагменты закладок и истории.
+    void adoptIndexedEncoding(const LogFilePtr& logFile, const FileEncoding& encoding,
+                              bool wholeState);
+    // Текст строк файла стал другим (сменился декодер): фрагменты закладок и
+    // истории переходов переписываются по видимым строкам; идёт
+    // перефильтрация — ещё раз по её окончании (m_previewRefreshFiles).
+    void refreshTextFragments(const QString& filePath);
+    QSet<QString> m_previewRefreshFiles;
+    // Запасная сменилась: предварительные решения — по свидетельству с новой
+    // запасной; посреди загрузки — когда она закончится (m_reconsiderPending).
+    void reconsiderProvisional();
+    bool m_reconsiderPending = false;
     // Файлы, которые индексный путь вернул в резидентный (UTF-16/32): по
     // порогу размера вкладка с таким файлом не конвертируется — индексатор
     // откатил бы её снова, и файл перечитывался бы целиком на каждый тик.
@@ -332,7 +378,7 @@ private:
     LogIndexer* m_indexer = nullptr;
     // Зеркало флага извлечения полей (для индексатора/индексного store).
     bool m_extractionEnabled = false;
-    TextEncoding m_fallbackEncoding = TextEncodings::systemFallback();
+    TextEncoding m_fallbackEncoding = TextEncodings::systemFallback(); // из AppSettings в конструкторе
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.
     bool m_autoReload = false;

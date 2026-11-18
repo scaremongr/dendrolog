@@ -11,7 +11,7 @@ filtering, highlighting and live reload.
 
 - **Open log file(s)** — `File → Open` (`Ctrl+O`) or the folder button on the toolbar. Multiple files open into one tab and are merged by timestamp; such a tab is named after the first file, e.g. `app.log +2`.
 - **Drop files** anywhere in the window to open them. **Drop a folder** to open it in the Directory Scanner: the panel comes up and the scan starts. Files and folders dropped together: the files open, the folder is scanned. The scanner shows one folder at a time, so of several folders the first one is scanned.
-- **Command line** — `DendroLog app.log other.log` opens the files, `DendroLog C:\logs` scans the folder; the same rules as for a drop. `program | DendroLog -` reads the program's output as a growing log.
+- **Command line** — `DendroLog app.log other.log` opens the files, `DendroLog C:\logs` scans the folder; the same rules as for a drop. `program | DendroLog -` reads the program's output as a growing log. `--encoding <name>` sets the encoding of the files and the stream (see "Encodings").
 - **Start screen** — while no tab is open, the window shows buttons to open files or scan a folder and the recent files as links.
 - **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once (`File → Scan Directory…`).
 - **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list. A piped stream (`program | DendroLog -`) is not remembered: it does not exist after the window closes.
@@ -212,6 +212,16 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - **Follow tail** — the toggle with the down arrow or `Shift+F5`: keeps the newest lines in view; scrolling up turns it off, and so does any jump to a line (Go to, a search match, a Search result, the timeline, Statistics, next error).
 - **↓ N new lines** — while you read further up with Follow tail off, lines appended below the screen are counted in a small badge at the bottom of the view. Only lines the tab's filters show are counted; above 99,999 the number is shortened (`120K`, `3.4M`), the tooltip has the exact one. Click the badge, or press `Alt+End` (`View → Go to New Lines`), to jump to the first new line: it becomes the selected line, Follow tail stays off, and lines that come on screen drop out of the count, so pressing again pages through the rest. The badge goes away when you scroll to the bottom or turn Follow tail on. A filter change or a reload of a rewritten file starts the count afresh; each tab keeps its own.
 
+## Encodings
+
+- **Detected by itself.** UTF-8, Windows-1251, IBM866 (cp866), KOI8-R and Windows-1252 — each file has its own encoding, a merged tab included. While a file holds only ASCII there is nothing to decide: the text is the same in any encoding. The first byte outside ASCII decides, wherever it is — on the third gigabyte or in an appended tail: bytes that look like UTF-8 give UTF-8, anything else the fallback encoding (among the Cyrillic ones, Windows-1251, IBM866 and KOI8-R are told apart by the bytes). A file with a UTF-8 byte-order mark is read as UTF-8. When there are few non-ASCII bytes so far (a word or two), the decision is **provisional**: it is checked again as more bytes arrive, and if it changes, the file is re-read without losing your place.
+- **The indicator** on the right of the status bar shows the encoding of the current line's file and where it comes from: `Windows-1251 (auto)`, `… (auto, provisional)`, `UTF-8 (BOM)`, `KOI8-R (manual)` — chosen by you, `ASCII (auto)` — only ASCII so far. In a merged tab it is the encoding of the selected line's file.
+- **Choose by hand** — click the indicator: UTF-8, Windows-1251, IBM866, KOI8-R, Windows-1252. The file is shown in the new encoding at once — a large file is not re-indexed; the current line, the selection and the place on screen stay, and search, filters, bookmarks and the navigation history work with the new text. The choice lasts while the tab is open: through reloads, a rewritten file and merging tabs. **Detect automatically** drops the choice and brings back the automatic decision. You can choose even while the file is still all ASCII.
+- **Fallback encoding** — **Settings → General → Non-UTF-8 files**: what to use for a file that is not UTF-8. The default follows the system language (Cyrillic — Windows-1251, otherwise Windows-1252). A change applies to new files and to open files whose decision is not final yet; decided files and manual choices stay as they are.
+- **Command line** — `DendroLog --encoding cp1251 app.log` opens the files in that encoding (as a manual choice); `program | DendroLog --encoding cp866 -` does the same for a stream. Names: `utf-8`, `windows-1251`/`cp1251`, `ibm866`/`cp866`, `koi8-r`, `windows-1252`/`cp1252`. An unknown name shows a message in the window, and the files open with automatic detection. The argument also works when the files are passed to an already open window (a second launch).
+- **Save View As** always writes UTF-8: a tab may hold files in different encodings, and UTF-8 keeps all of them intact.
+- **Limits.** UTF-16 and UTF-32 are recognised by the byte-order mark only and are read whole in the regular mode: a large such file is not indexed, its encoding cannot be changed, and it does not open in a tab with other files — open it in a tab of its own. A block of garbage at the start of a file (hundreds of non-ASCII bytes that do not look like text) can give a wrong final decision — correct it by choosing by hand.
+
 ## Directory Scanner
 
 - The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.
@@ -234,7 +244,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 ## Settings & theme
 
 - **Tools → Settings** (`Ctrl+,`):
-  - **General** — scan extensions, auto-reload interval, large files.
+  - **General** — scan extensions, auto-reload interval, large files, fallback encoding.
   - **Appearance** — window theme, monospaced font family and size (live preview), default word wrap.
   - **Colors** — log-level, syntax, selection and UI colours.
   - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved.

@@ -2,6 +2,7 @@
 #define TEXTENCODING_H
 
 #include <QByteArrayView>
+#include <QList>
 #include <QString>
 #include <QMetaType>
 #include <QStringConverter>
@@ -62,6 +63,10 @@ bool isDecodable(TextEncoding encoding);
 // Имя для интерфейса и командной строки: "UTF-8", "Windows-1251", "IBM866",
 // "KOI8-R", "Windows-1252", "UTF-16LE", …
 QString displayName(TextEncoding encoding);
+// Кодировки, которые пользователь выбирает вручную (меню индикатора,
+// --encoding), по порядку показа: UTF-8 и однобайтные. Запасная кодировка —
+// однобайтные из них (isSingleByte).
+QList<TextEncoding> selectable();
 // Обратно, без учёта регистра; понимает и распространённые синонимы
 // (cp1251, cp866, koi8r, latin1 не входит — это не Windows-1252). Только
 // декодируемые кодировки: UTF-16/32 вручную не выбираются.
@@ -83,8 +88,8 @@ struct Bom {
 std::optional<Bom> detectBom(QByteArrayView head);
 
 // Запасная кодировка для файлов не в UTF-8 по локали системы: кириллическая
-// письменность — Windows-1251, иначе Windows-1252. Пока нет настройки
-// (шаг 4 F-1), это и есть умолчание индексатора.
+// письменность — Windows-1251, иначе Windows-1252. Умолчание настройки
+// «запасная кодировка» (AppSettings::fallbackEncoding, шаг 4 F-1).
 TextEncoding systemFallback();
 
 } // namespace TextEncodings
@@ -185,6 +190,20 @@ struct FileEncoding {
     bool decided() const { return source != Source::Undecided; }
     // Решение больше не пересматривается: advance его не трогает.
     bool settled() const { return decided() && !(source == Source::Auto && provisional); }
+    // Автоматике больше нечего решать: её решение окончательно (BOM,
+    // окончательное «авто»). При выборе пользователя — решение, хранящееся
+    // рядом (шаг 4): под выбором автоматика продолжает копить, чтобы
+    // «Определить автоматически» вернула настоящее решение и тогда, когда
+    // файл с самого начала читался выбранной кодировкой (--encoding,
+    // объединение вкладок). Вызывающие (индексатор, парсер) смотрят на это,
+    // а не на settled().
+    bool detectionSettled() const
+    {
+        if (source != Source::User)
+            return settled();
+        return autoSource != Source::Undecided
+            && !(autoSource == Source::Auto && provisional);
+    }
 
     // Выбор пользователя поверх этого состояния: автоматика сохраняется рядом.
     FileEncoding withUserChoice(TextDecoder chosen) const
@@ -216,7 +235,16 @@ struct FileEncoding {
     // (прежде «не решено») пересмотром не считается: показанные строки — ASCII.
     bool adopt(const FileEncoding& detected)
     {
-        if (source == Source::User && detected.source != Source::User) {
+        // Проход шёл под выбором пользователя (шаг 4): нового в нём — только
+        // решение автоматики. Выбор, действующий сейчас, мог с тех пор
+        // смениться (в том числе на «авто») — берём из прохода лишь автоматику.
+        if (detected.source == Source::User) {
+            const FileEncoding automaticPart = detected.automatic();
+            if (!automaticPart.decided())
+                return false;
+            return adopt(automaticPart);
+        }
+        if (source == Source::User) {
             *this = withAutomatic(detected);
             return false;
         }
@@ -303,12 +331,23 @@ qsizetype appendEvidence(EncodingEvidence& evidence, const char* data, qsizetype
 //   • Набралось kFinalHighBytes байтов ≥ 0x80 — решение окончательное
 //     (свидетельство дальше не копится и не хранится).
 //
+//   • Выбор пользователя (шаг 4): декодер — выбранный, а автоматика копит и
+//     решает рядом (autoDecoder/autoSource) по тем же правилам, пока её
+//     решение не окончательное (detectionSettled).
+//
 // true — изменилось решение (кодировка, источник или сила): вызывающему
 // сообщить подписчикам. Изменение одного свидетельства (evidence.end) true не
 // даёт — его вызывающий передаёт в конце прохода, чтобы следующий проход
 // (дозапись, переход порога) продолжил с того же места.
 bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
              const QString& filePath, TextEncoding fallback);
+
+// Запасная кодировка сменилась (настройка шага 4): предварительное решение
+// автоматики (в том числе хранящееся рядом с выбором пользователя)
+// пересчитывается по накопленному свидетельству с новой запасной.
+// «Не решено» и окончательное не трогаются — первое решат следующие проходы
+// уже с новой запасной. true — изменился декодер автоматики.
+bool reconsider(FileEncoding& state, TextEncoding fallback);
 
 // Только выбор между кириллическими кодировками, без проверки UTF-8 —
 // открыт для тестов и замеров точности.

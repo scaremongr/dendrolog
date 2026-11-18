@@ -3,6 +3,10 @@
 #include <QObject>
 #include <QStringList>
 
+#include "textencoding.h"
+
+#include <optional>
+
 // ---------------------------------------------------------------------------
 // AppSettings — application-level preferences singleton.
 //
@@ -134,6 +138,22 @@ public:
     int  textCacheBudgetMB() const;
     void setTextCacheBudgetMB(int mb);
 
+    // ---- Кодировки (F-1) ------------------------------------------------- //
+
+    // Запасная кодировка автоопределения — однобайтная, которую автоматика
+    // берёт, когда байты файла не похожи на UTF-8. nullopt — по локали системы
+    // (TextEncodings::systemFallback, умолчание). В ini — словом:
+    // [App] fallbackEncoding=system | Windows-1251 | IBM866 | KOI8-R |
+    // Windows-1252; неизвестное или не однобайтное значение читается как
+    // system. Сеттер шлёт fallbackEncodingChanged (вкладки применяют сами:
+    // новые проходы и предварительные решения) и settingsChanged.
+    std::optional<TextEncoding> fallbackEncodingChoice() const { return m_fallbackEncoding; }
+    void setFallbackEncodingChoice(std::optional<TextEncoding> encoding);
+    // Действующая запасная: выбранная либо по локали системы.
+    TextEncoding fallbackEncoding() const;
+    static QString fallbackEncodingToString(std::optional<TextEncoding> encoding);
+    static std::optional<TextEncoding> fallbackEncodingFromString(const QString& text);
+
     // ---- Быстрый поиск (поле в тулбаре) ----------------------------------- //
 
     // Переключатели «Aa», «слово целиком», «.*» и история запросов; в ini —
@@ -157,6 +177,8 @@ signals:
     // directory scanner) can update themselves without each class needing
     // to know every individual preference.
     void settingsChanged();
+    // Действующая запасная кодировка сменилась (Settings → General).
+    void fallbackEncodingChanged(TextEncoding encoding);
 
 private:
     void writeQuickSearch(QSettings& s) const;
@@ -181,4 +203,5 @@ private:
     bool        m_quickSearchWholeWord { false };
     bool        m_quickSearchRegex { false };
     QStringList m_quickSearchHistory;
+    std::optional<TextEncoding> m_fallbackEncoding; // nullopt — по локали системы
 };

@@ -80,6 +80,7 @@ add_subdirectory(schema_store)
 add_subdirectory(textencoding)
 add_subdirectory(record_identity)
 add_subdirectory(scrollbar_marks)
+add_subdirectory(encoding_ui)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
 # пропускать правильные передачи через Qt как гонки, ни прятать настоящие.

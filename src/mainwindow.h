@@ -77,7 +77,11 @@ public:
     // Открыть пути, переданные в командной строке (DendroLog.exe a.log logs/),
     // брошенные в окно или присланные вторым экземпляром: файлы — вкладками,
     // папка — в Directory Scanner (правило — OpenRouting::plan).
-    void openFilesFromCommandLine(const QStringList& paths);
+    // initial — состояние кодировки файлов (--encoding: выбор пользователя).
+    void openFilesFromCommandLine(const QStringList& paths, const FileEncoding& initial = {});
+    // Командная строка целиком (своя или второго экземпляра): файлы и папка,
+    // stdin, кодировка из --encoding; ошибка разбора — сообщение в окне.
+    void openCommandLine(const OpenRouting::CommandLine& commandLine);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -130,7 +134,7 @@ private slots:
     void updateFilterInputsFromModel();
     void handleModelFiltered();
     void onOpenSelectedDirectoryFiles(const QStringList& filePaths);
-    void openRecentFile(const QString& filePath);
+    void openRecentFile(const QString& filePath, const FileEncoding& initial = {});
     void onSettingsTriggered();
 
     // Search related slots
@@ -177,7 +181,7 @@ private slots:
 public:
     // Приём потокового ввода (`program | DendroLog -`): спулит stdin во
     // временный файл и открывает его вкладкой-растущим логом с follow-tail.
-    void openStdinStream();
+    void openStdinStream(const FileEncoding& initial = {});
 
 private:
     Ui::MainWindow *ui; // Pointer to the UI class generated from mainwindow.ui
@@ -204,6 +208,7 @@ private:
     // Фоновый Save View As и кнопка его отмены в строке статуса.
     ViewExportJob* m_exportJob = nullptr;
     QToolButton* m_cancelExportButton = nullptr;
+    class EncodingIndicator* m_encodingIndicator = nullptr; // кодировка файла текущей строки
     QString m_exportCancelReason; // почему экспорт отменён не пользователем
 
     // Time filter widgets (added to ui->timeFilterToolBar)

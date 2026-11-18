@@ -75,6 +75,8 @@ void AppSettings::load()
     m_indexedThresholdMB     = qBound(0, s.value(QStringLiteral("indexedThresholdMB"), 512).toInt(), 1 << 20);
     m_textCacheBudgetMB      = qBound(64, s.value(QStringLiteral("textCacheBudgetMB"), 256).toInt(), 2048);
     m_themeMode              = themeModeFromString(s.value(QStringLiteral("theme")).toString());
+    m_fallbackEncoding       = fallbackEncodingFromString(
+        s.value(QStringLiteral("fallbackEncoding")).toString());
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -138,6 +140,7 @@ void AppSettings::save()
     s.setValue(QStringLiteral("indexedThresholdMB"),     m_indexedThresholdMB);
     s.setValue(QStringLiteral("textCacheBudgetMB"),      m_textCacheBudgetMB);
     s.setValue(QStringLiteral("theme"),                  themeModeToString(m_themeMode));
+    s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
     s.endGroup();
 
     writeQuickSearch(s);
@@ -364,4 +367,36 @@ void AppSettings::setAutoReloadIntervalSecs(int secs)
         return;
     m_autoReloadIntervalSecs = clamped;
     emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+void AppSettings::setFallbackEncodingChoice(std::optional<TextEncoding> encoding)
+{
+    if (encoding && !TextEncodings::isSingleByte(*encoding))
+        encoding.reset();
+    if (m_fallbackEncoding == encoding)
+        return;
+    const TextEncoding before = fallbackEncoding();
+    m_fallbackEncoding = encoding;
+    if (fallbackEncoding() != before)
+        emit fallbackEncodingChanged(fallbackEncoding());
+    emit settingsChanged();
+}
+
+TextEncoding AppSettings::fallbackEncoding() const
+{
+    return m_fallbackEncoding.value_or(TextEncodings::systemFallback());
+}
+
+QString AppSettings::fallbackEncodingToString(std::optional<TextEncoding> encoding)
+{
+    return encoding ? TextEncodings::displayName(*encoding) : QStringLiteral("system");
+}
+
+std::optional<TextEncoding> AppSettings::fallbackEncodingFromString(const QString& text)
+{
+    const std::optional<TextEncoding> encoding = TextEncodings::fromName(text.trimmed());
+    if (!encoding || !TextEncodings::isSingleByte(*encoding))
+        return std::nullopt;
+    return encoding;
 }

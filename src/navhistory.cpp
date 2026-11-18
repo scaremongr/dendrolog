@@ -198,6 +198,17 @@ void NavHistory::invalidateFile(const QString& filePath)
     }
 }
 
+void NavHistory::refreshPreviews(const QString& filePath)
+{
+    for (NavEntry& e : m_entries) {
+        if (e.filePath != filePath || !e.verified || e.lost)
+            continue;
+        const int row = m_model.rowForKey(e.key);
+        if (row >= 0)
+            e.preview = m_model.messageAt(row).left(kPreviewLength);
+    }
+}
+
 void NavHistory::invalidateAll()
 {
     for (NavEntry& e : m_entries) {

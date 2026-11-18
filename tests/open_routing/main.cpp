@@ -7,7 +7,10 @@
 //   • план с каталогом действительно запускает скан в панели сканера;
 //   • RecentFiles: спул stdin (`program | DendroLog -`) в недавние не
 //     попадает — ни при открытии, ни из ini прежних версий; порядок, отсев
-//     повторов и предел в 10 записей — как было в MainWindow.
+//     повторов и предел в 10 записей — как было в MainWindow;
+//   • командная строка (F-1, шаг 4): --encoding <имя> и --encoding=<имя>,
+//     синонимы, неизвестное и пропущенное имя — понятная ошибка, а не тихий
+//     UTF-8; что второй экземпляр передаёт первому и как тот это разбирает.
 // ============================================================================
 
 #include "directoryscanner.h"
@@ -22,6 +25,8 @@
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <cstdio>
+#include <initializer_list>
+#include <utility>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -168,6 +173,86 @@ static void testRecentFiles(const QTemporaryDir& tmp)
     CHECK(recent.paths().isEmpty(), "clear empties the list");
 }
 
+static void testCommandLine(const QTemporaryDir& tmp)
+{
+    using OpenRouting::parseCommandLine;
+    const QString a = QDir(tmp.path()).filePath("cmd-a.log");
+
+    {
+        const auto cl = parseCommandLine({ "--encoding", "cp1251", a, "-" });
+        CHECK(cl.error.isEmpty() && cl.encoding == TextEncoding::Windows1251,
+              "--encoding cp1251 is Windows-1251");
+        CHECK(cl.paths == QStringList({ a }) && cl.readStdin && !cl.newInstance,
+              "paths and stdin around --encoding");
+        const FileEncoding initial = OpenRouting::initialEncoding(cl);
+        CHECK(initial.source == FileEncoding::Source::User
+                  && initial.decoder.encoding() == TextEncoding::Windows1251
+                  && !initial.automatic().decided(),
+              "--encoding is a user choice; automatic detection is still undecided");
+    }
+    for (const auto& [name, expected] : std::initializer_list<std::pair<const char*, TextEncoding>>{
+             { "utf-8", TextEncoding::Utf8 }, { "UTF8", TextEncoding::Utf8 },
+             { "cp866", TextEncoding::Ibm866 }, { "IBM866", TextEncoding::Ibm866 },
+             { "koi8-r", TextEncoding::Koi8R }, { "koi8r", TextEncoding::Koi8R },
+             { "windows-1252", TextEncoding::Windows1252 }, { "Windows-1251", TextEncoding::Windows1251 } }) {
+        const auto cl = parseCommandLine({ QStringLiteral("--encoding=") + QLatin1String(name), a });
+        CHECK(cl.error.isEmpty() && cl.encoding == expected && cl.paths == QStringList({ a }),
+              QStringLiteral("--encoding=%1").arg(QLatin1String(name)));
+    }
+    {
+        const auto cl = parseCommandLine({ "--encoding", "latin-9", a });
+        CHECK(!cl.encoding && cl.error.contains("latin-9") && cl.error.contains("Windows-1251"),
+              "unknown name: a message naming it and the known ones: " + cl.error);
+        CHECK(cl.paths == QStringList({ a }), "unknown name: files still open");
+        CHECK(!OpenRouting::initialEncoding(cl).decided(),
+              "unknown name: files open with automatic detection, not silently as UTF-8");
+    }
+    {
+        const auto cl = parseCommandLine({ a, "--encoding" });
+        CHECK(!cl.encoding && !cl.error.isEmpty() && cl.paths == QStringList({ a }),
+              "missing name: a message");
+    }
+    // Имя забыли: следующий флаг или существующий файл не съедается.
+    {
+        QFile touch(a);
+        CHECK(touch.open(QIODevice::WriteOnly), "write cmd-a.log");
+        touch.close();
+        const auto stdinCl = parseCommandLine({ "--encoding", "-" });
+        CHECK(stdinCl.readStdin && !stdinCl.encoding && !stdinCl.error.isEmpty(),
+              "--encoding - : stdin is still read, the missing name is reported");
+        const auto fileCl = parseCommandLine({ "--encoding", a });
+        CHECK(fileCl.paths == QStringList({ a }) && !fileCl.error.isEmpty(),
+              "--encoding <existing file>: the file is opened, the missing name is reported");
+        const auto flagCl = parseCommandLine({ "--encoding", "--new-instance", a });
+        CHECK(flagCl.newInstance && flagCl.paths == QStringList({ a }), "--encoding --new-instance");
+    }
+    {
+        const auto cl = parseCommandLine({ "--new-instance", a });
+        CHECK(cl.newInstance && cl.error.isEmpty() && !cl.encoding
+                  && !OpenRouting::initialEncoding(cl).decided(),
+              "no --encoding: automatic detection");
+    }
+    // Второй экземпляр: имя как дано (ошибку покажет окно первого), пути —
+    // абсолютные; первый разбирает список тем же разбором.
+    {
+        const QString cwd = QDir::currentPath();
+        QDir::setCurrent(tmp.path());
+        const auto cl = parseCommandLine({ "--encoding", "koi8r", "cmd-a.log" });
+        const QStringList forwarded = OpenRouting::forwardedArguments(cl);
+        QDir::setCurrent(cwd);
+        const auto received = parseCommandLine(forwarded);
+        CHECK(received.encoding == TextEncoding::Koi8R && received.error.isEmpty()
+                  && received.paths == QStringList({ QDir::cleanPath(a) }),
+              "forwarded to the first instance: " + forwarded.join(' '));
+        const auto bad = parseCommandLine(OpenRouting::forwardedArguments(
+            parseCommandLine({ "--encoding=nope", a })));
+        CHECK(!bad.encoding && bad.error.contains("nope"),
+              "an unknown name reaches the first instance and is reported there");
+        const auto plain = OpenRouting::forwardedArguments(parseCommandLine({ a }));
+        CHECK(plain == QStringList({ QDir::cleanPath(a) }), "no --encoding — only paths");
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -182,6 +267,7 @@ int main(int argc, char** argv)
     testPlan(tmp);
     testFolderStartsScan(tmp);
     testRecentFiles(tmp);
+    testCommandLine(tmp);
 
     if (failures == 0)
         std::printf("open_routing: OK\n");
