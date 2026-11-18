@@ -3,6 +3,7 @@
 
 #include "logentry.h"
 #include "logscan.h"
+#include "recordid.h"
 #include "textquery.h"
 #include <QDateTime>
 #include <QPair>
@@ -81,6 +82,22 @@ public:
     // видно ни одной строки. Индексный бэкенд — двоичный поиск.
     virtual int nearestVisibleRowForLine(qint64 lineNumber,
                                          const LogFile* sourceFile) const = 0;
+    // ---- Ключ строки (R-1) ------------------------------------------------------
+    // Ключ видимой строки; невалидный — строки нет. Резидентный бэкенд —
+    // O(1), индексный — два чтения индекса.
+    virtual RecordKey keyAt(int visibleRow) const = 0;
+    // Видимая строка ключа; -1 — строка скрыта фильтром или ключ не
+    // действителен (строки нет в документе с теми же id записи и меткой,
+    // см. recordid.h). O(log N) на обоих бэкендах; индексный в тождественном
+    // режиме — O(1).
+    virtual int rowForKey(const RecordKey& key) const = 0;
+    // Ближайшая видимая строка к строке ключа — та же семантика, что у
+    // nearestVisibleRow и nearestVisibleRowForLine: видна — она сама; скрыта
+    // фильтром — следующая видимая за её МЕСТОМ в порядке вкладки, а за
+    // концом — последняя видимая. -1 — ключ не действителен или не видно ни
+    // одной строки. Цена — как у rowForKey.
+    virtual int nearestRowForKey(const RecordKey& key) const = 0;
+
     // Синхронный поиск текста (быстрый поиск: подстрока, слово целиком,
     // регекс) в видимых строках; -1 — не найдено. Одна реализация на оба
     // бэкенда — LogScanSnapshot::findRowWithText, та же, что у фонового

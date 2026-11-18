@@ -128,6 +128,48 @@ static void checkAppendInParts(const QDir& dir, const QString& name, const QStri
           name + ": rewritten file is reloaded from scratch: " + rows(model).join(" | "));
 }
 
+// Номера физических строк на живой вкладке (R-1): идентификатор строки стоит
+// на её номере, поэтому оба бэкенда нумеруют строки как файл — с пустой
+// последней строкой, CRLF, строкой, дописанной частями, и хвостом без '\n'.
+// Эталон — разбиение байтов файла (testdocs::expectedPhysicalLines).
+static void checkLineNumbers(const QDir& dir, const QString& name, const QString& schema)
+{
+    QByteArray bytes = record(0, "INFO", "first") + record(1, "ERROR", "second") + "\n";
+    const QString path = testdocs::writeFile(dir, name + "-lines.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.addLogFile(path);
+    CHECK(settled(tab), name + " line numbers: initial load");
+    const LogModel& model = *tab.model();
+
+    const auto compare = [&](const QString& step) {
+        const QString expected = testdocs::expectedPhysicalLines(bytes).join(" | ");
+        const QString actual = testdocs::numberedLines(model).join(" | ");
+        CHECK(actual == expected, name + " line numbers, " + step + ":\n    file: " + expected
+                                      + "\n    tab:  " + actual);
+    };
+    const auto append = [&](const QByteArray& chunk, const QString& step) {
+        bytes += chunk;
+        CHECK(testdocs::appendToFile(path, chunk), name + ": append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + " line numbers: reload settles");
+        compare(step);
+    };
+
+    compare("blank last line");
+    append(record(2, "WARN", "after blank"), "record after the blank last line");
+    append("    at part", "a line without '\\n'");
+    append("ial\n\n", "the line completed, then a blank line");
+    append(QByteArray(record(3, "INFO", "crlf")).replace("\n", "\r\n") + "\r\n",
+           "CRLF line and a blank CRLF line");
+    append("    left\rright\n", "a lone CR inside a line");
+    append("tail without newline", "a provisional tail");
+    append("\n" + record(4, "INFO", "last"), "the tail completed");
+    CHECK(tab.model()->isIndexedBackend() == (name == QStringLiteral("indexed")),
+          name + " line numbers: the tab stayed on its backend");
+}
+
 // 400 строк: каждая третья — ERROR, NEEDLE на строках 30, 150 и 300 (все ERROR).
 static QByteArray jumpFixture()
 {
@@ -640,6 +682,7 @@ int main(int argc, char** argv)
 
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
+    checkLineNumbers(dir, QStringLiteral("resident"), schema);
     checkJumps(dir, QStringLiteral("resident"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("resident"), schema);
     checkWideTail(dir, QStringLiteral("utf16le"), schema, QStringConverter::Utf16LE,
@@ -652,6 +695,7 @@ int main(int argc, char** argv)
     checkWideAboveThreshold(dir, schema);
     settings.setIndexedThresholdMB(0);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
+    checkLineNumbers(dir, QStringLiteral("indexed"), schema);
     checkJumps(dir, QStringLiteral("indexed"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);
 

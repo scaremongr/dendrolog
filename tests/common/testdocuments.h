@@ -27,6 +27,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QMap>
 #include <QObject>
 #include <QRandomGenerator>
 #include <QStringList>
@@ -495,6 +496,56 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     for (const auto& batch : batches)
         doc.model->appendEntries(batch);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Номера физических строк (R-1): эталон — разбиение байтов файла. Строка — то,
+// что кончается '\n' ('\r' перед ним снимается), плюс хвост без '\n'; пустая
+// строка — тоже строка, в том числе последняя; за завершающим '\n' строки нет.
+// Сверяется в виде «номер: текст», по возрастанию номера (порядок строк
+// одно-файловой вкладки у бэкендов законно разный).
+// ---------------------------------------------------------------------------
+
+inline QStringList numbered(const QStringList& lines)
+{
+    QStringList out;
+    for (int i = 0; i < lines.size(); ++i)
+        out << QStringLiteral("%1: %2").arg(i + 1).arg(lines[i]);
+    return out;
+}
+
+inline QStringList expectedPhysicalLines(QByteArray bytes)
+{
+    if (bytes.startsWith("\xEF\xBB\xBF"))
+        bytes.remove(0, 3);
+    QList<QByteArray> parts = bytes.split('\n');
+    if (!parts.isEmpty() && parts.last().isEmpty())
+        parts.removeLast(); // за завершающим '\n' строки нет
+    QStringList lines;
+    for (QByteArray& part : parts) {
+        if (part.endsWith('\r'))
+            part.chop(1);
+        lines << QString::fromUtf8(part);
+    }
+    return numbered(lines);
+}
+
+// Строки документа по номерам из ключа строки (LogModel::keyAt). Повтор номера
+// помечается, а не теряется.
+inline QStringList numberedLines(const LogModel& model)
+{
+    QMap<qint64, QString> byLine;
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const RecordKey key = model.keyAt(row);
+        if (byLine.contains(key.line))
+            byLine[key.line] += QStringLiteral(" <ПОВТОР НОМЕРА> ") + model.messageAt(row);
+        else
+            byLine.insert(key.line, model.messageAt(row));
+    }
+    QStringList out;
+    for (auto it = byLine.constBegin(); it != byLine.constEnd(); ++it)
+        out << QStringLiteral("%1: %2").arg(it.key()).arg(it.value());
+    return out;
 }
 
 } // namespace testdocs

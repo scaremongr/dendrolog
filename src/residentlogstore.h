@@ -42,6 +42,9 @@ public:
     int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
                           bool* visible = nullptr) const override;
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const override;
+    RecordKey keyAt(int visibleRow) const override;
+    int rowForKey(const RecordKey& key) const override;
+    int nearestRowForKey(const RecordKey& key) const override;
     LogScanSnapshot scanSnapshot(bool filteredOnly) const override;
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
@@ -67,6 +70,10 @@ public:
     const QVector<std::shared_ptr<LogEntry>>& visibleEntries() const { return m_filteredEntries; }
 
 private:
+    // Позиция ключа в списке list (m_allEntries или m_filteredEntries):
+    // lower_bound по ключу сортировки; *exact — на ней стоит строка ключа.
+    static int lowerBoundForKey(const QVector<std::shared_ptr<LogEntry>>& list,
+                                const RecordKey& key, bool* exact);
     bool passesFilters(const std::shared_ptr<LogEntry>& entry) const;
     void rebuildFilteredEntries();
     void mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);

@@ -838,13 +838,9 @@ int IndexedLogStore::placeAmongVisible(int logicalEntryId, const LogFile* source
     if (first < 0 || m_identityVisible)
         return -1; // записи нет в данных (при тождестве скрытых не бывает)
 
-    // Запись скрыта: её место — нижняя граница в видимом списке, как в
+    // Запись скрыта: её место — место её первой строки среди видимых, как в
     // nearestVisibleRow, но без прижатия к последней строке.
-    const RowRef ref = makeRef(fileId, first);
-    const auto it = std::lower_bound(m_visibleRefs.constBegin(), m_visibleRefs.constEnd(),
-                                     ref,
-                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
-    return int(it - m_visibleRefs.constBegin());
+    return visiblePlace(makeRef(fileId, first));
 }
 
 int IndexedLogStore::nearestVisibleRowForLine(qint64 lineNumber,
@@ -864,14 +860,104 @@ int IndexedLogStore::nearestVisibleRowForLine(qint64 lineNumber,
     if (total <= 0)
         return -1;
     const qint64 line = qBound(qint64(0), lineNumber - 1, total - 1);
-    if (m_identityVisible && identityAll())
-        return int(line);
+    return qMin(visiblePlace(makeRef(fileId, line)), visible - 1);
+}
 
-    const QVector<RowRef>& list = m_identityVisible ? m_allRefs : m_visibleRefs;
-    const auto it = std::lower_bound(list.constBegin(), list.constEnd(),
-                                     makeRef(fileId, line),
+// ---------------------------------------------------------------------------
+// Ключ строки (R-1)
+// ---------------------------------------------------------------------------
+
+bool IndexedLogStore::refShown(RowRef ref) const
+{
+    if (identityAll())
+        return refLine(ref) < m_shownAllCount;
+    const auto it = std::lower_bound(m_allRefs.constBegin(), m_allRefs.constEnd(), ref,
                                      [this](RowRef a, RowRef b) { return rowLess(a, b); });
-    return qMin(int(it - list.constBegin()), int(list.size()) - 1);
+    return it != m_allRefs.constEnd() && *it == ref;
+}
+
+int IndexedLogStore::visiblePlace(RowRef ref, bool* visible) const
+{
+    if (m_identityVisible && identityAll()) {
+        // Тождество: строка видна, если показана; место — её номер.
+        const qint64 line = refLine(ref);
+        if (visible)
+            *visible = line < m_shownAllCount;
+        return int(qMin(line, m_shownAllCount));
+    }
+    const QVector<RowRef>& list = m_identityVisible ? m_allRefs : m_visibleRefs;
+    const auto it = std::lower_bound(list.constBegin(), list.constEnd(), ref,
+                                     [this](RowRef a, RowRef b) { return rowLess(a, b); });
+    if (visible)
+        *visible = it != list.constEnd() && *it == ref;
+    return int(it - list.constBegin());
+}
+
+bool IndexedLogStore::refForKey(const RecordKey& key, RowRef* ref) const
+{
+    if (!key.isValid())
+        return false;
+    const int fileId = fileIdOf(key.file.get());
+    if (fileId < 0)
+        return false;
+    const LineIndex& index = *m_files[fileId].index;
+    const qint64 line = key.line - 1;
+    if (line >= index.lineCount())
+        return false;
+    // Ключ совпадает целиком, как у резидентного бэкенда (его поиск идёт по
+    // id записи и метке): строка того же номера из другой записи — не она.
+    const quint32 logical = index.logicalId(line);
+    if (key.logicalEntryId < 0 || logical != quint32(key.logicalEntryId))
+        return false;
+    const qint64 ms = index.timestampMs(logical);
+    if ((ms >= 0 ? ms : RecordKey::kNoTimestamp) != key.timestampMs)
+        return false;
+    *ref = makeRef(fileId, line);
+    return true;
+}
+
+RecordKey IndexedLogStore::keyAt(int visibleRow) const
+{
+    if (visibleRow < 0 || visibleRow >= visibleCount())
+        return {};
+    const RowRef ref = rowToRef(visibleRow);
+    const IndexedFile& f = m_files[refFile(ref)];
+    const qint64 line = refLine(ref);
+    const quint32 logical = f.index->logicalId(line);
+    const qint64 ms = f.index->timestampMs(logical);
+    RecordKey key;
+    key.file = f.logFile;
+    key.line = line + 1;
+    key.logicalEntryId = int(logical);
+    key.timestampMs = ms >= 0 ? ms : RecordKey::kNoTimestamp;
+    return key;
+}
+
+int IndexedLogStore::rowForKey(const RecordKey& key) const
+{
+    RowRef ref = 0;
+    if (!refForKey(key, &ref))
+        return -1;
+    bool visible = false;
+    const int place = visiblePlace(ref, &visible);
+    return visible ? place : -1;
+}
+
+int IndexedLogStore::nearestRowForKey(const RecordKey& key) const
+{
+    const int count = visibleCount();
+    RowRef ref = 0;
+    if (count == 0 || !refForKey(key, &ref))
+        return -1;
+    bool visible = false;
+    const int place = visiblePlace(ref, &visible);
+    if (visible)
+        return place;
+    // Скрытая строка: есть ли она среди показанных. Без фильтра видимые и
+    // есть все показанные — второй двоичный поиск не нужен.
+    if (m_identityVisible || !refShown(ref))
+        return -1;
+    return qMin(place, count - 1);
 }
 
 namespace {

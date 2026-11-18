@@ -55,6 +55,8 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QHash>
+#include <QMap>
 #include <QObject>
 #include <QRandomGenerator>
 #include <QSet>
@@ -361,6 +363,172 @@ static void compareEntryLookup(const LogModel& res, const LogModel& idx,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ключ строки (R-1): keyAt / rowForKey / nearestRowForKey.
+// ---------------------------------------------------------------------------
+
+// Все строки документа без фильтра — снимаются сразу после загрузки, пока
+// фильтр не применён: часть из них конфигурации потом скроют.
+struct AllLines {
+    QVector<RecordKey> keys;   // в порядке вкладки
+    QVector<int>       fileIndex; // номер файла ключа в Document::files
+};
+
+static AllLines collectAllLines(const Document& doc)
+{
+    AllLines all;
+    const int rows = doc.model->rowCount();
+    all.keys.reserve(rows);
+    all.fileIndex.reserve(rows);
+    for (int row = 0; row < rows; ++row) {
+        const RecordKey key = doc.model->keyAt(row);
+        int fi = -1;
+        for (int i = 0; i < doc.files.size(); ++i)
+            if (doc.files[i] == key.file)
+                fi = i;
+        all.keys.append(key);
+        all.fileIndex.append(fi);
+    }
+    return all;
+}
+
+static QString describe(const RecordKey& k)
+{
+    if (!k.isValid())
+        return QStringLiteral("<нет ключа>");
+    return QStringLiteral("%1:%2 #%3 @%4")
+        .arg(QFileInfo(k.file->filePath).fileName())
+        .arg(k.line)
+        .arg(k.logicalEntryId)
+        .arg(k.hasTimestamp() ? QString::number(k.timestampMs) : QStringLiteral("-"));
+}
+
+// Ключи одного бэкенда против перебора, без обращения к поиску по ключу:
+// видимая строка — по равенству ключей при проходе всех строк вкладки вместе
+// с видимыми (видимые — упорядоченная подпоследовательность всех), место
+// скрытой — число видимых перед ней. Порядок вкладки у каждого бэкенда свой,
+// поэтому сверка годится и для одно-файловой вкладки «не по порядку».
+static void checkKeysAgainstScan(const LogModel& m, const AllLines& all, const QString& backend)
+{
+    const int rows = m.rowCount();
+    QVector<RecordKey> visible(rows);
+    for (int r = 0; r < rows; ++r) {
+        visible[r] = m.keyAt(r);
+        CHECK(visible[r].isValid(), QStringLiteral("%1: keyAt(%2) невалиден").arg(backend).arg(r));
+        CHECK(m.rowForKey(visible[r]) == r,
+              QStringLiteral("%1: rowForKey(keyAt(%2) = %3) = %4")
+                  .arg(backend).arg(r).arg(describe(visible[r])).arg(m.rowForKey(visible[r])));
+    }
+    CHECK(!m.keyAt(-1).isValid() && !m.keyAt(rows).isValid(),
+          backend + QStringLiteral(": keyAt за границами обязан быть невалидным"));
+    CHECK(m.rowForKey(RecordKey{}) == -1 && m.nearestRowForKey(RecordKey{}) == -1,
+          backend + QStringLiteral(": невалидный ключ"));
+
+    int j = 0;
+    for (int i = 0; i < all.keys.size(); ++i) {
+        if (g_contextFailures > kFailuresPerContext)
+            return;
+        const RecordKey& key = all.keys[i];
+        const bool isVisible = j < rows && visible[j] == key;
+        const int expectedExact = isVisible ? j : -1;
+        const int expectedNearest = rows == 0 ? -1 : qMin(j, rows - 1);
+        const int exact = m.rowForKey(key);
+        const int nearest = m.nearestRowForKey(key);
+        CHECK(exact == expectedExact,
+              QStringLiteral("%1: rowForKey(%2) = %3, перебором %4")
+                  .arg(backend, describe(key)).arg(exact).arg(expectedExact));
+        CHECK(nearest == expectedNearest,
+              QStringLiteral("%1: nearestRowForKey(%2) = %3, перебором %4")
+                  .arg(backend, describe(key)).arg(nearest).arg(expectedNearest));
+
+        // Ключ с чужой записью или меткой той же строки — не она (выборочно:
+        // каждая пятая строка, цена прогона).
+        if (i % 5 != 0) {
+            if (isVisible)
+                ++j;
+            continue;
+        }
+        RecordKey stale = key;
+        stale.logicalEntryId += 1;
+        CHECK(m.rowForKey(stale) == -1 && m.nearestRowForKey(stale) == -1,
+              QStringLiteral("%1: ключ с другим id записи нашёл строку (%2)")
+                  .arg(backend, describe(key)));
+        stale = key;
+        stale.timestampMs = key.hasTimestamp() ? key.timestampMs + 1 : 0;
+        CHECK(m.rowForKey(stale) == -1,
+              QStringLiteral("%1: ключ с другой меткой нашёл строку (%2)")
+                  .arg(backend, describe(key)));
+        if (isVisible)
+            ++j;
+    }
+}
+
+// Сверка ключей между бэкендами. Строки сопоставляются по (файл, номер
+// строки), а не по номеру ряда: так сверка годится и там, где порядок
+// бэкендов законно расходится (sameOrder = false), — тогда сравниваются
+// только видимость строки и сам ключ, ряды — нет.
+static void compareRecordKeys(const Document& res, const Document& idx,
+                              const AllLines& resAll, const AllLines& idxAll,
+                              bool sameOrder)
+{
+    const LogModel& rm = *res.model;
+    const LogModel& im = *idx.model;
+
+    checkKeysAgainstScan(rm, resAll, QStringLiteral("резидентный"));
+    checkKeysAgainstScan(im, idxAll, QStringLiteral("индексный"));
+
+    QHash<QPair<int, qint64>, int> idxByLine;
+    for (int i = 0; i < idxAll.keys.size(); ++i)
+        idxByLine.insert(qMakePair(idxAll.fileIndex[i], idxAll.keys[i].line), i);
+    CHECK_EQ(resAll.keys.size(), idxAll.keys.size(), QStringLiteral("число строк документа"));
+
+    for (int i = 0; i < resAll.keys.size(); ++i) {
+        if (g_contextFailures > kFailuresPerContext)
+            return;
+        const RecordKey& rk = resAll.keys[i];
+        const auto found = idxByLine.constFind(qMakePair(resAll.fileIndex[i], rk.line));
+        CHECK(found != idxByLine.constEnd(),
+              QStringLiteral("строки %1 нет на индексном бэкенде").arg(describe(rk)));
+        if (found == idxByLine.constEnd())
+            continue;
+        const RecordKey& ik = idxAll.keys[found.value()];
+        const QString what = describe(rk);
+
+        CHECK_EQ(rk.logicalEntryId, ik.logicalEntryId, what + QStringLiteral(": id записи"));
+        CHECK_EQ(rk.timestampMs, ik.timestampMs, what + QStringLiteral(": метка"));
+        CHECK_EQ(rk.file->filePath, ik.file->filePath, what + QStringLiteral(": файл"));
+
+        const int rr = rm.rowForKey(rk);
+        const int ir = im.rowForKey(ik);
+        CHECK_EQ(rr >= 0, ir >= 0, what + QStringLiteral(": строка видна"));
+        if (rr >= 0 && ir >= 0) {
+            CHECK_EQ(rm.messageAt(rr), im.messageAt(ir), what + QStringLiteral(": текст строки"));
+            CHECK_EQ(rm.keyAt(rr).line, im.keyAt(ir).line, what + QStringLiteral(": найденная строка"));
+        }
+        if (sameOrder) {
+            CHECK_EQ(rr, ir, QStringLiteral("rowForKey(%1)").arg(what));
+            CHECK_EQ(rm.nearestRowForKey(rk), im.nearestRowForKey(ik),
+                     QStringLiteral("nearestRowForKey(%1)").arg(what));
+        }
+    }
+
+    // Видимые ряды: ключ один и тот же на обоих бэкендах.
+    if (sameOrder && rm.rowCount() == im.rowCount()) {
+        for (int row = 0; row < rm.rowCount(); ++row) {
+            if (g_contextFailures > kFailuresPerContext)
+                return;
+            const RecordKey rk = rm.keyAt(row);
+            const RecordKey ik = im.keyAt(row);
+            const QString what = QStringLiteral("keyAt(%1)").arg(row);
+            CHECK_EQ(rk.line, ik.line, what + QStringLiteral(".line"));
+            CHECK_EQ(rk.logicalEntryId, ik.logicalEntryId, what + QStringLiteral(".logicalEntryId"));
+            CHECK_EQ(rk.timestampMs, ik.timestampMs, what + QStringLiteral(".timestampMs"));
+            CHECK_EQ(rk.file ? rk.file->filePath : QString(), ik.file ? ik.file->filePath : QString(),
+                     what + QStringLiteral(".file"));
+        }
+    }
+}
+
 // Быстрый поиск вперёд/назад, с заворотом и без.
 static void compareSearch(const LogModel& res, const LogModel& idx)
 {
@@ -611,7 +779,8 @@ static QStringList visibleTextsSorted(const LogModel& model)
 // стоимость должна быть видна, а не выясняться таймаутом CTest.
 struct StageTiming {
     qint64 rows = 0, navigation = 0, search = 0, snapshots = 0,
-           records = 0, divergence = 0, apply = 0, load = 0, levelSearch = 0;
+           records = 0, divergence = 0, apply = 0, load = 0, levelSearch = 0,
+           keys = 0;
 };
 static StageTiming g_timing;
 
@@ -621,7 +790,8 @@ static void printTiming(const QString& tag)
 {
     std::fprintf(stdout,
                  "  [%s] накопленно, мс: загрузка=%lld фильтры=%lld строки=%lld "
-                 "навигация=%lld поиск=%lld уровни=%lld снапшоты=%lld записи=%lld оценки=%lld\n",
+                 "навигация=%lld поиск=%lld уровни=%lld снапшоты=%lld записи=%lld оценки=%lld "
+                 "ключи=%lld\n",
                  U8(tag),
                  static_cast<long long>(g_timing.load),
                  static_cast<long long>(g_timing.apply),
@@ -631,7 +801,8 @@ static void printTiming(const QString& tag)
                  static_cast<long long>(g_timing.levelSearch),
                  static_cast<long long>(g_timing.snapshots),
                  static_cast<long long>(g_timing.records),
-                 static_cast<long long>(g_timing.divergence));
+                 static_cast<long long>(g_timing.divergence),
+                 static_cast<long long>(g_timing.keys));
     std::fflush(stdout);
 }
 
@@ -931,6 +1102,9 @@ static void runFixture(const QString& fixtureName, const QStringList& paths,
             lookupProbes << res.model->keyForRow((i * rows) / 25);
     }
 
+    const AllLines resAll = collectAllLines(res);
+    const AllLines idxAll = collectAllLines(idx);
+
     const QPair<QDateTime, QDateTime> range = res.model->fullTimeRange();
 
     QVector<FilterConfig> configs = namedConfigs(range.first, range.second);
@@ -948,6 +1122,9 @@ static void runFixture(const QString& fixtureName, const QStringList& paths,
 
         compareAll(res, idx);
         compareEntryLookup(*res.model, *idx.model, lookupProbes, res.files, idx.files);
+        t.restart();
+        compareRecordKeys(res, idx, resAll, idxAll, /*sameOrder=*/true);
+        g_timing.keys += t.elapsed();
     }
 
     printTiming(fixtureName);
@@ -1073,6 +1250,9 @@ static void testSingleFileUnsortedLookups(const QString& unsortedPath,
     }
     CHECK(probes.size() > 50, QStringLiteral("мало записей в фикстуре: %1").arg(probes.size()));
 
+    const AllLines resAll = collectAllLines(res);
+    const AllLines idxAll = collectAllLines(idx);
+
     const QPair<QDateTime, QDateTime> range = res.model->fullTimeRange();
     for (const FilterConfig& cfg : namedConfigs(range.first, range.second)) {
         g_context = QStringLiteral("поиск записи / один файл, метки не по порядку / ") + cfg.name;
@@ -1080,6 +1260,9 @@ static void testSingleFileUnsortedLookups(const QString& unsortedPath,
 
         applyConfig(*res.model, cfg, fieldNames);
         applyConfig(*idx.model, cfg, fieldNames);
+
+        // Ключ строки: каждый бэкенд в своём порядке, сверка — по строкам.
+        compareRecordKeys(res, idx, resAll, idxAll, /*sameOrder=*/false);
 
         const int rows = idx.model->rowCount();
         QVector<int> rowId(rows);
@@ -1208,6 +1391,84 @@ static void testAttachWithActiveFilter(const QString& unsortedPath, const QStrin
     g_contextFailures = 0;
     CHECK(idx.model->rowCount() > 0, QStringLiteral("фильтр оставил строки"));
     compareVisibleRows(*res.model, *idx.model);
+}
+
+// ---------------------------------------------------------------------------
+// Номера физических строк (R-1): на номере строки стоит идентификатор, поэтому
+// оба бэкенда обязаны нумеровать строки одинаково — и так, как их видит
+// файл: строка — то, что кончается '\n' ('\r' перед ним снимается), плюс
+// хвост без '\n'; пустая строка — тоже строка, в том числе последняя; за
+// завершающим '\n' строки нет. Эталон — разбиение байтов
+// (testdocs::expectedPhysicalLines), а не один из бэкендов: общую ошибку
+// сверка бэкендов не увидит.
+// ---------------------------------------------------------------------------
+
+static void checkLineNumbers(const QString& what, const Document& res, const Document& idx,
+                             const QByteArray& bytes)
+{
+    const QString expected = expectedPhysicalLines(bytes).join(QStringLiteral(" | "));
+    const QString resLines = numberedLines(*res.model).join(QStringLiteral(" | "));
+    const QString idxLines = numberedLines(*idx.model).join(QStringLiteral(" | "));
+    CHECK(resLines == expected,
+          QStringLiteral("%1: резидентный бэкенд нумерует строки не так, как файл:\n"
+                         "    файл:        %2\n    резидентный: %3").arg(what, expected, resLines));
+    CHECK(idxLines == expected,
+          QStringLiteral("%1: индексный бэкенд нумерует строки не так, как файл:\n"
+                         "    файл:      %2\n    индексный: %3").arg(what, expected, idxLines));
+}
+
+static void testLineNumbers(const QDir& dir, const QString& schema)
+{
+    const QByteArray a = "2026-03-05 10:00:00.000 [w] INFO - first\n";
+    const QByteArray b = "2026-03-05 10:00:01.000 [w] ERROR - second\n";
+    const QByteArray cont = "    at continuation\n";
+    const QByteArray c = "2026-03-05 10:00:02.000 [w] WARN - third\n";
+
+    struct Case {
+        const char* name;
+        QByteArray initial;
+        QVector<QByteArray> appends; // дозаписи; файл перед каждой кончается '\n'
+    };
+    auto crlf = [](QByteArray s) { return s.replace("\n", "\r\n"); };
+    const QVector<Case> cases = {
+        { "LF", a + b + cont + c, { c } },
+        { "пустая строка в хвосте", a + b + "\n", { c, "\n", "\n\n" + a } },
+        { "несколько пустых строк в хвосте", a + "\n\n\n", { b } },
+        { "пустые строки в середине", a + "\n" + cont + "\n\n" + b, { "\n" + c } },
+        { "CRLF", crlf(a + b + cont + c), { crlf(c) } },
+        { "CRLF, пустая строка в хвосте", crlf(a + b + "\n"), { crlf(c) } },
+        { "оборванная последняя строка", a + b + "    at tail without newline", {} },
+        { "CRLF, оборванная последняя строка", crlf(a + b) + "2026-03-05 10:00:03.000 [w] INFO - cut", {} },
+        { "только перевод строки", "\n", { a } },
+        { "только пустые строки", "\n\n", { a } },
+        { "UTF-8 BOM", "\xEF\xBB\xBF" + a + b + "\n", { c } },
+        { "только UTF-8 BOM", "\xEF\xBB\xBF", { a } },
+        { "пустой файл", "", { a } },
+        { "одиночный \\r внутри строки", a + "    left\rright\n" + b, {} },
+    };
+
+    for (int n = 0; n < cases.size(); ++n) {
+        const Case& tc = cases[n];
+        g_context = QStringLiteral("номера строк / ") + QString::fromUtf8(tc.name);
+        g_contextFailures = 0;
+
+        QByteArray bytes = tc.initial;
+        const QString resPath = writeFile(dir, QStringLiteral("lines-%1-res.log").arg(n), bytes);
+        const QString idxPath = writeFile(dir, QStringLiteral("lines-%1-idx.log").arg(n), bytes);
+        Document res = loadResident({ resPath }, schema);
+        Document idx = loadIndexed({ idxPath }, schema);
+        checkLineNumbers(QStringLiteral("загрузка"), res, idx, bytes);
+
+        for (int k = 0; k < tc.appends.size(); ++k) {
+            const QByteArray& chunk = tc.appends[k];
+            bytes += chunk;
+            CHECK(appendResidentTail(res, 0, chunk, schema), QStringLiteral("резидентная дозапись"));
+            CHECK(appendIndexedTail(idx, 0, chunk, schema), QStringLiteral("индексная дозапись"));
+            settleChecked(*res.model);
+            settleChecked(*idx.model);
+            checkLineNumbers(QStringLiteral("дозапись %1").arg(k + 1), res, idx, bytes);
+        }
+    }
 }
 
 // F-12. Лог без слов уровня: запись начинает ведущая метка (позиция 0,
@@ -1342,6 +1603,7 @@ int main(int argc, char** argv)
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);
     testZonedMerge(dir, schema);
     testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);
+    testLineNumbers(dir, schema);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

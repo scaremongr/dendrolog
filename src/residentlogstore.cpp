@@ -489,6 +489,113 @@ int ResidentLogStore::nearestVisibleRowForLine(qint64 lineNumber,
     return qMin(found.row, int(m_filteredEntries.size()) - 1);
 }
 
+// ---------------------------------------------------------------------------
+// Ключ строки (R-1)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// «Запись строго раньше ключа» — зеркало LogEntry::operator< (время, путь
+// файла, id записи, номер строки), где правая сторона — ключ. Расхождение с
+// оператором проявится как ненайденная строка; ловит logstore_equivalence.
+bool entryLessKey(const std::shared_ptr<LogEntry>& entry, const RecordKey& key)
+{
+    if (!entry)
+        return false; // null — «большие», как в logEntryPtrLess
+    const LogEntry& e = *entry;
+
+    // 1. Время логической записи; без метки — в конец.
+    const bool entryTs = e.timestamp().isValid();
+    if (entryTs && key.hasTimestamp()) {
+        const qint64 ms = e.timestamp().toMSecsSinceEpoch();
+        if (ms != key.timestampMs)
+            return ms < key.timestampMs;
+    } else if (entryTs) {
+        return true;
+    } else if (key.hasTimestamp()) {
+        return false;
+    }
+
+    // 2. Файл: разные экземпляры — по пути.
+    const LogFile* ef = e.sourceFile().get();
+    const LogFile* kf = key.file.get();
+    if (ef && kf && ef != kf) {
+        if (ef->filePath != kf->filePath)
+            return ef->filePath < kf->filePath;
+    } else if (ef && !kf) {
+        return true;
+    } else if (!ef && kf) {
+        return false;
+    }
+
+    // 3. Запись, 4. строка.
+    if (e.logicalEntryId() != key.logicalEntryId)
+        return e.logicalEntryId() < key.logicalEntryId;
+    return e.originalLineNumber() < key.line;
+}
+
+bool entryMatchesKey(const LogEntry& e, const RecordKey& key)
+{
+    if (e.sourceFile() != key.file || e.originalLineNumber() != key.line
+        || e.logicalEntryId() != key.logicalEntryId)
+        return false;
+    const qint64 ms = e.timestamp().isValid() ? e.timestamp().toMSecsSinceEpoch()
+                                              : RecordKey::kNoTimestamp;
+    return ms == key.timestampMs;
+}
+
+} // namespace
+
+int ResidentLogStore::lowerBoundForKey(const QVector<std::shared_ptr<LogEntry>>& list,
+                                       const RecordKey& key, bool* exact)
+{
+    const auto it = std::lower_bound(list.constBegin(), list.constEnd(), key, entryLessKey);
+    *exact = it != list.constEnd() && *it && entryMatchesKey(**it, key);
+    return int(it - list.constBegin());
+}
+
+RecordKey ResidentLogStore::keyAt(int visibleRow) const
+{
+    if (visibleRow < 0 || visibleRow >= m_filteredEntries.size())
+        return {};
+    const auto& e = m_filteredEntries[visibleRow];
+    if (!e)
+        return {};
+    RecordKey key;
+    key.file = e->sourceFile();
+    key.line = e->originalLineNumber();
+    key.logicalEntryId = e->logicalEntryId();
+    if (e->timestamp().isValid())
+        key.timestampMs = e->timestamp().toMSecsSinceEpoch();
+    return key;
+}
+
+int ResidentLogStore::rowForKey(const RecordKey& key) const
+{
+    if (!key.isValid())
+        return -1;
+    bool exact = false;
+    const int row = lowerBoundForKey(m_filteredEntries, key, &exact);
+    return exact ? row : -1;
+}
+
+int ResidentLogStore::nearestRowForKey(const RecordKey& key) const
+{
+    if (!key.isValid() || m_filteredEntries.isEmpty())
+        return -1;
+    // Видимый список — упорядоченная подпоследовательность всех записей,
+    // поэтому нижняя граница в нём и есть место строки среди видимых.
+    bool exact = false;
+    const int place = lowerBoundForKey(m_filteredEntries, key, &exact);
+    if (exact)
+        return place;
+    bool inData = false;
+    lowerBoundForKey(m_allEntries, key, &inData);
+    if (!inData)
+        return -1;
+    return qMin(place, int(m_filteredEntries.size()) - 1);
+}
+
 LogScanSnapshot ResidentLogStore::scanSnapshot(bool filteredOnly) const
 {
     return LogScanSnapshot::fromEntries(filteredOnly ? m_filteredEntries

@@ -3,6 +3,7 @@
 
 #include "logentry.h"
 #include "logscan.h"
+#include "recordid.h"
 #include "filterruleset.h"
 #include "textmatchhighlighter.h"
 #include <QAbstractListModel>
@@ -177,6 +178,11 @@ public:
                           bool* visible = nullptr) const;
     // Видимая строка для строки lineNumber (с 1) файла; см. LogStore.
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const;
+    // Ключ строки (R-1, recordid.h): LogStore::keyAt / rowForKey /
+    // nearestRowForKey.
+    RecordKey keyAt(int visibleRow) const;
+    int rowForKey(const RecordKey& key) const;
+    int nearestRowForKey(const RecordKey& key) const;
 
     // Ближайшая видимая строка с уровнем из levels или -1 (LogStore::findRowWithLevel).
     int findRowWithLevel(LogLevelMask levels, int startRow, bool forward,

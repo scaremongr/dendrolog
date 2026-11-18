@@ -105,6 +105,26 @@ qsizetype afterLastNewline(const QByteArray& chunk, CodeUnit unit)
     return -1;
 }
 
+// Файл — ровно метка порядка байтов, без единой строки.
+bool isOnlyByteOrderMark(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray head = file.read(5);
+    static const QByteArray kMarks[] = {
+        QByteArray("\xEF\xBB\xBF", 3),        // UTF-8
+        QByteArray("\xFF\xFE", 2),            // UTF-16 LE
+        QByteArray("\xFE\xFF", 2),            // UTF-16 BE
+        QByteArray("\xFF\xFE\x00\x00", 4),    // UTF-32 LE
+        QByteArray("\x00\x00\xFE\xFF", 4),    // UTF-32 BE
+    };
+    for (const QByteArray& mark : kMarks)
+        if (head == mark)
+            return true;
+    return false;
+}
+
 } // namespace
 
 void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
@@ -123,8 +143,11 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         return;
     }
 
+    // Без QIODevice::Text: он выбрасывает из текста КАЖДЫЙ '\r', а не только
+    // перед '\n', — текст строки разошёлся бы с индексным путём. "\r\n"
+    // снимает сам readLine.
     QFile file(logFile->filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::ReadOnly)) {
         emit parsingFailed(logFile);
         return;
     }
@@ -168,9 +191,17 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     while (!in.atEnd()) {
         if (m_abort.load(std::memory_order_relaxed))
             return; // Parser is shutting down — drop the rest.
+        // Строка — то, что кончается '\n', плюс хвост без него; пустая
+        // последняя строка ("…\n\n") — тоже строка. За завершающим '\n'
+        // readLine строки не отдаёт (atEnd), поэтому пропускать здесь нечего:
+        // прежний пропуск пустой строки у конца терял настоящую пустую строку
+        // и сдвигал номера всех дописанных за ней — номера разошлись бы с
+        // индексным путём, а на номере строки стоит её идентификатор (R-1).
         line = in.readLine();
-        // Skip the phantom empty line that QTextStream produces after a trailing newline.
-        if (line.isEmpty() && in.atEnd())
+        // Исключение одно: файл из одного BOM. readLine съедает BOM и отдаёт
+        // пустую строку, которой в файле нет.
+        if (line.isEmpty() && in.atEnd() && startOffset == 0 && totalParsedEntries == 0
+            && isOnlyByteOrderMark(logFile->filePath))
             break;
         bytesRead += line.length() + 1; // Приблизительный подсчет, +1 для \n
         fileLineNumber++;

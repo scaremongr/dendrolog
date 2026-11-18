@@ -87,6 +87,9 @@ public:
     int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
                           bool* visible = nullptr) const override;
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const override;
+    RecordKey keyAt(int visibleRow) const override;
+    int rowForKey(const RecordKey& key) const override;
+    int nearestRowForKey(const RecordKey& key) const override;
     LogScanSnapshot scanSnapshot(bool filteredOnly) const override;
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
@@ -125,6 +128,17 @@ private:
     // Первая строка логической записи id в файле (logicalId по строкам не
     // убывает — двоичный поиск); -1, если записи в файле нет.
     static qint64 firstLineOfRecord(const LineIndex& index, quint32 id);
+    // Строка ключа, если файл подключён, строка есть в индексе, а id записи
+    // и метка совпадают с ним. Показана ли строка модели — не проверяет
+    // (refShown): видимая строка показана заведомо.
+    bool refForKey(const RecordKey& key, RowRef* ref) const;
+    // Строка ref показана модели (входит во все строки вкладки).
+    bool refShown(RowRef ref) const;
+    // МЕСТО строки ref среди видимых в порядке вкладки (rowLess): её номер,
+    // если видна (*visible = true), иначе число видимых строк перед ней.
+    // Общая основа nearestRowForKey, nearestVisibleRowForLine и места
+    // скрытой записи — одна семантика «ближайшей видимой» на весь стор.
+    int visiblePlace(RowRef ref, bool* visible = nullptr) const;
     QStringList filePaths() const;
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).

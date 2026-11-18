@@ -361,6 +361,21 @@ int LogModel::nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceF
     return m_store->nearestVisibleRowForLine(lineNumber, sourceFile);
 }
 
+RecordKey LogModel::keyAt(int visibleRow) const
+{
+    return m_store->keyAt(visibleRow);
+}
+
+int LogModel::rowForKey(const RecordKey& key) const
+{
+    return m_store->rowForKey(key);
+}
+
+int LogModel::nearestRowForKey(const RecordKey& key) const
+{
+    return m_store->nearestRowForKey(key);
+}
+
 int LogModel::findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
                                bool wrapAround) const
 {

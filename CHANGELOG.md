@@ -6,6 +6,12 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A blank last line of a file is now shown in tabs below the large-file
+  threshold, as it already was above it. Before, the line was dropped, and
+  lines appended to the file after it got line numbers one too low. A lone
+  carriage return inside a line is no longer removed from its text.
+
 ## [0.5.0] — 2026-11-18
 
 ### Added

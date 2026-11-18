@@ -64,6 +64,7 @@ set(DENDROLOG_CORE_SOURCES
     src/logmodel.h
     src/logmodel.cpp
     src/logstore.h
+    src/recordid.h
     src/residentlogstore.h
     src/residentlogstore.cpp
     src/indexedlogstore.h
