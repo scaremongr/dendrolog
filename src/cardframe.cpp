@@ -1,5 +1,7 @@
 #include "cardframe.h"
 
+#include <QApplication>
+
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -138,6 +140,32 @@ void CardFrame::applyFrameStyle()
             "background-color: %1; border: none; border-radius: 2px;")
                 .arg(m_accent.isValid() ? m_accent.name() : neutral));
     }
+}
+
+// ============================================================
+// MutedLabel
+// ============================================================
+
+MutedLabel::MutedLabel(const QString& text, QWidget* parent)
+    : QLabel(text, parent)
+{
+    applyColor();
+}
+
+void MutedLabel::changeEvent(QEvent* event)
+{
+    QLabel::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ParentChange)
+        applyColor();
+}
+
+void MutedLabel::applyColor()
+{
+    const QPalette source = parentWidget() ? parentWidget()->palette() : QApplication::palette();
+    const QString style = QStringLiteral("color: %1;").arg(CardFrame::mutedTextColor(source).name());
+    // Смена таблицы стилей сама шлёт PaletteChange — без сравнения был бы цикл.
+    if (style != styleSheet())
+        setStyleSheet(style);
 }
 
 // ============================================================

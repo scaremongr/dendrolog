@@ -1,0 +1,1 @@
+dendrolog_add_test(quick_search_field LIBRARIES dendrolog_widgets TIMEOUT 120)

@@ -2,6 +2,7 @@
 #define QUICKSEARCH_H
 
 #include "logscan.h"
+#include "textquery.h"
 
 #include <QObject>
 #include <QPointer>
@@ -21,10 +22,12 @@ class QTimer;
 // ближайшая строка с заданным уровнем (F8 / Shift+F8, startLevel): по
 // метаданным снапшота, без чтения текста.
 //
-// Синхронный LogModel::findNext/PreviousOccurrence на индексном бэкенде —
+// Запрос — TextQuery (подстрока, слово целиком, регекс; см. textquery.h).
+// Синхронный LogModel::findOccurrence на индексном бэкенде —
 // это скан диска на GUI-потоке: на гигантском файле без совпадений окно
 // замирало на всё время чтения. Здесь скан идёт по снапшоту видимых строк
-// (LogScanSnapshot) в пуле, с той же семантикой, что у синхронного поиска.
+// (LogScanSnapshot) в пуле — тем же LogScanSnapshot::findRowWithText, что и
+// синхронный поиск.
 //
 // Модель за время поиска может измениться:
 //   • вставки строк (дозапись хвоста, слияние) — найденная строка сдвигается
@@ -46,9 +49,10 @@ public:
     ~QuickSearch() override;
 
     // Новый поиск (прежний отменяется). startRow — текущая строка view или -1;
-    // семантика startRow/wrapAround — как у LogModel::findNext/Previous.
-    void start(LogModel* model, const QString& text, Qt::CaseSensitivity cs,
-               bool forward, int startRow, bool wrapAround = true);
+    // семантика startRow/wrapAround — как у LogModel::findOccurrence.
+    // Невалидный запрос (TextQuery::isValid) находит -1: проверять до старта.
+    void start(LogModel* model, const TextQuery& query, bool forward, int startRow,
+               bool wrapAround = true);
     // То же по уровню: ближайшая строка, с которой начинается запись уровня из
     // levels (LogScanSnapshot::findRowWithLevel).
     void startLevel(LogModel* model, LogLevelMask levels, bool forward, int startRow,
@@ -74,8 +78,8 @@ public:
 
     // Сам скан — синхронно по снапшоту (воркер; тесты сверяют с моделью).
     // -1 — не найдено или отменено.
-    static qint64 scan(const LogScanSnapshot& snapshot, const QString& text,
-                       Qt::CaseSensitivity cs, bool forward, qint64 startRow,
+    static qint64 scan(const LogScanSnapshot& snapshot, const TextQuery& query,
+                       bool forward, qint64 startRow,
                        bool wrapAround, const std::atomic_bool* cancel = nullptr,
                        std::atomic<int>* progress = nullptr);
     // Номер строки снапшота → номер в модели после вставок (по порядку).

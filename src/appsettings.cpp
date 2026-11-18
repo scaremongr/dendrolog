@@ -92,6 +92,13 @@ void AppSettings::load()
         s.endGroup();
     }
 
+    s.beginGroup(QStringLiteral("QuickSearch"));
+    m_quickSearchMatchCase = s.value(QStringLiteral("matchCase"), false).toBool();
+    m_quickSearchWholeWord = s.value(QStringLiteral("wholeWord"), false).toBool();
+    m_quickSearchRegex     = s.value(QStringLiteral("regex"), false).toBool();
+    m_quickSearchHistory   = s.value(QStringLiteral("history")).toStringList();
+    s.endGroup();
+
     // First-run font default: pick the best available monospaced font using the
     // same priority order as the old LogListView constructor used.
     if (m_fontFamily.isEmpty()) {
@@ -132,6 +139,8 @@ void AppSettings::save()
     s.setValue(QStringLiteral("textCacheBudgetMB"),      m_textCacheBudgetMB);
     s.setValue(QStringLiteral("theme"),                  themeModeToString(m_themeMode));
     s.endGroup();
+
+    writeQuickSearch(s);
 
     // Save theme colors.
     AppTheme::instance().save(s);
@@ -213,6 +222,43 @@ void AppSettings::setScanRefreshIntervalSecs(int secs)
         return;
     m_scanRefreshIntervalSecs = clamped;
     emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+void AppSettings::writeQuickSearch(QSettings& s) const
+{
+    s.beginGroup(QStringLiteral("QuickSearch"));
+    s.setValue(QStringLiteral("matchCase"), m_quickSearchMatchCase);
+    s.setValue(QStringLiteral("wholeWord"), m_quickSearchWholeWord);
+    s.setValue(QStringLiteral("regex"),     m_quickSearchRegex);
+    s.setValue(QStringLiteral("history"),   m_quickSearchHistory);
+    s.endGroup();
+}
+
+void AppSettings::saveQuickSearch()
+{
+    QSettings s(iniFilePath(), QSettings::IniFormat);
+    writeQuickSearch(s);
+}
+
+void AppSettings::setQuickSearchMatchCase(bool on)
+{
+    m_quickSearchMatchCase = on;
+}
+
+void AppSettings::setQuickSearchWholeWord(bool on)
+{
+    m_quickSearchWholeWord = on;
+}
+
+void AppSettings::setQuickSearchRegex(bool on)
+{
+    m_quickSearchRegex = on;
+}
+
+void AppSettings::setQuickSearchHistory(const QStringList& entries)
+{
+    m_quickSearchHistory = entries;
 }
 
 // ---------------------------------------------------------------------------

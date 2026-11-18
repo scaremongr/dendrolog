@@ -341,12 +341,10 @@ FilterPanelWidget::FilterPanelWidget(Mode mode, QWidget* parent)
     cardRows->setSpacing(3);
 
     // ---- Ряд 1: что делает панель — одной строкой ---------------------- //
-    auto* purpose = new QLabel(search
+    auto* purpose = new MutedLabel(search
         ? tr("Finds lines and lists them; the log itself stays complete.")
         : tr("Hides the lines that do not match the rules."), m_settingsCard);
     purpose->setWordWrap(true);
-    purpose->setStyleSheet(QStringLiteral("color: %1;")
-        .arg(CardFrame::mutedTextColor(palette()).name()));
     cardRows->addWidget(purpose);
 
     // ---- Ряд 2: профиль + меню действий ------------------------------- //
@@ -433,12 +431,13 @@ void FilterPanelWidget::focusFirstRule()
     m_cards.first()->focusText();
 }
 
-void FilterPanelWidget::setSingleRule(const QString& text, bool caseSensitive)
+void FilterPanelWidget::setSingleRule(const TextQuery& query)
 {
     while (!m_cards.isEmpty())
         removeCard(m_cards.last());
-    FilterRule rule = quickRule(text, /*exclude=*/false);
-    rule.caseSensitive = caseSensitive;
+    FilterRule rule = quickRule(query.patternText(), /*exclude=*/false);
+    rule.caseSensitive = query.caseSensitive;
+    rule.isRegex = query.needsRegex();
     addRule(rule);
 }
 

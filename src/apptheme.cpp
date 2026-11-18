@@ -1,4 +1,5 @@
 #include "apptheme.h"
+#include "cardframe.h"
 #include <QSettings>
 
 // ---------------------------------------------------------------------------
@@ -93,4 +94,9 @@ void AppTheme::save(QSettings& s) const
     s.setValue("searchMatch",     searchMatch.name(QColor::HexArgb));
 
     s.endGroup();
+}
+
+QColor AppTheme::searchNotFoundBackground(const QPalette& palette)
+{
+    return CardFrame::mixedColor(instance().logError, palette.color(QPalette::Base), 0.72);
 }

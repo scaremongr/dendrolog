@@ -4,6 +4,7 @@
 #include "compactstyle.h"
 #include "singleinstance.h"
 #include <QApplication>
+#include "openrouting.h"
 #include <QElapsedTimer>
 #include <QIcon>
 #include <QStyle>
@@ -70,7 +71,8 @@ int main(int argc, char *argv[])
     // Пайп stdin передать нельзя — при «-» всегда открываем своё окно.
     SingleInstance guard(QStringLiteral("DendroLog"));
     if (!forceNewInstance && !readStdin && guard.isSecondary()) {
-        if (guard.sendToPrimary(cliFiles))
+        // Пути разрешаем здесь: у первичного экземпляра другой текущий каталог.
+        if (guard.sendToPrimary(OpenRouting::absolutePaths(cliFiles)))
             return 0;
         // Первичный экземпляр не ответил (завис/умер) — продолжаем как обычно.
     }
@@ -100,7 +102,8 @@ int main(int argc, char *argv[])
         w.activateWindow();
     });
 
-    // Файлы, переданные аргументами командной строки, открываются как обычные.
+    // Пути из командной строки: файлы открываются как обычные, папка — в
+    // Directory Scanner.
     if (!cliFiles.isEmpty())
         w.openFilesFromCommandLine(cliFiles);
 

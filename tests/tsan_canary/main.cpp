@@ -10,6 +10,11 @@
 //   race  — настоящая гонка, идущая через те же пути; отчёт ОБЯЗАН появиться
 //           (CTest ищет его в выводе). Нет отчёта — слой ослепил TSan, и
 //           зелёный прогон остальных тестов ничего не значит.
+// Вторая пара режимов так же проверяет tests/sanitizers/tsan_qt_refcount.h
+// (счётчик ссылок контейнеров Qt как синхронизация):
+//   cow      — запись на месте после того, как воркер отпустил свою копию
+//              списка; отчётов быть НЕ должно;
+//   cow-race — воркер читает буфер, не держа копии; отчёт ОБЯЗАН появиться.
 // ============================================================================
 
 #include <QCoreApplication>
@@ -23,9 +28,12 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <thread>
+#include <utility>
 
 class Worker : public QObject {
     Q_OBJECT
@@ -115,6 +123,83 @@ static int runClean()
     return failures ? 1 : 0;
 }
 
+// Копия контейнера Qt у воркера и запись в оригинал после того, как воркер её
+// отпустил, — так живут снапшоты резидентного хранилища (LogScanSnapshot):
+// воркер читает неявно разделяемую копию списка, GUI-поток потом дописывает в
+// свой. Пока копия жива, запись отсоединяется в новый буфер; когда отпущена —
+// идёт на месте, в буфер, который воркер только что читал. Порядок «чтение →
+// запись» держит один счётчик ссылок, без единого вызова в Qt, поэтому здесь
+// нет ни сигнала, ни QFuture: о готовности воркер сообщает relaxed-флагом,
+// который TSan синхронизацией не считает. Отчётов быть не должно благодаря
+// tests/sanitizers/tsan_qt_refcount.h. Потоки — std::thread: их запуск и join
+// TSan видит сам, слой tsan_qt_sync.cpp в проверке не участвует.
+static int runCow()
+{
+    int failures = 0;
+    for (int round = 0; round < 200; ++round) {
+        QList<QString> list;
+        list.reserve(256); // запись на месте не должна перевыделять буфер
+        for (int i = 0; i < 64; ++i)
+            list.append(QString::number(i + round));
+
+        std::atomic_bool released{false};
+        qsizetype seen = 0;
+        std::thread reader([snapshot = list, &released, &seen]() mutable {
+            for (const QString& s : std::as_const(snapshot))
+                seen += s.size();
+            snapshot = QList<QString>(); // отпустить копию: счётчик 2 → 1
+            released.store(true, std::memory_order_relaxed);
+        });
+        while (!released.load(std::memory_order_relaxed))
+            std::this_thread::yield();
+
+        const QString* before = list.constData();
+        list.append(QStringLiteral("tail")); // на месте
+        list[0] = QStringLiteral("head");    // и поверх прочитанного
+        if (list.constData() != before)
+            ++failures; // отсоединился — сценарий не тот, что проверяем
+        reader.join();
+        if (seen <= 0)
+            ++failures;
+    }
+    std::fprintf(stderr, "tsan_canary cow: %d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}
+
+// То же, но воркер читает буфер, НЕ держа копии (по голому указателю), а
+// GUI-поток в это время пишет: счётчик ссылок тут ничего не упорядочивает, и
+// отчёт обязан появиться — проверка, что tsan_qt_refcount.h не ослепил TSan.
+__attribute__((noinline)) static void racyListWrite(QList<int>& list, int value)
+{
+    list[0] = value;
+}
+
+__attribute__((noinline)) static int racyListRead(const int* raw)
+{
+    return raw[0];
+}
+
+static int runCowRace()
+{
+    QList<int> list(64, 1);
+    QList<int> keeper = list; // общий буфер, счётчик 2
+    std::atomic_bool stop{false};
+    long long sum = 0;
+    std::thread reader([raw = keeper.constData(), &stop, &sum] {
+        while (!stop.load(std::memory_order_relaxed))
+            sum += racyListRead(raw);
+    });
+    keeper = QList<int>(); // счётчик 2 → 1: дальше запись идёт на месте
+    for (int i = 0; i < 2000; ++i) {
+        racyListWrite(list, i);
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    stop.store(true, std::memory_order_relaxed);
+    reader.join();
+    std::fprintf(stderr, "tsan_canary cow-race: sum %lld\n", sum);
+    return 0;
+}
+
 // Несинхронизированные записи вынесены в функции с приметными именами: по ним
 // CTest отличает нужный отчёт от любого другого.
 __attribute__((noinline)) static void racyGuiWrite(int& counter, int value)
@@ -163,7 +248,11 @@ int main(int argc, char** argv)
         return runClean();
     if (argc == 2 && std::strcmp(argv[1], "race") == 0)
         return runRace();
-    std::fprintf(stderr, "usage: tsan_canary clean|race\n");
+    if (argc == 2 && std::strcmp(argv[1], "cow") == 0)
+        return runCow();
+    if (argc == 2 && std::strcmp(argv[1], "cow-race") == 0)
+        return runCowRace();
+    std::fprintf(stderr, "usage: tsan_canary clean|race|cow|cow-race\n");
     return 2;
 }
 

@@ -4,9 +4,9 @@
 #include <QColor>
 #include <QFrame>
 #include <QIcon>
+#include <QLabel>
 #include <QScrollArea>
 
-class QLabel;
 class QToolButton;
 class QVBoxLayout;
 
@@ -76,6 +76,24 @@ private:
     QVBoxLayout* m_rows   = nullptr;
     QColor       m_accent;
     bool         m_accentBorder = false;
+};
+
+// ============================================================
+// MutedLabel — подпись приглушённым цветом (CardFrame::mutedTextColor),
+// которая сама перекрашивается при смене темы. Цвет считается из палитры
+// родителя: собственную подпись уже изменила её же таблица стилей.
+// ============================================================
+class MutedLabel : public QLabel
+{
+    Q_OBJECT
+public:
+    explicit MutedLabel(const QString& text = QString(), QWidget* parent = nullptr);
+
+protected:
+    void changeEvent(QEvent* event) override;
+
+private:
+    void applyColor();
 };
 
 // ============================================================

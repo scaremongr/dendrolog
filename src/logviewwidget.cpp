@@ -34,7 +34,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_quickSearch = new QuickSearch(this);
     connect(m_quickSearch, &QuickSearch::finished, this, &LogViewWidget::handleQuickSearchFinished);
     connect(m_quickSearch, &QuickSearch::progress, this,
-            [this](int percent) { emit quickSearchProgress(m_quickSearchTerm, percent); });
+            [this](int percent) { emit quickSearchProgress(m_quickSearchQuery.text, percent); });
     // Модель перестроилась посреди скана (фильтр, перезагрузка файла) —
     // ищем заново от текущей строки.
     connect(m_quickSearch, &QuickSearch::invalidated, this, &LogViewWidget::startQuickSearch);
@@ -354,6 +354,7 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
     // только пока этот файл в ней единственный.
     if (m_loadedFiles.size() == 1) {
         m_model->convertToResidentBackend();
+        m_residentOnlyFiles.insert(logFile->filePath);
         st = FileReloadState{};
         st.loadInFlight = true;
         m_logParser->startParsing(logFile);
@@ -455,7 +456,7 @@ void LogViewWidget::rememberLastLines(FileReloadState& st,
 }
 
 void LogViewWidget::handleTailState(const LogFilePtr& logFile, qint64 endOffset,
-                                    bool lastLinePartial, qint64 lastLineStart)
+                                    bool lastLinePartial, qint64 lastLineStart, int encoding)
 {
     if (!logFile)
         return;
@@ -463,6 +464,7 @@ void LogViewWidget::handleTailState(const LogFilePtr& logFile, qint64 endOffset,
     st.endOffset = endOffset;
     st.lastLinePartial = lastLinePartial;
     st.lastLineStart = lastLineStart;
+    st.encoding = QStringConverter::Encoding(encoding);
 }
 
 void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
@@ -475,9 +477,11 @@ bool LogViewWidget::reloadChangedFiles(bool force)
     // Растущий файл (типично — спул stdin) пересёк порог индексного бэкенда:
     // конвертируем вкладку, дальше хвост дочитывает индексатор. Конвертируем
     // только когда по файлу нет джоба в полёте — иначе резидентный парсер
-    // дописал бы в состояние, которым уже владеет индексатор.
+    // дописал бы в состояние, которым уже владеет индексатор. Файл, который
+    // индексатор уже вернул в резидентный путь (UTF-16), не конвертируем.
     if (!m_model->isIndexedBackend() && m_loadedFiles.size() == 1
         && m_loadedFiles[0]
+        && !m_residentOnlyFiles.contains(m_loadedFiles[0]->filePath)
         && !m_fileReloadStates.value(m_loadedFiles[0]->filePath).loadInFlight) {
         const qint64 size = QFileInfo(m_loadedFiles[0]->filePath).size();
         if (size >= AppSettings::instance().indexedThresholdBytes()) {
@@ -521,6 +525,8 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             // когда на диске что-то изменилось (иначе перечитывали бы
             // недоступный файл на каждый тик); ручной F5 пробует всегда.
             if (!force && stamp == st.failedStamp) continue;
+            if (m_residentOnlyFiles.remove(logFile->filePath))
+                return reloadChangedFiles(force) || anyChanged; // см. Replaced
             startFullReload(logFile);
             anyChanged = true;
             continue;
@@ -586,7 +592,7 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             st.loadInFlight = true;
             // Якорь сдвинется по концу прочитанного (tailState); повторный
             // опрос этот диапазон не возьмёт — по файлу загрузка в полёте.
-            m_reloadParser->startParsingFrom(logFile, from, context);
+            m_reloadParser->startParsingFrom(logFile, from, context, st.encoding);
             anyChanged = true;
             break;
         }
@@ -595,6 +601,11 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             // Файл обрезан или переписан другим содержимым (в том числе удалён
             // и создан заново): выбрасываем устаревшие строки и читаем заново.
             // Состояние восстановится в handle*Finished.
+            // Содержимое новое — отметка «только резидентный» к нему не
+            // относится: проверяем порог заново (сначала этой функции), а
+            // UTF-16 индексатор вернёт обратно, прочитав только BOM.
+            if (m_residentOnlyFiles.remove(logFile->filePath))
+                return reloadChangedFiles(force) || anyChanged;
             startFullReload(logFile); // `st` переинициализирован — не переиспользовать
             anyChanged = true;
             break;
@@ -659,22 +670,20 @@ void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFileP
 }
 
 
-void LogViewWidget::searchTextNext(const QString& term, bool caseSensitive)
+void LogViewWidget::searchTextNext(const TextQuery& query)
 {
-    if (!m_model || term.isEmpty())
+    if (!m_model || query.isEmpty())
         return;
-    m_quickSearchTerm = term;
-    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchQuery = query;
     m_quickSearchForward = true;
     startQuickSearch();
 }
 
-void LogViewWidget::searchTextPrevious(const QString& term, bool caseSensitive)
+void LogViewWidget::searchTextPrevious(const TextQuery& query)
 {
-    if (!m_model || term.isEmpty())
+    if (!m_model || query.isEmpty())
         return;
-    m_quickSearchTerm = term;
-    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchQuery = query;
     m_quickSearchForward = false;
     startQuickSearch();
 }
@@ -690,9 +699,7 @@ void LogViewWidget::startQuickSearch()
                                                     m_view->selectedRecordId(),
                                                     m_view->selectedRecordFile(),
                                                     m_quickSearchForward);
-    m_quickSearch->start(m_model, m_quickSearchTerm,
-                         m_quickSearchCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive,
-                         m_quickSearchForward, currentRow);
+    m_quickSearch->start(m_model, m_quickSearchQuery, m_quickSearchForward, currentRow);
 }
 
 bool LogViewWidget::goToEntry(int logicalEntryId, const LogFile* sourceFile)
@@ -757,13 +764,13 @@ void LogViewWidget::finishLevelJump(int row, int startRow)
 
 void LogViewWidget::handleQuickSearchFinished(int row)
 {
-    const QString term = m_quickSearchTerm;
+    const QString term = m_quickSearchQuery.text;
     if (row >= 0 && row < m_model->rowCount()) {
         // Раскрыть найденную строку и подсветить в ней вхождения term ДО
         // перехода: раскрытие меняет высоту строки, и прокрутка должна
         // целиться уже в финальную геометрию. Сам переход — общий (goToRow):
         // строка становится выбором пользователя, follow-tail снимается.
-        m_view->showSearchMatch(row, term, m_quickSearchCaseSensitive);
+        m_view->showSearchMatch(row, m_quickSearchQuery);
         m_view->goToRow(row);
         emit quickSearchFinished(term, true);
     } else {

@@ -14,8 +14,11 @@
 #include "LogListView.h"
 #include "logviewwidget.h"
 #include "filterruleset.h"
+#include "openrouting.h"
 
 // Forward declarations for Qt classes used in members or method signatures
+class QuickSearchField;
+struct TextQuery;
 class QProgressBar;
 class QLabel;
 class LogViewWidget;
@@ -69,7 +72,9 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-    // Открыть файлы, переданные в командной строке (DendroLog.exe a.log b.log).
+    // Открыть пути, переданные в командной строке (DendroLog.exe a.log logs/),
+    // брошенные в окно или присланные вторым экземпляром: файлы — вкладками,
+    // папка — в Directory Scanner (правило — OpenRouting::plan).
     void openFilesFromCommandLine(const QStringList& paths);
 
 protected:
@@ -143,7 +148,11 @@ private slots:
     void onSearchCleared();
     // «Find All»: запрос из одного правила «Contains text» в панели Search
     // и поиск; пустой text — просто открыть панель с курсором в правиле.
-    void findAllInSearchPanel(const QString& text, bool caseSensitive);
+    void findAllInSearchPanel(const TextQuery& query);
+    // Запрос поля быстрого поиска, годный к запуску: непустой и валидный.
+    // Невалидный регекс — сообщение в строке статуса, false. Годный —
+    // запоминается в истории.
+    bool takeQuickSearchQuery(TextQuery* query);
     // Go to Line / Time (Ctrl+G): диалог над активной вкладкой.
     void showGoToDialog();
     void onViewExportFinished(const ViewExport::Result& result);
@@ -182,8 +191,8 @@ private:
     QProgressBar* m_progressBar;
     QLabel* m_statusLabel;
     QLabel* m_lineInfoLabel;
-    QLineEdit* m_searchLineEdit = nullptr;
-    QAction*   m_matchCaseAction = nullptr;   // «Aa» — учитывать регистр
+    // Поле быстрого поиска: запрос, переключатели «Aa» / слово / «.*», история.
+    QuickSearchField* m_searchLineEdit = nullptr;
     // Стартовый экран вместо пустой рамки, пока нет ни одной вкладки.
     WelcomeWidget* m_welcome = nullptr;
     // Строка статуса показывает прогресс быстрого поиска — вернуть её по итогу.
@@ -282,7 +291,7 @@ private:
     // Directory Scanner related members
     QString m_lastOpenDir;
     QString m_lastScanDir;
-    QStringList m_recentFiles;
+    RecentFiles m_recentFiles;   // что в недавние не попадает — openrouting.h
 
     // Other members
     LogViewWidget*     m_activeLogView;
@@ -310,6 +319,8 @@ private:
     void saveSettings();
     void loadSettings();
     void addToRecentFiles(const QString& filePath);
+    // Запустить скан каталога и показать панель Directory Scanner.
+    void scanDirectory(const QString& dirPath);
     void updateRecentFilesMenu();
 
     // Auto-reload support
@@ -331,8 +342,6 @@ private:
     // либо весь диапазон её лога (а не «вчера–сегодня»).
     void seedTimeFilterEditors();
     void updateTimeFilterInfo();
-    // Подсветка поля быстрого поиска «не найдено».
-    void setQuickSearchNotFound(bool notFound);
     // Подпись списка результатов панели Search: статус контроллера + как
     // начать поиск.
     void updateSearchResultsStatus();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QPalette>
 #include "logentry.h"
 
 // Forward declaration — keeps this header free of heavy QSettings dependencies.
@@ -120,6 +121,11 @@ public:
             default:              return QColor(Qt::white);
         }
     }
+
+    // Фон поля быстрого поиска, когда текст не найден: цвет ошибки,
+    // разбавленный фоном поля. Зависит от палитры — считать в момент
+    // применения и заново на PaletteChange, а не один раз.
+    static QColor searchNotFoundBackground(const QPalette& palette);
 
     // Persistence — called from AppSettings::load() / save().
     // The [Theme] group in the INI file is owned by these methods.

@@ -367,18 +367,23 @@ int LogModel::findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
     return m_store->findRowWithLevel(levels, startRow, forward, wrapAround);
 }
 
+QModelIndex LogModel::findOccurrence(const TextQuery& query, int startRow, bool forward,
+                                     bool wrapAround) const
+{
+    const int row = m_store->findOccurrence(query, startRow, forward, wrapAround);
+    return row >= 0 ? index(row, 0) : QModelIndex();
+}
+
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow,
                                          Qt::CaseSensitivity cs, bool wrapAround) const
 {
-    const int row = m_store->findNextOccurrence(text, startRow, cs, wrapAround);
-    return row >= 0 ? index(row, 0) : QModelIndex();
+    return findOccurrence(TextQuery(text, cs), startRow, /*forward=*/true, wrapAround);
 }
 
 QModelIndex LogModel::findPreviousOccurrence(const QString& text, int startRow,
                                              Qt::CaseSensitivity cs, bool wrapAround) const
 {
-    const int row = m_store->findPreviousOccurrence(text, startRow, cs, wrapAround);
-    return row >= 0 ? index(row, 0) : QModelIndex();
+    return findOccurrence(TextQuery(text, cs), startRow, /*forward=*/false, wrapAround);
 }
 
 // ---------------------------------------------------------------------------

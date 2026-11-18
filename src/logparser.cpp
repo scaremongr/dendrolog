@@ -1,6 +1,7 @@
 #include "logparser.h"
 #include "patternheuristics.h"
 #include <QFile>
+#include <QStringDecoder>
 #include <QTextStream>
 #include <QtConcurrent> // Для QtConcurrent::run
 #include <QFileInfo>    // Для получения размера файла (для progress)
@@ -38,14 +39,15 @@ void LogParser::startParsing(const LogFilePtr& logFile)
 }
 
 void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
-                                 const ResumeContext& context)
+                                 const ResumeContext& context,
+                                 QStringConverter::Encoding encoding)
 {
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
     (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, context,
-                                      patternSnapshot, extraction]() {
+                                      patternSnapshot, extraction, encoding]() {
         this->parseFrom(logFile, startOffset, context, patternSnapshot, extraction,
-                        /*initial=*/false);
+                        /*initial=*/false, encoding);
     });
 }
 
@@ -56,12 +58,59 @@ void LogParser::setPattern(const QString& schemaString)
 
 void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction)
 {
-    parseFrom(logFile, 0, ResumeContext(), pattern, extraction, /*initial=*/true);
+    parseFrom(logFile, 0, ResumeContext(), pattern, extraction, /*initial=*/true,
+              QStringConverter::Utf8);
 }
+
+namespace {
+
+// Кодировки с переводом строки шире байта: ширина кодовой единицы и порядок
+// байтов. Обобщённые Utf16/Utf32 (без BOM) — порядок байтов машины.
+struct CodeUnit {
+    int width = 1;
+    bool bigEndian = false;
+};
+
+CodeUnit codeUnitOf(QStringConverter::Encoding encoding)
+{
+    const bool hostBig = QSysInfo::ByteOrder == QSysInfo::BigEndian;
+    switch (encoding) {
+    case QStringConverter::Utf16:   return {2, hostBig};
+    case QStringConverter::Utf16LE: return {2, false};
+    case QStringConverter::Utf16BE: return {2, true};
+    case QStringConverter::Utf32:   return {4, hostBig};
+    case QStringConverter::Utf32LE: return {4, false};
+    case QStringConverter::Utf32BE: return {4, true};
+    default:                        return {};
+    }
+}
+
+// Смещение в chunk (он начинается на границе единицы) сразу ЗА последним
+// переводом строки, либо -1.
+qsizetype afterLastNewline(const QByteArray& chunk, CodeUnit unit)
+{
+    if (unit.width == 1) {
+        const qsizetype newline = chunk.lastIndexOf('\n');
+        return newline < 0 ? -1 : newline + 1;
+    }
+    const qsizetype low = unit.bigEndian ? unit.width - 1 : 0; // байт с '\n'
+    for (qsizetype at = (chunk.size() / unit.width - 1) * unit.width; at >= 0;
+         at -= unit.width) {
+        bool newline = chunk[at + low] == '\n';
+        for (qsizetype i = 0; newline && i < unit.width; ++i)
+            newline = i == low || chunk[at + i] == 0;
+        if (newline)
+            return at + unit.width;
+    }
+    return -1;
+}
+
+} // namespace
 
 void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                           const ResumeContext& context, const LogPattern& pattern,
-                          bool extraction, bool initial)
+                          bool extraction, bool initial,
+                          QStringConverter::Encoding tailEncoding)
 {
     if (initial)
         emit parsingStarted(logFile);
@@ -85,6 +134,13 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     }
 
     QTextStream in(&file);
+    // Первая загрузка узнаёт UTF-16/32 по BOM (автоопределение QTextStream).
+    // У дозаписи BOM нет — она читается в кодировке, в которой файл уже
+    // прочитан; иначе хвост UTF-16 декодировался бы как UTF-8.
+    if (!initial && tailEncoding != QStringConverter::Utf8) {
+        in.setAutoDetectUnicode(false);
+        in.setEncoding(tailEncoding);
+    }
     QVector<std::shared_ptr<LogEntry>> batchEntries;
     const int BATCH_SIZE = 5000;
     batchEntries.reserve(BATCH_SIZE);
@@ -168,100 +224,180 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // Точный конец прочитанного (дальше дочитывание продолжит отсюда) и не
     // оборвана ли последняя строка: писатель мог не успеть дописать '\n'.
     // Такую строку вкладка показывает предварительно и при дозаписи читает
-    // заново с её начала. Начало ищется по сырым байтам — только для
-    // кодировок, где перевод строки — один байт '\n' (не UTF-16/32).
+    // заново с её начала. Всё считается по сырым байтам, в кодовых единицах
+    // кодировки: в UTF-16 перевод строки — два байта, а порция может
+    // оборваться посреди единицы — такой огрызок не считается прочитанным
+    // (единицы выровнены от начала файла: BOM — ровно одна единица).
+    const QStringConverter::Encoding encoding = in.encoding();
+    const CodeUnit unit = codeUnitOf(encoding);
     qint64 endOffset = in.pos();
     if (endOffset < 0)
         endOffset = file.size();
+    endOffset -= endOffset % unit.width;
     bool lastLinePartial = false;
     qint64 lastLineStart = -1;
-    const QStringConverter::Encoding encoding = in.encoding();
-    const bool byteNewlines = encoding != QStringConverter::Utf16
-        && encoding != QStringConverter::Utf16LE && encoding != QStringConverter::Utf16BE
-        && encoding != QStringConverter::Utf32 && encoding != QStringConverter::Utf32LE
-        && encoding != QStringConverter::Utf32BE;
-    if (byteNewlines && totalParsedEntries > 0 && endOffset > startOffset) {
+    // Строки начинаются после BOM: перечитывание с нуля отдало бы его
+    // декодеру без автоопределения.
+    const qint64 firstLineStart = (startOffset == 0 && unit.width > 1) ? unit.width : startOffset;
+    if (totalParsedEntries > 0 && endOffset > firstLineStart) {
         QFile raw(logFile->filePath);
-        char last = '\n';
-        if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - 1) && raw.getChar(&last)
-            && last != '\n') {
+        if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - unit.width)
+            && afterLastNewline(raw.read(unit.width), unit) < 0) {
             lastLinePartial = true;
-            lastLineStart = startOffset;
+            lastLineStart = firstLineStart;
             constexpr qint64 kChunk = 64 * 1024;
-            for (qint64 pos = endOffset; pos > startOffset;) {
-                const qint64 from = qMax(startOffset, pos - kChunk);
+            for (qint64 pos = endOffset; pos > firstLineStart;) {
+                const qint64 from = qMax(firstLineStart, pos - kChunk);
                 if (!raw.seek(from))
                     break;
-                const QByteArray chunk = raw.read(pos - from);
-                const qsizetype newline = chunk.lastIndexOf('\n');
-                if (newline >= 0) {
-                    lastLineStart = from + newline + 1;
+                const qsizetype after = afterLastNewline(raw.read(pos - from), unit);
+                if (after >= 0) {
+                    lastLineStart = from + after;
                     break;
                 }
                 pos = from;
             }
         }
     }
-    emit tailState(logFile, endOffset, lastLinePartial, lastLineStart);
+    emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, int(encoding));
     emit parsingFinished(totalParsedEntries, logFile);
 }
 
-LogParser::FileStats LogParser::analyzeFileForStats(const QString& filePath, qint64 fromOffset)
+LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
+                                                    const StatsResume& from) const
 {
-    FileStats stats;
+    StatsScan scan;
+    FileStats& stats = scan.stats;
+    stats.fileSize = QFileInfo(filePath).size();
+
+    // Без QIODevice::Text: смещения — сырые байты (инвариант 5), '\r' перед
+    // '\n' снимается вручную.
     QFile file(filePath);
-    QFileInfo fileInfo(filePath);
-    stats.fileSize = fileInfo.size();
-
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::ReadOnly)) {
         stats.parseSuccess = false;
+        scan.complete = stats;
         qWarning() << "AnalyzeStats: Failed to open file:" << filePath;
-        return stats;
+        return scan;
     }
 
-    if (fromOffset > 0 && !file.seek(fromOffset)) {
+    // Кодировка: с начала файла — по BOM, как автоопределение QTextStream у
+    // разбора вкладки; хвост — в кодировке, известной по прошлому разбору.
+    QStringConverter::Encoding encoding = from.encoding;
+    qint64 offset = from.offset;
+    if (offset == 0) {
+        const QByteArray head = file.read(4);
+        const auto detected = QStringConverter::encodingForData(head);
+        if (detected) {
+            // Строки начинаются за BOM: в UTF-8 он три байта, в UTF-16/32 —
+            // одна кодовая единица.
+            encoding = *detected;
+            offset = encoding == QStringConverter::Utf8 ? 3 : codeUnitOf(encoding).width;
+        } else {
+            encoding = QStringConverter::Utf8;
+        }
+    }
+    const CodeUnit unit = codeUnitOf(encoding);
+    if (offset % unit.width != 0 || !file.seek(offset)) {
         stats.parseSuccess = false;
-        return stats;
+        scan.complete = stats;
+        return scan;
     }
 
-    QTextStream in(&file);
-    QString line;
-    QDateTime currentTs;
-    LogLevel currentLevel;
-    bool firstTsFound = false;
+    QStringDecoder decoder(encoding, QStringConverter::Flag::Stateless);
+    bool inRecord = from.inRecord;
+    LogLevel recordLevel = LogLevel::Unknown;
 
-    while (!in.atEnd()) {
-        line = in.readLine();
-        stats.totalEntries++; // Count each line as a potential entry for simplicity in stats
-
-        const bool hasTimestamp = m_classifier.detectTimestamp(line, currentTs);
-        if (hasTimestamp) {
-            if (!firstTsFound) {
-                stats.firstEntryTimestamp = currentTs;
-                firstTsFound = true;
-            }
-            stats.lastEntryTimestamp = currentTs; // Keep updating last timestamp
+    const auto countLine = [&](const QByteArray& bytes) {
+        QString line = decoder.decode(bytes);
+        if (line.endsWith(u'\r'))
+            line.chop(1);
+        QDateTime ts;
+        LogLevel level = LogLevel::Unknown;
+        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts);
+        const bool hasLevel = m_classifier.detectLogLevel(line, level);
+        // Схема полей здесь не участвует: вкладка решает по ней, только когда
+        // включено извлечение полей, а по умолчанию — по метке и уровню.
+        if (LineClassifier::isPrimaryLine(false, hasTimestamp, hasLevel)) {
+            recordLevel = level;
+            if (!stats.firstEntryTimestamp.isValid())
+                stats.firstEntryTimestamp = ts;
+            stats.lastEntryTimestamp = ts;
+        } else if (!inRecord) {
+            recordLevel = LogLevel::Unknown;   // строка до первой записи — своя запись
+        } else {
+            return;                            // продолжение текущей записи
         }
-
-        // Счётчики — по ЗАПИСЯМ, как во вкладке без схемы: уровень даёт только
-        // строка с меткой времени (isPrimaryLine). Слово «err» или «critical»
-        // в строке-продолжении (стек-трейс) ошибкой не считается.
-        if (hasTimestamp && m_classifier.detectLogLevel(line, currentLevel)) {
-            switch (currentLevel) {
-            case LogLevel::Warn:
-                stats.warnCount++;
-                break;
-            case LogLevel::Error:
-                stats.errorCount++;
-                break;
-            case LogLevel::Fatal:
-                stats.fatalCount++;
-                break;
-            default:
-                break;
-            }
+        inRecord = true;
+        stats.totalEntries++;
+        switch (recordLevel) {
+        case LogLevel::Warn:  stats.warnCount++;  break;
+        case LogLevel::Error: stats.errorCount++; break;
+        case LogLevel::Fatal: stats.fatalCount++; break;
+        default: break;
         }
+    };
+
+    // Поиск перевода строки — по кодовым единицам кодировки.
+    const qsizetype low = unit.bigEndian ? unit.width - 1 : 0;
+    const auto findNewline = [&](const QByteArray& buf, qsizetype fromPos) -> qsizetype {
+        if (unit.width == 1)
+            return buf.indexOf('\n', fromPos);
+        for (qsizetype at = fromPos; at + unit.width <= buf.size(); at += unit.width) {
+            if (buf[at + low] != '\n')
+                continue;
+            bool newline = true;
+            for (qsizetype k = 0; newline && k < unit.width; ++k)
+                newline = k == low || buf[at + k] == 0;
+            if (newline)
+                return at;
+        }
+        return -1;
+    };
+
+    constexpr qint64 kChunk = 1 << 20;
+    QByteArray pending;           // байты начатой, ещё не законченной строки
+    qint64 lineStart = offset;    // сырое смещение начала pending
+    while (true) {
+        const QByteArray chunk = file.read(kChunk);
+        if (chunk.isEmpty())
+            break;
+        pending += chunk;
+        qsizetype pos = 0;
+        while (true) {
+            const qsizetype newline = findNewline(pending, pos);
+            if (newline < 0)
+                break;
+            countLine(pending.mid(pos, newline - pos));
+            lineStart += newline + unit.width - pos;
+            pos = newline + unit.width;
+        }
+        pending.remove(0, pos);
     }
-    // file.close() will be called by QFile destructor
-    return stats;
+
+    // Целые строки кончились: это точка продолжения. Оборванная последняя
+    // строка (писатель не дописал '\n') считается в показанных цифрах, но не
+    // в базе — при дозаписи она перечитается целиком.
+    scan.complete = stats;
+    scan.next.offset = lineStart;
+    scan.next.encoding = encoding;
+    scan.next.inRecord = inRecord;
+    if (pending.size() >= unit.width)
+        countLine(pending.left(pending.size() - pending.size() % unit.width));
+    return scan;
+}
+
+LogParser::FileStats LogParser::mergeStats(const FileStats& head, const FileStats& tail)
+{
+    FileStats merged = head;
+    merged.fileSize      = tail.fileSize;
+    merged.totalEntries += tail.totalEntries;
+    merged.warnCount    += tail.warnCount;
+    merged.errorCount   += tail.errorCount;
+    merged.fatalCount   += tail.fatalCount;
+    merged.parseSuccess  = head.parseSuccess && tail.parseSuccess;
+    if (!merged.firstEntryTimestamp.isValid())
+        merged.firstEntryTimestamp = tail.firstEntryTimestamp;
+    if (tail.lastEntryTimestamp.isValid())
+        merged.lastEntryTimestamp = tail.lastEntryTimestamp;
+    return merged;
 }

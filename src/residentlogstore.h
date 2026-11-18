@@ -42,10 +42,6 @@ public:
     int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
                           bool* visible = nullptr) const override;
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const override;
-    int findNextOccurrence(const QString& text, int startRow,
-                           Qt::CaseSensitivity cs, bool wrapAround) const override;
-    int findPreviousOccurrence(const QString& text, int startRow,
-                               Qt::CaseSensitivity cs, bool wrapAround) const override;
     LogScanSnapshot scanSnapshot(bool filteredOnly) const override;
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
