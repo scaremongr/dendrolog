@@ -1,7 +1,9 @@
 #ifndef DIRECTORYSCANNER_H
 #define DIRECTORYSCANNER_H
 
+#include "filecontentsearch.h"
 #include "logparser.h"
+#include "textencoding.h"
 
 #include <QObject>
 #include <QHash>
@@ -175,6 +177,13 @@ public:
     // Drop all filters and show every item.
     void clearFilters();
 
+    // Запасная кодировка фильтра по содержимому (F-1, шаг 5) — та же
+    // настройка, что у вкладок (AppSettings::fallbackEncoding; сканер берёт её
+    // значением, панель передаёт смену). Смена перепроверяет только файлы,
+    // чей ответ от неё зависел (решены автоматикой в однобайтную кодировку).
+    void setFallbackEncoding(TextEncoding encoding);
+    TextEncoding fallbackEncoding() const { return m_fallbackEncoding; }
+
     // True while a background content search is running.
     bool isContentFilterRunning() const { return m_contentWatcher != nullptr; }
 
@@ -271,6 +280,13 @@ private:
         qint64 size = 0;
         qint64 mtimeMs = 0;
         bool   matched = false;
+        bool   dependsOnFallback = false;  // перепроверить при смене запасной кодировки
+    };
+
+    // Ответ воркера по одному файлу.
+    struct ContentVerdict {
+        bool matched = false;
+        bool dependsOnFallback = false;
     };
 
     // Shared, lock-free progress/cancellation channel between the search
@@ -283,19 +299,19 @@ private:
 
     // Functor handed to QtConcurrent::mapped: decides whether one file matches
     // the content filter. Self-contained so it can run on any pool thread.
+    // Кодировка файла — правило вкладки (FileContentSearch), запасная —
+    // значением.
     struct ContentMatcher {
-        using result_type = bool;
+        using result_type = ContentVerdict;
 
-        QString             needle;
-        bool                isRegex = false;
-        Qt::CaseSensitivity cs = Qt::CaseInsensitive;
-        QRegularExpression  re;   // precompiled when isRegex
+        ContentQuery        query;
+        TextEncoding        fallback = TextEncoding::Windows1252;
         std::shared_ptr<SearchProgress> progress;
         // Keeps the sequence mapped() iterates over alive for as long as the
         // kernel (which owns a copy of this functor) exists.
         std::shared_ptr<const QList<SearchItem>> items;
 
-        bool operator()(const SearchItem& item) const;
+        ContentVerdict operator()(const SearchItem& item) const;
     };
 
     // ---- Tree ----
@@ -391,7 +407,8 @@ private:
     std::shared_ptr<const QList<SearchItem>> m_contentTodo;
     int                             m_contentCandidates = 0;         // incl. cache hits
     qint64                          m_contentTotalBytes = 0;
-    QFutureWatcher<bool>*           m_contentWatcher = nullptr;      // running search
+    QFutureWatcher<ContentVerdict>* m_contentWatcher = nullptr;      // running search
+    TextEncoding                    m_fallbackEncoding = TextEncodings::systemFallback();
     QTimer*                         m_contentProgressTimer = nullptr;
     std::shared_ptr<SearchProgress> m_contentProgress;
     QString                         m_contentCacheKey;               // query the cache holds

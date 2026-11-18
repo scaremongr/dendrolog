@@ -8,7 +8,6 @@
 #include <QLocale>
 #include <QMenu>
 #include <QThread>
-#include <QStringDecoder>
 #include <QRegularExpression>
 #include <QtConcurrent>
 #include <QStyledItemDelegate>
@@ -963,114 +962,21 @@ void DirectoryScanner::onWatchedPathChanged()
 
 // ─── Filtering ────────────────────────────────────────────────────────────────
 
-namespace {
-
-// Read granularity for the content search. Big enough to amortise syscalls,
-// small enough that progress stays smooth and several parallel workers don't
-// add up to a noticeable amount of memory.
-constexpr qint64 kReadChunkBytes = 256 * 1024;
-
-// A "line" longer than this is treated as complete for regex purposes, so a
-// binary file without newlines can't grow the buffer without bound.
-constexpr qsizetype kMaxLineChars = 4 * 1024 * 1024;
-
-// Plain-substring search over the raw stream. A needle typed into a line edit
-// can never contain a newline, so scanning chunk-wise (with a small overlap to
-// cover matches straddling a chunk boundary) is equivalent to scanning line by
-// line — and several times faster, because nothing is split or allocated per
-// line the way QTextStream::readLine() does it.
-bool streamContainsLiteral(QFile& file, const QString& needle, Qt::CaseSensitivity cs,
-                           const std::atomic<bool>& cancelled, std::atomic<qint64>& bytesDone)
+DirectoryScanner::ContentVerdict
+DirectoryScanner::ContentMatcher::operator()(const SearchItem& item) const
 {
-    QStringDecoder decoder(QStringDecoder::Utf8);
-    const qsizetype overlap = needle.size() - 1;
-    QString carry;
+    ContentVerdict verdict;
+    qint64 counted = 0;   // байты этого файла в общем счётчике (воркеров несколько)
 
-    while (!file.atEnd()) {
-        if (cancelled.load(std::memory_order_relaxed))
-            return false;
-        const QByteArray block = file.read(kReadChunkBytes);
-        if (block.isEmpty())
-            break;
-        bytesDone.fetch_add(block.size(), std::memory_order_relaxed);
-
-        // The decoder is stateful, so a multi-byte character split across two
-        // reads is stitched back together instead of turning into garbage.
-        const QString decoded = decoder.decode(block);
-        if (decoded.isEmpty())
-            continue;
-        const QString text = carry.isEmpty() ? decoded : carry + decoded;
-        if (text.contains(needle, cs))
-            return true;
-        carry = text.right(std::min(overlap, text.size()));
-    }
-    return false;
-}
-
-// Regular expressions are line-oriented (anchors, greedy runs), so this one
-// does split lines — but out of a decoded chunk, without a QTextStream and
-// without allocating a QString per line.
-bool streamMatchesRegex(QFile& file, const QRegularExpression& re,
-                        const std::atomic<bool>& cancelled, std::atomic<qint64>& bytesDone)
-{
-    if (!re.isValid())
-        return false;
-
-    QStringDecoder decoder(QStringDecoder::Utf8);
-    QString pending;
-
-    auto matchLine = [&re](QStringView line) {
-        if (line.endsWith(u'\r'))
-            line.chop(1);
-        return re.match(line).hasMatch();
-    };
-
-    while (!file.atEnd()) {
-        if (cancelled.load(std::memory_order_relaxed))
-            return false;
-        const QByteArray block = file.read(kReadChunkBytes);
-        if (block.isEmpty())
-            break;
-        bytesDone.fetch_add(block.size(), std::memory_order_relaxed);
-
-        const QString decoded = decoder.decode(block);
-        pending += decoded;
-
-        qsizetype start = 0;
-        while (true) {
-            const qsizetype nl = pending.indexOf(u'\n', start);
-            if (nl < 0)
-                break;
-            if (matchLine(QStringView(pending).sliced(start, nl - start)))
-                return true;
-            start = nl + 1;
-        }
-        pending.remove(0, start);
-
-        if (pending.size() > kMaxLineChars) {
-            if (matchLine(pending))
-                return true;
-            pending.clear();
-        }
-    }
-    return !pending.isEmpty() && matchLine(pending);
-}
-
-} // namespace
-
-bool DirectoryScanner::ContentMatcher::operator()(const SearchItem& item) const
-{
-    bool matched = false;
-    qint64 counted = 0;
-
-    QFile file(item.path);
-    if (!progress->cancelled.load(std::memory_order_relaxed)
-        && file.open(QIODevice::ReadOnly)) {
-        const qint64 before = progress->bytesDone.load(std::memory_order_relaxed);
-        matched = isRegex
-            ? streamMatchesRegex(file, re, progress->cancelled, progress->bytesDone)
-            : streamContainsLiteral(file, needle, cs, progress->cancelled, progress->bytesDone);
-        counted = progress->bytesDone.load(std::memory_order_relaxed) - before;
+    if (!progress->cancelled.load(std::memory_order_relaxed)) {
+        FileContentSearch::Options options;
+        options.fallback  = fallback;
+        options.cancelled = &progress->cancelled;
+        options.bytesDone = &progress->bytesDone;
+        const FileContentSearch::Result result = FileContentSearch::search(item.path, query, options);
+        verdict.matched = result.matched;
+        verdict.dependsOnFallback = result.dependsOnFallback;
+        counted = result.bytesRead;
     }
 
     // A file we bailed out of early (match found, unreadable, cancelled) still
@@ -1079,7 +985,7 @@ bool DirectoryScanner::ContentMatcher::operator()(const SearchItem& item) const
     if (counted < item.size)
         progress->bytesDone.fetch_add(item.size - counted, std::memory_order_relaxed);
     progress->filesDone.fetch_add(1, std::memory_order_relaxed);
-    return matched;
+    return verdict;
 }
 
 void DirectoryScanner::setDateFilter(bool enabled, const QDateTime& from, const QDateTime& to)
@@ -1121,6 +1027,31 @@ void DirectoryScanner::clearFilters()
     refreshAllVisibility();
 }
 
+void DirectoryScanner::setFallbackEncoding(TextEncoding encoding)
+{
+    if (encoding == m_fallbackEncoding)
+        return;
+    m_fallbackEncoding = encoding;
+    // Вердикты файлов, решённых автоматикой в однобайтную кодировку, могли
+    // измениться; ASCII, UTF-8 и файлы с BOM от запасной не зависят.
+    int dropped = 0;
+    for (auto it = m_contentCache.begin(); it != m_contentCache.end();) {
+        if (it->dependsOnFallback) {
+            it = m_contentCache.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    // Идущий поиск читает с прежней запасной — заново; применённый фильтр —
+    // только если какой-то вердикт от неё зависел (остальные — из кэша).
+    if (!m_contentText.isEmpty()
+        && (m_contentWatcher || (m_contentFilterActive && dropped > 0))) {
+        cancelContentSearch();
+        startContentSearch();
+    }
+}
+
 void DirectoryScanner::cancelContentSearch()
 {
     m_contentProgressTimer->stop();
@@ -1136,9 +1067,9 @@ void DirectoryScanner::cancelContentSearch()
     m_contentWatcher->cancel();
     // Detach: let the cancelled future wind down and free itself without
     // blocking the UI thread.
-    QFutureWatcher<bool>* w = m_contentWatcher;
+    QFutureWatcher<ContentVerdict>* w = m_contentWatcher;
     m_contentWatcher = nullptr;
-    connect(w, &QFutureWatcher<bool>::finished, w, &QObject::deleteLater);
+    connect(w, &QFutureWatcher<ContentVerdict>::finished, w, &QObject::deleteLater);
 }
 
 QString DirectoryScanner::contentQueryKey() const
@@ -1194,7 +1125,7 @@ void DirectoryScanner::startContentSearch()
             continue;
         }
         if (candidate.size <= 0) {
-            m_contentCache.insert(candidate.path, { candidate.size, candidate.mtimeMs, false });
+            m_contentCache.insert(candidate.path, { candidate.size, candidate.mtimeMs, false, false });
             continue;
         }
 
@@ -1210,24 +1141,17 @@ void DirectoryScanner::startContentSearch()
     }
 
     ContentMatcher matcher;
-    matcher.needle  = m_contentText;
-    matcher.isRegex = m_contentRegex;
-    matcher.cs = m_contentCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    if (m_contentRegex) {
-        QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
-        if (!m_contentCaseSensitive)
-            opts |= QRegularExpression::CaseInsensitiveOption;
-        matcher.re = QRegularExpression(m_contentText, opts);
-        matcher.re.optimize();
-    }
+    matcher.query = ContentQuery(m_contentText, m_contentRegex,
+                                 m_contentCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+    matcher.fallback = m_fallbackEncoding;
     m_contentProgress = std::make_shared<SearchProgress>();
     matcher.progress  = m_contentProgress;
     m_contentTodo = std::move(todo);
     matcher.items = m_contentTodo;
 
-    m_contentWatcher = new QFutureWatcher<bool>(this);
-    connect(m_contentWatcher, &QFutureWatcher<bool>::finished, this, [this]() {
-        QFutureWatcher<bool>* w = m_contentWatcher;
+    m_contentWatcher = new QFutureWatcher<ContentVerdict>(this);
+    connect(m_contentWatcher, &QFutureWatcher<ContentVerdict>::finished, this, [this]() {
+        QFutureWatcher<ContentVerdict>* w = m_contentWatcher;
         m_contentWatcher = nullptr;
         m_contentProgressTimer->stop();
         m_contentProgress.reset();
@@ -1235,10 +1159,11 @@ void DirectoryScanner::startContentSearch()
         const int n = m_contentTodo ? int(m_contentTodo->size()) : 0;
         for (int i = 0; i < n && i < w->future().resultCount(); ++i) {
             const SearchItem& searched = m_contentTodo->at(i);
-            const bool matched = w->resultAt(i);
-            if (matched)
+            const ContentVerdict verdict = w->resultAt(i);
+            if (verdict.matched)
                 m_contentMatches.insert(searched.path);
-            m_contentCache.insert(searched.path, { searched.size, searched.mtimeMs, matched });
+            m_contentCache.insert(searched.path, { searched.size, searched.mtimeMs,
+                                                   verdict.matched, verdict.dependsOnFallback });
         }
         m_contentFilterActive = true;
         w->deleteLater();

@@ -121,6 +121,8 @@ set(DENDROLOG_CORE_SOURCES
     src/openrouting.cpp
     src/textencoding.h
     src/textencoding.cpp
+    src/filecontentsearch.h
+    src/filecontentsearch.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES

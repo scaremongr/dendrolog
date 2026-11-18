@@ -220,6 +220,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - **Fallback encoding** — **Settings → General → Non-UTF-8 files**: what to use for a file that is not UTF-8. The default follows the system language (Cyrillic — Windows-1251, otherwise Windows-1252). A change applies to new files and to open files whose decision is not final yet; decided files and manual choices stay as they are.
 - **Command line** — `DendroLog --encoding cp1251 app.log` opens the files in that encoding (as a manual choice); `program | DendroLog --encoding cp866 -` does the same for a stream. Names: `utf-8`, `windows-1251`/`cp1251`, `ibm866`/`cp866`, `koi8-r`, `windows-1252`/`cp1252`. An unknown name shows a message in the window, and the files open with automatic detection. The argument also works when the files are passed to an already open window (a second launch).
 - **Save View As** always writes UTF-8: a tab may hold files in different encodings, and UTF-8 keeps all of them intact.
+- **Directory Scanner** searches file contents in the same encoding a tab would use: by the byte-order mark (UTF-8, UTF-16, UTF-32), otherwise by the same detection rule with the same fallback encoding. A query that finds a line in a tab finds the file in the scanner. Changing the fallback encoding re-checks only the files that depend on it.
 - **Limits.** UTF-16 and UTF-32 are recognised by the byte-order mark only and are read whole in the regular mode: a large such file is not indexed, its encoding cannot be changed, and it does not open in a tab with other files — open it in a tab of its own. A block of garbage at the start of a file (hundreds of non-ASCII bytes that do not look like text) can give a wrong final decision — correct it by choosing by hand.
 
 ## Directory Scanner
@@ -233,7 +234,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
   - **Manual** (default) — the tree never changes on its own, but the button lights up when something changed on disk.
   - **Automatic** — changes are pulled in by themselves; the period is set from “Auto-refresh interval…” in the same menu. While the panel is hidden the refresh is deferred until it reappears.
   - **Off** — nothing is watched; the button still refreshes on demand.
-- **⚙ opens the filters.** The content filter reads files in the background and reports progress **in bytes**, so the bar tracks the real work even when one file dwarfs the rest. Re-applying the same query is served from cache (instant), and an active date filter narrows down which files are read at all.
+- **⚙ opens the filters.** The content filter reads files in the background and reports progress **in bytes**, so the bar tracks the real work even when one file dwarfs the rest. Re-applying the same query is served from cache (instant), and an active date filter narrows down which files are read at all. A file's encoding is detected the way a tab detects it (see "Encodings"): Cyrillic in Windows-1251, IBM866 and KOI8-R and text in UTF-16 are found, case-sensitive or not, as plain text or a regular expression; an appended or rotated file is checked again in its own encoding.
 
 ## Panels & layout
 

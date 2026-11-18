@@ -65,6 +65,11 @@ All notable changes to DendroLog are documented here. The format follows
   command line or a piped stream in that encoding, also through an already
   open window; an unknown name is reported instead of being read as UTF-8.
   **Save View As** writes the text as shown, in UTF-8.
+  The **Directory Scanner** content filter reads each file in the same
+  encoding a tab would: Cyrillic in Windows-1251, IBM866, KOI8-R and any text
+  in UTF-16 is found now (before, files were searched as UTF-8 only), with the
+  same fallback encoding as tabs; changing it re-checks only the files that
+  depend on it. Searching a directory of UTF-8 logs is no slower.
 
 ### Changed
 - **Show/Hide Directory Scanner panel** moved from `Ctrl+F2` to `Ctrl+F10`:

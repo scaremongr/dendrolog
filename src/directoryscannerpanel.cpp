@@ -58,6 +58,10 @@ DirectoryScannerPanel::DirectoryScannerPanel(QWidget* parent)
     const AppSettings& settings = AppSettings::instance();
     m_scanner->setAutoRefreshIntervalSecs(settings.scanRefreshIntervalSecs());
     m_scanner->setRefreshMode(static_cast<RefreshMode>(settings.scanRefreshMode()));
+    // Запасная кодировка фильтра по содержимому — та же, что у вкладок (F-1).
+    m_scanner->setFallbackEncoding(settings.fallbackEncoding());
+    connect(&AppSettings::instance(), &AppSettings::fallbackEncodingChanged,
+            m_scanner, &DirectoryScanner::setFallbackEncoding);
     updateRefreshButton();
 }
 

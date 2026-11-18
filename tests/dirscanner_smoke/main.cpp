@@ -7,6 +7,12 @@
 //     записей и уровней совпадают с содержимым;
 //   • фильтр по содержимому: литерал, регистр, регексп, совпадение НА СТЫКЕ
 //     блоков чтения (256 КиБ) и корректный прогресс в байтах;
+//   • фильтр по содержимому не зависит от кодировки (F-1, шаг 5): cp1251,
+//     cp866, KOI8-R, UTF-8 (с BOM и без), UTF-16 LE/BE; граница блока посреди
+//     символа и запроса; предварительное решение и пересмотр; запасная
+//     кодировка; сверка «сканер нашёл файл ⇔ вкладка нашла строку»; отмена
+//     посреди файла; статистика от кодировки не зависит; дозапись, новый файл
+//     и ротация проверяются кодировкой файла;
 //   • инкрементальное обновление rescan(): добавленный файл появляется,
 //     удалённый исчезает, а дописанный в хвост пересчитывается «по дельте»
 //     и даёт РОВНО те же цифры, что полный повторный скан.
@@ -14,6 +20,9 @@
 
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
+#include "appsettings.h"
+#include "filecontentsearch.h"
+#include "filterruleset.h"
 #include "../common/testdocuments.h"
 
 #include <QApplication>
@@ -26,6 +35,10 @@
 #include <QSet>
 #include <QStringEncoder>
 #include <QTreeWidget>
+#include <QThread>
+#include <QtConcurrent>
+
+#include <atomic>
 
 #include <cstdio>
 
@@ -531,6 +544,538 @@ static void testPanelRefresh()
 }
 
 // ---------------------------------------------------------------------------
+// F-1, шаг 5. Фильтр по содержимому читает файл той же кодировкой, что и
+// вкладка: BOM, иначе EncodingDetector::advance по блокам (окно 64 КБ,
+// предварительное решение и пересмотр) и TextDecoder. Критерий — «сканер нашёл
+// файл ⇔ вкладка нашла строку» (Text Filters на резидентной и индексной
+// вкладке) для каждой кодировки.
+
+struct ContentProbe {
+    QString text;
+    bool regex = false;
+    bool caseSensitive = false;
+    int expect = -1;   // 1 — найдено, 0 — нет, -1 — только сверка с вкладкой
+};
+
+static QString describeProbe(const ContentProbe& p)
+{
+    return u"'%1'%2%3"_s.arg(p.text, p.regex ? u" regex"_s : QString(),
+                               p.caseSensitive ? u" case"_s : QString());
+}
+
+static bool tabFinds(testdocs::Document& doc, const ContentProbe& probe)
+{
+    FilterRuleSet rules;
+    FilterRule rule;
+    rule.action = FilterRule::Action::Include;
+    rule.text = probe.text;
+    rule.isRegex = probe.regex;
+    rule.caseSensitive = probe.caseSensitive;
+    rules.rules.append(rule);
+    rules.bindFields({}, false);   // как MainWindow: без привязки регекс не скомпилирован
+    doc.model->setFilterRules(rules);
+    testdocs::settle(*doc.model);
+    const bool found = doc.model->rowCount() > 0;
+    doc.model->setFilterRules(FilterRuleSet());
+    testdocs::settle(*doc.model);
+    return found;
+}
+
+static FileContentSearch::Result searchFile(const QString& path, const ContentProbe& probe,
+                                            qint64 blockBytes = FileContentSearch::kReadBlockBytes,
+                                            TextEncoding fallback = testdocs::kTestFallbackEncoding,
+                                            qsizetype maxLineBytes = FileContentSearch::kMaxLineBytes)
+{
+    FileContentSearch::Options options;
+    options.fallback = fallback;
+    options.blockBytes = blockBytes;
+    options.maxLineBytes = maxLineBytes;
+    const ContentQuery query(probe.text, probe.regex,
+                             probe.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+    return FileContentSearch::search(path, query, options);
+}
+
+// Сверка одного файла: поиск сканера (на разных размерах блока) против
+// вкладки, открытой обоими бэкендами (UTF-16 — только резидентной).
+static void checkFileAgainstTab(const QString& path, const QList<ContentProbe>& probes,
+                                const QString& what, bool indexedToo = true,
+                                const QList<qint64>& blockSizes = { FileContentSearch::kReadBlockBytes })
+{
+    testdocs::Document resident = testdocs::buildResident({ path }, QString());
+    CHECK(resident.errors.isEmpty(), qPrintable(what + u": the resident tab loads the file: "_s
+                                                 + resident.errors.join(u"; "_s)));
+    testdocs::Document indexed;
+    if (indexedToo) {
+        indexed = testdocs::buildIndexed({ path }, QString());
+        CHECK(indexed.errors.isEmpty(), qPrintable(what + u": the indexed tab loads the file"_s));
+    }
+    for (const ContentProbe& probe : probes) {
+        const bool tab = tabFinds(resident, probe);
+        if (indexedToo && tabFinds(indexed, probe) != tab) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s %s: resident and indexed tabs disagree\n",
+                         qPrintable(what), qPrintable(describeProbe(probe)));
+        }
+        if (probe.expect >= 0 && tab != (probe.expect == 1)) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s %s: the tab %s the text, expected otherwise\n",
+                         qPrintable(what), qPrintable(describeProbe(probe)),
+                         tab ? "finds" : "does not find");
+        }
+        for (const qint64 block : blockSizes) {
+            const FileContentSearch::Result result = searchFile(path, probe, block);
+            if (result.matched != tab) {
+                ++g_failures;
+                std::fprintf(stderr,
+                             "FAIL %s %s (block %lld): scanner %s, tab %s (scanner read it as %s)\n",
+                             qPrintable(what), qPrintable(describeProbe(probe)), (long long)block,
+                             result.matched ? "matches" : "does not match",
+                             tab ? "finds the line" : "finds nothing",
+                             qPrintable(TextEncodings::displayName(result.usedEncoding)));
+            }
+        }
+    }
+}
+
+static QByteArray encodeFixture(const QString& text, const QString& kind)
+{
+    if (kind == u"UTF-8"_s)
+        return text.toUtf8();
+    if (kind == u"UTF-8 BOM"_s)
+        return QByteArray("\xEF\xBB\xBF") + text.toUtf8();
+    if (kind == u"UTF-16LE"_s || kind == u"UTF-16BE"_s) {
+        QStringEncoder encoder(kind == u"UTF-16LE"_s ? QStringConverter::Utf16LE
+                                                     : QStringConverter::Utf16BE,
+                               QStringConverter::Flag::WriteBom);
+        return encoder.encode(text);
+    }
+    return testdocs::encodeText(text, *TextEncodings::fromName(kind));
+}
+
+static const QStringList kEncodingKinds{
+    u"Windows-1251"_s, u"IBM866"_s, u"KOI8-R"_s, u"UTF-8"_s, u"UTF-8 BOM"_s,
+    u"UTF-16LE"_s, u"UTF-16BE"_s,
+};
+
+static QList<ContentProbe> cyrillicProbes()
+{
+    return {
+        { u"соединения"_s, false, false, 1 },
+        { u"СОЕДИНЕНИЯ"_s, false, false, 1 },
+        { u"Ошибка соединения"_s, false, true, 1 },
+        { u"ошибка соединения"_s, false, true, 0 },
+        { u"ПРЕДУПРЕЖДЕНИЕ: диск"_s, false, true, 1 },
+        { u"щёлкнул"_s, false, false, 1 },
+        { u"\\[worker-0\\] ERROR - Ошибка\\s+соединения"_s, true, true, 1 },
+        { u"^\\S+ \\S+ \\[worker-1\\] INFO - пользователь\\s+ИВАНОВ"_s, true, false, 1 },
+        { u"Иванова"_s, true, false, 0 },
+        { u"ascii preamble line 2$"_s, true, true, 1 },
+        { u"зззнетничего"_s, false, false, 0 },
+    };
+}
+
+static void testContentEncodings()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QString text = testdocs::cyrillicLogText(4);
+    const QList<ContentProbe> probes = cyrillicProbes();
+
+    // Каждая кодировка: сканер против вкладки, блоки разного размера
+    // (граница блока проходит через разные места символов и строк).
+    for (const QString& kind : kEncodingKinds) {
+        const QString path = dir + u"/enc-"_s + QString(kind).replace(u' ', u'_') + u".log"_s;
+        writeFile(path, encodeFixture(text, kind));
+        const bool wide = kind.startsWith(u"UTF-16"_s);
+        checkFileAgainstTab(path, probes, kind, !wide, { 16, 61, 4096, FileContentSearch::kReadBlockBytes });
+        const FileContentSearch::Result r = searchFile(path, probes.first());
+        const TextEncoding expected = kind == u"UTF-8 BOM"_s ? TextEncoding::Utf8
+            : kind == u"UTF-16LE"_s                          ? TextEncoding::Utf16LE
+            : kind == u"UTF-16BE"_s                          ? TextEncoding::Utf16BE
+                                                             : *TextEncodings::fromName(kind);
+        if (r.usedEncoding != expected) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s: the scanner read it as %s\n", qPrintable(kind),
+                         qPrintable(TextEncodings::displayName(r.usedEncoding)));
+        }
+    }
+
+    // То же через сам сканер: одно дерево, все кодировки сразу.
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFallbackEncoding(testdocs::kTestFallbackEncoding);
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == kEncodingKinds.size()
+                            && allScanned(tree.invisibleRootItem()); }),
+          "encodings: scan completes");
+    int matched = -1;
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterFinished,
+                     [&](int m, int) { matched = m; });
+    for (const ContentProbe& probe : probes) {
+        matched = -1;
+        scanner.setContentFilter(probe.text, probe.regex, probe.caseSensitive);
+        scanner.applyFilters();
+        CHECK(waitFor([&] { return matched >= 0; }), "encodings: content search finishes");
+        const int want = probe.expect == 1 ? int(kEncodingKinds.size()) : 0;
+        if (matched != want) {
+            QStringList shown;
+            for (int i = 0; i < tree.topLevelItemCount(); ++i)
+                if (!tree.topLevelItem(i)->isHidden())
+                    shown << tree.topLevelItem(i)->text(ScanCol::Name);
+            ++g_failures;
+            std::fprintf(stderr, "FAIL scanner %s: %d of %d files match [%s]\n",
+                         qPrintable(describeProbe(probe)), matched, want,
+                         qPrintable(shown.join(u", "_s)));
+        }
+    }
+}
+
+// Совпадение, разрезанное границей блока чтения, и многобайтный символ на
+// границе — на каждом сдвиге.
+static void testContentBlockEdges()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QString needle = u"Ошибка соединения"_s;
+    for (const QString& kind : { u"UTF-8"_s, u"Windows-1251"_s, u"KOI8-R"_s, u"UTF-16LE"_s }) {
+        int misses = 0;
+        for (int shift = 0; shift < 48; ++shift) {
+            QString line = u"2026-03-01 10:00:00 ERROR "_s + QString(shift, u'x') + u" "_s + needle
+                + u" конец\n"_s;
+            const QString path = dir + u"/edge.log"_s;
+            writeFile(path, encodeFixture(line + line.toUpper().replace(u"ОШИБКА"_s, u"сбой"_s), kind));
+            for (const qint64 block : { 16, 17, 23, 32 }) {
+                if (!searchFile(path, { needle, false, true }, block).matched)
+                    ++misses;
+                if (!searchFile(path, { u"ERROR x* Ошибка соединения конец$"_s, true, true }, block).matched)
+                    ++misses;
+            }
+        }
+        if (misses) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL block edges, %s: %d searches missed the needle\n",
+                         qPrintable(kind), misses);
+        }
+    }
+
+    // Строка без '\n' длиннее предела проверяется кусками с перекрытием:
+    // подстрока на стыке кусков не теряется.
+    int misses = 0;
+    for (int shift = 0; shift < 40; ++shift) {
+        const QString path = dir + u"/long.bin"_s;
+        writeFile(path, QByteArray(100 + shift, 'z') + needle.toUtf8() + QByteArray(200, 'z'));
+        if (!searchFile(path, { needle, false, false }, 16, TextEncoding::Windows1251, 64).matched)
+            ++misses;
+    }
+    CHECK(misses == 0, "a needle inside an over-long line is found at every offset");
+
+    // Регекс (кусок без перекрытия): многобайтный символ на месте разреза
+    // длинной строки не теряется — разрез идёт по границе символа.
+    misses = 0;
+    for (int shift = 0; shift < 40; ++shift) {
+        const QString path = dir + u"/long-utf8.bin"_s;
+        writeFile(path, QByteArray(60 + shift, 'z') + u"ж"_s.toUtf8() + QByteArray(200, 'z')
+                            + u" ещё кириллица"_s.toUtf8());
+        if (!searchFile(path, { u"ж"_s, true, true }, 16, TextEncoding::Windows1251, 64).matched)
+            ++misses;
+    }
+    CHECK(misses == 0, "a UTF-8 character at the cut of an over-long line is kept whole");
+
+    // Через сканер, блок 256 КиБ: кириллица UTF-8 и cp1251 ровно на стыке.
+    QTemporaryDir tree256;
+    for (const QString& kind : { u"UTF-8"_s, u"Windows-1251"_s }) {
+        QByteArray bytes(FileContentSearch::kReadBlockBytes - 5, 'a');
+        bytes += '\n';
+        bytes += encodeFixture(needle + u" и ещё немного русского текста\n"_s, kind);
+        writeFile(tree256.path() + u"/straddle-"_s + kind + u".log"_s, bytes);
+    }
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFallbackEncoding(testdocs::kTestFallbackEncoding);
+    scanner.scan(tree256.path());
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == 2 && allScanned(tree.invisibleRootItem()); }),
+          "straddle: scan completes");
+    int matched = -1;
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterFinished,
+                     [&](int m, int) { matched = m; });
+    scanner.setContentFilter(u"ОШИБКА СОЕДИНЕНИЯ"_s, false, false);
+    scanner.applyFilters();
+    CHECK(waitFor([&] { return matched >= 0; }), "straddle: search finishes");
+    CHECK(matched == 2, "cyrillic across the 256 KiB block edge is found in UTF-8 and cp1251");
+}
+
+// Предварительное решение и его пересмотр (шаг 3а): результат — как у файла,
+// сразу прочитанного итоговой кодировкой, и как у вкладки.
+static void testContentProvisional()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QByteArray asciiPad = [] {
+        QByteArray pad;
+        for (int i = 0; pad.size() < 96 * 1024; ++i)
+            pad += "2026-03-01 10:00:00 INFO  padding line " + QByteArray::number(i) + "\n";
+        return pad;
+    }();
+    // Несколько длинных кириллических строк: свидетельства хватает на
+    // окончательное решение, а не-ASCII строк мало — резидентный парсер зовёт
+    // QTextStream::pos() на каждой такой строке, пока решение предварительное,
+    // и под санитайзером это дорого.
+    const QString cyrText = QStringLiteral(
+        "2026-03-01 10:00:01 ERROR - Ошибка соединения с базой данных: таймаут ожидания ответа "
+        "от сервера хранилища истёк, повторное подключение через пять секунд\n"
+        "2026-03-01 10:00:02 INFO - Пользователь Иванов вошёл в систему с рабочей станции "
+        "бухгалтерии и открыл журнал операций за прошлый месяц\n"
+        "2026-03-01 10:00:03 WARN - Предупреждение: диск заполнен почти полностью, свободного "
+        "места осталось меньше пяти процентов, очистите временные файлы\n");
+    const QByteArray utf8Text = cyrText.toUtf8();
+    const QByteArray cp1251Text = testdocs::encodeText(cyrText, TextEncoding::Windows1251);
+
+    struct Case {
+        const char* name;
+        QByteArray bytes;
+        QList<ContentProbe> probes;
+    };
+    const QList<Case> cases{
+        // Мусорный байт в начале UTF-8-файла: решение — запасная, предварительно;
+        // кириллица дальше 64 КБ пересматривает его в UTF-8.
+        { "garbage byte, then UTF-8 beyond 64 KiB",
+          QByteArray("2026-03-01 09:59:59 INFO  torn \xFF byte\n") + asciiPad + utf8Text,
+          { { u"соединения"_s, false, false, 1 }, { u"пользователь иванов"_s, false, false, 1 },
+            { u"torn"_s, false, false, 1 } } },
+        // Строка с запросом прочитана под предварительной запасной (мусор
+        // перевешивает одно слово UTF-8), пересмотр приходит следующими блоками.
+        { "UTF-8 word under a provisional single-byte decision",
+          QByteArray("2026-03-01 09:59:58 WARN  junk \xC0\xC1\xF5\xFF\xFE\xC0\xC1\xF5\xFF\n"
+                     "2026-03-01 09:59:59 ERROR сбой\n") + asciiPad + utf8Text,
+          { { u"сбой"_s, false, true, 1 }, { u"ERROR сбой$"_s, true, true, 1 } } },
+        // Обратное: слово UTF-8 даёт предварительное UTF-8, дальше — cp1251;
+        // итоговая кодировка — cp1251, и строка «сбой» уже не находится.
+        { "provisional UTF-8 revised to cp1251",
+          QByteArray("2026-03-01 09:59:59 ERROR сбой\n") + asciiPad + cp1251Text,
+          { { u"сбой"_s, false, false, 0 }, { u"соединения"_s, false, false, 1 } } },
+        // Одно слово cp1251 — предварительно, пересмотра нет.
+        { "one cp1251 word, never revised",
+          QByteArray("2026-03-01 09:59:59 ERROR ") + testdocs::encodeText(u"сбой"_s, TextEncoding::Windows1251)
+              + "\n" + asciiPad,
+          { { u"СБОЙ"_s, false, false, -1 }, { u"сбой"_s, true, true, -1 } } },
+    };
+    for (const Case& c : cases) {
+        const QString path = dir + u"/provisional.log"_s;
+        writeFile(path, c.bytes);
+        checkFileAgainstTab(path, c.probes, QString::fromLatin1(c.name), true,
+                            { 64, 4096, 64 * 1024, FileContentSearch::kReadBlockBytes });
+        for (const ContentProbe& probe : c.probes) {
+            const bool got = searchFile(path, probe).matched;
+            if (probe.expect >= 0 && got != (probe.expect == 1)) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL %s %s: the scanner says %d\n", c.name,
+                             qPrintable(describeProbe(probe)), int(got));
+            }
+            // Запомненные строки не влезли — пересмотр перечитывает файл с
+            // начала; ответ тот же, прогресс не считает байты дважды.
+            for (const qint64 block : { 64, 4096 }) {
+                std::atomic<qint64> done{ 0 };
+                FileContentSearch::Options options;
+                options.fallback = testdocs::kTestFallbackEncoding;
+                options.blockBytes = block;
+                options.retainedLimitBytes = 1;
+                options.bytesDone = &done;
+                const ContentQuery query(probe.text, probe.regex,
+                                         probe.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+                const bool reread = FileContentSearch::search(path, query, options).matched;
+                if (reread != got || done.load() > c.bytes.size()) {
+                    ++g_failures;
+                    std::fprintf(stderr, "FAIL %s %s (reread, block %lld): %d vs %d, %lld bytes counted\n",
+                                 c.name, qPrintable(describeProbe(probe)), (long long)block,
+                                 int(reread), int(got), (long long)done.load());
+                }
+            }
+        }
+    }
+}
+
+// Запасная кодировка: значением из настроек; смена перепроверяет только
+// файлы, решённые автоматикой в однобайтную кодировку.
+static void testContentFallback()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QString text = testdocs::cyrillicLogText(2);
+    writeFile(dir + u"/cp1251.log"_s, testdocs::encodeText(text, TextEncoding::Windows1251));
+    writeFile(dir + u"/utf8.log"_s, text.toUtf8());
+    writeFile(dir + u"/ascii.log"_s, "2026-03-01 10:00:00 INFO  nothing russian here\n");
+    const qint64 cp1251Size = QFileInfo(dir + u"/cp1251.log"_s).size();
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFallbackEncoding(TextEncoding::Windows1252);
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == 3 && allScanned(tree.invisibleRootItem()); }),
+          "fallback: scan completes");
+    int matched = -1;
+    qint64 bytesTotal = -1;
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterFinished,
+                     [&](int m, int) { matched = m; });
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterProgress,
+                     [&](qint64, qint64 all, int, int) { bytesTotal = all; });
+
+    scanner.setContentFilter(u"соединения"_s, false, false);
+    scanner.applyFilters();
+    CHECK(waitFor([&] { return matched >= 0; }), "fallback: first search finishes");
+    CHECK(matched == 1, "with a Windows-1252 fallback only the UTF-8 file has Cyrillic");
+
+    matched = -1;
+    bytesTotal = -1;
+    scanner.setFallbackEncoding(TextEncoding::Windows1251);
+    CHECK(waitFor([&] { return matched >= 0; }), "fallback change re-runs the content filter");
+    CHECK(matched == 2, "with a Windows-1251 fallback the cp1251 file matches too");
+    CHECK(bytesTotal == cp1251Size,
+          "only the file decided by the fallback is read again (UTF-8 and ASCII verdicts are kept)");
+
+    // Тот же ответ, что у вкладки с той же запасной.
+    checkFileAgainstTab(dir + u"/cp1251.log"_s, { { u"соединения"_s, false, false, 1 } },
+                        u"fallback cp1251"_s);
+
+    // Панель берёт запасную из настроек и следует за её сменой.
+    AppSettings& settings = AppSettings::instance();
+    const std::optional<TextEncoding> before = settings.fallbackEncodingChoice();
+    settings.setFallbackEncodingChoice(TextEncoding::Koi8R);
+    {
+        DirectoryScannerPanel panel;
+        CHECK(panel.scanner()->fallbackEncoding() == TextEncoding::Koi8R,
+              "the panel hands the configured fallback to its scanner");
+        settings.setFallbackEncodingChoice(TextEncoding::Ibm866);
+        CHECK(panel.scanner()->fallbackEncoding() == TextEncoding::Ibm866,
+              "the panel follows a fallback change");
+    }
+    settings.setFallbackEncodingChoice(before);
+}
+
+// Отмена посреди файла: воркер выходит между блоками, совпадения не сообщает.
+static void testContentCancel()
+{
+    QTemporaryDir tmp;
+    const QString path = tmp.path() + u"/huge.log"_s;
+    {
+        QFile f(path);
+        CHECK(f.open(QIODevice::WriteOnly), "cancel: create the file");
+        const QByteArray line = "2026-03-01 10:00:00 INFO  nothing to see here, move along\n";
+        QByteArray chunk;
+        while (chunk.size() < 1024 * 1024)
+            chunk += line;
+        for (int i = 0; i < 48; ++i)
+            f.write(chunk);
+        f.write(testdocs::encodeText(u"2026-03-01 10:00:01 ERROR сбой в самом конце\n"_s,
+                                     TextEncoding::Windows1251));
+    }
+    const qint64 size = QFileInfo(path).size();
+    const FileContentSearch::Result whole = searchFile(path, { u"сбой"_s, false, false });
+    CHECK(whole.matched && whole.bytesRead == size,
+          "cancel: the needle is at the end, and the whole file is accounted for");
+
+    // Отмена ставится из потока поиска после блока, кончившегося за первым
+    // мегабайтом: детерминированно «посреди файла», без гонки с таймером.
+    std::atomic<bool> cancelled{ false };
+    std::atomic<qint64> bytesDone{ 0 };
+    FileContentSearch::Options options;
+    options.fallback = TextEncoding::Windows1251;
+    options.blockBytes = 64 * 1024;
+    options.cancelled = &cancelled;
+    options.bytesDone = &bytesDone;
+    options.afterBlock = [&](qint64 end) {
+        if (end >= 1024 * 1024)
+            cancelled.store(true);
+    };
+    const ContentQuery query(u"сбой"_s, false, Qt::CaseInsensitive);
+    const FileContentSearch::Result result = FileContentSearch::search(path, query, options);
+    CHECK(result.cancelled, "cancel: the search reports cancellation");
+    CHECK(!result.matched, "cancel: a cancelled search matches nothing");
+    CHECK(result.bytesRead == bytesDone.load() && result.bytesRead < 2 * 1024 * 1024,
+          "cancel: the worker stops at the next block, and reports what it read");
+}
+
+// Статистика сканера от кодировки не зависит: файлы cp1251 и UTF-16 дают те
+// же цифры, что тот же текст в UTF-8, и совпадают с вкладкой.
+static void testStatsAcrossEncodings()
+{
+    QTemporaryDir tmp;
+    const QString text = testdocs::cyrillicLogText(3);
+    const QString utf8Path = tmp.path() + u"/stats-utf8.log"_s;
+    writeFile(utf8Path, text.toUtf8());
+    LogParser parser;
+    const LogParser::FileStats reference = parser.analyzeFileForStats(utf8Path).stats;
+    CHECK(reference.totalEntries > 0 && reference.errorCount > 0 && reference.warnCount > 0,
+          "stats: the fixture has records and alerts");
+    for (const QString& kind : { u"Windows-1251"_s, u"IBM866"_s, u"KOI8-R"_s, u"UTF-16LE"_s, u"UTF-16BE"_s }) {
+        const QString path = tmp.path() + u"/stats-"_s + kind + u".log"_s;
+        writeFile(path, encodeFixture(text, kind));
+        const LogParser::FileStats stats = parser.analyzeFileForStats(path).stats;
+        if (stats.totalEntries != reference.totalEntries || stats.warnCount != reference.warnCount
+            || stats.errorCount != reference.errorCount || stats.fatalCount != reference.fatalCount
+            || stats.firstEntryTimestamp != reference.firstEntryTimestamp
+            || stats.lastEntryTimestamp != reference.lastEntryTimestamp) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL stats %s: %d entries W%d E%d F%d, UTF-8 gives %d W%d E%d F%d\n",
+                         qPrintable(kind), stats.totalEntries, stats.warnCount, stats.errorCount,
+                         stats.fatalCount, reference.totalEntries, reference.warnCount,
+                         reference.errorCount, reference.fatalCount);
+        }
+        checkAgainstTab(path, qPrintable(u"stats "_s + kind), !kind.startsWith(u"UTF-16"_s));
+    }
+}
+
+// Инкрементальное обновление: дописанный хвост, новый файл и ротация
+// проверяются кодировкой файла.
+static void testContentIncremental()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QString grows = dir + u"/grows.log"_s;
+    const QString rotated = dir + u"/rotated.log"_s;
+    writeFile(grows, "2026-03-01 10:00:00 INFO  only ascii so far\n");
+    writeFile(rotated, "2026-03-01 10:00:00 INFO  before rotation\n");
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFallbackEncoding(testdocs::kTestFallbackEncoding);
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == 2 && allScanned(tree.invisibleRootItem()); }),
+          "incremental: scan completes");
+    int matched = -1, rescans = 0;
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterFinished,
+                     [&](int m, int) { matched = m; });
+    QObject::connect(&scanner, &DirectoryScanner::rescanFinished, [&](int, int, int) { ++rescans; });
+    scanner.setContentFilter(u"ОШИБКА СОЕДИНЕНИЯ"_s, false, false);
+    scanner.applyFilters();
+    CHECK(waitFor([&] { return matched >= 0; }), "incremental: first search finishes");
+    CHECK(matched == 0, "incremental: nothing matches yet");
+
+    const auto visibleNames = [&] {
+        QStringList shown;
+        for (int i = 0; i < tree.topLevelItemCount(); ++i)
+            if (!tree.topLevelItem(i)->isHidden())
+                shown << tree.topLevelItem(i)->text(ScanCol::Name);
+        shown.sort();
+        return shown;
+    };
+    const QString cyr = testdocs::cyrillicLogText(0);
+    appendFile(grows, testdocs::encodeText(cyr, TextEncoding::Windows1251));
+    writeFile(rotated, testdocs::encodeText(cyr, TextEncoding::Koi8R));
+    writeFile(dir + u"/new.log"_s, testdocs::encodeText(cyr, TextEncoding::Ibm866));
+    matched = -1;
+    scanner.rescan();
+    CHECK(waitFor([&] { return rescans == 1 && allScanned(tree.invisibleRootItem()); }),
+          "incremental: rescan finishes");
+    CHECK(waitFor([&] { return !scanner.isContentFilterRunning()
+                            && visibleNames() == QStringList{ u"grows.log"_s, u"new.log"_s, u"rotated.log"_s }; }),
+          "incremental: the cp1251 tail, the KOI8-R rotation and the new cp866 file all match");
+}
+
+// ---------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -550,6 +1095,13 @@ int main(int argc, char** argv)
     testRecordCounts(rootPath);
     testAppends();
     testRotatedNames();
+    testContentEncodings();
+    testContentBlockEdges();
+    testContentProvisional();
+    testContentFallback();
+    testContentCancel();
+    testStatsAcrossEncodings();
+    testContentIncremental();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =
