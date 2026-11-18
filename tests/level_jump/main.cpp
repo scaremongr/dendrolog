@@ -20,14 +20,47 @@
 #include "testdocuments.h"
 
 #include <QApplication>
+#include <QFuture>
+#include <QSemaphore>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThreadPool>
+#include <QtConcurrent/QtConcurrentRun>
 #include <cstdio>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
     if (!(condition)) { ++failures; std::fprintf(stderr, "FAIL: %s (line %d)\n", qPrintable(QString(label)), __LINE__); } \
 } while (0)
+
+// Занимает все потоки общего пула, пока не отпустят: фоновый скан, запущенный
+// за это время, гарантированно ещё НЕ начался, когда тест меняет модель. Без
+// этого исход «скан успел / не успел» зависел бы от планировщика (а запись в
+// список, который воркер только что дочитал, TSan принимал бы за гонку).
+class PoolHold {
+public:
+    PoolHold()
+    {
+        QThreadPool* pool = QThreadPool::globalInstance();
+        const int threads = pool->maxThreadCount();
+        for (int i = 0; i < threads; ++i)
+            m_tasks.append(QtConcurrent::run([this] { m_started.release(); m_gate.acquire(); }));
+        m_started.acquire(threads);
+    }
+    ~PoolHold() { release(); }
+    void release()
+    {
+        m_gate.release(int(m_tasks.size()));
+        for (QFuture<void>& task : m_tasks)
+            task.waitForFinished();
+        m_tasks.clear();
+    }
+
+private:
+    QSemaphore m_gate;
+    QSemaphore m_started;
+    QVector<QFuture<void>> m_tasks;
+};
 
 static const LogLevelMask kErrors = levelBit(LogLevel::Error) | levelBit(LogLevel::Fatal);
 static const LogLevelMask kWarnings = levelBit(LogLevel::Warn);
@@ -244,17 +277,22 @@ static void checkTab(const QString& name, const QString& path, const QString& sc
     jump(kErrors, true);
     CHECK(outcome == Outcome::NotFound, name + ": hidden errors are not targets");
 
-    // Модель перестраивается сразу после запуска. Синхронный переход уже
-    // сделан (1100). Фоновый либо успел до перестройки (тогда тоже 1100), либо
-    // прерван ею: номер из снапшота больше ничего не значит, вкладка сообщает
-    // об этом и выделение не трогает. Итог в любом случае один.
+    // Модель перестраивается, пока переход ещё идёт (пул придержан — скан не
+    // начался). Синхронный переход уже сделан (1100). Фоновый на резидентной
+    // вкладке прерван перестройкой: номер из снапшота больше ничего не значит,
+    // вкладка сообщает об этом и выделение не трогает. На индексной фильтр сам
+    // идёт в пуле — скан может успеть до его итога (тогда тоже 1100). Итог в
+    // любом случае один.
     model.setLogLevelFilter({});
     CHECK(testdocs::settle(model), name + ": reset settles");
     testdocs::pump(300);
     view.goToRow(700);
     const int before = finished;
-    tab.goToLevel(kErrors, true);
-    model.setLogLevelFilter({LogLevel::Error, LogLevel::Info});
+    {
+        PoolHold hold;
+        tab.goToLevel(kErrors, true);
+        model.setLogLevelFilter({LogLevel::Error, LogLevel::Info});
+    }
     CHECK(testdocs::waitFor([&] { return finished > before; }, 20000) && testdocs::settle(model),
           name + ": jump across a filter change finishes");
     testdocs::pump(300);
@@ -263,6 +301,9 @@ static void checkTab(const QString& name, const QString& path, const QString& sc
     CHECK(finished == before + 1, name + ": one result across a filter change");
     if (syncRows > 0) {
         CHECK(outcome == Outcome::Moved && landed.endsWith(" 1100"), name + ": synchronous jump is done before the filter");
+    } else if (!model.isIndexedBackend()) {
+        CHECK(outcome == Outcome::Interrupted && landed.endsWith(" 700"),
+              name + ": a rebuilt model interrupts the background jump");
     } else {
         CHECK((outcome == Outcome::Moved && landed.endsWith(" 1100"))
                   || (outcome == Outcome::Interrupted && landed.endsWith(" 700")),
@@ -382,9 +423,12 @@ int main(int argc, char** argv)
         }
         std::sort(batch.begin(), batch.end(), logEntryPtrLess);
         found = -2;
-        search.startLevel(&model, kErrors, true, 700);
         const int before = model.rowCount();
-        model.mergeEntries(batch);
+        {
+            PoolHold hold;
+            search.startLevel(&model, kErrors, true, 700);
+            model.mergeEntries(batch);
+        }
         const int inserted = model.rowCount() - before;
         CHECK(inserted > 0, "entries merged during the level search");
         CHECK(testdocs::waitFor([&] { return found != -2; }), "shifted level search finishes");
@@ -396,8 +440,11 @@ int main(int argc, char** argv)
         CHECK(invalidated == 0, "insertions do not invalidate");
 
         found = -2;
-        search.startLevel(&model, kErrors, false, -1);
-        model.setLogLevelFilter({LogLevel::Error}); // < 100k записей — синхронный reset
+        {
+            PoolHold hold;
+            search.startLevel(&model, kErrors, false, -1);
+            model.setLogLevelFilter({LogLevel::Error}); // < 100k записей — синхронный reset
+        }
         CHECK(testdocs::waitFor([&] { return invalidated == 1; }), "reset invalidates the level search");
         testdocs::pump(50);
         CHECK(found == -2, "invalidated level search reports no row");
