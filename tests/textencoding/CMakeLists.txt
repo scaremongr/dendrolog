@@ -1,0 +1,1 @@
+dendrolog_add_test(textencoding LIBRARIES dendrolog_core TIMEOUT 120)
