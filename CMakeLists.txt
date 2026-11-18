@@ -254,6 +254,8 @@ if(DENDROLOG_SANITIZER STREQUAL "thread")
         _ZN20QFutureInterfaceBase15waitForFinishedEv           # QFutureInterfaceBase::waitForFinished
         _ZN20QFutureInterfaceBase13waitForResultEi             # QFutureInterfaceBase::waitForResult
         _ZNK20QFutureInterfaceBase6derefTEv                    # QFutureInterfaceBase::derefT
+        _ZN20QFutureInterfaceBaseD1Ev                          # QFutureInterfaceBase::~QFutureInterfaceBase
+        _ZN20QFutureInterfaceBaseD2Ev                          # (базовый деструктор, из ~QFutureInterface<T>)
         _ZN18QFutureWatcherBase15waitForFinishedEv             # QFutureWatcherBase::waitForFinished
     )
     foreach(_symbol IN LISTS _tsan_wrapped_symbols)
