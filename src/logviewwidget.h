@@ -46,6 +46,10 @@ public:
     // «Failed to parse: <файл>».
     QString loadFailureMessage(const LogFilePtr& logFile) const;
     
+    // Путь файла вкладки: абсолютный, без «.» и «..» (один файл — один
+    // LogFile); сравнение — с учётом регистра платформы.
+    static QString normalizedPath(const QString& path);
+    static bool samePath(const QString& a, const QString& b);
     // Возвращает список загруженных файлов
     QList<LogFilePtr> loadedFiles() const { return m_loadedFiles.toList(); }
     
@@ -65,6 +69,7 @@ public:
     // Идёт ли по вкладке фоновая загрузка данных: первичный разбор/индексация
     // либо дочитывание хвоста. Потребители (панель статистики) используют это,
     // чтобы не считать по заведомо неполному документу.
+    // Сюда же входит фоновая сверка строк RecordLocator (R-1).
     bool isLoading() const { return m_loading; }
 
     // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
@@ -258,6 +263,10 @@ private:
         { return size == o.size && mtimeMs == o.mtimeMs; }
         static DiskStamp of(const QString& filePath);
     };
+
+    // Проход по файлу закончился — RecordLocator: конец прочитанного и
+    // недописанная последняя строка (R-1).
+    void locatorFileLoaded(const LogFilePtr& logFile);
 
     // Пересчитывает агрегат «идёт фоновая загрузка» по состояниям файлов и
     // сигналит об изменении. Вызывается в конце каждого события, способного

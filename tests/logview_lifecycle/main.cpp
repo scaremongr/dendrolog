@@ -28,10 +28,13 @@
 #include "LogListView.h"
 #include "indexedlogstore.h"
 #include "logindexer.h"
+#include "recordlocator.h"
+#include "bookmarkstore.h"
 
 #include <QAbstractButton>
 #include <QApplication>
 #include <QFocusEvent>
+#include <QPointer>
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QStringEncoder>
@@ -1326,6 +1329,310 @@ static void checkProvisionalThreshold(const QDir& dir, const QString& schema)
           "provisional threshold: the tail reads as UTF-8");
 }
 
+// ---------------------------------------------------------------------------
+// Сохранённые идентификаторы строк на живой вкладке (R-1, шаг 3)
+// ---------------------------------------------------------------------------
+
+struct SavedId {
+    SourceIdentity source;
+    RecordId id;
+    qint64 line = 0;
+    QString text;
+};
+
+struct Answers {
+    QHash<int, RecordKey> resolved;
+    QHash<int, RecordLocator::Refusal> refused;
+};
+
+static void listen(LogModel& model, Answers& out, QObject* context)
+{
+    QObject::connect(&model.recordLocator(), &RecordLocator::resolved, context,
+                     [&out](int token, const RecordKey& key) { out.resolved.insert(token, key); });
+    QObject::connect(&model.recordLocator(), &RecordLocator::refused, context,
+                     [&out](int token, RecordLocator::Refusal r) { out.refused.insert(token, r); });
+}
+
+static int rowOfLine(const LogModel& model, qint64 line)
+{
+    for (int row = 0; row < model.rowCount(); ++row)
+        if (model.keyAt(row).line == line)
+            return row;
+    return -1;
+}
+
+static QVector<SavedId> saveLines(LogViewWidget& tab, const QVector<qint64>& lines)
+{
+    QVector<SavedId> out;
+    LogModel& model = *tab.model();
+    for (const qint64 line : lines) {
+        const int row = rowOfLine(model, line);
+        const RecordKey key = model.keyAt(row);
+        const auto source = model.recordLocator().sourceFor(key.file);
+        CHECK(row >= 0 && source, QStringLiteral("сохранение строки %1").arg(line));
+        if (row < 0 || !source)
+            continue;
+        out.append({ *source, model.recordLocator().idFor(key, model.messageAt(row)), line,
+                     model.messageAt(row) });
+    }
+    return out;
+}
+
+// Открыть файл во вкладке, попросив строки до загрузки.
+static QHash<int, SavedId> requestAndOpen(LogViewWidget& tab, const QString& path,
+                                          const QVector<SavedId>& saved, const QString& schema)
+{
+    tab.setParserPattern(schema);
+    QHash<int, SavedId> tokens;
+    for (const SavedId& s : saved)
+        tokens.insert(tab.model()->recordLocator().request(s.source, s.id), s);
+    tab.addLogFile(path);
+    return tokens;
+}
+
+static void checkLocatorLive(const QDir& dir, const QString& schema)
+{
+    AppSettings& settings = AppSettings::instance();
+    using Refusal = RecordLocator::Refusal;
+
+    // ---- Один файл — один LogFile: другое написание пути того же файла ------
+    {
+        const QString path = testdocs::writeFile(dir, "loc-same.log", record(1, "INFO", "one"));
+        QDir(dir).mkpath("sub");
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.addLogFile(path);
+        tab.addLogFile(dir.absolutePath() + "/sub/../loc-same.log");
+        tab.addLogFile(dir.absolutePath() + "/./loc-same.log");
+        CHECK(settled(tab), "locator/same file: load");
+        CHECK(tab.fileCount() == 1 && tab.model()->rowCount() == 1,
+              QStringLiteral("другое написание пути — тот же файл: файлов %1, строк %2")
+                  .arg(tab.fileCount()).arg(tab.model()->rowCount()));
+    }
+
+    // ---- Вкладка переходит порог с фильтром: фильтр действует сразу ----------
+    {
+        settings.setIndexedThresholdMB(1);
+        QByteArray start;
+        for (int i = 0; i < 2000; ++i)
+            start += record(i / 50, i % 5 == 0 ? "ERROR" : "INFO", "line " + QByteArray::number(i));
+        const QString path = testdocs::writeFile(dir, "loc-grows.log", start);
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.addLogFile(path);
+        CHECK(settled(tab), "locator/threshold: load");
+        tab.model()->setLogLevelFilter({ LogLevel::Error });
+        CHECK(settled(tab), "locator/threshold: filter");
+        const int idHidden = tab.bookmarks().add(0); // строка 1 — ERROR, видна
+        tab.model()->setLogLevelFilter({});
+        CHECK(settled(tab), "locator/threshold: filter off");
+        const int idInfo = tab.bookmarks().add(rowOfLine(*tab.model(), 2)); // INFO
+        tab.model()->setLogLevelFilter({ LogLevel::Error });
+        CHECK(settled(tab), "locator/threshold: filter on");
+        QByteArray more;
+        for (int i = 2000; i < 30000; ++i)
+            more += record(i / 50, i % 5 == 0 ? "ERROR" : "INFO", "line " + QByteArray::number(i));
+        CHECK(testdocs::appendToFile(path, more), "locator/threshold: append past threshold");
+        tab.reloadChangedFiles(true);
+        CHECK(settled(tab), "locator/threshold: conversion");
+        CHECK(tab.model()->isIndexedBackend(), "locator/threshold: indexed now");
+        CHECK(tab.model()->rowCount() == 6000,
+              QStringLiteral("locator/threshold: фильтр модели действует после конверсии: %1 строк")
+                  .arg(tab.model()->rowCount()));
+        CHECK(tab.bookmarks().status(idHidden) == BookmarkStore::Status::Visible
+                  && tab.bookmarks().status(idInfo) == BookmarkStore::Status::Hidden,
+              "locator/threshold: закладки — видимая и скрытая фильтром");
+        settings.setIndexedThresholdMB(512);
+    }
+
+    // ---- Индексная → резидентная (UTF-16 — откат индексатора) ---------------
+    {
+        QString text;
+        for (int i = 0; i < 300; ++i)
+            text += QString::fromLatin1(record(i, "INFO", "wide " + QByteArray::number(i)));
+        QByteArray bytes("\xFF\xFE", 2);
+        auto enc = QStringEncoder(QStringConverter::Utf16LE);
+        bytes += QByteArray(enc(text));
+        const QString path = testdocs::writeFile(dir, "loc-utf16.log", bytes);
+        QVector<SavedId> saved;
+        {
+            LogViewWidget tab;
+            tab.setParserPattern(schema);
+            tab.addLogFile(path);
+            CHECK(settled(tab), "locator/utf16: resident load");
+            saved = saveLines(tab, { 1, 150, 300 });
+        }
+        settings.setIndexedThresholdMB(0);
+        LogViewWidget tab;
+        QObject context;
+        Answers out;
+        listen(*tab.model(), out, &context);
+        const QHash<int, SavedId> tokens = requestAndOpen(tab, path, saved, schema);
+        CHECK(settled(tab), "locator/utf16: indexed → resident fallback");
+        CHECK(!tab.model()->isIndexedBackend(), "locator/utf16: resident after fallback");
+        CHECK(out.resolved.size() == saved.size() && out.refused.isEmpty(),
+              QStringLiteral("locator/utf16: найдено %1 из %2").arg(out.resolved.size()).arg(saved.size()));
+        for (auto it = out.resolved.cbegin(); it != out.resolved.cend(); ++it)
+            CHECK(it->line == tokens[it.key()].line
+                      && tab.model()->messageAt(tab.model()->rowForKey(it.value())) == tokens[it.key()].text,
+                  "locator/utf16: та же строка");
+        settings.setIndexedThresholdMB(512);
+    }
+
+    for (const int threshold : { 512, 0 }) {
+        settings.setIndexedThresholdMB(threshold);
+        const QString tag = threshold ? QStringLiteral("resident") : QStringLiteral("indexed");
+        QByteArray bytes;
+        for (int i = 0; i < 400; ++i) {
+            bytes += record(i, i % 7 == 0 ? "ERROR" : "INFO", "event " + QByteArray::number(i));
+            if (i % 9 == 4)
+                bytes += "    at detail " + QByteArray::number(i) + '\n';
+        }
+        const QString path = testdocs::writeFile(dir, QStringLiteral("loc-%1.log").arg(tag), bytes);
+
+        // ---- Дозапись: сохранённое до и после неё находится -----------------
+        QVector<SavedId> saved;
+        {
+            LogViewWidget tab;
+            tab.setParserPattern(schema);
+            tab.addLogFile(path);
+            CHECK(settled(tab), tag + ": load");
+            saved = saveLines(tab, { 1, 6, 200, 444 });
+            CHECK(testdocs::appendToFile(path, record(500, "INFO", "appended one")
+                                                   + "    appended continuation\n"),
+                  tag + ": append");
+            tab.reloadChangedFiles(true);
+            CHECK(settled(tab), tag + ": append settles");
+            const qint64 lastLine = tab.model()->keyAt(tab.model()->rowCount() - 1).line;
+            saved += saveLines(tab, { lastLine - 1, lastLine });
+            CHECK(saved.constLast().source.size == QFileInfo(path).size(),
+                  tag + ": идентичность — по концу прочитанного после дозаписи");
+        }
+        {
+            LogViewWidget tab;
+            QObject context;
+            Answers out;
+            listen(*tab.model(), out, &context);
+            const QHash<int, SavedId> tokens = requestAndOpen(tab, path, saved, schema);
+            CHECK(settled(tab), tag + ": reopen");
+            CHECK(out.resolved.size() == saved.size() && out.refused.isEmpty(),
+                  QStringLiteral("%1: после дозаписи найдено %2 из %3").arg(tag).arg(out.resolved.size()).arg(saved.size()));
+            for (auto it = out.resolved.cbegin(); it != out.resolved.cend(); ++it) {
+                const int row = tab.model()->rowForKey(it.value());
+                CHECK(row >= 0 && tab.model()->messageAt(row) == tokens[it.key()].text,
+                      QStringLiteral("%1: строка %2 на месте").arg(tag).arg(tokens[it.key()].line));
+            }
+            // Дозапись в открытую вкладку найденного не трогает.
+            CHECK(testdocs::appendToFile(path, record(501, "INFO", "more")), tag + ": append again");
+            tab.reloadChangedFiles(true);
+            CHECK(settled(tab), tag + ": append again settles");
+            for (const RecordKey& key : std::as_const(out.resolved))
+                CHECK(tab.model()->rowForKey(key) >= 0, tag + ": ключи пережили дозапись");
+
+            // ---- Полная перезагрузка: файл исчез, сохранённое ждёт его ----------
+            const QByteArray content = [&] {
+                QFile f(path);
+                return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+            }();
+            CHECK(QFile::remove(path), tag + ": file removed");
+            tab.reloadChangedFiles(true);
+            CHECK(settled(tab) && tab.model()->rowCount() == 0, tag + ": rows dropped");
+            Answers late;
+            QObject lateContext;
+            listen(*tab.model(), late, &lateContext);
+            QHash<int, SavedId> waiting;
+            for (const SavedId& s : saved)
+                waiting.insert(tab.model()->recordLocator().request(s.source, s.id), s);
+            testdocs::pump(20);
+            CHECK(late.resolved.isEmpty() && late.refused.isEmpty(),
+                  tag + ": пока файла нет — запросы ждут (не SourceMissing)");
+            QFile f(path);
+            CHECK(f.open(QIODevice::WriteOnly) && f.write(content) == content.size(), tag + ": file back");
+            f.close();
+            tab.reloadChangedFiles(true);
+            CHECK(settled(tab), tag + ": full reload");
+            CHECK(late.resolved.size() == saved.size() && late.refused.isEmpty(),
+                  QStringLiteral("%1: файл вернули тем же — найдено %2 из %3")
+                      .arg(tag).arg(late.resolved.size()).arg(saved.size()));
+        }
+
+        // ---- Ротация с переименованием ------------------------------------------
+        {
+            const QString rotated = path + ".1";
+            QFile::remove(rotated);
+            CHECK(QFile::rename(path, rotated), tag + ": rotate");
+            QByteArray fresh;
+            for (int i = 0; i < 50; ++i)
+                fresh += record(600 + i, "INFO", "fresh " + QByteArray::number(i));
+            testdocs::writeFile(dir, QFileInfo(path).fileName(), fresh);
+            LogViewWidget byOldPath;
+            QObject context;
+            Answers out;
+            listen(*byOldPath.model(), out, &context);
+            requestAndOpen(byOldPath, path, saved, schema);
+            CHECK(settled(byOldPath), tag + ": open new file");
+            bool allChanged = out.refused.size() == saved.size() && out.resolved.isEmpty();
+            for (const auto r : std::as_const(out.refused))
+                allChanged = allChanged && r == Refusal::SourceChanged;
+            CHECK(allChanged, tag + ": по старому пути — SourceChanged");
+
+            // Перепривязка к переименованному файлу проходит проверку источника.
+            QVector<SavedId> moved = saved;
+            for (SavedId& s : moved)
+                s.source.path = QFileInfo(rotated).absoluteFilePath();
+            LogViewWidget byNewPath;
+            Answers out2;
+            listen(*byNewPath.model(), out2, &context);
+            requestAndOpen(byNewPath, rotated, moved, schema);
+            CHECK(settled(byNewPath), tag + ": open rotated");
+            CHECK(out2.resolved.size() == saved.size() && out2.refused.isEmpty(),
+                  QStringLiteral("%1: переименованный — найдено %2 из %3").arg(tag).arg(out2.resolved.size()).arg(saved.size()));
+        }
+    }
+    settings.setIndexedThresholdMB(512);
+
+    // ---- Закрытие вкладки посреди фоновой проверки -----------------------------
+    {
+        settings.setIndexedThresholdMB(0);
+        QByteArray big;
+        for (int i = 0; i < 200000; ++i)
+            big += record(i / 1000, "INFO", "row " + QByteArray::number(i));
+        const QString path = testdocs::writeFile(dir, "loc-closing.log", big);
+        QVector<SavedId> saved;
+        {
+            LogViewWidget tab;
+            tab.setParserPattern(schema);
+            tab.addLogFile(path);
+            CHECK(settled(tab), "locator/closing: load");
+            QVector<qint64> lines;
+            for (qint64 l = 1; l <= 200000; l += 40)
+                lines.append(l);
+            QVector<SavedId> all;
+            LogModel& model = *tab.model();
+            const auto source = model.recordLocator().sourceFor(tab.loadedFiles().value(0));
+            for (const qint64 l : lines) {
+                const int row = int(l - 1); // одна индексная вкладка: row == line - 1
+                all.append({ *source, model.recordLocator().idFor(model.keyAt(row), model.messageAt(row)), l, {} });
+            }
+            saved = all;
+        }
+        bool caughtBusy = false;
+        for (int attempt = 0; attempt < 5 && !caughtBusy; ++attempt) {
+            auto tab = std::make_unique<LogViewWidget>();
+            QPointer<RecordLocator> locator(&tab->model()->recordLocator());
+            requestAndOpen(*tab, path, saved, schema);
+            testdocs::waitFor([&] { return locator && locator->stats().byteChecks == 0 && locator->isBusy()
+                                           && locator->stats().feeds > 0; }, 10000);
+            caughtBusy = locator && locator->isBusy() && locator->stats().feeds > 0;
+            tab.reset(); // закрыли посреди проверки
+            testdocs::pump(300);
+            CHECK(!locator, "locator/closing: локатор ушёл вместе с вкладкой");
+        }
+        CHECK(caughtBusy, "locator/closing: вкладку закрыли, пока шла фоновая проверка");
+        settings.setIndexedThresholdMB(512);
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1366,6 +1673,7 @@ int main(int argc, char** argv)
     checkJumps(dir, QStringLiteral("indexed"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);
     checkEncodingSwitch(dir, schema);
+    checkLocatorLive(dir, schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

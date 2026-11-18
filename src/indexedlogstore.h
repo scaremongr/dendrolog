@@ -68,6 +68,12 @@ public:
     // Файл заменён: сброс его строк и индекса (свежий index начнёт с нуля).
     void resetFileIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> fresh);
     std::shared_ptr<LineIndex> indexForFile(const QString& filePath) const;
+    // Ключ строки line (с 1) файла, видимой или скрытой фильтром, если она
+    // уже показана модели; иначе невалидный (RecordLocator, R-1). offset /
+    // length — байты строки в файле без EOL. O(1), со слитой вкладкой —
+    // O(log N) (refShown).
+    RecordKey keyForLine(const LogFile* file, qint64 line, qint64* offset = nullptr,
+                         quint32* length = nullptr) const;
 
     // ---- Кодировка файла (F-1) -------------------------------------------------
     // Текущая кодировка файла и её источник; для неподключённого — «не решено».

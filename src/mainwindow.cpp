@@ -26,6 +26,7 @@
 #include "openrouting.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
+#include "searchresultsnavigator.h"
 #include "fieldreextraction.h"
 #include "welcomewidget.h"
 #include "compactstyle.h"
@@ -2005,14 +2006,11 @@ void MainWindow::setupSearchDock()
     // что и в основном view, но со своим (отфильтрованным) набором записей.
     m_searchController = new SearchResultsController(this);
     LogModel* resultsModel = m_searchController->model();
-    // Install before the view's reset handlers; background completion must
-    // not turn restored result selection into user navigation in the main log.
-    connect(resultsModel, &QAbstractItemModel::modelAboutToBeReset,
-            this, [this]() { m_suppressResultNavigation = true; });
+    // Выбор строки в результатах (мышь или клавиатура) → прыжок в основном
+    // view; перестройка выдачи (reset, Suppress) — не выбор пользователя.
     m_searchResultsView = m_searchPanel->resultsView();
-    m_searchResultsView->setModel(resultsModel);
-    connect(resultsModel, &QAbstractItemModel::modelReset,
-            this, [this]() { m_suppressResultNavigation = false; });
+    m_searchNavigator = new SearchResultsNavigator(resultsModel, m_searchResultsView, this);
+    m_searchNavigator->setTarget([this]() { return m_activeLogView; });
 
     // Тот же шрифт, что и у основных view, но на пункт мельче (searchResultsFont).
     m_searchResultsView->setFont(searchResultsFont());
@@ -2035,13 +2033,6 @@ void MainWindow::setupSearchDock()
         if (!m_showingSearchDock && searchResultsLive() && !m_searchController->isActive())
             runSearchIntoResults();
     });
-
-    // Выбор строки в результатах (мышь или клавиатура) → прыжок в основном view.
-    if (m_searchResultsView->selectionModel())
-        connect(m_searchResultsView->selectionModel(), &QItemSelectionModel::currentRowChanged,
-                this, [this](const QModelIndex& current, const QModelIndex&) {
-                    onSearchResultActivated(current);
-                });
 
     // Подпись: «ищем… N%», число совпадений или почему поиска нет (и как его
     // начать).
@@ -2389,9 +2380,8 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     // Панель результатов следит за моделью активной вкладки: дописанные строки
     // проверяет инкрементально, перестройку — полным поиском заново.
     if (m_searchController) {
-        m_suppressResultNavigation = true;
+        SearchResultsNavigator::Suppress quiet(*m_searchNavigator);
         m_searchController->setSource(logView->model());
-        m_suppressResultNavigation = false;
     }
 
     if (m_activeLogView && m_activeLogView->model() && m_activeLogView->view())
@@ -2465,9 +2455,8 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
 
     // Выдача уходящей вкладки указывала бы на чужие записи.
     if (m_searchController) {
-        m_suppressResultNavigation = true;
+        SearchResultsNavigator::Suppress quiet(*m_searchNavigator);
         m_searchController->setSource(nullptr);
-        m_suppressResultNavigation = false;
     }
 
     if (m_activeLogView == logView)
@@ -2566,7 +2555,8 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
     QString text;
     QString tip;
     const bool isStdinSpool = m_stdinSpooler && n == 1 && files.first()
-        && files.first()->filePath == m_stdinSpooler->spoolFilePath();
+        && LogViewWidget::samePath(files.first()->filePath,
+                                   LogViewWidget::normalizedPath(m_stdinSpooler->spoolFilePath()));
     if (isStdinSpool) {
         // Файл спула — техническая деталь: вкладка остаётся «stdin».
         text = tr("stdin");
@@ -3542,10 +3532,11 @@ void MainWindow::runSearchIntoResults()
     m_searchRules = rules;
 
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
-    m_suppressResultNavigation = true;
-    m_searchController->setSource(m_activeLogView->model());
-    m_searchController->search(rules);
-    m_suppressResultNavigation = false;
+    {
+        SearchResultsNavigator::Suppress quiet(*m_searchNavigator);
+        m_searchController->setSource(m_activeLogView->model());
+        m_searchController->search(rules);
+    }
 
     // Подсветка совпадений: всегда в списке результатов; в основном view — по
     // галочке Highlight панели Search (вместе с подсветкой фильтра вкладки).
@@ -3559,9 +3550,10 @@ void MainWindow::clearSearchResults()
     if (!m_searchController)
         return;
     // Reset модели дёрнет currentRowChanged — не даём ему прыгнуть в main.
-    m_suppressResultNavigation = true;
-    m_searchController->clear();
-    m_suppressResultNavigation = false;
+    {
+        SearchResultsNavigator::Suppress quiet(*m_searchNavigator);
+        m_searchController->clear();
+    }
     if (m_searchResultsView)
         m_searchResultsView->setTextHighlightPatterns({});
     refreshMainViewHighlights(m_activeLogView);
@@ -3570,21 +3562,6 @@ void MainWindow::clearSearchResults()
 bool MainWindow::searchResultsLive() const
 {
     return m_searchDockWidget && m_searchDockWidget->isVisible();
-}
-
-void MainWindow::onSearchResultActivated(const QModelIndex& current)
-{
-    if (m_suppressResultNavigation || !current.isValid()
-        || !m_activeLogView || !m_activeLogView->model() || !m_activeLogView->view())
-        return;
-
-    const LogModel::EntryKey key = m_searchController->model()->keyForRow(current.row());
-    if (key.logicalEntryId < 0)
-        return;
-
-    // Двигаем текущую строку и центрируем — фокус остаётся на панели результатов,
-    // так что стрелками можно продолжать листать совпадения.
-    m_activeLogView->goToEntry(key.logicalEntryId, key.sourceFile, NavKind::Search);
 }
 
 void MainWindow::applyRowMarkersToActiveView()

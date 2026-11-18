@@ -15,16 +15,19 @@
 // ============================================================================
 
 #include "recordid.h"
+#include "recordlocator.h"
 #include "stdinspooler.h"
 #include "testdocuments.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMap>
 #include <QStringDecoder>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 
 #include <cstdio>
@@ -644,10 +647,546 @@ static void testLineFingerprints(const QDir& dir, const QString& schema)
         checkEncodingIndependence(QString::fromLatin1(n), pathOf[n], schema);
 }
 
+// ---------------------------------------------------------------------------
+// RecordLocator (шаг 3): сохранённые идентификаторы → ключи на обоих бэкендах
+// ---------------------------------------------------------------------------
+
+using Refusal = RecordLocator::Refusal;
+
+// Сохранённая строка: что R-4 запишет на диск, плюс эталон для сверки.
+struct SavedLine {
+    SourceIdentity source;
+    RecordId id;
+    QString path;
+    qint64 line = 0;
+    QString text;
+};
+
+// Ответы локатора по токенам.
+struct Outcomes {
+    QHash<int, RecordKey> resolved;
+    QHash<int, Refusal> refused;
+    QHash<int, RecordId> completed;
+    QHash<int, qint64> linesShownAtResolve; // строк в модели в момент ответа
+    int answers() const { return int(resolved.size() + refused.size()); }
+};
+
+static void listen(LogModel& model, Outcomes& out, QObject* context)
+{
+    RecordLocator& loc = model.recordLocator();
+    QObject::connect(&loc, &RecordLocator::resolved, context,
+                     [&out, &model](int token, const RecordKey& key) {
+                         out.resolved.insert(token, key);
+                         out.linesShownAtResolve.insert(token, model.totalLineCount());
+                     });
+    QObject::connect(&loc, &RecordLocator::refused, context,
+                     [&out](int token, Refusal reason) { out.refused.insert(token, reason); });
+    QObject::connect(&loc, &RecordLocator::completed, context,
+                     [&out](int token, const RecordId& id) { out.completed.insert(token, id); });
+}
+
+static bool waitIdle(LogModel& model)
+{
+    return waitFor([&model] { return !model.recordLocator().isBusy(); }, 60000);
+}
+
+// Сохранить строки документа rows: идентичность источника по концу
+// прочитанного и идентификатор строки — через JSON, как на диск.
+static QVector<SavedLine> saveRows(const LogModel& model, const QVector<int>& rows)
+{
+    QVector<SavedLine> out;
+    RecordLocator& loc = model.recordLocator();
+    for (const int row : rows) {
+        const RecordKey key = model.keyAt(row);
+        if (!key.isValid())
+            continue;
+        const auto source = loc.sourceFor(key.file);
+        const RecordId id = loc.idFor(key, model.messageAt(row));
+        if (!source)
+            continue;
+        const QJsonDocument doc(QJsonObject{ { "source", source->toJson() }, { "record", id.toJson() } });
+        const QJsonObject back = QJsonDocument::fromJson(doc.toJson()).object();
+        const auto s = SourceIdentity::fromJson(back.value("source").toObject());
+        const auto r = RecordId::fromJson(back.value("record").toObject());
+        CHECK(s && r && *s == *source && *r == id, "JSON сохранённой строки — круговой проход");
+        if (!s || !r)
+            continue;
+        out.append({ *s, *r, key.file->filePath, key.line, model.messageAt(row) });
+    }
+    return out;
+}
+
+// Документ: модель → before (фильтр, запросы) → загрузка обоими путями.
+static Document loadDocument(bool resident, const QStringList& paths, const QString& schema,
+                             const std::function<void(Document&)>& before = {})
+{
+    Document doc;
+    doc.model = std::make_unique<LogModel>();
+    if (before)
+        before(doc);
+    if (resident)
+        addResidentFiles(doc, paths, schema);
+    else
+        addIndexedFiles(doc, paths, schema, IndexedLoad::Concurrent);
+    if (!settle(*doc.model) || !waitIdle(*doc.model))
+        doc.errors << QStringLiteral("документ не пришёл в покой");
+    return doc;
+}
+
+static const char* backendName(bool resident) { return resident ? "резидентный" : "индексный"; }
+
+static QVector<int> spreadRows(const LogModel& model, int count)
+{
+    QVector<int> rows;
+    const int n = model.rowCount();
+    for (int i = 0; i < count && n > 0; ++i)
+        rows.append(int(qint64(n - 1) * i / qMax(1, count - 1)));
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    return rows;
+}
+
+static void testLocatorRoundTrip(const QDir& dir, const QString& schema)
+{
+    const QString a = writeFile(dir, "loc-a.log",
+                                makeLogBytes(9000, 101u, "\n", fixtureBaseTime(), true, true, false));
+    const QString b = writeFile(dir, "loc-b.log",
+                                makeLogBytes(4000, 202u, "\r\n", fixtureBaseTime().addSecs(30), false, true, true));
+    const QList<QStringList> sets = { { a }, { a, b } };
+    for (const QStringList& paths : sets) {
+        for (const bool saveResident : { true, false }) {
+            Document saved = loadDocument(saveResident, paths, schema);
+            CHECK(saved.errors.isEmpty(), saved.errors.join("; "));
+            const QVector<SavedLine> lines = saveRows(*saved.model, spreadRows(*saved.model, 120));
+            CHECK(lines.size() > 100, QStringLiteral("сохранено строк: %1").arg(lines.size()));
+            const qint64 total = saved.model->totalLineCount();
+            saved = Document(); // вкладку закрыли
+
+            for (const bool restoreResident : { true, false }) {
+                for (const bool filtered : { false, true }) {
+                    const QString what = QStringLiteral("%1 файл(ов), сохранено %2, найдено %3%4")
+                                             .arg(paths.size())
+                                             .arg(QString::fromUtf8(backendName(saveResident)),
+                                                  QString::fromUtf8(backendName(restoreResident)),
+                                                  filtered ? QStringLiteral(", с фильтром") : QString());
+                    QObject context;
+                    Outcomes out;
+                    QHash<int, SavedLine> byToken;
+                    Document doc = loadDocument(restoreResident, paths, schema, [&](Document& d) {
+                        listen(*d.model, out, &context);
+                        // Фильтр — у бэкенда, в который придут строки.
+                        if (!restoreResident)
+                            d.model->convertToIndexedBackend()->setFieldPattern(schema, true);
+                        if (filtered)
+                            d.model->setLogLevelFilter({ LogLevel::Error, LogLevel::Fatal });
+                        for (const SavedLine& s : lines) {
+                            const int token = d.model->recordLocator().request(s.source, s.id);
+                            byToken.insert(token, s);
+                        }
+                        CHECK(out.answers() == 0, what + ": ответа внутри request нет");
+                    });
+                    CHECK(doc.errors.isEmpty(), what + ": " + doc.errors.join("; "));
+                    LogModel& model = *doc.model;
+                    CHECK(out.refused.isEmpty(), QStringLiteral("%1: отказов %2").arg(what).arg(out.refused.size()));
+                    CHECK(out.resolved.size() == lines.size(),
+                          QStringLiteral("%1: найдено %2 из %3").arg(what).arg(out.resolved.size()).arg(lines.size()));
+                    CHECK(model.recordLocator().pendingCount() == 0, what + ": ожидающих не осталось");
+                    CHECK(model.recordLocator().stats().examined == lines.size(),
+                          QStringLiteral("%1: тронуто ожидающих %2").arg(what).arg(model.recordLocator().stats().examined));
+                    // По мере загрузки: первые строки нашлись раньше, чем
+                    // показаны все (слитая вкладка; резидентный — порциями).
+                    if (restoreResident) {
+                        qint64 earliest = total;
+                        for (const qint64 shown : std::as_const(out.linesShownAtResolve))
+                            earliest = qMin(earliest, shown);
+                        CHECK(earliest < total, QStringLiteral("%1: найдено по мере загрузки (%2 из %3 строк)")
+                                                    .arg(what).arg(earliest).arg(total));
+                    }
+                    int hidden = 0;
+                    for (auto it = out.resolved.cbegin(); it != out.resolved.cend(); ++it) {
+                        const SavedLine& s = byToken[it.key()];
+                        const RecordKey& key = it.value();
+                        CHECK(key.isValid() && key.file->filePath == s.path && key.line == s.line,
+                              QStringLiteral("%1: строка %2 найдена на месте").arg(what).arg(s.line));
+                        if (model.rowForKey(key) < 0) {
+                            ++hidden;
+                            CHECK(filtered && model.nearestRowForKey(key) >= 0,
+                                  QStringLiteral("%1: скрытая строка %2 — в данных").arg(what).arg(s.line));
+                        }
+                    }
+                    if (filtered)
+                        CHECK(hidden > 0 && hidden < out.resolved.size(),
+                              QStringLiteral("%1: фильтр скрыл часть (%2)").arg(what).arg(hidden));
+                    model.setLogLevelFilter({});
+                    settle(model);
+                    for (auto it = out.resolved.cbegin(); it != out.resolved.cend(); ++it) {
+                        const int row = model.rowForKey(it.value());
+                        CHECK(row >= 0 && model.messageAt(row) == byToken[it.key()].text,
+                              QStringLiteral("%1: ключ ведёт к той же строке (%2)").arg(what).arg(byToken[it.key()].line));
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void testLocatorRefusals(const QDir& dir, const QString& schema)
+{
+    for (const bool resident : { true, false }) {
+        const QString tag = QString::fromUtf8(backendName(resident));
+        const QByteArray bytes = makeLogBytes(800, 7u, "\n", fixtureBaseTime(), false, true, true);
+        const QString path = writeFile(dir, QStringLiteral("refuse-%1.log").arg(resident), bytes);
+        QVector<SavedLine> lines;
+        {
+            Document d = loadDocument(resident, { path }, schema);
+            lines = saveRows(*d.model, spreadRows(*d.model, 40));
+        }
+        CHECK(lines.size() >= 30, tag + ": сохранены строки");
+        // Начала строк файла (номер строки → смещение).
+        QVector<qint64> lineStart = { 0 };
+        for (qint64 i = 0; i < bytes.size(); ++i)
+            if (bytes[i] == '\n')
+                lineStart.append(i + 1);
+        // Строка из середины файла, которую правим (дальше 4 КБ от краёв).
+        int middle = -1;
+        for (int i = 0; i < lines.size(); ++i) {
+            const qint64 at = lineStart.value(lines[i].line - 1, -1);
+            if (at > 8192 && at < bytes.size() - 8192 && lines[i].text.contains(QRegularExpression("[a-z]"))) {
+                middle = i;
+                break;
+            }
+        }
+        CHECK(middle >= 0, tag + ": есть строка в середине файла");
+
+        // LineAbsent: номер за концом файла.
+        {
+            SavedLine beyond = lines.constLast();
+            beyond.id.line += 100000;
+            QObject context;
+            Outcomes out;
+            int token = 0;
+            Document d = loadDocument(resident, { path }, schema, [&](Document& doc) {
+                listen(*doc.model, out, &context);
+                token = doc.model->recordLocator().request(beyond.source, beyond.id);
+            });
+            CHECK(out.refused.value(token, Refusal::SourceChanged) == Refusal::LineAbsent
+                      && out.refused.size() == 1 && out.resolved.isEmpty(),
+                  tag + ": строки нет — LineAbsent");
+        }
+
+        // TextMismatch: правка одной строки в середине, начало и конец целы.
+        if (middle >= 0) {
+            QByteArray edited = bytes;
+            const qint64 at = lineStart[lines[middle].line - 1];
+            const qint64 letter = at + lines[middle].text.indexOf(QRegularExpression("[a-z]"));
+            edited[letter] = edited[letter] == 'q' ? 'z' : 'q';
+            const QString editedPath = writeFile(dir, QStringLiteral("refuse-mid-%1.log").arg(resident), edited);
+            QObject context;
+            Outcomes out;
+            QHash<int, int> index;
+            Document d = loadDocument(resident, { editedPath }, schema, [&](Document& doc) {
+                listen(*doc.model, out, &context);
+                for (int i = 0; i < lines.size(); ++i) {
+                    SourceIdentity s = lines[i].source;
+                    s.path = editedPath; // тот же файл, перенесённый
+                    index.insert(doc.model->recordLocator().request(s, lines[i].id), i);
+                }
+            });
+            CHECK(lines[middle].source.checkAt(editedPath) == State::Valid, tag + ": правка в середине — источник Valid");
+            for (auto it = index.cbegin(); it != index.cend(); ++it) {
+                if (it.value() == middle)
+                    CHECK(out.refused.value(it.key(), Refusal::LineAbsent) == Refusal::TextMismatch,
+                          tag + ": изменённая строка — TextMismatch");
+                else
+                    CHECK(out.resolved.contains(it.key()),
+                          QStringLiteral("%1: строка %2 найдена").arg(tag).arg(lines[it.value()].line));
+            }
+        }
+
+        // SourceChanged: переписан той же длиной (первый байт другой).
+        {
+            QByteArray rewritten = bytes;
+            rewritten[0] = rewritten[0] == '1' ? '2' : '1';
+            const QString changed = writeFile(dir, QStringLiteral("refuse-changed-%1.log").arg(resident), rewritten);
+            QObject context;
+            Outcomes out;
+            Document d = loadDocument(resident, { changed }, schema, [&](Document& doc) {
+                listen(*doc.model, out, &context);
+                for (const SavedLine& s : lines) {
+                    SourceIdentity src = s.source;
+                    src.path = changed;
+                    doc.model->recordLocator().request(src, s.id);
+                }
+            });
+            CHECK(out.resolved.isEmpty() && out.refused.size() == lines.size(),
+                  QStringLiteral("%1: переписанный — ни одного resolved (%2)").arg(tag).arg(out.resolved.size()));
+            bool allChanged = true;
+            for (const Refusal r : std::as_const(out.refused))
+                allChanged = allChanged && r == Refusal::SourceChanged;
+            CHECK(allChanged, tag + ": все — SourceChanged");
+            CHECK(d.model->recordLocator().stats().sourceChecks == 1, tag + ": источник проверен один раз");
+        }
+
+        // SourceMissing: файл исчез после загрузки (поздний запрос), пустая
+        // идентичность.
+        {
+            const QString gone = writeFile(dir, QStringLiteral("refuse-gone-%1.log").arg(resident), bytes);
+            Document d = loadDocument(resident, { gone }, schema);
+            QObject context;
+            Outcomes out;
+            listen(*d.model, out, &context);
+            CHECK(QFile::remove(gone), tag + ": файл удалён");
+            SourceIdentity src = lines[0].source;
+            src.path = gone;
+            const int t1 = d.model->recordLocator().request(src, lines[0].id);
+            const int t2 = d.model->recordLocator().request(SourceIdentity(), lines[1].id);
+            CHECK(out.answers() == 0, tag + ": ответ не внутри request");
+            waitFor([&] { return out.answers() == 2; }, 5000);
+            CHECK(out.refused.value(t1, Refusal::LineAbsent) == Refusal::SourceMissing,
+                  tag + ": файла нет — SourceMissing");
+            CHECK(out.refused.value(t2, Refusal::LineAbsent) == Refusal::SourceMissing,
+                  tag + ": пустая идентичность — SourceMissing");
+        }
+
+        // Поздний запрос: файл уже прочитан — строки находятся отдельным проходом.
+        {
+            Document d = loadDocument(resident, { path }, schema);
+            QObject context;
+            Outcomes out;
+            listen(*d.model, out, &context);
+            for (const SavedLine& s : lines)
+                d.model->recordLocator().request(s.source, s.id);
+            waitFor([&] { return out.answers() == lines.size(); }, 10000);
+            CHECK(out.resolved.size() == lines.size(),
+                  QStringLiteral("%1: поздние запросы найдены (%2)").arg(tag).arg(out.resolved.size()));
+            CHECK(d.model->recordLocator().stats().latePasses >= 1, tag + ": поздний проход");
+        }
+    }
+}
+
+static void testLocatorPartialLine(const QDir& dir, const QString& schema)
+{
+    // Индексный путь: недописанная строка (без '\n') — идентификатор без
+    // отпечатка; дописанная — completed с отпечатком полной строки.
+    QByteArray bytes = makeLogBytes(300, 9u, "\n", fixtureBaseTime(), false, true, true);
+    bytes += "2026-07-16 10:00:00.000 [main] INFO partial tail";
+    const QString path = writeFile(dir, "partial.log", bytes);
+    SavedLine saved;
+    {
+        Document d = loadDocument(false, { path }, schema);
+        LogModel& m = *d.model;
+        const int last = m.rowCount() - 1;
+        const QVector<SavedLine> s = saveRows(m, { last });
+        CHECK(s.size() == 1 && !s[0].id.hasText, "индексный: последняя строка без '\\n' — без отпечатка");
+        CHECK(s.size() == 1 && s[0].id.toJson().value("partial").toBool(), "JSON: partial:true");
+        if (s.size() == 1)
+            saved = s[0];
+    }
+    QObject context;
+    Outcomes out;
+    int token = 0;
+    Document d = loadDocument(false, { path }, schema, [&](Document& doc) {
+        listen(*doc.model, out, &context);
+        token = doc.model->recordLocator().request(saved.source, saved.id);
+    });
+    CHECK(out.resolved.value(token).line == saved.line, "недописанная строка найдена по номеру");
+    CHECK(out.completed.isEmpty(), "пока не дописана — completed нет");
+    CHECK(appendIndexedTail(d, 0, " and the rest\nnext line\n", schema), "дозапись");
+    waitIdle(*d.model);
+    const RecordId expected = RecordId::forLine(saved.line, saved.text + " and the rest");
+    CHECK(out.completed.contains(token) && out.completed[token] == expected,
+          "дописана — completed с отпечатком полной строки");
+    // Идентичность по концу прочитанного до дозаписи по-прежнему Valid.
+    CHECK(saved.source.check() == State::Valid, "дозапись: источник Valid");
+}
+
+static void testLocatorEncodings(const QDir& dir, const QString& schema)
+{
+    const QByteArray cp1251 = encodeText(cyrillicLogText(40), TextEncoding::Windows1251);
+    const QString path = writeFile(dir, "loc-cp1251.log", cp1251);
+    for (const bool saveResident : { true, false }) {
+        QVector<SavedLine> lines;
+        {
+            Document d = loadDocument(saveResident, { path }, schema);
+            lines = saveRows(*d.model, spreadRows(*d.model, 60));
+        }
+        for (const bool restoreResident : { true, false }) {
+            const QString what = QStringLiteral("cp1251 → KOI8-R, %1 → %2")
+                                     .arg(QString::fromUtf8(backendName(saveResident)),
+                                          QString::fromUtf8(backendName(restoreResident)));
+            QObject context;
+            Outcomes out;
+            Document d = loadDocument(restoreResident, { path }, schema, [&](Document& doc) {
+                listen(*doc.model, out, &context);
+                // Между сохранением и восстановлением пользователь выбрал
+                // другую кодировку (резидентный — до загрузки).
+                doc.encodings[path] = FileEncoding().withUserChoice(TextDecoder(TextEncoding::Koi8R));
+                for (const SavedLine& s : lines)
+                    doc.model->recordLocator().request(s.source, s.id);
+            });
+            if (!restoreResident) {
+                setDocumentEncoding(d, d.files[0], FileEncoding().withUserChoice(TextDecoder(TextEncoding::Koi8R)), schema);
+                settle(*d.model);
+            }
+            CHECK(out.resolved.size() == lines.size() && out.refused.isEmpty(),
+                  QStringLiteral("%1: найдено %2 из %3").arg(what).arg(out.resolved.size()).arg(lines.size()));
+            // Текст строки теперь другой (KOI8-R), а ключ ведёт к той же строке.
+            int differs = 0;
+            for (const RecordKey& key : std::as_const(out.resolved)) {
+                const int row = d.model->rowForKey(key);
+                CHECK(row >= 0, what + ": ключ виден");
+                for (const SavedLine& s : lines)
+                    if (s.line == key.line && row >= 0 && d.model->messageAt(row) != s.text)
+                        ++differs;
+            }
+            CHECK(differs > 0, what + ": текст строк сменился вместе с кодировкой");
+        }
+    }
+}
+
+// Цена порции (инвариант 3): K ожидающих, поток порций разного размера —
+// работа не зависит от размера порции.
+static void testLocatorBatchCost(const QDir& dir, const QString& schema)
+{
+    const QString path = writeFile(dir, "cost.log",
+                                   makeLogBytes(30000, 33u, "\n", fixtureBaseTime(), false, true, true));
+    for (const bool resident : { true, false }) {
+        Document d = loadDocument(resident, { path }, schema);
+        LogModel& model = *d.model;
+        const QVector<SavedLine> lines = saveRows(model, spreadRows(model, 1000));
+        const LogFilePtr file = d.files[0];
+        const qint64 total = model.totalLineCount();
+        // Все строки резидентного документа в порядке файла — для порций.
+        QVector<std::shared_ptr<LogEntry>> fileOrder;
+        if (resident) {
+            fileOrder = model.residentEntriesForFieldMutation();
+            std::sort(fileOrder.begin(), fileOrder.end(), [](const auto& x, const auto& y) {
+                return x->originalLineNumber() < y->originalLineNumber();
+            });
+        }
+        qint64 examinedPerChunk[2] = { 0, 0 };
+        const int chunks[2] = { 50, 20000 };
+        for (int c = 0; c < 2; ++c) {
+            RecordLocator& loc = model.recordLocator();
+            QObject context;
+            Outcomes out;
+            listen(model, out, &context);
+            model.invalidateFileRows(file->filePath); // строки «сброшены»
+            for (const SavedLine& s : lines)
+                loc.reacquire(file, s.id);
+            const qint64 before = loc.stats().examined;
+            for (qint64 first = 0; first < total; first += chunks[c]) {
+                const qint64 count = qMin<qint64>(chunks[c], total - first);
+                if (resident)
+                    loc.residentBatch(fileOrder.mid(first, count));
+                else
+                    loc.indexedRange(file, first, count);
+            }
+            loc.fileLoaded(file);
+            waitIdle(model);
+            examinedPerChunk[c] = loc.stats().examined - before;
+            CHECK(out.resolved.size() == lines.size(),
+                  QStringLiteral("%1, порции по %2: найдено %3 из %4").arg(QString::fromUtf8(backendName(resident)))
+                      .arg(chunks[c]).arg(out.resolved.size()).arg(lines.size()));
+        }
+        CHECK(examinedPerChunk[0] == lines.size() && examinedPerChunk[1] == lines.size(),
+              QStringLiteral("%1: тронуто ожидающих %2 (порции по 50) и %3 (по 20000) при K = %4")
+                  .arg(QString::fromUtf8(backendName(resident))).arg(examinedPerChunk[0])
+                  .arg(examinedPerChunk[1]).arg(lines.size()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Замер: --bench <file> [K] [--resident] — разрешение K сохранённых
+// идентификаторов (по умолчанию 1000) при загрузке файла против той же
+// загрузки без них: время и самое долгое событие GUI-потока.
+// ---------------------------------------------------------------------------
+
+class TimingApp : public QCoreApplication {
+public:
+    using QCoreApplication::QCoreApplication;
+    bool timing = false;
+    qint64 maxNs = 0;
+    bool notify(QObject* receiver, QEvent* event) override
+    {
+        if (!timing)
+            return QCoreApplication::notify(receiver, event);
+        QElapsedTimer t;
+        t.start();
+        const bool ok = QCoreApplication::notify(receiver, event);
+        maxNs = qMax(maxNs, t.nsecsElapsed());
+        return ok;
+    }
+};
+
+static int runBench(TimingApp& app, const QString& path, int k, bool resident)
+{
+    const QString schema = buildSchema();
+    const auto load = [&](const std::function<void(Document&)>& before, qint64* resolvedAtMs,
+                          int* resolvedCount) {
+        app.maxNs = 0;
+        app.timing = true;
+        QElapsedTimer t;
+        t.start();
+        Document doc;
+        doc.model = std::make_unique<LogModel>();
+        QObject context;
+        int resolved = 0;
+        QObject::connect(&doc.model->recordLocator(), &RecordLocator::resolved, &context,
+                         [&](int, const RecordKey&) {
+                             ++resolved;
+                             if (resolvedAtMs)
+                                 *resolvedAtMs = t.elapsed();
+                         });
+        if (before)
+            before(doc);
+        if (resident)
+            addResidentFiles(doc, { path }, schema);
+        else
+            addIndexedFiles(doc, { path }, schema);
+        const qint64 loadedMs = t.elapsed();
+        waitIdle(*doc.model);
+        app.timing = false;
+        if (resolvedCount)
+            *resolvedCount = resolved;
+        std::fprintf(stdout, "  загрузка %lld мс, до конца проверки %lld мс, самое долгое событие %.1f мс, строк %lld\n",
+                     qint64(loadedMs), qint64(t.elapsed()), app.maxNs / 1e6,
+                     qint64(doc.model->totalLineCount()));
+        return doc;
+    };
+    std::fprintf(stdout, "%s, %s бэкенд\n", qPrintable(path), resident ? "резидентный" : "индексный");
+    std::fprintf(stdout, "без идентификаторов:\n");
+    Document base = load({}, nullptr, nullptr);
+    const QVector<SavedLine> lines = saveRows(*base.model, spreadRows(*base.model, k));
+    base = Document();
+    std::fprintf(stdout, "с %d сохранёнными идентификаторами:\n", int(lines.size()));
+    qint64 lastResolvedMs = 0;
+    int resolved = 0;
+    QElapsedTimer requestTimer;
+    qint64 requestNs = 0;
+    Document doc = load([&](Document& d) {
+        requestTimer.start();
+        for (const SavedLine& s : lines)
+            d.model->recordLocator().request(s.source, s.id);
+        requestNs = requestTimer.nsecsElapsed();
+    }, &lastResolvedMs, &resolved);
+    const RecordLocator::Stats& st = doc.model->recordLocator().stats();
+    std::fprintf(stdout, "  постановка запросов %.2f мс; найдено %d из %d, последнее — на %lld мс; "
+                         "порций %lld, тронуто ожидающих %lld, сверено байтами %lld, проверок источника %lld\n",
+                 requestNs / 1e6, resolved, int(lines.size()), lastResolvedMs, st.feeds, st.examined,
+                 st.byteChecks, st.sourceChecks);
+    return resolved == lines.size() ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
-    QCoreApplication app(argc, argv);
+    TimingApp app(argc, argv);
+    const QStringList args = app.arguments();
+    if (args.size() >= 3 && args[1] == QLatin1String("--bench")) {
+        const int k = args.size() >= 4 && args[3].toInt() > 0 ? args[3].toInt() : 1000;
+        return runBench(app, args[2], k, args.contains(QLatin1String("--resident")));
+    }
 
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
@@ -662,6 +1201,11 @@ int main(int argc, char** argv)
     testEphemeral(dir);
     testJson(dir);
     testLineFingerprints(dir, schema);
+    testLocatorRoundTrip(dir, schema);
+    testLocatorRefusals(dir, schema);
+    testLocatorPartialLine(dir, schema);
+    testLocatorEncodings(dir, schema);
+    testLocatorBatchCost(dir, schema);
 
     if (failures) {
         std::fprintf(stderr, "record_identity: %d failure(s)\n", failures);

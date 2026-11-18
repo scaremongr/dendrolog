@@ -1,10 +1,78 @@
 #include "navhistory.h"
 #include "logmodel.h"
+#include "recordlocator.h"
 
 NavHistory::NavHistory(LogModel& model)
     : QObject(&model)
     , m_model(model)
 {
+    RecordLocator& loc = locator();
+    connect(&loc, &RecordLocator::resolved, this, [this](int token, const RecordKey& key) {
+        NavEntry* e = entryByToken(token);
+        if (!e)
+            return;
+        if (e->record.hasText)
+            e->token = 0; // недописанную строку локатор ведёт дальше
+        e->key = key;
+        e->verified = true;
+        e->lost = false;
+        emit changed();
+    });
+    connect(&loc, &RecordLocator::refused, this, [this](int token, RecordLocator::Refusal) {
+        NavEntry* e = entryByToken(token);
+        if (!e)
+            return;
+        e->token = 0;
+        e->verified = true;
+        e->lost = true;
+        emit changed();
+    });
+    connect(&loc, &RecordLocator::completed, this,
+            [this](int token, const RecordId& record, const RecordKey& key) {
+        if (NavEntry* e = entryByToken(token)) {
+            e->token = 0;
+            e->record = record;
+            // Дописанная строка могла начать запись: ключ другой.
+            if (key.isValid() && key.file == e->key.file && key.line == e->line)
+                e->key = key;
+        }
+    });
+}
+
+RecordLocator& NavHistory::locator() const
+{
+    return m_model.recordLocator();
+}
+
+NavEntry* NavHistory::entryByToken(int token)
+{
+    for (NavEntry& e : m_entries)
+        if (e.token == token)
+            return &e;
+    return nullptr;
+}
+
+void NavHistory::release(NavEntry& e)
+{
+    if (e.token) {
+        locator().cancel(e.token);
+        e.token = 0;
+    }
+}
+
+void NavHistory::releaseTokens(qsizetype from, qsizetype end)
+{
+    for (qsizetype i = from; i < end && i < m_entries.size(); ++i)
+        release(m_entries[i]);
+}
+
+void NavHistory::reacquire(NavEntry& e)
+{
+    release(e);
+    e.verified = false;
+    e.lost = false; // файл могли вернуть к прежнему содержимому
+    if (e.key.isValid())
+        e.token = locator().reacquire(e.key.file, e.record);
 }
 
 NavEntry NavHistory::makeEntry(int row, NavKind kind, bool origin) const
@@ -15,7 +83,9 @@ NavEntry NavHistory::makeEntry(int row, NavKind kind, bool origin) const
         return e;
     e.filePath = e.key.file->filePath;
     e.line = e.key.line;
-    e.preview = m_model.messageAt(row).left(kPreviewLength);
+    const QString text = m_model.messageAt(row);
+    e.preview = text.left(kPreviewLength);
+    e.record = locator().idFor(e.key, text);
     e.kind = kind;
     e.origin = origin;
     return e;
@@ -39,8 +109,10 @@ void NavHistory::recordJump(int fromRow, int toRow, NavKind kind)
         return;
 
     // Как в браузере: новый переход отбрасывает «вперёд».
-    if (m_pos >= 0 && m_pos < m_entries.size() - 1)
+    if (m_pos >= 0 && m_pos < m_entries.size() - 1) {
+        releaseTokens(m_pos + 1, m_entries.size());
         m_entries.resize(m_pos + 1);
+    }
 
     const bool atCurrent = m_pos >= 0 && from.key.isValid()
         && m_entries[m_pos].verified && !m_entries[m_pos].lost
@@ -53,6 +125,7 @@ void NavHistory::recordJump(int fromRow, int toRow, NavKind kind)
         && m_entries[m_pos].kind == kind) {
         // Серия переходов одного вида без движения между ними: заменяем
         // прошлую цель, Alt+← вернёт к началу серии.
+        release(m_entries[m_pos]);
         m_entries[m_pos] = to;
         if (m_pos > 0 && m_entries[m_pos - 1].key == to.key)
             m_entries.removeLast(); // серия вернулась туда, откуда началась
@@ -61,8 +134,19 @@ void NavHistory::recordJump(int fromRow, int toRow, NavKind kind)
             m_entries.append(from);
         m_entries.append(to);
     }
-    if (m_entries.size() > kMaxEntries)
+    if (m_entries.size() > kMaxEntries) {
+        releaseTokens(0, m_entries.size() - kMaxEntries);
         m_entries.remove(0, m_entries.size() - kMaxEntries);
+    }
+    // Недописанная последняя строка: отпечаток — когда её допишут.
+    for (qsizetype i = qMax<qsizetype>(0, m_entries.size() - 2); i < m_entries.size(); ++i) {
+        NavEntry& e = m_entries[i];
+        if (e.token == 0 && e.verified && !e.record.hasText && e.record.isValid()) {
+            const int row = m_model.rowForKey(e.key);
+            if (row >= 0)
+                e.token = locator().watchCompletion(e.key, e.record, m_model.messageAt(row));
+        }
+    }
     m_pos = int(m_entries.size()) - 1;
     m_lastWasJump = true;
     emit changed();
@@ -103,50 +187,21 @@ bool NavHistory::canGoForward() const
     return false;
 }
 
-bool NavHistory::textMatches(int row, const QString& preview) const
-{
-    return m_model.messageAt(row).left(kPreviewLength) == preview;
-}
-
 int NavHistory::resolve(NavEntry& e)
 {
     if (e.lost || !e.key.isValid())
         return -1;
-    if (e.verified) {
-        // Строка видна — фрагмент освежаем: она могла быть предварительной
-        // (хвост без '\n') и дописаться; иначе после следующей полной
-        // перезагрузки сверка сочла бы её чужой.
-        const int row = m_model.rowForKey(e.key);
-        if (row >= 0) {
-            e.preview = m_model.messageAt(row).left(kPreviewLength);
-            return row;
-        }
-        return m_model.nearestRowForKey(e.key);
-    }
-
-    // Строки файла сбрасывались: ключ может указывать на чужую строку
-    // переписанного файла — сверяем текст.
-    int row = m_model.rowForKey(e.key);
-    if (row < 0) {
-        // Ключа нет среди видимых: другие границы записей после перезагрузки
-        // (или строка скрыта) — ищем по номеру строки.
-        const int byLine = m_model.nearestVisibleRowForLine(e.line, e.key.file.get());
-        const RecordKey k = m_model.keyAt(byLine);
-        if (k.isValid() && k.file == e.key.file && k.line == e.line)
-            row = byLine;
-    }
+    // Строки файла сброшены, локатор ещё не нашёл строку: место пока
+    // недоступно (файл грузится, удалён) — пропускаем.
+    if (!e.verified)
+        return -1;
+    // Строка видна — фрагмент освежаем: она могла быть предварительной
+    // (хвост без '\n') и дописаться.
+    const int row = m_model.rowForKey(e.key);
     if (row >= 0) {
-        if (!textMatches(row, e.preview)) {
-            e.lost = true;
-            return -1;
-        }
-        e.key = m_model.keyAt(row);
         e.preview = m_model.messageAt(row).left(kPreviewLength);
-        e.verified = true;
         return row;
     }
-    // Строка скрыта фильтром: текст не проверить, ведёт ключ, если он есть
-    // в данных. Иначе файл ещё грузится, убран или строки больше нет.
     return m_model.nearestRowForKey(e.key);
 }
 
@@ -180,6 +235,7 @@ void NavHistory::clear()
 {
     if (m_entries.isEmpty())
         return;
+    releaseTokens(0, m_entries.size());
     m_entries.clear();
     m_pos = -1;
     m_lastWasJump = false;
@@ -187,15 +243,12 @@ void NavHistory::clear()
 }
 
 // Сброс строк снимает и «пропала»: файл могли вернуть к прежнему
-// содержимому — пропавшее место сверится заново (как у закладок).
+// содержимому — пропавшее место ищется заново (как у закладок).
 void NavHistory::invalidateFile(const QString& filePath)
 {
-    for (NavEntry& e : m_entries) {
-        if (e.filePath == filePath) {
-            e.verified = false;
-            e.lost = false;
-        }
-    }
+    for (NavEntry& e : m_entries)
+        if (e.filePath == filePath)
+            reacquire(e);
 }
 
 void NavHistory::refreshPreviews(const QString& filePath)
@@ -211,8 +264,6 @@ void NavHistory::refreshPreviews(const QString& filePath)
 
 void NavHistory::invalidateAll()
 {
-    for (NavEntry& e : m_entries) {
-        e.verified = false;
-        e.lost = false;
-    }
+    for (NavEntry& e : m_entries)
+        reacquire(e);
 }

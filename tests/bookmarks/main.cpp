@@ -31,6 +31,8 @@
 #include "LogListView.h"
 
 #include <QApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLineEdit>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -664,6 +666,279 @@ static void checkConversion(const QDir& dir, const QString& schema)
     settings.setIndexedThresholdMB(512);
 }
 
+// Строка закладки скрыта фильтром, когда кончилась полная загрузка, а ключ
+// строки сменился (переписанный файл сдвинул границы записей): прежде
+// перепривязка видела только видимые строки, и закладка оставалась «не
+// найдена». Строку находит RecordLocator — по номеру и тексту среди всех.
+static void checkHiddenAtReload(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / скрыта фильтром при перезагрузке");
+    QByteArray before;
+    for (int i = 0; i < 60; ++i) {
+        before += record(i, i % 7 == 3 ? "ERROR" : "INFO", "line " + QByteArray::number(i));
+        if (i % 10 == 5)
+            before += "    at continuation of " + QByteArray::number(i) + '\n';
+    }
+    QByteArray after = before;
+    after.replace("    at continuation of 5\n", record(5, "INFO", "inserted record"));
+    const QString path = writeFile(dir, name + "-hidden.log", before);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    BookmarkStore& store = tab.bookmarks();
+    // Строка 35 — запись «line 31» (ERROR), строка 23 — «line 20» (INFO).
+    const qint64 hiddenLine = 35;
+    CHECK(model.messageAt(rowOfLine(model, path, hiddenLine)).endsWith("ERROR - line 31"),
+          QStringLiteral("фикстура: строка 35"));
+    const int id = store.add(rowOfLine(model, path, hiddenLine), QStringLiteral("скрытая"));
+    const int idVisible = store.add(rowOfLine(model, path, 23));
+    const RecordKey oldKey = store.find(id)->key;
+
+    model.setLogLevelFilter({ LogLevel::Info });
+    CHECK(settled(tab), QStringLiteral("фильтр"));
+    CHECK(writeBytes(path, after), QStringLiteral("переписан"));
+    reload(tab);
+    CHECK(store.status(id) == BookmarkStore::Status::Hidden,
+          QStringLiteral("скрытая фильтром — Hidden, а не «не найдена»: статус %1").arg(int(store.status(id))));
+    CHECK(store.find(id)->key.logicalEntryId != oldKey.logicalEntryId
+              && store.find(id)->key.line == hiddenLine,
+          QStringLiteral("сценарий: ключ сменился, строка та же"));
+    CHECK(store.status(idVisible) == BookmarkStore::Status::Visible, QStringLiteral("видимая — Visible"));
+    CHECK(tab.goToBookmarkId(id) && tab.view()->userSelectedRow() == model.nearestRowForKey(store.find(id)->key),
+          QStringLiteral("переход к скрытой — к ближайшей видимой"));
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), QStringLiteral("фильтр снят"));
+    CHECK(store.idAtRow(rowOfLine(model, path, hiddenLine)) == id
+              && store.find(id)->note == QStringLiteral("скрытая"),
+          QStringLiteral("без фильтра — отметка на своей строке"));
+}
+
+// Закладка на строке, скрытой фильтром, когда сменилась кодировка: её
+// фрагмент по видимым строкам не переписать. Строку после полной перезагрузки
+// сверяет отпечаток (ASCII-скелет, от кодировки не зависит), а не фрагмент.
+static void checkHiddenEncodingChange(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / скрыта фильтром при смене кодировки");
+    QString text;
+    for (int i = 0; i < 40; ++i)
+        text += QString::fromLatin1(record(i, i % 5 ? "INFO" : "ERROR", QByteArray()).chopped(1))
+              + QStringLiteral("Запись номер %1: ошибка диска\n").arg(i);
+    QByteArray bytes = encodeText(text, TextEncoding::Windows1251);
+    const QString path = writeFile(dir, name + "-hidden-cp1251.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    BookmarkStore& store = tab.bookmarks();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    const int id = store.add(rowOfLine(model, path, 10)); // INFO
+    const QString previewBefore = store.find(id)->preview;
+    model.setLogLevelFilter({ LogLevel::Error });
+    CHECK(settled(tab) && store.status(id) == BookmarkStore::Status::Hidden, QStringLiteral("скрыта фильтром"));
+
+    tab.setFileEncoding(file, TextEncoding::Koi8R);
+    CHECK(settled(tab), QStringLiteral("смена на KOI8-R"));
+    CHECK(store.find(id)->preview == previewBefore,
+          QStringLiteral("сценарий: фрагмент скрытой строки не переписан"));
+    bytes[bytes.size() - 2] = 'X';
+    CHECK(writeBytes(path, bytes), QStringLiteral("переписан"));
+    reload(tab);
+    CHECK(store.status(id) == BookmarkStore::Status::Hidden,
+          QStringLiteral("после перезагрузки — скрыта, а не «не найдена»: %1").arg(int(store.status(id))));
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), QStringLiteral("фильтр снят"));
+    CHECK(store.idAtRow(rowOfLine(model, path, 10)) == id, QStringLiteral("закладка на своей строке"));
+}
+
+// Закладки вне вкладки (R-4): сохранили в JSON → закрыли вкладку → открыли
+// заново → закладки на своих строках. Без диска настроек; бэкенд при
+// открытии может быть другим.
+static void checkSaveRestore(const QDir& dir, const QString& schema)
+{
+    AppSettings& settings = AppSettings::instance();
+    QByteArray bytes;
+    for (int i = 0; i < 300; ++i) {
+        bytes += record(i, i % 7 == 3 ? "ERROR" : "INFO", "line " + QByteArray::number(i));
+        if (i % 10 == 5)
+            bytes += "    at continuation of " + QByteArray::number(i) + '\n';
+    }
+    QByteArray second;
+    for (int i = 0; i < 100; ++i)
+        second += record(i * 3 + 1, "WARN", "second " + QByteArray::number(i));
+    const QString path = writeFile(dir, "saved.log", bytes);
+    const QString other = writeFile(dir, "saved-2.log", second);
+    for (const bool saveIndexed : { false, true }) {
+        for (const bool restoreIndexed : { false, true }) {
+            g_context = QStringLiteral("сохранение и восстановление: %1 → %2")
+                            .arg(saveIndexed ? "индексная" : "резидентная",
+                                 restoreIndexed ? "индексная" : "резидентная");
+            QJsonArray saved;
+            QSet<LineId> expected;
+            QHash<LineId, QString> notes;
+            {
+                settings.setIndexedThresholdMB(saveIndexed ? 0 : 512);
+                LogViewWidget tab;
+                tab.setParserPattern(schema);
+                tab.addLogFile(path);
+                tab.addLogFile(other);
+                CHECK(settled(tab), QStringLiteral("загрузка"));
+                LogModel& model = *tab.model();
+                CHECK(model.isIndexedBackend() == saveIndexed, QStringLiteral("бэкенд сохранения"));
+                int n = 0;
+                for (const auto& [file, line] : { std::pair{ path, qint64(1) }, { path, qint64(4) }, { path, qint64(7) },
+                                                  { path, qint64(150) }, { path, qint64(329) },
+                                                  { other, qint64(1) }, { other, qint64(77) } }) {
+                    const int row = rowOfLine(model, file, line);
+                    CHECK(row >= 0, QStringLiteral("строка %1").arg(line));
+                    const QString note = QStringLiteral("заметка %1").arg(++n);
+                    tab.bookmarks().add(row, note);
+                    expected.insert({ file, line });
+                    notes.insert({ file, line }, note);
+                }
+                for (const BookmarkState& s : tab.bookmarks().states())
+                    saved.append(s.toJson());
+                CHECK(saved.size() == expected.size(), QStringLiteral("сохранено %1").arg(saved.size()));
+            } // вкладку закрыли
+            const QByteArray json = QJsonDocument(saved).toJson();
+
+            settings.setIndexedThresholdMB(restoreIndexed ? 0 : 512);
+            LogViewWidget tab;
+            tab.setParserPattern(schema);
+            BookmarkStore& store = tab.bookmarks();
+            QVector<int> ids;
+            for (const QJsonValue& v : QJsonDocument::fromJson(json).array()) {
+                QString error;
+                const auto s = BookmarkState::fromJson(v.toObject(), &error);
+                CHECK(s.has_value(), QStringLiteral("JSON закладки читается: ") + error);
+                if (s)
+                    ids.append(store.restore(*s));
+            }
+            for (const int id : ids)
+                CHECK(id >= 0 && store.status(id) == BookmarkStore::Status::Pending,
+                      QStringLiteral("до загрузки — Pending"));
+            tab.model()->setLogLevelFilter({ LogLevel::Info, LogLevel::Warn }); // ERROR скрыт
+            tab.addLogFile(path);
+            tab.addLogFile(other);
+            CHECK(settled(tab), QStringLiteral("загрузка"));
+            LogModel& model = *tab.model();
+            CHECK(model.isIndexedBackend() == restoreIndexed, QStringLiteral("бэкенд восстановления"));
+            int hidden = 0;
+            for (const int id : ids) {
+                const Bookmark* b = store.find(id);
+                CHECK(b && expected.contains({ b->filePath, b->line }),
+                      QStringLiteral("закладка %1 на своей строке").arg(b ? b->line : -1));
+                if (!b)
+                    continue;
+                CHECK(b->note == notes.value({ b->filePath, b->line }), QStringLiteral("заметка"));
+                const BookmarkStore::Status st = store.status(id);
+                hidden += st == BookmarkStore::Status::Hidden;
+                CHECK(st == BookmarkStore::Status::Visible || st == BookmarkStore::Status::Hidden,
+                      QStringLiteral("строка %1 найдена: статус %2").arg(b->line).arg(int(st)));
+            }
+            CHECK(hidden == 1, QStringLiteral("ERROR-строка скрыта фильтром: %1").arg(hidden));
+            model.setLogLevelFilter({});
+            CHECK(settled(tab), QStringLiteral("фильтр снят"));
+            checkRoles(model, expected, QStringLiteral("отметки восстановленных"));
+
+            // Повторное восстановление в открытую вкладку не плодит дублей.
+            const int before = store.count();
+            for (const QJsonValue& v : QJsonDocument::fromJson(json).array())
+                store.restore(*BookmarkState::fromJson(v.toObject()));
+            CHECK(store.count() == before, QStringLiteral("повторное восстановление — без дублей"));
+        }
+    }
+    settings.setIndexedThresholdMB(512);
+
+    // Файл переписан между сохранением и открытием — закладки «не найдены»,
+    // заметки и фрагменты на месте.
+    g_context = QStringLiteral("сохранение: файл переписан");
+    QJsonArray saved;
+    {
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.addLogFile(path);
+        CHECK(settled(tab), QStringLiteral("загрузка"));
+        tab.bookmarks().add(rowOfLine(*tab.model(), path, 40), QStringLiteral("до перезаписи"));
+        for (const BookmarkState& s : tab.bookmarks().states())
+            saved.append(s.toJson());
+    }
+    QByteArray rewritten = bytes;
+    rewritten[0] = '1';
+    rewritten[1] = '9';
+    CHECK(writeBytes(path, rewritten), QStringLiteral("переписан"));
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    const int id = tab.bookmarks().restore(*BookmarkState::fromJson(saved.at(0).toObject()));
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    pump(5);
+    CHECK(tab.bookmarks().status(id) == BookmarkStore::Status::Missing,
+          QStringLiteral("переписанный — «не найдена»: %1").arg(int(tab.bookmarks().status(id))));
+    CHECK(tab.bookmarks().find(id)->note == QStringLiteral("до перезаписи")
+              && tab.bookmarks().find(id)->preview.endsWith("continuation of 35"),
+          QStringLiteral("заметка и фрагмент сохранены"));
+    CHECK(tab.bookmarks().state(id).has_value(), QStringLiteral("потерянная тоже сохраняется"));
+
+    // Прежнее содержимое вернули — отказанная сохранённая закладка
+    // проверяется заново и находит строку.
+    // (Удалить и создать заново: правку только начала файла той же длины
+    // дочитывание не замечает — FileChangeDetector смотрит конец.)
+    CHECK(QFile::remove(path), QStringLiteral("файл удалён"));
+    reload(tab);
+    CHECK(writeBytes(path, bytes), QStringLiteral("содержимое возвращено"));
+    reload(tab);
+    CHECK(tab.bookmarks().status(id) == BookmarkStore::Status::Visible
+              && tab.bookmarks().idAtRow(rowOfLine(*tab.model(), path, 40)) == id,
+          QStringLiteral("после возврата содержимого — на своей строке: %1").arg(int(tab.bookmarks().status(id))));
+}
+
+// Закладка на недописанной последней строке: идентификатор без отпечатка,
+// пока строку не допишут; дописали — полный (оба бэкенда).
+static void checkPartialLine(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / недописанная строка");
+    QByteArray bytes;
+    for (int i = 0; i < 20; ++i)
+        bytes += record(i, "INFO", "line " + QByteArray::number(i));
+    bytes += "2026-03-05 10:00:30.000 [w] INFO - unfinished";
+    const QString path = writeFile(dir, name + "-partial.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    const int id = tab.bookmarks().add(rowOfLine(model, path, 21));
+    CHECK(id >= 0 && !tab.bookmarks().find(id)->record.hasText,
+          QStringLiteral("на недописанной — без отпечатка"));
+    CHECK(appendToFile(path, " and finished\n" + record(31, "INFO", "next")), QStringLiteral("дописано"));
+    reload(tab);
+    const Bookmark* b = tab.bookmarks().find(id);
+    CHECK(b && b->record == RecordId::forLine(21, u"2026-03-05 10:00:30.000 [w] INFO - unfinished and finished"),
+          QStringLiteral("дописана — отпечаток полной строки"));
+    CHECK(tab.bookmarks().status(id) == BookmarkStore::Status::Visible, QStringLiteral("и закладка видна"));
+
+    // Недописанная строка без метки (продолжение записи) дописана в начало
+    // новой записи: ключ строки сменился, закладка остаётся на ней.
+    CHECK(appendToFile(path, "2026-03-05 10:0"), QStringLiteral("начало строки"));
+    reload(tab);
+    const qint64 last = model.keyAt(model.rowCount() - 1).line;
+    const int idTail = tab.bookmarks().add(rowOfLine(model, path, last));
+    const RecordKey before = tab.bookmarks().find(idTail)->key;
+    CHECK(appendToFile(path, "0:40.000 [w] ERROR - now a record\n"), QStringLiteral("строка дописана"));
+    reload(tab);
+    const int row = rowOfLine(model, path, last);
+    CHECK(model.keyAt(row).logicalEntryId != before.logicalEntryId,
+          QStringLiteral("сценарий: дописанная строка начала запись"));
+    CHECK(tab.bookmarks().idAtRow(row) == idTail
+              && tab.bookmarks().find(idTail)->record
+                     == RecordId::forLine(last, u"2026-03-05 10:00:40.000 [w] ERROR - now a record"),
+          QStringLiteral("закладка дописанной строки — на ней, с полным отпечатком"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -700,11 +975,18 @@ int main(int argc, char** argv)
     checkTab(dir, QStringLiteral("resident"), schema);
     checkPlainRewrite(dir, QStringLiteral("resident"), schema);
     checkEncodingChange(dir, QStringLiteral("resident"), schema);
+    checkHiddenAtReload(dir, QStringLiteral("resident"), schema);
+    checkHiddenEncodingChange(dir, QStringLiteral("resident"), schema);
+    checkPartialLine(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
     checkPlainRewrite(dir, QStringLiteral("indexed"), schema);
     checkEncodingChange(dir, QStringLiteral("indexed"), schema);
+    checkHiddenAtReload(dir, QStringLiteral("indexed"), schema);
+    checkHiddenEncodingChange(dir, QStringLiteral("indexed"), schema);
+    checkPartialLine(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
+    checkSaveRestore(dir, schema);
     checkPanelLifecycle(dir, schema);
     checkConversion(dir, schema);
 

@@ -3,10 +3,12 @@
 #include "appsettings.h"
 #include "indexedlogstore.h"
 #include "quicksearch.h"
+#include "recordlocator.h"
 #include <QVBoxLayout>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QDebug>
 #include <algorithm>
 #include <utility>
@@ -106,6 +108,11 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_view, &LogListView::historyNavigationRequested, this,
             [this](bool forward) { navigateHistory(forward); });
     connect(&m_model->navHistory(), &NavHistory::changed, this, &LogViewWidget::navHistoryChanged);
+
+    // Поиск строк по сохранённым идентификаторам (R-1): проверка текста на
+    // индексном пути идёт в фоне — пока она не кончилась, вкладка «грузится».
+    connect(&m_model->recordLocator(), &RecordLocator::busyChanged,
+            this, [this](bool) { updateLoadingState(); });
 
     // Пробрасываем сигнал фильтрации модели
     connect(m_model, &LogModel::modelFiltered, this, &LogViewWidget::handleModelFilteredRelay);
@@ -332,6 +339,7 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
             st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
     rememberLastLines(st, entries);
     m_model->replaceEntriesForFile(logFile->filePath, entries);
+    locatorFileLoaded(logFile);
     // Текст строк файла другой при тех же ключах — фрагменты закладок и
     // истории переходов, иначе сверка после следующей загрузки их потеряет.
     refreshTextFragments(logFile->filePath);
@@ -457,10 +465,15 @@ QString LogViewWidget::loadFailureMessage(const LogFilePtr& logFile) const
         .arg(logFile->shortName(), st->unsupportedReason);
 }
 
-void LogViewWidget::addLogFile(const QString &filePath, const FileEncoding& initial)
+void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding& initial)
 {
+    // Один файл — один LogFile во вкладке: ключ строки (RecordKey) и
+    // LogEntry::operator< сравнивают файлы по указателю, а порядок — по
+    // пути; два экземпляра одного файла (разное написание пути) дали бы
+    // дубли строк и промахи rowForKey. Путь приводится к абсолютному виду.
+    const QString filePath = normalizedPath(requestedPath);
     for (const auto &file : m_loadedFiles) {
-        if (file->filePath == filePath) {
+        if (samePath(file->filePath, filePath)) {
             // Файл уже загружен или в процессе загрузки: --encoding для него —
             // обычный выбор пользователя.
             if (initial.source == FileEncoding::Source::User)
@@ -515,9 +528,41 @@ void LogViewWidget::addLogFile(const QString &filePath, const FileEncoding& init
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
 }
 
+QString LogViewWidget::normalizedPath(const QString& path)
+{
+    if (path.isEmpty())
+        return path;
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+}
+
+bool LogViewWidget::samePath(const QString& a, const QString& b)
+{
+#ifdef Q_OS_WIN
+    return a.compare(b, Qt::CaseInsensitive) == 0;
+#else
+    return a == b;
+#endif
+}
+
+void LogViewWidget::locatorFileLoaded(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return;
+    RecordLocator& locator = m_model->recordLocator();
+    if (const auto* store = m_model->indexedOrNull()) {
+        const auto index = store->indexForFile(logFile->filePath);
+        locator.fileLoaded(logFile, index ? index->endOffset() : -1);
+        return;
+    }
+    const FileReloadState st = m_fileReloadStates.value(logFile->filePath);
+    const qint64 provisional = st.lastLinePartial && st.lastEntry
+        ? st.lastEntry->originalLineNumber() : 0;
+    locator.fileLoaded(logFile, st.endOffset, provisional);
+}
+
 void LogViewWidget::updateLoadingState()
 {
-    bool loading = false;
+    bool loading = m_model->recordLocator().isBusy();
     for (auto it = m_fileReloadStates.constBegin();
          it != m_fileReloadStates.constEnd(); ++it) {
         if (it->loadInFlight) {
@@ -548,11 +593,14 @@ void LogViewWidget::dropRowsForFile(const LogFilePtr& logFile)
 {
     if (!logFile)
         return;
-    m_model->invalidateFileRows(logFile->filePath);
-    if (auto* store = m_model->indexedOrNull())
+    // Закладки, история и локатор узнают о сбросе строк файла один раз:
+    // резидентный removeEntriesForFile сообщает им сам.
+    if (auto* store = m_model->indexedOrNull()) {
+        m_model->invalidateFileRows(logFile->filePath);
         store->resetFileIndex(logFile, std::make_shared<LineIndex>());
-    else
+    } else {
         m_model->removeEntriesForFile(logFile->filePath);
+    }
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
@@ -565,11 +613,12 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     // Ключ уже есть в хэше у всех вызывающих — вставки (и рехэша, который
     // инвалидировал бы их ссылку на состояние) здесь не происходит.
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
-    // Строки файла сбрасываются: закладки и история переходов сверят их,
-    // когда строки покажутся.
-    m_model->invalidateFileRows(logFile->filePath);
 
     if (auto* store = m_model->indexedOrNull()) {
+        // Строки файла сбрасываются: закладки и история переходов найдут их
+        // заново (RecordLocator), когда строки покажутся. Резидентный
+        // removeEntriesForFile ниже сообщает об этом сам.
+        m_model->invalidateFileRows(logFile->filePath);
         // Строки файла сбрасываются, индексация идёт в свежий LineIndex
         // (store сам чистит кэш текста и refs).
         ensureIndexer();
@@ -665,6 +714,9 @@ void LogViewWidget::handleIndexBatchReady(const LogFilePtr& logFile,
     const bool tailAppend =
         m_fileReloadStates.value(logFile->filePath).initialLoadDone;
     store->appendIndexedRows(logFile, firstLine, count, tailAppend);
+    // Строки показаны модели — локатор сверяет ожидающие идентификаторы
+    // этого диапазона (O(log K + найденные), диапазон не просматривается).
+    m_model->recordLocator().indexedRange(logFile, firstLine, count);
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
@@ -687,6 +739,7 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
     st.initialLoadDone = true;
     st.loadInFlight = false;
     st.failedStamp = DiskStamp{};
+    locatorFileLoaded(logFile);
     updateLoadingState();
 
     bookmarksFileLoaded(logFile, wasInitial);
@@ -775,6 +828,10 @@ void LogViewWidget::handleEntriesParsed(
     // стоимость батча O(B) при загрузке одного файла (append в конец) вместо
     // прежней полной пересборки O(N) на каждый батч.
     m_model->mergeEntries(sortedBatch);
+    // Порция в порядке файла — локатору (строки уже показаны модели). После
+    // конверсии во индексный бэкенд модель такие порции отбрасывает.
+    if (!m_model->isIndexedBackend())
+        m_model->recordLocator().residentBatch(entriesBatch);
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
@@ -794,6 +851,7 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
         st.initialLoadDone = true;
         st.loadInFlight    = false;
         st.failedStamp     = DiskStamp{};
+        locatorFileLoaded(parsedLogFile);
         updateLoadingState();
         bookmarksFileLoaded(parsedLogFile, true);
         if (st.reparsePending) {
@@ -1035,6 +1093,8 @@ void LogViewWidget::handleIncrementalEntriesParsed(
 
     // Append entries directly — no model reset, selection preserved.
     m_model->appendEntries(batch);
+    if (!m_model->isIndexedBackend())
+        m_model->recordLocator().residentBatch(batch);
 }
 
 void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFilePtr& logFile)
@@ -1046,6 +1106,7 @@ void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFi
         // не прочитается повторно и не потеряется.
         if (st.endOffset >= 0)
             st.anchor = FileChangeDetector::capture(logFile->filePath, st.endOffset);
+        locatorFileLoaded(logFile);
         updateLoadingState();
         bookmarksFileLoaded(logFile, false);
         if (st.reparsePending) {

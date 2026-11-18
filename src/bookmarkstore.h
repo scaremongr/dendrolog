@@ -3,6 +3,9 @@
 
 #include "recordid.h"
 
+#include <QJsonObject>
+#include <optional>
+
 #include <QDateTime>
 #include <QHash>
 #include <QObject>
@@ -13,6 +16,7 @@
 #include <utility>
 
 class LogModel;
+class RecordLocator;
 
 // ============================================================================
 // BookmarkStore — закладки с заметками одной вкладки (R-2, docs/design/R-5.md).
@@ -28,40 +32,60 @@ class LogModel;
 //   • isBookmarkedRow (роль модели BookmarkRole, отметка в жёлобе) — O(1):
 //     keyAt + поиск в хэше по (файл, строка). На батч индексатора здесь
 //     ничего не пересчитывается (инвариант 3);
-//   • перепроверка после сброса строк — O(закладок · log N) на событие
-//     модели, и только пока есть непроверенные закладки.
+//   • поиск строк после сброса — RecordLocator: O(log K + найденные) на
+//     порцию загрузки; на события модели здесь ничего не считается.
 //
 // Жизнь закладки при смене данных:
 //   • фильтр — ключ не меняется; скрытая закладка остаётся (статус Hidden);
 //   • дозапись хвоста — ключи прежних строк не меняются;
 //   • строки файла сброшены (полная перезагрузка, файл исчез, конверсия
 //     вкладки в другой бэкенд) — invalidateFile / invalidateAll: закладка
-//     «не проверена» и в жёлобе не показана. Когда строка с тем же ключом
-//     снова показана моделью, её текст сверяется с фрагментом: совпал —
-//     закладка снова живая, нет — «строка не найдена» (файл переписан, а ключ
-//     случайно совпал с чужой строкой — например, у строк без меток);
-//   • файл дочитан (fileLoaded), а ключа нет (другие границы записей после
-//     перезагрузки с другой схемой, другая метка) — перепривязка по номеру
-//     строки с проверкой фрагмента; не вышло — «строка не найдена».
+//     «не проверена» (Pending), в жёлобе не показана, а её строку ищет
+//     RecordLocator модели (reacquire): по номеру строки и отпечатку текста
+//     (RecordId), в каждой пришедшей порции — видима строка или скрыта
+//     фильтром. Нашлась — закладка снова живая с новым ключом; номера нет
+//     или текст другой — «строка не найдена» (Missing). Источник при этом
+//     не проверяется: строка того же номера и текста в переписанном файле —
+//     та же строка;
+//   • сохранённая закладка (BookmarkState, R-4) — restore: ждёт файл со
+//     своим путём; источник проверяется (переписан — «не найдена»).
 //
 // Ловушки:
 //   • ключ действителен, только когда строка уже показана модели (R-1): пока
 //     файл грузится, закладка в статусе Pending, а не Missing;
-//   • перепривязка видит только ВИДИМЫЕ строки (nearestVisibleRowForLine):
-//     строку, скрытую фильтром в момент окончания загрузки, она не найдёт —
-//     закладка останется «не найдена» до следующей полной загрузки файла;
-//   • фрагмент сверяется по первым 200 символам; строку, совпадающую с
-//     прежней в этих символах, перепроверка не отличит.
+//   • фрагмент (preview) — только для показа: его текст зависит от
+//     кодировки; сверяет строку отпечаток RecordId (от кодировки не зависит);
+//   • закладка на недописанной последней строке (без '\n') хранит
+//     идентификатор без отпечатка, пока строку не допишут
+//     (RecordLocator::watchCompletion → completed).
 // ============================================================================
 
 struct Bookmark {
     int id = -1;
     RecordKey key;          // ключ строки на момент последней проверки
+    RecordId record;        // номер строки + отпечаток текста (R-1)
     QString filePath;
     qint64 line = 0;        // номер физической строки в файле, с 1
     QString preview;        // первые kPreviewLength символов текста строки
     QString note;
     QDateTime created;
+};
+
+// Закладка вне вкладки (R-4 пишет её на диск, docs/design/R-5.md): источник,
+// строка в нём, заметка и фрагмент. Чистые данные и JSON.
+struct BookmarkState {
+    static constexpr int kFormatVersion = 1;
+
+    SourceIdentity source;
+    RecordId record;
+    QString note;
+    QString preview;
+    QDateTime created;
+
+    // {"version":1,"source":{…},"record":{…},"note":…,"preview":…,"created":…}
+    QJsonObject toJson() const;
+    // Чужая версия, битый источник или строка — nullopt и причина.
+    static std::optional<BookmarkState> fromJson(const QJsonObject& json, QString* error = nullptr);
 };
 
 class BookmarkStore : public QObject {
@@ -97,6 +121,21 @@ public:
     // сохраняет заметку. -1 — строки нет.
     int add(int row, const QString& note = QString());
     bool remove(int id);
+    // ---- Сохранение (R-4) ---------------------------------------------------------
+    // Закладка вне вкладки: идентичность источника по концу прочитанного
+    // (RecordLocator::sourceFor), строка, заметка, фрагмент. nullopt — нет
+    // такой или источник не снять (файла нет и прежней идентичности нет).
+    std::optional<BookmarkState> state(int id) const;
+    // Все, в порядке bookmarks(); файл stdin (Ephemeral) — тоже, решает
+    // вызывающий (toJson у него пустой источник).
+    QVector<BookmarkState> states() const;
+    // Вернуть сохранённую закладку: статус Pending, пока RecordLocator не
+    // найдёт строку (файл со своим путём подключён к вкладке, источник цел,
+    // текст совпал), иначе Missing. Звать можно до загрузки файла и после.
+    // Закладка на той же строке уже есть — её id (пустая заметка дополняется).
+    // -1 — идентификатор невалиден.
+    int restore(const BookmarkState& state);
+
     // Поставить или снять; true — закладка теперь стоит.
     bool toggle(int row);
     void clear();
@@ -122,9 +161,9 @@ public:
     // Сброшены все строки (конверсия бэкенда, clear).
     void invalidateAll();
     // Загрузка файла закончилась: fullLoad — файл прочитан с нуля, иначе —
-    // дочитан хвост. Непроверенные закладки сверяются, потерявшие ключ —
-    // перепривязываются по номеру строки. После дозаписи фрагменты видимых
-    // закладок файла обновляются (предварительная строка без '\n' дописалась).
+    // дочитан хвост. После дозаписи фрагменты видимых закладок файла
+    // обновляются (предварительная строка без '\n' дописалась). Строки
+    // ищет RecordLocator — сам, по порциям.
     void fileLoaded(const QString& filePath, bool fullLoad);
     // Текст строк файла стал другим при тех же ключах — сменилась кодировка
     // (F-1: выбор пользователя, пересмотр автоматики). Фрагменты сверенных
@@ -142,28 +181,40 @@ signals:
 private:
     struct Item {
         Bookmark bookmark;
-        bool verified = true;  // текст строки сверен после последнего сброса
+        bool verified = true;  // строка найдена после последнего сброса
         bool lost = false;     // строка не найдена
+        int token = 0;         // запрос к RecordLocator (поиск, слежение)
+        SourceIdentity source; // идентичность при постановке / из сохранения
     };
     using LineKey = std::pair<const LogFile*, qint64>;
 
     static LineKey lineKey(const Bookmark& b) { return { b.key.file.get(), b.line }; }
+    RecordLocator& locator() const;
     QString previewOf(int row) const;
     // Фрагменты сверенных закладок файла, чьи строки видны, — по тексту
     // модели. true — какой-то изменился.
     bool updateVisiblePreviews(const QString& filePath);
-    bool inData(const RecordKey& key) const;
     void notifyRow(int row);
-    // Сверить непроверенные закладки, чьи строки сейчас видны.
-    bool verifyPending();
-    void scheduleVerify();
+    void scheduleChanged();
+    // Строка закладки сброшена: искать заново (RecordLocator::reacquire).
+    void reacquire(int id, Item& item);
+    void releaseToken(Item& item);
+    // Привязать item к строке row (постановка, повторная постановка):
+    // ключ, идентификатор, слежение за недописанной строкой.
+    void bindToRow(int id, Item& item, int row);
+    void onResolved(int token, const RecordKey& key);
+    void onRefused(int token);
+    void onCompleted(int token, const RecordId& record, const RecordKey& key);
+    // Сохранённая закладка без строки (ещё не нашла её или получила отказ):
+    // ждёт файл со своим путём (RecordLocator::request).
+    void requestSaved(int id, Item& item);
 
     LogModel& m_model;
     QHash<int, Item> m_items;
     QHash<LineKey, int> m_byLine;
+    QHash<int, int> m_byToken; // токен локатора → id закладки
     int m_nextId = 1;
-    int m_unverified = 0;
-    QTimer m_verifyTimer;
+    QTimer m_changedTimer;
 };
 
 #endif // BOOKMARKSTORE_H

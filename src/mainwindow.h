@@ -52,6 +52,7 @@ class LogModel;
 class LogListView;
 class LogPattern;
 class SearchResultsController;
+class SearchResultsNavigator;
 class FieldReextraction;
 class QModelIndex;
 class QDialog;
@@ -279,7 +280,7 @@ private:
     QString      m_levelJumpStatusText;
     // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
     // меняется программно (reset модели при пересборке результатов).
-    bool         m_suppressResultNavigation = false;
+    SearchResultsNavigator* m_searchNavigator = nullptr;
     // Состояние загрузки активной вкладки → панель статистики (не считать по
     // недогруженному документу). Рвётся в disconnectFromLogView.
     QMetaObject::Connection m_statsLoadingConn;
@@ -472,7 +473,6 @@ private:
     // идущий поиск (галочка Highlight панели Search).
     void refreshMainViewHighlights(LogViewWidget* view);
     // Клик/навигация по строке в панели результатов → прыжок в основном view.
-    void onSearchResultActivated(const QModelIndex& current);
     // Панель Search видима: только тогда выдача держится актуальной полными
     // перезапусками поиска (см. SearchResultsController).
     bool searchResultsLive() const;

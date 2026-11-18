@@ -594,6 +594,21 @@ int ResidentLogStore::lowerBoundForKey(const QVector<std::shared_ptr<LogEntry>>&
     return int(it - list.constBegin());
 }
 
+QVector<std::shared_ptr<LogEntry>> ResidentLogStore::entriesAtLines(
+    const LogFile* file, const QVector<qint64>& sortedLines) const
+{
+    QVector<std::shared_ptr<LogEntry>> out;
+    if (!file || sortedLines.isEmpty())
+        return out;
+    for (const auto& e : m_allEntries) {
+        if (e && e->sourceFile().get() == file
+            && std::binary_search(sortedLines.cbegin(), sortedLines.cend(),
+                                  qint64(e->originalLineNumber())))
+            out.append(e);
+    }
+    return out;
+}
+
 RecordKey ResidentLogStore::keyAt(int visibleRow) const
 {
     if (visibleRow < 0 || visibleRow >= m_filteredEntries.size())

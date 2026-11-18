@@ -23,6 +23,8 @@
 #include "bookmarkstore.h"
 #include "logviewwidget.h"
 #include "navhistory.h"
+#include "searchresultscontroller.h"
+#include "searchresultsnavigator.h"
 #include "shortcutmanager.h"
 #include "testdocuments.h"
 
@@ -622,6 +624,166 @@ static void checkTabClose(const QDir& dir, const QString& schema)
     CHECK(!history, QStringLiteral("история ушла вместе с вкладкой"));
 }
 
+// Переписанный файл сдвинул границы записей (ключи строк другие), а место
+// истории скрыто фильтром, когда загрузка кончилась. Строку находит
+// RecordLocator — по номеру и тексту среди ВСЕХ строк порции, — и возврат
+// ведёт к ближайшей видимой, а не пропускает место.
+static void checkHiddenAtReload(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / скрыто фильтром при перезагрузке");
+    const auto lineOfRecord = [](int i) { return qint64(i + 1 + (i + 4) / 10); };
+    const QByteArray before = tabFixture(60);
+    QByteArray after = before;
+    after.replace("    at continuation of 5\n", record(5, "INFO", "inserted record"));
+    CHECK(after.size() != before.size() && after.count('\n') == before.count('\n'),
+          QStringLiteral("фикстура: строк столько же, запись вставлена"));
+    const QString path = writeFile(dir, name + "-hidden.log", before);
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    NavHistory& h = tab.navHistory();
+    const qint64 hiddenLine = lineOfRecord(31); // ERROR
+    select(tab, rowOfLine(model, lineOfRecord(20)));
+    tab.view()->goToRow(rowOfLine(model, hiddenLine), NavKind::GoTo);
+    tab.view()->goToRow(rowOfLine(model, lineOfRecord(40)), NavKind::Timeline);
+    CHECK(historyLines(h) == QVector<qint64>({ lineOfRecord(20), hiddenLine, lineOfRecord(40) }),
+          QStringLiteral("три места: ") + linesOf(model, h));
+    const RecordKey oldKey = h.entries().value(1).key;
+
+    model.setLogLevelFilter({ LogLevel::Info });
+    CHECK(settled(tab), QStringLiteral("фильтр"));
+    CHECK(writeBytes(path, after), QStringLiteral("переписан"));
+    reload(tab);
+    const NavEntry hidden = h.entries().value(1);
+    CHECK(hidden.verified && !hidden.lost && hidden.key.line == hiddenLine,
+          QStringLiteral("место найдено по номеру и тексту, хотя скрыто"));
+    CHECK(hidden.key.logicalEntryId != oldKey.logicalEntryId,
+          QStringLiteral("сценарий: ключ строки сменился"));
+    CHECK(model.rowForKey(hidden.key) < 0, QStringLiteral("строка скрыта фильтром"));
+    select(tab, rowOfLine(model, lineOfRecord(40)));
+    const int expected = model.nearestRowForKey(hidden.key);
+    CHECK(tab.navigateHistory(false) && tab.view()->userSelectedRow() == expected && expected >= 0,
+          QStringLiteral("Alt+← — к ближайшей видимой у скрытого места, а пришли к строке %1")
+              .arg(selectedLine(tab)));
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), QStringLiteral("фильтр снят"));
+    CHECK(tab.navigateHistory(true) && selectedLine(tab) == lineOfRecord(40), QStringLiteral("вперёд"));
+    CHECK(tab.navigateHistory(false) && selectedLine(tab) == hiddenLine,
+          QStringLiteral("без фильтра — точно на место: %1").arg(selectedLine(tab)));
+}
+
+// Место истории на строке, скрытой фильтром, когда сменилась кодировка: после
+// полной перезагрузки его находит отпечаток строки, а не фрагмент.
+static void checkHiddenEncodingChange(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / скрыто фильтром при смене кодировки");
+    QString text;
+    for (int i = 0; i < 60; ++i)
+        text += QString::fromLatin1(record(i, i % 5 ? "INFO" : "ERROR", QByteArray()).chopped(1))
+              + QStringLiteral("Запись номер %1: ошибка диска\n").arg(i);
+    QByteArray bytes = encodeText(text, TextEncoding::Windows1251);
+    const QString path = writeFile(dir, name + "-hidden-cp1251.log", bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    NavHistory& h = tab.navHistory();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    select(tab, rowOfLine(model, 7));                      // INFO — будет скрыта
+    tab.view()->goToRow(rowOfLine(model, 41), NavKind::GoTo); // ERROR
+    CHECK(historyLines(h) == QVector<qint64>({ 7, 41 }), QStringLiteral("два места"));
+    model.setLogLevelFilter({ LogLevel::Error });
+    CHECK(settled(tab), QStringLiteral("фильтр"));
+    tab.setFileEncoding(file, TextEncoding::Koi8R);
+    CHECK(settled(tab), QStringLiteral("смена на KOI8-R"));
+    bytes[bytes.size() - 2] = 'X';
+    CHECK(writeBytes(path, bytes), QStringLiteral("переписан"));
+    reload(tab);
+    const NavEntry hidden = h.entries().value(0);
+    CHECK(hidden.verified && !hidden.lost && hidden.key.line == 7,
+          QStringLiteral("скрытое место найдено после перезагрузки"));
+    model.setLogLevelFilter({});
+    CHECK(settled(tab), QStringLiteral("фильтр снят"));
+    select(tab, rowOfLine(model, 41));
+    CHECK(tab.navigateHistory(false) && selectedLine(tab) == 7,
+          QStringLiteral("Alt+← — к строке 7, а не %1").arg(selectedLine(tab)));
+}
+
+// Выдача Search перестраивается сама (фильтр вкладки, дозапись) и на reset
+// восстанавливает своё выделение — это не выбор пользователя: переход во
+// вкладке и запись в историю делать нельзя (SearchResultsNavigator).
+static void checkSearchResultsQuiet(const QDir& dir, const QString& schema)
+{
+    g_context = QStringLiteral("выдача Search не пишет историю");
+    const QString path = writeFile(dir, "search-quiet.log", tabFixture(200));
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    NavHistory& h = tab.navHistory();
+
+    SearchResultsController search;
+    search.setSource(&model);
+    search.setLive(true);
+    LogListView results;
+    results.resize(600, 300);
+    SearchResultsNavigator nav(search.model(), &results);
+    nav.setTarget([&tab]() { return &tab; });
+    results.show();
+    FilterRuleSet rules;
+    FilterRule rule;
+    rule.text = QStringLiteral("needle");
+    rules.rules.append(rule);
+    rules.bindFields({}, false);
+    search.search(rules);
+    CHECK(waitFor([&] { return search.model()->rowCount() >= 10 && !search.model()->isFiltering(); }, 10000),
+          QStringLiteral("выдача готова"));
+    CHECK(nav.navigations() == 0 && h.entries().isEmpty(), QStringLiteral("поиск сам никуда не ведёт"));
+
+    // Пользователь выбрал совпадение — переход во вкладке, запись в историю.
+    results.goToRow(2, NavKind::History);
+    pump(20);
+    CHECK(nav.navigations() == 1, QStringLiteral("выбор в выдаче — переход"));
+    const int mainRow = tab.view()->userSelectedRow();
+    CHECK(mainRow >= 0 && model.messageAt(mainRow).contains(QStringLiteral("needle")),
+          QStringLiteral("во вкладке выбрано совпадение"));
+    const RecordKey mainKey = model.keyAt(mainRow);
+    const QVector<qint64> before = historyLines(h);
+    CHECK(!before.isEmpty(), QStringLiteral("переход записан в историю"));
+    const QString chosen = search.model()->messageAt(results.userSelectedRow());
+
+    // Выдача перестраивается полным поиском (фильтр вкладки сменился) и
+    // восстанавливает своё выделение.
+    int resets = 0;
+    int restored = 0;
+    QObject relay;
+    QObject::connect(search.model(), &QAbstractItemModel::modelReset, &relay, [&] { ++resets; });
+    QObject::connect(results.selectionModel(), &QItemSelectionModel::currentRowChanged, &relay,
+                     [&](const QModelIndex& cur, const QModelIndex&) { if (cur.isValid()) ++restored; });
+    model.setLogLevelFilter({ LogLevel::Info });
+    CHECK(settled(tab), QStringLiteral("фильтр вкладки"));
+    CHECK(waitFor([&] { return resets > 0 && !search.model()->isFiltering() && !search.isStale(); }, 10000),
+          QStringLiteral("выдача перестроена"));
+    pump(SearchResultsController::kRefreshDelayMs + 100);
+    CHECK(results.userSelectedRow() >= 0
+              && search.model()->messageAt(results.userSelectedRow()) == chosen,
+          QStringLiteral("выдача восстановила выделение"));
+    CHECK(restored > 0, QStringLiteral("сценарий: восстановление дёрнуло currentRowChanged"));
+    CHECK(nav.navigations() == 1, QStringLiteral("перестройка выдачи — не переход (%1)").arg(nav.navigations()));
+    CHECK(historyLines(h) == before, QStringLiteral("история не тронута: ") + linesOf(model, h));
+    CHECK(tab.view()->userSelectedRow() >= 0 && model.keyAt(tab.view()->userSelectedRow()) == mainKey,
+          QStringLiteral("основной вид не сдвинут"));
+}
+
 static void checkShortcuts()
 {
     g_context = QStringLiteral("сочетания");
@@ -677,9 +839,14 @@ int main(int argc, char** argv)
     settings.setIndexedThresholdMB(512);
     checkTab(dir, QStringLiteral("resident"), schema);
     checkEncodingChange(dir, QStringLiteral("resident"), schema);
+    checkHiddenAtReload(dir, QStringLiteral("resident"), schema);
+    checkHiddenEncodingChange(dir, QStringLiteral("resident"), schema);
+    checkSearchResultsQuiet(dir, schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
     checkEncodingChange(dir, QStringLiteral("indexed"), schema);
+    checkHiddenAtReload(dir, QStringLiteral("indexed"), schema);
+    checkHiddenEncodingChange(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
     checkConversion(dir, schema);
     checkTabClose(dir, schema);
