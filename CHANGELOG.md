@@ -22,6 +22,11 @@ All notable changes to DendroLog are documented here. The format follows
 - **Theme** in `Settings → Appearance`: **Same as system** (the default, follows
   the OS as before), **Light** or **Dark**. The choice applies at once to the
   whole window and is remembered.
+- **A folder dropped on the window opens in the Directory Scanner**: the panel
+  comes up and the scan starts. The same goes for a folder on the command line
+  (`DendroLog C:\logs`) and one handed over to the already open window. Files
+  dropped together with folders open as before; of several folders the first
+  one is scanned.
 
 ### Changed
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
@@ -37,6 +42,12 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- A piped stream (`program | DendroLog -`) no longer leaves a dead entry in
+  **Recent Files**: its temporary file is gone once the window closes. Such
+  entries left by earlier versions are dropped on start.
+- A relative path passed on the command line while a window is already open
+  is resolved against the folder the command was run in, not the folder of
+  the open window.
 - With **Follow tail** on, a jump no longer snaps back to the end of a growing
   log on the next appended lines. A click on the timeline, a jump from
   Statistics, a result picked in the Search panel and a quick-search match

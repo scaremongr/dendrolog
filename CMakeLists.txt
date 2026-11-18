@@ -95,6 +95,8 @@ set(DENDROLOG_CORE_SOURCES
     src/quicksearch.cpp
     src/gotolocation.h
     src/gotolocation.cpp
+    src/openrouting.h
+    src/openrouting.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES

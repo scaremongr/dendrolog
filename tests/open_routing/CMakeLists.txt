@@ -1,0 +1,1 @@
+dendrolog_add_test(open_routing LIBRARIES dendrolog_widgets TIMEOUT 120)

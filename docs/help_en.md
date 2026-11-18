@@ -10,10 +10,11 @@ filtering, highlighting and live reload.
 ## Opening logs
 
 - **Open log file(s)** — `File → Open` (`Ctrl+O`) or the folder button on the toolbar. Multiple files open into one tab and are merged by timestamp; such a tab is named after the first file, e.g. `app.log +2`.
-- **Drop files** anywhere in the window to open them.
+- **Drop files** anywhere in the window to open them. **Drop a folder** to open it in the Directory Scanner: the panel comes up and the scan starts. Files and folders dropped together: the files open, the folder is scanned. The scanner shows one folder at a time, so of several folders the first one is scanned.
+- **Command line** — `DendroLog app.log other.log` opens the files, `DendroLog C:\logs` scans the folder; the same rules as for a drop. `program | DendroLog -` reads the program's output as a growing log.
 - **Start screen** — while no tab is open, the window shows buttons to open files or scan a folder and the recent files as links.
 - **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once (`File → Scan Directory…`).
-- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list.
+- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list. A piped stream (`program | DendroLog -`) is not remembered: it does not exist after the window closes.
 - **Close Tab** — `Ctrl+W`, the tab's cross or the middle mouse button.
 - **Save View As** — `File → Save View As…` (`Ctrl+Shift+S`). Writes exactly what the view currently shows (active filters **and** the Log Fields selection) to a **new** file. Open files are never overwritten.
 - The view is saved in the background: the window stays usable, the status bar shows the progress, and **Cancel Save** next to it stops the export. The rows are taken as they were when saving started, so filtering or scrolling meanwhile does not change the file. A cancelled export leaves an existing destination file as it was.

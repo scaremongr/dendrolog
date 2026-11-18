@@ -29,6 +29,12 @@ public:
     QString spoolFilePath() const { return m_path; }
     void requestStop() { m_stop.store(true); }
 
+    // Где лежит спул процесса pid: <temp>/DendroLog-stdin-<pid>.log.
+    static QString spoolFilePathFor(qint64 pid);
+    // Путь — спул stdin (этого или другого экземпляра)? Спул — временный
+    // файл: его не запоминают в недавних (RecentFiles).
+    static bool isSpoolFilePath(const QString& path);
+
 signals:
     // В файл дописаны данные (не чаще ~3 раз в секунду). Приёмник дёргает
     // reloadChangedFiles() вкладки — сверх обычного таймера auto-reload.
