@@ -183,6 +183,7 @@ private:
     QLabel* m_statusLabel;
     QLabel* m_lineInfoLabel;
     QLineEdit* m_searchLineEdit = nullptr;
+    bool m_quickSearchNotFound = false; // поле подсвечено «не найдено»
     QAction*   m_matchCaseAction = nullptr;   // «Aa» — учитывать регистр
     // Стартовый экран вместо пустой рамки, пока нет ни одной вкладки.
     WelcomeWidget* m_welcome = nullptr;

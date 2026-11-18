@@ -341,12 +341,10 @@ FilterPanelWidget::FilterPanelWidget(Mode mode, QWidget* parent)
     cardRows->setSpacing(3);
 
     // ---- Ряд 1: что делает панель — одной строкой ---------------------- //
-    auto* purpose = new QLabel(search
+    auto* purpose = new MutedLabel(search
         ? tr("Finds lines and lists them; the log itself stays complete.")
         : tr("Hides the lines that do not match the rules."), m_settingsCard);
     purpose->setWordWrap(true);
-    purpose->setStyleSheet(QStringLiteral("color: %1;")
-        .arg(CardFrame::mutedTextColor(palette()).name()));
     cardRows->addWidget(purpose);
 
     // ---- Ряд 2: профиль + меню действий ------------------------------- //

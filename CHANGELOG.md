@@ -37,6 +37,17 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- **Switching between the light and dark theme repaints the panels.** Rule
+  and marker cards in Text Filters, Search and Row Highlighters, the header
+  cards of Entry Details and the Directory Scanner kept the colours of the
+  theme the window was opened in — white boxes and black labels on a dark
+  window, or the reverse — until a restart. The same happened when the OS
+  theme changed while DendroLog was running. The section toggles of Entry
+  Details, the muted captions, the Statistics placeholder, the scanner's
+  refresh icon and the "not found" tint of the quick-search box now follow
+  the theme as well.
+- The dark theme no longer depends on which theme was active before it: it
+  looks the same after a switch from light as on a start under a dark OS.
 - With **Follow tail** on, a jump no longer snaps back to the end of a growing
   log on the next appended lines. A click on the timeline, a jump from
   Statistics, a result picked in the Search panel and a quick-search match

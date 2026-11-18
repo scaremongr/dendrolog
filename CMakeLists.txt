@@ -130,6 +130,19 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/toggleswitch.h
     src/toggleswitch.cpp
     src/highlightpalette.h
+
+    # Панели и стартовый экран: в библиотеке ради tests/theme_mode
+    # (перекраска при смене темы).
+    src/welcomewidget.h
+    src/welcomewidget.cpp
+    src/filterpanelwidget.h
+    src/filterpanelwidget.cpp
+    src/markerpanelwidget.h
+    src/markerpanelwidget.cpp
+    src/entrydetailspanel.h
+    src/entrydetailspanel.cpp
+    src/statisticspanel.h
+    src/statisticspanel.cpp
 )
 
 set(PROJECT_SOURCES
@@ -142,8 +155,6 @@ set(PROJECT_SOURCES
     src/logtabbar.cpp
     src/logtabwidget.h
     src/logtabwidget.cpp
-    src/welcomewidget.h
-    src/welcomewidget.cpp
 
     src/schemastore.h
     src/schemastore.cpp
@@ -162,16 +173,8 @@ set(PROJECT_SOURCES
     src/settingsdialog.cpp
     src/settingsdialog.ui
 
-    src/filterpanelwidget.h
-    src/filterpanelwidget.cpp
-    src/markerpanelwidget.h
-    src/markerpanelwidget.cpp
     src/searchpanelwidget.h
     src/searchpanelwidget.cpp
-    src/entrydetailspanel.h
-    src/entrydetailspanel.cpp
-    src/statisticspanel.h
-    src/statisticspanel.cpp
     src/timelinehistogramwidget.h
     src/timelinehistogramwidget.cpp
 
