@@ -23,6 +23,7 @@
 #include "logparser.h"
 #include "patternheuristics.h"
 #include "sequentiallinereader.h"
+#include "textencoding.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -1509,15 +1510,46 @@ static int runBench(const QString& path, const QString& patternString)
 // Ступенчатая атрибуция стоимости индексации: 0 — чтение+разрез по \n,
 // 1 — +декодирование UTF-8, 2 — +detectTimestamp (с toMSecsSinceEpoch),
 // 3 — +detectLogLevel. Дельты между ступенями = цена каждого шага.
-static int runBenchStages(const QString& path)
+// encodingName — кодировка ступени 6 (имя TextEncodings::fromName); пусто —
+// решает EncodingDetector по первой не-ASCII строке (запасная — Windows-1251),
+// у файла из одних ASCII — UTF-8.
+static int runBenchStages(const QString& path, const QString& encodingName = QString())
 {
     // Стадии 0–3 накопительные: I/O → декод → timestamp → level. Стадия 4 —
     // декод + level без timestamp: цена классификации уровня отдельно, без
     // шума самой дорогой стадии. Стадия 5 — декод + detectTimestampMs с
     // опорной датой файла и флагом ведущей метки: горячий путь индексатора, без QDateTime (у
     // стадии 2 её цену определяет построение QDateTime на строку).
+    // Стадия 6 — декодирование выбранной кодировкой (TextDecoder, F-1): то же,
+    // что стадия 1, но декодером файла; для однобайтной — fromLatin1 и
+    // таблица. Разница 6 − 1 — цена (или выигрыш) своего декодера против
+    // fromUtf8 на том же файле.
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(path);
-    for (int stage = 0; stage <= 5; ++stage) {
+    TextEncoding encoding = TextEncoding::Utf8;
+    if (!encodingName.isEmpty()) {
+        const auto named = TextEncodings::fromName(encodingName);
+        if (!named) {
+            std::fprintf(stderr, "unknown encoding %s\n", qPrintable(encodingName));
+            return 2;
+        }
+        encoding = *named;
+    } else {
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            const QByteArray all = f.readAll();
+            const qsizetype high = EncodingDetector::firstHighByte(all);
+            if (high >= 0) {
+                const qsizetype lineStart = all.lastIndexOf('\n', high) + 1;
+                encoding = EncodingDetector::decide(
+                    QByteArrayView(all).mid(lineStart, EncodingDetector::kWindowBytes),
+                    TextEncoding::Windows1251).value_or(TextEncoding::Utf8);
+            }
+        }
+    }
+    const TextDecoder decoder(encoding);
+    std::fprintf(stderr, "stage 6 decoder: %s%s\n", qPrintable(TextEncodings::displayName(encoding)),
+                 encodingName.isEmpty() ? " (detected)" : "");
+    for (int stage = 0; stage <= 6; ++stage) {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) {
             std::fprintf(stderr, "cannot open %s\n", qPrintable(path));
@@ -1559,7 +1591,10 @@ static int runBenchStages(const QString& path)
                 if (len > 0 && data[len - 1] == '\r')
                     --len;
                 ++lines;
-                if (stage >= 1) {
+                if (stage == 6) {
+                    text = decoder.decode(data, len);
+                    sink += text.size();
+                } else if (stage >= 1) {
                     text = QString::fromUtf8(data, int(len));
                     sink += text.size();
                     if (stage == 5) {
@@ -1711,7 +1746,8 @@ int main(int argc, char** argv)
         return runBench(QString::fromLocal8Bit(argv[2]),
                         argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && qstrcmp(argv[1], "--bench-stages") == 0)
-        return runBenchStages(QString::fromLocal8Bit(argv[2]));
+        return runBenchStages(QString::fromLocal8Bit(argv[2]),
+                              argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
 
     QTemporaryDir tmp;
     if (!tmp.isValid()) {

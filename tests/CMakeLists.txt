@@ -75,6 +75,7 @@ add_subdirectory(theme_mode)
 add_subdirectory(builtin_schemas)
 add_subdirectory(open_routing)
 add_subdirectory(schema_store)
+add_subdirectory(textencoding)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
 # пропускать правильные передачи через Qt как гонки, ни прятать настоящие.

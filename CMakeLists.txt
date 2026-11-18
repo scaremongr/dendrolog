@@ -111,6 +111,8 @@ set(DENDROLOG_CORE_SOURCES
     src/builtinschemas.cpp
     src/openrouting.h
     src/openrouting.cpp
+    src/textencoding.h
+    src/textencoding.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES
