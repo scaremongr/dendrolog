@@ -60,6 +60,26 @@ public:
     void cancelQuickSearch();
     bool isQuickSearchRunning() const;
 
+    // Переход к следующей / предыдущей видимой записи с уровнем из levels
+    // (F8 / Shift+F8; к первой показанной строке записи) от строки, выбранной
+    // пользователем; через край — заворачивает. Переход — выбор пользователя
+    // (LogListView::goToRow).
+    // Небольшая вкладка ищется сразу (LogModel::findRowWithLevel), большая —
+    // в фоне по снапшоту (QuickSearch::startLevel): проход по сотням
+    // миллионов строк на GUI-потоке был бы фризом. Итог в обоих случаях —
+    // levelJumpFinished; новый переход отменяет прежний.
+    enum class LevelJumpOutcome {
+        Moved,        // перешли к следующей по направлению
+        Wrapped,      // дальше таких нет — перешли через край вкладки
+        OnlyCurrent,  // единственная такая строка — та, на которой стоим
+        NotFound,     // среди видимых строк таких нет
+        Interrupted,  // модель перестроилась посреди фонового поиска
+    };
+    void goToLevel(LogLevelMask levels, bool forward);
+    void cancelLevelJump();
+    // Вкладка не больше стольких видимых строк ищется синхронно.
+    void setLevelJumpSyncRows(int rows) { m_levelJumpSyncRows = rows; }
+
 signals: // Сигналы, которые LogViewWidget будет пробрасывать для MainWindow
     void fileParsingStarted(const LogFilePtr& logFile);
     void fileParsingProgress(const LogFilePtr& logFile, int progressPercentage);
@@ -81,6 +101,9 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // не присылает).
     void quickSearchProgress(const QString& term, int percent);
     void quickSearchFinished(const QString& term, bool found);
+    // Переход по уровню: прогресс долгого скана и итог.
+    void levelJumpProgress(LogLevelMask levels, bool forward, int percent);
+    void levelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
 
 private slots:
     void handleEntriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& parsedLogFile);
@@ -141,6 +164,12 @@ private:
     QString m_quickSearchTerm;
     bool m_quickSearchCaseSensitive = false;
     bool m_quickSearchForward = true;
+
+    void finishLevelJump(int row, int startRow);
+    QuickSearch* m_levelJump = nullptr;
+    LogLevelMask m_levelJumpLevels = 0;
+    bool m_levelJumpForward = true;
+    int m_levelJumpSyncRows = 1000000;
 
     LogParser* m_logParser;
 

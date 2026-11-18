@@ -31,6 +31,13 @@ public:
         return LogScanSnapshot::metaFor(*m_entries.at(row));
     }
 
+    LogLevel levelAt(qint64 row) const override
+    {
+        if (row < 0 || row >= m_entries.size() || !m_entries.at(row))
+            return LogLevel::Unknown;
+        return m_entries.at(row)->level();
+    }
+
     void forEachMeta(qint64 fromRow,
                      const std::function<bool(qint64, const LogEntryMeta&)>& visit)
         const override
@@ -100,4 +107,44 @@ private:
 LogScanSnapshot LogScanSnapshot::fromEntries(QVector<std::shared_ptr<LogEntry>> entries)
 {
     return LogScanSnapshot(std::make_shared<EntriesSnapshotImpl>(std::move(entries)));
+}
+
+qint64 LogScanSnapshot::findRowWithLevel(LogLevelMask levels, qint64 startRow, bool forward,
+                                         bool wrapAround, const std::atomic_bool* cancel,
+                                         std::atomic<int>* progress) const
+{
+    if (!m_impl)
+        return -1;
+    const Impl& impl = *m_impl;
+    const qint64 n = impl.rowCount();
+    qint64 scanned = 0;
+    bool cancelled = false;
+    const qint64 found = scanRowsFrom(n, startRow, forward, wrapAround, [&](qint64 row) {
+        // Строка стоит наносекунды — флаг отмены и прогресс раз в 64k строк.
+        if ((++scanned & 0xFFFF) == 0) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) {
+                cancelled = true;
+                return RowScanStep::Stop;
+            }
+            if (progress)
+                progress->store(int(qMin<qint64>(99, scanned * 100 / n)),
+                                std::memory_order_relaxed);
+        }
+        if (!(levelBit(impl.levelAt(row)) & levels))
+            return RowScanStep::Continue;
+        // Уровень подошёл (редкий случай) — продолжение ли это записи, чья
+        // строка показана прямо перед этой? Строки записи идут подряд в
+        // любом порядке вкладки.
+        if (row > 0) {
+            const LogEntryMeta current = impl.metaAt(row);
+            const LogEntryMeta previous = impl.metaAt(row - 1);
+            if (previous.logicalEntryId == current.logicalEntryId
+                && previous.sourceFile == current.sourceFile)
+                return RowScanStep::Continue;
+        }
+        return RowScanStep::Found;
+    });
+    if (progress)
+        progress->store(100, std::memory_order_relaxed);
+    return cancelled ? -1 : found;
 }

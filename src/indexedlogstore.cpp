@@ -940,6 +940,15 @@ public:
         return m;
     }
 
+    LogLevel levelAt(qint64 row) const override
+    {
+        if (row < 0 || row >= rowCount())
+            return LogLevel::Unknown;
+        int fileId; qint64 line;
+        resolve(row, fileId, line);
+        return files[fileId].index.level(line);
+    }
+
     void forEachMeta(qint64 fromRow,
                      const std::function<bool(qint64, const LogEntryMeta&)>& visit)
         const override

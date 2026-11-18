@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringView>
 #include <QVector>
+#include <atomic>
 #include <functional>
 #include <memory>
 
@@ -28,6 +29,54 @@ struct LogEntryMeta {
     bool     isPlainText = false;
 };
 
+// Обход строк «ближайшая подходящая от startRow» (переход по уровню; поиск
+// текста держит ту же семантику своими циклами):
+//   • вперёд — со startRow + 1 до конца; назад — со startRow - 1 до начала
+//     (startRow вне [0, n) — с последней строки);
+//   • wrapAround — затем с другого края до startRow ВКЛЮЧИТЕЛЬНО: строка, с
+//     которой начали, находится последней.
+// visit(row) решает, что делать дальше; итог — найденная строка или -1.
+enum class RowScanStep { Continue, Found, Stop };
+
+template <typename Visit>
+qint64 scanRowsFrom(qint64 n, qint64 startRow, bool forward, bool wrapAround, Visit&& visit)
+{
+    if (n <= 0)
+        return -1;
+    qint64 found = -1;
+    // false — обход закончен (нашли или остановлены).
+    const auto up = [&](qint64 from, qint64 end) {
+        for (qint64 i = from; i < end; ++i) {
+            const RowScanStep step = visit(i);
+            if (step == RowScanStep::Found)
+                found = i;
+            if (step != RowScanStep::Continue)
+                return false;
+        }
+        return true;
+    };
+    const auto down = [&](qint64 from, qint64 last) {
+        for (qint64 i = from; i >= last; --i) {
+            const RowScanStep step = visit(i);
+            if (step == RowScanStep::Found)
+                found = i;
+            if (step != RowScanStep::Continue)
+                return false;
+        }
+        return true;
+    };
+    if (forward) {
+        const qint64 first = qBound<qint64>(0, startRow + 1, n);
+        if (up(first, n) && wrapAround)
+            up(0, first);
+    } else {
+        const bool inside = startRow >= 0 && startRow < n;
+        if (down(inside ? startRow - 1 : n - 1, 0) && wrapAround && inside)
+            down(n - 1, startRow);
+    }
+    return found;
+}
+
 class LogScanSnapshot {
 public:
     // Реализация снапшота конкретного хранилища. forEachLine может читать
@@ -37,6 +86,9 @@ public:
         virtual ~Impl() = default;
         virtual qint64 rowCount() const = 0;
         virtual LogEntryMeta metaAt(qint64 row) const = 0;
+        // Только уровень строки: дешевле metaAt (переход по уровню идёт по
+        // сотням миллионов строк). Текст не читается.
+        virtual LogLevel levelAt(qint64 row) const { return metaAt(row).level; }
         virtual void forEachMeta(
             qint64 fromRow,
             const std::function<bool(qint64, const LogEntryMeta&)>& visit) const = 0;
@@ -73,6 +125,21 @@ public:
     {
         return m_impl ? m_impl->metaAt(row) : LogEntryMeta{};
     }
+
+    LogLevel levelAt(qint64 row) const
+    {
+        return m_impl ? m_impl->levelAt(row) : LogLevel::Unknown;
+    }
+
+    // Ближайшая от startRow строка, с которой начинается запись уровня из
+    // levels; -1 — нет или отменено. Строки-продолжения многострочной записи
+    // наследуют её уровень, поэтому целью служит только ПЕРВАЯ показанная
+    // строка записи: иначе «следующая ошибка» шагала бы по каждой строке
+    // стек-трейса. Порядок обхода — scanRowsFrom. Читает только метаданные;
+    // годится и для GUI-потока (небольшой документ), и для воркера.
+    qint64 findRowWithLevel(LogLevelMask levels, qint64 startRow, bool forward,
+                            bool wrapAround, const std::atomic_bool* cancel = nullptr,
+                            std::atomic<int>* progress = nullptr) const;
 
     // Последовательный обход от fromRow до конца; visit вернул false — стоп.
     void forEachMeta(qint64 fromRow,

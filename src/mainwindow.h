@@ -12,6 +12,7 @@
 #include "logfile.h"
 #include "viewexport.h"
 #include "LogListView.h"
+#include "logviewwidget.h"
 #include "filterruleset.h"
 
 // Forward declarations for Qt classes used in members or method signatures
@@ -131,6 +132,8 @@ private slots:
     void onSearchEnterPressed();
     void onQuickSearchProgress(const QString& term, int percent);
     void onQuickSearchFinished(const QString& term, bool found);
+    void onLevelJumpProgress(LogLevelMask levels, bool forward, int percent);
+    void onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
     // Пункт контекстного меню лога над выделенным текстом: найти его,
     // добавить правило фильтра или маркер и применить к активной вкладке.
     void onViewTextAction(LogListView::TextAction action, const QString& text);
@@ -247,6 +250,11 @@ private:
     // «Find All» в тулбаре поиска.
     QAction*     m_findAllAction = nullptr;
     QAction*     m_goToAction = nullptr;
+    // Next / Previous Error и Warning (F8, F7).
+    QVector<QAction*> m_levelJumpActions;
+    // Строка статуса занята сообщением перехода по уровню.
+    bool         m_levelJumpStatusShown = false;
+    QString      m_levelJumpStatusText;
     // Подавляет авто-прыжок в основном view, когда выбор в панели результатов
     // меняется программно (reset модели при пересборке результатов).
     bool         m_suppressResultNavigation = false;

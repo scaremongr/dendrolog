@@ -390,6 +390,29 @@ MainWindow::MainWindow(QWidget *parent)
     ui->menuView->insertSeparator(ui->actionWordWrap);
     m_shortcutActions.insert(QStringLiteral("goTo"), m_goToAction);
 
+    // Следующая / предыдущая ошибка (F8 / Shift+F8) и предупреждение
+    // (F7 / Shift+F7) среди показанных строк активной вкладки.
+    {
+        const LogLevelMask errors = levelBit(LogLevel::Error) | levelBit(LogLevel::Fatal);
+        const LogLevelMask warnings = levelBit(LogLevel::Warn);
+        const auto addLevelJump = [this](const QString& text, const QString& shortcutId,
+                                         LogLevelMask levels, bool forward) {
+            QAction* action = new QAction(text, this);
+            connect(action, &QAction::triggered, this, [this, levels, forward]() {
+                if (m_activeLogView)
+                    m_activeLogView->goToLevel(levels, forward);
+            });
+            ui->menuView->insertAction(ui->actionWordWrap, action);
+            m_shortcutActions.insert(shortcutId, action);
+            m_levelJumpActions.append(action);
+        };
+        addLevelJump(tr("Next Error"), QStringLiteral("nextError"), errors, true);
+        addLevelJump(tr("Previous Error"), QStringLiteral("prevError"), errors, false);
+        addLevelJump(tr("Next Warning"), QStringLiteral("nextWarning"), warnings, true);
+        addLevelJump(tr("Previous Warning"), QStringLiteral("prevWarning"), warnings, false);
+        ui->menuView->insertSeparator(ui->actionWordWrap);
+    }
+
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {
@@ -562,6 +585,8 @@ void MainWindow::updateWelcomeVisibility()
                         ui->actionShowAllLevels, ui->actionResetAllFilters,
                         ui->actionFatal, ui->actionError, ui->actionWarn,
                         ui->actionInfo, ui->actionDebug, ui->actionTrace })
+        a->setEnabled(!empty);
+    for (QAction* a : std::as_const(m_levelJumpActions))
         a->setEnabled(!empty);
 }
 
@@ -2136,6 +2161,8 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
     connect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
     connect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
+    connect(logView, &LogViewWidget::levelJumpProgress, this, &MainWindow::onLevelJumpProgress);
+    connect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
 
     if (logView->view()) {
         connect(logView->view(), &LogListView::timeFilterBoundRequested,
@@ -2214,9 +2241,15 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     disconnect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
     disconnect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
     disconnect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
+    disconnect(logView, &LogViewWidget::levelJumpProgress, this, &MainWindow::onLevelJumpProgress);
+    disconnect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
     // Поиск ушедшей вкладки больше некому показывать.
     logView->cancelQuickSearch();
-    if (m_quickSearchStatusShown) {
+    logView->cancelLevelJump();
+    const bool ownLevelJumpStatus = m_levelJumpStatusShown
+        && m_statusLabel->text() == m_levelJumpStatusText;
+    m_levelJumpStatusShown = false;
+    if (m_quickSearchStatusShown || ownLevelJumpStatus) {
         m_quickSearchStatusShown = false;
         m_statusLabel->setText(tr("Ready"));
     }
@@ -3709,6 +3742,53 @@ void MainWindow::onQuickSearchFinished(const QString& term, bool found)
     // «Не найдено» видно и в самом поле, а не только в строке статуса.
     if (m_searchLineEdit && m_searchLineEdit->text() == term)
         setQuickSearchNotFound(!found);
+}
+
+void MainWindow::onLevelJumpProgress(LogLevelMask levels, bool forward, int percent)
+{
+    // Приходит, только если скан длится дольше ~200 мс (огромная вкладка).
+    const bool warnings = levels == levelBit(LogLevel::Warn);
+    m_levelJumpStatusShown = true;
+    m_statusLabel->setText(
+        (forward ? (warnings ? tr("Looking for the next warning... %1%")
+                             : tr("Looking for the next error... %1%"))
+                 : (warnings ? tr("Looking for the previous warning... %1%")
+                             : tr("Looking for the previous error... %1%")))
+            .arg(percent));
+    m_levelJumpStatusText = m_statusLabel->text();
+}
+
+void MainWindow::onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome)
+{
+    const bool warnings = levels == levelBit(LogLevel::Warn);
+    QString text;
+    switch (outcome) {
+    case LogViewWidget::LevelJumpOutcome::Moved:
+        break;
+    case LogViewWidget::LevelJumpOutcome::Wrapped:
+        text = warnings ? tr("No more warnings this way - continued from the other end")
+                        : tr("No more errors this way - continued from the other end");
+        break;
+    case LogViewWidget::LevelJumpOutcome::OnlyCurrent:
+        text = warnings ? tr("This is the only warning among the shown lines")
+                        : tr("This is the only error among the shown lines");
+        break;
+    case LogViewWidget::LevelJumpOutcome::NotFound:
+        text = warnings ? tr("No warnings among the shown lines")
+                        : tr("No errors among the shown lines");
+        break;
+    case LogViewWidget::LevelJumpOutcome::Interrupted:
+        text = tr("The shown lines changed during the search - press the key again");
+        break;
+    }
+    // Удачный переход пояснений не требует, но своё прошлое пояснение убираем
+    // (только своё: строку статуса с тех пор мог занять кто-то другой).
+    if (!text.isEmpty())
+        m_statusLabel->setText(text);
+    else if (m_levelJumpStatusShown && m_statusLabel->text() == m_levelJumpStatusText)
+        m_statusLabel->setText(tr("Ready"));
+    m_levelJumpStatusShown = !text.isEmpty();
+    m_levelJumpStatusText = text;
 }
 
 void MainWindow::setQuickSearchNotFound(bool notFound)

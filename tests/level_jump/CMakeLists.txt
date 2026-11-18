@@ -1,0 +1,1 @@
+dendrolog_add_test(level_jump LIBRARIES dendrolog_widgets)

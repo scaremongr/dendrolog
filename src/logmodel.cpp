@@ -355,6 +355,12 @@ int LogModel::nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceF
     return m_store->nearestVisibleRowForLine(lineNumber, sourceFile);
 }
 
+int LogModel::findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
+                               bool wrapAround) const
+{
+    return m_store->findRowWithLevel(levels, startRow, forward, wrapAround);
+}
+
 QModelIndex LogModel::findNextOccurrence(const QString& text, int startRow,
                                          Qt::CaseSensitivity cs, bool wrapAround) const
 {

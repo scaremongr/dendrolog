@@ -8,6 +8,7 @@
 #include <QString>
 #include <QVector>
 #include <atomic>
+#include <functional>
 #include <memory>
 
 class LogModel;
@@ -15,7 +16,9 @@ class QTimer;
 
 // ============================================================================
 // QuickSearch — быстрый поиск (F3 / Shift+F3) ближайшего вхождения текста в
-// видимых строках модели, в фоне и с отменой.
+// видимых строках модели, в фоне и с отменой. Тем же механизмом ищется
+// ближайшая строка с заданным уровнем (F8 / Shift+F8, startLevel): по
+// метаданным снапшота, без чтения текста.
 //
 // Синхронный LogModel::findNext/PreviousOccurrence на индексном бэкенде —
 // это скан диска на GUI-потоке: на гигантском файле без совпадений окно
@@ -45,9 +48,18 @@ public:
     // семантика startRow/wrapAround — как у LogModel::findNext/Previous.
     void start(LogModel* model, const QString& text, Qt::CaseSensitivity cs,
                bool forward, int startRow, bool wrapAround = true);
+    // То же по уровню: ближайшая строка, с которой начинается запись уровня из
+    // levels (LogScanSnapshot::findRowWithLevel).
+    void startLevel(LogModel* model, LogLevelMask levels, bool forward, int startRow,
+                    bool wrapAround = true);
     // Отменить поиск: сигналов по нему больше не будет.
     void cancel();
     bool isRunning() const { return m_running; }
+    // Строка, от которой шёл последний завершённый поиск, в номерах ТЕКУЩЕЙ
+    // модели (пересчитана через те же вставки, что и найденная): по ней
+    // владелец отличает «дальше» от «завернули через край». Действительна в
+    // обработчике finished().
+    int startRowNow() const { return m_startRowNow; }
 
     // Сам скан — синхронно по снапшоту (воркер; тесты сверяют с моделью).
     // -1 — не найдено или отменено.
@@ -66,6 +78,9 @@ signals:
     void invalidated();
 
 private:
+    using Scan = std::function<qint64(const LogScanSnapshot&, const std::atomic_bool*,
+                                      std::atomic<int>*)>;
+    void launch(LogModel* model, int startRow, Scan scan);
     void detachModel();
 
     QPointer<LogModel> m_model;
@@ -73,6 +88,8 @@ private:
     QVector<Insertion> m_insertions;
     bool m_valid = true;
     bool m_running = false;
+    int m_startRow = -1;
+    int m_startRowNow = -1;
     int m_generation = 0;
     std::shared_ptr<std::atomic_bool> m_cancel;
     std::shared_ptr<std::atomic<int>> m_progress;

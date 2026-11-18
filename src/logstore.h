@@ -77,6 +77,19 @@ public:
     virtual int findPreviousOccurrence(const QString& text, int startRow,
                                        Qt::CaseSensitivity cs, bool wrapAround) const = 0;
 
+    // Ближайшая видимая строка, с которой начинается запись уровня из levels
+    // (F8 / Shift+F8), -1 — нет. Семантика и цена — LogScanSnapshot::
+    // findRowWithLevel: одна реализация на оба бэкенда поверх их снапшотов,
+    // только метаданные (индексный бэкенд текст с диска не читает). Проход
+    // линейный — на огромной вкладке звать из фона (QuickSearch::startLevel),
+    // а не с GUI-потока.
+    int findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
+                         bool wrapAround) const
+    {
+        return int(scanSnapshot(/*filteredOnly=*/true)
+                       .findRowWithLevel(levels, startRow, forward, wrapAround));
+    }
+
     // ---- Сканы ------------------------------------------------------------------
     virtual LogScanSnapshot scanSnapshot(bool filteredOnly) const = 0;
 

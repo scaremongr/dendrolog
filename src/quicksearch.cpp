@@ -25,10 +25,33 @@ QuickSearch::~QuickSearch()
 void QuickSearch::start(LogModel* model, const QString& text, Qt::CaseSensitivity cs,
                         bool forward, int startRow, bool wrapAround)
 {
+    launch(model, startRow,
+           [text, cs, forward, startRow, wrapAround](const LogScanSnapshot& snapshot,
+                                                     const std::atomic_bool* cancel,
+                                                     std::atomic<int>* progress) {
+               return scan(snapshot, text, cs, forward, startRow, wrapAround, cancel, progress);
+           });
+}
+
+void QuickSearch::startLevel(LogModel* model, LogLevelMask levels, bool forward,
+                             int startRow, bool wrapAround)
+{
+    launch(model, startRow,
+           [levels, forward, startRow, wrapAround](const LogScanSnapshot& snapshot,
+                                                   const std::atomic_bool* cancel,
+                                                   std::atomic<int>* progress) {
+               return snapshot.findRowWithLevel(levels, startRow, forward, wrapAround,
+                                                cancel, progress);
+           });
+}
+
+void QuickSearch::launch(LogModel* model, int startRow, Scan scan)
+{
     cancel();
     if (!model)
         return;
     m_model = model;
+    m_startRow = startRow;
     m_insertions.clear();
     m_valid = true;
     // Всё, что меняет номера строк, пока идёт скан: вставки пересчитываются,
@@ -67,12 +90,12 @@ void QuickSearch::start(LogModel* model, const QString& text, Qt::CaseSensitivit
             emit invalidated();
             return;
         }
+        m_startRowNow = m_startRow < 0 ? m_startRow : int(mapRow(m_startRow, insertions));
         emit finished(row < 0 ? -1 : int(mapRow(row, insertions)));
     });
     watcher->setFuture(QtConcurrent::run(
-        [snapshot, text, cs, forward, startRow, wrapAround, cancelFlag, progressValue]() {
-            return scan(snapshot, text, cs, forward, startRow, wrapAround,
-                        cancelFlag.get(), progressValue.get());
+        [snapshot, scan = std::move(scan), cancelFlag, progressValue]() {
+            return scan(snapshot, cancelFlag.get(), progressValue.get());
         }));
 }
 
