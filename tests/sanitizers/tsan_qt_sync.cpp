@@ -60,6 +60,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 namespace {
@@ -271,6 +272,34 @@ bool __wrap__ZNK20QFutureInterfaceBase6derefTEv(const QFutureInterfaceBase* f)
     const bool stillReferenced = __real__ZNK20QFutureInterfaceBase6derefTEv(f);
     __tsan_acquire(shared);
     return stillReferenced;
+}
+
+// QFutureInterfaceBase::~QFutureInterfaceBase — второй счётчик ссылок, на сам
+// разделяемый d (атомик внутри Qt): последний владелец удаляет d вместе с
+// хранилищем результатов. ~QFutureInterface<T> сначала читает хранилище
+// (clear<T>, если derefT сказал «последний по результатам»), потом зовёт этот
+// деструктор; поток пула, разрушая задачу, может оказаться последним по d и
+// удалить его. Удаление — ВНУТРИ настоящей функции, поэтому пара
+// release/acquire вокруг вызова ребра «чужой деструктор → моё удаление» не
+// даёт. Вместо неё — настоящий мьютекс вокруг всего деструктора: TSan видит
+// его (pthread) и упорядочивает деструкторы копий целиком. Рекурсивный —
+// удаление d может разрушить вложенный QFutureInterface (продолжения).
+// Только в сборке с TSan; деструкторы QFuture друг друга не ждут, так что
+// взаимоблокировки нет.
+static std::recursive_mutex g_futureDestructor;
+
+void __real__ZN20QFutureInterfaceBaseD1Ev(QFutureInterfaceBase*);
+void __wrap__ZN20QFutureInterfaceBaseD1Ev(QFutureInterfaceBase* f)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_futureDestructor);
+    __real__ZN20QFutureInterfaceBaseD1Ev(f);
+}
+
+void __real__ZN20QFutureInterfaceBaseD2Ev(QFutureInterfaceBase*);
+void __wrap__ZN20QFutureInterfaceBaseD2Ev(QFutureInterfaceBase* f)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_futureDestructor);
+    __real__ZN20QFutureInterfaceBaseD2Ev(f);
 }
 
 void __real__ZN20QFutureInterfaceBase15waitForFinishedEv(QFutureInterfaceBase*);
