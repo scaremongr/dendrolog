@@ -14,6 +14,7 @@
 #include <memory>
 
 class BookmarkStore;
+class NavHistory;
 class LogStore;
 class ResidentLogStore;
 class IndexedLogStore;
@@ -159,6 +160,13 @@ public:
     // Отметка закладки на видимой строке изменилась (зовёт BookmarkStore):
     // dataChanged только с BookmarkRole — view перерисовывает без сброса кэшей.
     void notifyBookmarkRow(int row);
+    // История переходов вкладки (R-7, Alt+← / Alt+→). Пишет её
+    // LogListView::goToRow; живёт вместе с моделью, на диск не пишется.
+    // Создаётся при первом обращении.
+    NavHistory& navHistory() const;
+    // Строки файла сброшены вкладкой мимо модели (индексный сброс файла,
+    // полная перезагрузка): закладки и история сверят строки заново.
+    void invalidateFileRows(const QString& filePath);
 
     // ---- Dynamic field-visibility control -----------------------------------
     void setAvailableFields(const QStringList& fieldNames);
@@ -277,6 +285,7 @@ private:
     bool m_fieldFilterEnabled = false;
 
     BookmarkStore* m_bookmarks = nullptr; // child QObject
+    mutable NavHistory* m_navHistory = nullptr; // child QObject, лениво
 };
 
 #endif // LOGMODEL_H

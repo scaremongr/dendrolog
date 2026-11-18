@@ -1,0 +1,1 @@
+dendrolog_add_test(nav_history LIBRARIES dendrolog_widgets)

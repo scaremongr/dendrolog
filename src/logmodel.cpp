@@ -1,5 +1,6 @@
 #include "logmodel.h"
 #include "bookmarkstore.h"
+#include "navhistory.h"
 #include "indexedlogstore.h"
 #include "residentlogstore.h"
 
@@ -62,6 +63,8 @@ ResidentLogStore* LogModel::residentOrNull() const
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
     m_bookmarks->invalidateAll();
+    if (m_navHistory)
+        m_navHistory->invalidateAll();
     if (auto* r = residentOrNull())
         r->setEntries(entries);
 }
@@ -78,9 +81,24 @@ void LogModel::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatc
         r->mergeEntries(sortedBatch);
 }
 
-void LogModel::removeEntriesForFile(const QString& filePath)
+NavHistory& LogModel::navHistory() const
+{
+    // Лениво: у модели выдачи Search переходов нет, история ей не нужна.
+    if (!m_navHistory)
+        m_navHistory = new NavHistory(*const_cast<LogModel*>(this));
+    return *m_navHistory;
+}
+
+void LogModel::invalidateFileRows(const QString& filePath)
 {
     m_bookmarks->invalidateFile(filePath);
+    if (m_navHistory)
+        m_navHistory->invalidateFile(filePath);
+}
+
+void LogModel::removeEntriesForFile(const QString& filePath)
+{
+    invalidateFileRows(filePath);
     if (auto* r = residentOrNull())
         r->removeEntriesForFile(filePath);
 }
@@ -273,6 +291,8 @@ void LogModel::clear()
 {
     cancelPendingFilter(!isIndexedBackend());
     m_bookmarks->invalidateAll();
+    if (m_navHistory)
+        m_navHistory->invalidateAll();
     beginResetModel();
     m_store = std::make_unique<ResidentLogStore>(*this);
     m_filterRules = {};
@@ -344,6 +364,8 @@ IndexedLogStore* LogModel::convertToIndexedBackend()
     m_store->cancelPendingFilter(false);
     // Строки перечитает индексатор: закладки сверятся, когда покажутся снова.
     m_bookmarks->invalidateAll();
+    if (m_navHistory)
+        m_navHistory->invalidateAll();
     beginResetModel();
     auto indexed = std::make_unique<IndexedLogStore>(*this);
     IndexedLogStore* raw = indexed.get();
@@ -359,6 +381,8 @@ void LogModel::convertToResidentBackend()
         return;
     m_store->cancelPendingFilter(false);
     m_bookmarks->invalidateAll();
+    if (m_navHistory)
+        m_navHistory->invalidateAll();
     beginResetModel();
     m_store = std::make_unique<ResidentLogStore>(*this);
     endResetModel();

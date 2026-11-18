@@ -203,7 +203,7 @@ void SettingsDialog::buildShortcutsTab()
         connect(edit, &QKeySequenceEdit::keySequenceChanged,
                 this, [this]() { updateShortcutConflicts(); });
 
-        m_shortcutRows.append({ cmd.id, edit });
+        m_shortcutRows.append({ cmd.id, edit, edit->keySequence() });
         m_shortcutLabels.insert(cmd.id, cmd.label);
         form->addRow(new QLabel(cmd.label, content), edit);
     }
@@ -405,9 +405,11 @@ void SettingsDialog::applyToSettings()
 
     // ---- Shortcuts tab ---------------------------------------------------- //
     ShortcutManager& sm = ShortcutManager::instance();
-    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
-        if (row.edit)
+    for (ShortcutRow& row : m_shortcutRows) {
+        if (row.edit && row.edit->keySequence() != row.initial) {
             sm.setSequence(row.id, row.edit->keySequence());
+            row.initial = row.edit->keySequence();
+        }
     }
     sm.save();
 

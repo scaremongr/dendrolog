@@ -2,6 +2,7 @@
 #ifndef LOGVIEWWIDGET_H
 #define LOGVIEWWIDGET_H
 
+#include "navhistory.h"
 #include "textquery.h"
 #include <QWidget>
 #include <QVBoxLayout>
@@ -93,7 +94,9 @@ public:
     // Переход к записи (из Search Results, из статистики) как выбор
     // пользователя (LogListView::goToRow). Запись скрыта фильтром — к ближайшей
     // видимой строке (LogModel::nearestVisibleRow); false — перейти некуда.
-    bool goToEntry(int logicalEntryId, const LogFile* sourceFile);
+    // kind — вид перехода для истории (NavHistory).
+    bool goToEntry(int logicalEntryId, const LogFile* sourceFile,
+                   NavKind kind = NavKind::Other);
 
     // Переход к следующей / предыдущей видимой записи с уровнем из levels
     // (F8 / Shift+F8; к первой показанной строке записи) от строки, выбранной
@@ -131,6 +134,14 @@ public:
     // Вкладка не больше стольких видимых строк ищется синхронно.
     void setLevelJumpSyncRows(int rows) { m_levelJumpSyncRows = rows; }
 
+    // ---- История переходов (R-7) ------------------------------------------------
+    // Хранилище — у модели (NavHistory); пишет LogListView::goToRow.
+    NavHistory& navHistory() const { return m_model->navHistory(); }
+    // Alt+← / Alt+→ (и боковые кнопки мыши): к предыдущему / следующему месту
+    // истории через goToRow (выбор пользователя, follow-tail снимается), без
+    // новых записей. false — идти некуда (все места пропали или истории нет).
+    bool navigateHistory(bool forward);
+
 signals: // Сигналы, которые LogViewWidget будет пробрасывать для MainWindow
     void fileParsingStarted(const LogFilePtr& logFile);
     void fileParsingProgress(const LogFilePtr& logFile, int progressPercentage);
@@ -157,6 +168,8 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void levelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
     // Итог F2 / Shift+F2 (Interrupted не бывает: поиск синхронный).
     void bookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome);
+    // История переходов изменилась: состояние пунктов Back / Forward.
+    void navHistoryChanged();
     // Пункт контекстного меню «заметка к закладке»: закладка уже стоит,
     // заметку спрашивает окно. created — закладку поставил сам этот пункт:
     // отказ от заметки её снимает.

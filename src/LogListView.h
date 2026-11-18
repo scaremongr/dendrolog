@@ -14,6 +14,7 @@
 #include "textquery.h"
 #include "tabexpander.h"
 #include "linewrapper.h"
+#include "navhistory.h"
 
 struct LogFile;
 
@@ -188,7 +189,11 @@ public:
     // позиции (инвариант 10) — и ставится в середину вьюпорта; follow-tail
     // снимается, иначе дозапись увела бы вид обратно к хвосту. Номер вне
     // диапазона игнорируется.
-    void goToRow(int row);
+    // Здесь же — единственная точка записи истории переходов (R-7,
+    // NavHistory модели): место, откуда ушли (выбранная строка, без неё —
+    // первая на экране), и цель. kind — вид перехода для склейки серий;
+    // NavKind::History (возврат по истории) не пишется.
+    void goToRow(int row, NavKind kind = NavKind::Other);
     void clearSearchMatch();
 
     // Пункты закладок в контекстном меню строки. Включает вкладка
@@ -290,6 +295,9 @@ public:
 
 signals:
     void badgeClicked(int row, BadgeType type, const QString& text);
+    // Боковые кнопки мыши «назад» / «вперёд» над видом (R-7): вкладка ведёт
+    // по истории переходов.
+    void historyNavigationRequested(bool forward);
 
     // Режим follow-tail включён/выключен (в т.ч. автоматически при уходе
     // пользователя от низа) — для синхронизации тогла в тулбаре.

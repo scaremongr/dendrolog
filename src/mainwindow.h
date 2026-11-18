@@ -265,6 +265,8 @@ private:
     // «Find All» в тулбаре поиска.
     QAction*     m_findAllAction = nullptr;
     QAction*     m_goToAction = nullptr;
+    QAction*     m_navBackAction = nullptr;     // Alt+←, история переходов (R-7)
+    QAction*     m_navForwardAction = nullptr;  // Alt+→
     // Next / Previous Error и Warning (F8, F7).
     QVector<QAction*> m_levelJumpActions;
     // Строка статуса занята сообщением перехода по уровню.
@@ -337,6 +339,8 @@ private:
     void refreshToolIcons();
     // Стартовый экран виден, пока нет ни одной вкладки.
     void updateWelcomeVisibility();
+    // Пункты Navigate Back / Forward — по истории активной вкладки.
+    void updateNavHistoryActions();
     void clearRecentFiles();
     // Размер шрифта лога: steps > 0 крупнее, < 0 мельче, 0 — по умолчанию.
     void changeFontSize(int steps);

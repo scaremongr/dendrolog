@@ -95,6 +95,11 @@ LogViewWidget::LogViewWidget(QWidget *parent)
             emit bookmarkNoteEditRequested(id, bookmarks().count() > before);
     });
 
+    // История переходов: боковые кнопки мыши и состояние пунктов меню.
+    connect(m_view, &LogListView::historyNavigationRequested, this,
+            [this](bool forward) { navigateHistory(forward); });
+    connect(&m_model->navHistory(), &NavHistory::changed, this, &LogViewWidget::navHistoryChanged);
+
     // Пробрасываем сигнал фильтрации модели
     connect(m_model, &LogModel::modelFiltered, this, &LogViewWidget::handleModelFilteredRelay);
 
@@ -414,7 +419,7 @@ void LogViewWidget::dropRowsForFile(const LogFilePtr& logFile)
 {
     if (!logFile)
         return;
-    bookmarks().invalidateFile(logFile->filePath);
+    m_model->invalidateFileRows(logFile->filePath);
     if (auto* store = m_model->indexedOrNull())
         store->resetFileIndex(logFile, std::make_shared<LineIndex>());
     else
@@ -431,8 +436,9 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     // Ключ уже есть в хэше у всех вызывающих — вставки (и рехэша, который
     // инвалидировал бы их ссылку на состояние) здесь не происходит.
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
-    // Строки файла сбрасываются: закладки сверятся, когда строки покажутся.
-    bookmarks().invalidateFile(logFile->filePath);
+    // Строки файла сбрасываются: закладки и история переходов сверят их,
+    // когда строки покажутся.
+    m_model->invalidateFileRows(logFile->filePath);
 
     if (auto* store = m_model->indexedOrNull()) {
         // Строки файла сбрасываются, индексация идёт в свежий LineIndex
@@ -960,14 +966,29 @@ void LogViewWidget::startQuickSearch()
     m_quickSearch->start(m_model, m_quickSearchQuery, m_quickSearchForward, currentRow);
 }
 
-bool LogViewWidget::goToEntry(int logicalEntryId, const LogFile* sourceFile)
+bool LogViewWidget::goToEntry(int logicalEntryId, const LogFile* sourceFile, NavKind kind)
 {
     if (!m_model || !m_view)
         return false;
     const int row = m_model->nearestVisibleRow(logicalEntryId, sourceFile);
     if (row < 0)
         return false;
-    m_view->goToRow(row);
+    m_view->goToRow(row, kind);
+    return true;
+}
+
+bool LogViewWidget::navigateHistory(bool forward)
+{
+    // Фоновый F3 / F8, закончившись после возврата, увёл бы вид от места,
+    // куда вернулись, и записал бы переход оттуда.
+    cancelQuickSearch();
+    cancelLevelJump();
+    NavHistory& history = navHistory();
+    const int current = m_view->userSelectedRow();
+    const int row = forward ? history.forward(current) : history.back(current);
+    if (row < 0)
+        return false;
+    m_view->goToRow(row, NavKind::History);
     return true;
 }
 
@@ -1015,7 +1036,7 @@ void LogViewWidget::finishLevelJump(int row, int startRow)
             outcome = LevelJumpOutcome::Wrapped;
         else
             outcome = LevelJumpOutcome::Moved;
-        m_view->goToRow(row);
+        m_view->goToRow(row, NavKind::LevelJump);
     }
     emit levelJumpFinished(m_levelJumpLevels, outcome);
 }
@@ -1053,7 +1074,7 @@ void LogViewWidget::goToBookmark(bool forward)
             outcome = LevelJumpOutcome::Wrapped;
         else
             outcome = LevelJumpOutcome::Moved;
-        m_view->goToRow(row);
+        m_view->goToRow(row, NavKind::Bookmark);
     }
     emit bookmarkJumpFinished(forward, outcome);
 }
@@ -1063,7 +1084,7 @@ bool LogViewWidget::goToBookmarkId(int id)
     const int row = bookmarks().targetRow(id);
     if (row < 0)
         return false;
-    m_view->goToRow(row);
+    m_view->goToRow(row, NavKind::Bookmark);
     return true;
 }
 
@@ -1076,7 +1097,7 @@ void LogViewWidget::handleQuickSearchFinished(int row)
         // целиться уже в финальную геометрию. Сам переход — общий (goToRow):
         // строка становится выбором пользователя, follow-tail снимается.
         m_view->showSearchMatch(row, m_quickSearchQuery);
-        m_view->goToRow(row);
+        m_view->goToRow(row, NavKind::QuickSearch);
         emit quickSearchFinished(term, true);
     } else {
         m_view->clearSearchMatch();

@@ -49,6 +49,8 @@
 - **Bookmarks with notes** — `Ctrl+F2` marks a line, `F2` / `Shift+F2` jump
   between bookmarks, the Bookmarks panel lists them with a note each; they stay
   through filters, reloads and the switch to the large-file mode.
+- **Navigation history** — `Alt+←` / `Alt+→` go back to where a jump (search,
+  Statistics, timeline, bookmark, Go to, `F8`) started and forward again.
 - **Marks on the scrollbar** — errors, warnings, bookmarks and Search panel
   matches are visible on the scrollbar at a glance; computed in the background,
   even on a log of tens of millions of lines.
