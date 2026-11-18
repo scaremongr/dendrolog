@@ -267,9 +267,15 @@ static void checkView(const QString& name, testdocs::Document& doc)
     view.resize(900, 400);
     view.setModel(&model);
     view.show();
-    // Отложенный пересчёт view после resize — 150 мс; раньше него проверять
-    // позицию значит ловить промежуточное состояние (как в logview_state).
-    testdocs::pump(300);
+    // Паузы после show нет намеренно (Q-12): переход и фильтр попадают в
+    // окно отложенного пересчёта после resize, и он не должен их отменить.
+    // Позицию проверяем, когда view закончил пересчёты, — ждём состояние.
+    const auto settleView = [&name](LogListView& v) {
+        CHECK(testdocs::waitFor([&v] { return !v.hasPendingLayout(); }, 10000),
+              name + ": view settles");
+        testdocs::pump(0);   // отложенные на один оборот цикла прокрутки
+    };
+    CHECK(view.hasPendingLayout(), name + ": the resize recalculation is still pending");
 
     const LogFile* file = model.entryAt(0)->sourceFile().get();
     // Строка 1001 файла: запись с ERROR или нет — ищем ближайшую ERROR-строку
@@ -288,7 +294,7 @@ static void checkView(const QString& name, testdocs::Document& doc)
     const GoToResult target = GoToLocation::resolve(model, lineTarget(wanted), file);
     CHECK(target.row >= 0 && target.exact, name + ": visible line resolves exactly");
     view.goToRow(target.row);
-    testdocs::pump(50);
+    CHECK(view.hasPendingLayout(), name + ": the jump lands before the resize recalculation");
 
     const auto currentLine = [&]() -> qint64 {
         const QModelIndex cur = view.currentIndex();
@@ -303,16 +309,22 @@ static void checkView(const QString& name, testdocs::Document& doc)
     };
     CHECK(currentLine() == wanted, name + ": jump selects the row");
     CHECK(currentShown(), name + ": jump scrolls the row into view");
+    settleView(view);
+    CHECK(currentShown(), name + ": the row stays in view after the resize recalculation");
 
+    // То же с фильтром: новое окно пересчёта, фильтр применён внутри него.
+    view.resize(900, 420);
+    testdocs::pump(0);
+    CHECK(view.hasPendingLayout(), name + ": the second resize recalculation is pending");
     model.setLogLevelFilter({LogLevel::Error});
     CHECK(testdocs::settle(model), name + ": filter settles");
-    testdocs::pump(300);
+    settleView(view);
     CHECK(currentLine() == wanted, name + ": selection survives the filter");
     CHECK(currentShown(), name + ": row stays in view after the filter");
 
     model.setLogLevelFilter({});
     CHECK(testdocs::settle(model), name + ": reset settles");
-    testdocs::pump(300);
+    settleView(view);
     CHECK(currentLine() == wanted, name + ": selection survives the reset");
     CHECK(currentShown(), name + ": row stays in view after the reset");
 
@@ -336,7 +348,6 @@ static void checkView(const QString& name, testdocs::Document& doc)
     fresh.resize(900, 400);
     fresh.setModel(&model);
     fresh.show();
-    testdocs::pump(300);
     QFocusEvent focus(QEvent::FocusIn, Qt::ActiveWindowFocusReason);
     QApplication::sendEvent(&fresh, &focus);
     const int assigned = fresh.currentIndex().row();
@@ -349,7 +360,7 @@ static void checkView(const QString& name, testdocs::Document& doc)
         fresh.goToRow(assigned);
         model.setLogLevelFilter({model.visibleLevelAt(assigned)});
         CHECK(testdocs::settle(model), name + ": filter settles");
-        testdocs::pump(300);
+        settleView(fresh);
         const QModelIndex cur = fresh.currentIndex();
         const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
         CHECK(now && now->sourceFile().get() == assignedFile

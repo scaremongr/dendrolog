@@ -4,6 +4,7 @@
 #include "cardframe.h"
 #include "apptheme.h"
 
+#include <QEvent>
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QDateTimeEdit>
@@ -330,6 +331,14 @@ void DirectoryScannerPanel::promptRefreshInterval()
     m_scanner->setAutoRefreshIntervalSecs(secs);
     AppSettings::instance().setScanRefreshIntervalSecs(m_scanner->autoRefreshIntervalSecs());
     updateRefreshButton();
+}
+
+// Смена темы: глиф кнопки обновления перекрашен под палитру.
+void DirectoryScannerPanel::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && m_scanner)
+        updateRefreshButton();
 }
 
 void DirectoryScannerPanel::updateRefreshButton()

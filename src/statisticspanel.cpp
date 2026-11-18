@@ -755,7 +755,7 @@ void StatisticsPanel::showEvent(QShowEvent* event)
 }
 
 // Смена темы: цвета HTML посчитаны из палитры браузера — отрисовать готовый
-// результат заново, без пересбора. Отложенно: дочерний браузер получает
+// результат (или заглушку) заново, без пересбора. Отложенно: дочерний браузер получает
 // новую палитру позже панели.
 void StatisticsPanel::changeEvent(QEvent* event)
 {
@@ -764,6 +764,8 @@ void StatisticsPanel::changeEvent(QEvent* event)
         QTimer::singleShot(0, this, [this] {
             if (m_stats.valid)
                 renderStats();
+            else if (!m_placeholderText.isEmpty())
+                renderPlaceholder(m_placeholderText);
         });
     }
 }
@@ -850,6 +852,7 @@ void StatisticsPanel::onCollectionFinished()
 
 void StatisticsPanel::renderPlaceholder(const QString& text)
 {
+    m_placeholderText = text; // смена темы отрисует заглушку заново
     m_statusLabel->setText(QString());
     m_navTargets.clear();
     const QColor muted = mixColors(m_browser->palette().color(QPalette::Text),

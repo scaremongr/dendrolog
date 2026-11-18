@@ -59,6 +59,11 @@ public:
     // Палитра приложения для действующей схемы.
     static QPalette paletteFor(Qt::ColorScheme effective);
 
+    // Довести текущую палитру приложения до виджетов со style sheet: сам Qt
+    // их при смене палитры пропускает (см. реализацию). refresh() зовёт это
+    // после каждой смены палитры.
+    static void repolishStyledWidgets();
+
 public slots:
     // Пересчитать действующую схему и применить, если что-то изменилось.
     void refresh();

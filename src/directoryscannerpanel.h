@@ -55,6 +55,7 @@ protected:
     // Пока док скрыт, авто-обновление только копит «есть изменения»; при
     // появлении панели подтягиваем их сразу, не дожидаясь очередного тика.
     void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     void buildUi();

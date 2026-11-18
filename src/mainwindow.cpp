@@ -3778,13 +3778,14 @@ void MainWindow::setQuickSearchNotFound(bool notFound)
 {
     if (!m_searchLineEdit)
         return;
+    m_quickSearchNotFound = notFound;
     if (!notFound) {
         if (!m_searchLineEdit->styleSheet().isEmpty())
             m_searchLineEdit->setStyleSheet(QString());
         return;
     }
-    const QColor bg = CardFrame::mixedColor(AppTheme::instance().logError,
-                                            palette().color(QPalette::Base), 0.72);
+    // Цвет зависит от палитры: changeEvent зовёт это заново при смене темы.
+    const QColor bg = AppTheme::searchNotFoundBackground(palette());
     m_searchLineEdit->setStyleSheet(QStringLiteral("QLineEdit { background-color: %1; }")
                                         .arg(bg.name()));
 }
@@ -3970,12 +3971,14 @@ void MainWindow::changeEvent(QEvent* event)
     const bool restored  = (type == QEvent::WindowStateChange && !isMinimized());
     if (activated || restored)
         onAutoReloadTimerTick();
-    // Смена светлой/тёмной темы: иконки и стили кнопок уровней считаются
-    // из палитры — перекрасить.
+    // Смена светлой/тёмной темы: иконки, стили кнопок уровней и фон поля
+    // быстрого поиска «не найдено» считаются из палитры — перекрасить.
     if (type == QEvent::PaletteChange && m_constructed) {
         refreshToolIcons();
         updateLogLevelFilterButtons();
         updateTimeFilterInfo();
+        if (m_quickSearchNotFound)
+            setQuickSearchNotFound(true);
     }
 }
 
