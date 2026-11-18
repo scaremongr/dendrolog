@@ -42,6 +42,11 @@ public:
     LogModel* source() const { return m_source; }
     // Есть применённый запрос (пустой или испорченный запрос — не активен).
     bool isActive() const { return m_active; }
+    // Выдача отстала от источника: его видимый набор перестроен (reset,
+    // удаление строк), а полный поиск ещё не запущен — ждёт дебаунса или
+    // показа панели (setLive). В ней могут быть строки, которых вкладка уже
+    // не показывает.
+    bool isStale() const { return m_stale; }
     const FilterRuleSet& rules() const { return m_rules; }
     QString statusText() const { return m_status; }
 

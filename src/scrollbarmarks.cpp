@@ -87,6 +87,7 @@ void ScrollbarMarks::setModel(LogModel* model)
     }
     m_model = model;
     m_marks = ScrollbarMarkSet();
+    m_searchCarry = false;
     ++m_serial;
     emit marksChanged();
     if (m_model) {
@@ -143,6 +144,7 @@ void ScrollbarMarks::setSearch(SearchResultsController* search)
         disconnect(c);
     m_searchConnections.clear();
     m_search = search;
+    m_searchCarry = false;
     if (search) {
         // Изменения выдачи касаются этой вкладки, только если она источник
         // (или отметки поиска уже нарисованы и их надо снять).
@@ -150,12 +152,23 @@ void ScrollbarMarks::setSearch(SearchResultsController* search)
             return searchApplies() || !m_marks.rows[ScrollbarMarkSet::Search].isEmpty();
         };
         const auto stale = [this, touched]() {
-            if (touched())
+            // Идущий расчёт взял выдачу, а поиск здесь больше не действует
+            // (снят, источник сменился): его результат принёс бы отметки
+            // поиска, которые уже никто не снимет, — отбросить.
+            if (m_running && m_runningSearch && !searchApplies())
+                invalidate();
+            else if (touched())
                 markStale();
         };
+        // Выдача перестроена: прежние отметки поиска переносить нельзя, а
+        // идущий расчёт отбросить, только если он её сопоставлял, — расчёт
+        // одних уровней от выдачи не зависит.
         const auto rebuilt = [this, touched]() {
-            if (touched())
+            m_searchCarry = false;
+            if (m_running && m_runningSearch)
                 invalidate();
+            else if (touched())
+                markStale();
         };
         LogModel* results = search->model();
         m_searchConnections << connect(search, &SearchResultsController::statusChanged,
@@ -205,7 +218,9 @@ void ScrollbarMarks::markStale()
 
 void ScrollbarMarks::invalidate()
 {
-    // Номера строк идущего расчёта больше ничего не значат.
+    // Номера строк идущего расчёта больше ничего не значат — как и строки
+    // опубликованных отметок поиска.
+    m_searchCarry = false;
     if (m_running) {
         ++m_generation;
         m_cancel->store(true);
@@ -247,13 +262,21 @@ void ScrollbarMarks::launch()
     const LogScanSnapshot snapshot = m_model->scanSnapshot(/*filteredOnly=*/true);
     // Выдача, которая ещё считается, неполна: отметок поиска нет, пока она не
     // готова (её modelFiltered/reset снова пометят набор устаревшим).
+    // Отставшая выдача (полный поиск отложен) — не подпоследовательность
+    // видимых строк вкладки: сопоставлять её нельзя, отметок поиска нет.
     LogModel* results = searchModel();
-    const LogScanSnapshot search = results && !results->isFiltering()
+    const bool stale = results && m_search->isStale();
+    const LogScanSnapshot search = results && !stale && !results->isFiltering()
         ? results->scanSnapshot(/*filteredOnly=*/true) : LogScanSnapshot();
+    // Выдача дописывается (джоб по новым строкам источника), а не
+    // перестраивается: уже найденные строки на месте — их отметки переносятся
+    // в новый набор (см. m_searchCarry).
+    m_runningSearchSkipped = results && !stale && results->isFiltering();
 
     auto cancel = std::make_shared<std::atomic_bool>(false);
     m_cancel = cancel;
     m_running = true;
+    m_runningSearch = search.rowCount() > 0;
     ++m_launches;
     const int generation = ++m_generation;
 
@@ -270,8 +293,16 @@ void ScrollbarMarks::launch()
         Result result = watcher->result();
         if (!result.cancelled) {
             QVector<qint64> bookmarks = std::move(m_marks.rows[ScrollbarMarkSet::Bookmark]);
+            const bool carry = m_runningSearchSkipped && m_searchCarry && searchApplies();
+            QVector<qint64> carried;
+            if (carry)
+                carried = std::move(m_marks.rows[ScrollbarMarkSet::Search]);
             m_marks = std::move(result.marks);
             m_marks.rows[ScrollbarMarkSet::Bookmark] = std::move(bookmarks);
+            if (carry)
+                m_marks.rows[ScrollbarMarkSet::Search] = std::move(carried);
+            else
+                m_searchCarry = m_runningSearch;
             refreshBookmarks();
             ++m_serial;
             emit marksChanged();
@@ -340,11 +371,20 @@ ScrollbarMarkSet ScrollbarMarks::compute(const LogScanSnapshot& snapshot,
     const qint64 m = search.rowCount();
     if (m > 0 && n > 0) {
         Thinner found(out.rows[ScrollbarMarkSet::Search], n);
+        // Строки выдачи, которых нет среди видимых строк вкладки, — выдача
+        // разошлась с вкладкой вопреки ожиданию (отставшую launch не берёт).
+        // Такая строка пропускается, следующие ищутся с прежнего места; после
+        // kMaxMisses промахов (каждый — проход до конца) сопоставление
+        // прекращается, следующий расчёт возьмёт свежую выдачу.
+        constexpr int kMaxMisses = 8;
+        int misses = 0;
         qint64 i = 0;
         qint64 steps = 0;
-        for (qint64 j = 0; j < m && i < n; ++j) {
+        for (qint64 j = 0; j < m && i < n && misses < kMaxMisses; ++j) {
             const LogFile* wantedFile = nullptr;
             const qint64 wantedLine = search.lineAt(j, &wantedFile);
+            const qint64 from = i;
+            bool hit = false;
             for (; i < n; ++i) {
                 if ((++steps & 0xFFFF) == 0 && isCancelled(cancel))
                     return stop();
@@ -353,11 +393,14 @@ ScrollbarMarkSet ScrollbarMarks::compute(const LogScanSnapshot& snapshot,
                 if (line == wantedLine && file == wantedFile) {
                     found.add(i);
                     ++i;
+                    hit = true;
                     break;
                 }
             }
-            // Не нашли до конца — выдача отстала от вкладки; остаток не
-            // сопоставить, следующий расчёт возьмёт свежую.
+            if (!hit) {
+                ++misses;
+                i = from;
+            }
         }
     }
     return out;

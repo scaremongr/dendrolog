@@ -12,6 +12,9 @@
 //     добавления файла, смены размера, постановки и снятия закладки;
 //   • поиск: выдача панели Search на вкладке-источнике (ключи строк выдачи →
 //     строки вкладки), рост выдачи на дозаписи, снятие поиска, чужая вкладка;
+//     слитая и одно-файловая неупорядоченная вкладка, поиск по отфильтрованной;
+//     отставшая выдача (панель скрыта) отметок не даёт; снятие поиска посреди
+//     первого расчёта; дозапись с активным поиском отметки не гасит;
 //   • reset посреди расчёта — результат отброшен; поток батчей — запусков
 //     расчёта единицы, а не по батчу; скрытый view не считает.
 // Режим замера: scrollbar_marks --bench <file> — вкладка на файле, расчёт
@@ -198,6 +201,33 @@ static void checkCore()
         CHECK(set.rows[Category::Warning] == bruteLevelRows(s, false), "small: warning rows exact");
         CHECK(set.rows[Category::Search].isEmpty() && set.rows[Category::Bookmark].isEmpty(),
               "small: no search, no bookmarks");
+    }
+
+    // Выдача с несколькими строками, которых вкладка не показывает: они
+    // пропускаются, отметки остальных — на своих строках вкладки.
+    {
+        const auto data = makeSynthetic(20000, 5);
+        std::vector<qint64> visible;
+        for (qint64 r = 0; r < 20000; ++r)
+            if (r % 1000 != 500)
+                visible.push_back(r);
+        const LogScanSnapshot tab(std::make_shared<SyntheticImpl>(data, visible));
+        std::vector<qint64> hits;
+        QVector<qint64> want;
+        // Каждая 50-я строка; спрятанные (…500) — только первые четыре.
+        for (qint64 b = 0; b < 20000; b += 50) {
+            const bool hidden = b % 1000 == 500;
+            if (hidden && b > 3500)
+                continue;
+            hits.push_back(b);
+            if (!hidden)
+                want.append(qint64(std::lower_bound(visible.begin(), visible.end(), b) - visible.begin()));
+        }
+        const LogScanSnapshot stale(std::make_shared<SyntheticImpl>(data, hits));
+        const ScrollbarMarkSet set = ScrollbarMarks::compute(tab, stale);
+        CHECK(set.rows[Category::Search] == want,
+              QStringLiteral("hidden result rows are skipped: %1 search rows, expected %2")
+                  .arg(set.rows[Category::Search].size()).arg(want.size()));
     }
 
     const qint64 n = 3000000;
@@ -522,10 +552,19 @@ static QVector<int> searchRowsInSource(const LogModel& results, const LogModel& 
     return rows;
 }
 
-static void checkSearch(const QDir& dir, const QString& schema, bool indexed)
+// files = 1: файл не упорядочен по времени (makeFiles), резидентная вкладка
+// его сортирует, индексная — нет (row == line); выдача должна совпасть с
+// вкладкой в обоих случаях. sourceFilter — поиск по отфильтрованной вкладке
+// (у индексной одно-файловой — поисковая база с явным списком строк).
+static void checkSearch(const QDir& dir, const QString& schema, bool indexed, int files = 2,
+                        bool sourceFilter = false)
 {
-    const QString label = indexed ? QStringLiteral("search, indexed") : QStringLiteral("search, resident");
-    const QStringList paths = makeFiles(dir, QStringLiteral("search-%1").arg(indexed), 2, 1500);
+    const QString label = QStringLiteral("search, %1, %2 file(s)%3")
+                              .arg(indexed ? "indexed" : "resident").arg(files)
+                              .arg(sourceFilter ? ", filtered source" : "");
+    const QStringList paths = makeFiles(dir, QStringLiteral("search-%1-%2-%3")
+                                                 .arg(indexed).arg(files).arg(sourceFilter),
+                                        files, 1500);
     testdocs::Document doc = indexed ? testdocs::buildIndexed(paths, schema)
                                      : testdocs::buildResident(paths, schema);
     testdocs::Document other = testdocs::buildResident({ paths[0] }, schema);
@@ -540,6 +579,10 @@ static void checkSearch(const QDir& dir, const QString& schema, bool indexed)
     otherView.scrollbarMarks()->setSearch(&search);
     view.show();
     otherView.show();
+    if (sourceFilter) {
+        doc.model->setLogLevelFilter({ LogLevel::Error, LogLevel::Warn, LogLevel::Info });
+        testdocs::settle(*doc.model);
+    }
     compareView(view, {}, label + ": before search");
 
     search.setSource(doc.model.get());
@@ -557,19 +600,135 @@ static void checkSearch(const QDir& dir, const QString& schema, bool indexed)
 
     // Фильтр источника — выдача пересчитывается, отметки за ней.
     doc.model->setLogLevelFilter({ LogLevel::Error, LogLevel::Warn });
+    if (sourceFilter) {
+        search.clear();
+        return;
+    }
+    // Ждать состояния, а не таймера: фильтр вкладки применён (выдача
+    // отстала), затем отложенный полный поиск выдачи закончен.
     testdocs::settle(*doc.model);
-    testdocs::waitFor([&] { return !search.model()->isFiltering(); });
-    testdocs::pump(SearchResultsController::kRefreshDelayMs + 100);
-    CHECK(testdocs::settle(*search.model()), label + ": results follow the filter");
+    CHECK(testdocs::waitFor([&] { return !search.isStale() && !search.model()->isFiltering(); }),
+          label + ": results follow the filter");
     compareView(view, searchRowsInSource(*search.model(), *doc.model), label + ": filtered results");
     doc.model->setLogLevelFilter({});
     testdocs::settle(*doc.model);
-    testdocs::pump(SearchResultsController::kRefreshDelayMs + 100);
-    CHECK(testdocs::settle(*search.model()), label + ": results back");
+    CHECK(testdocs::waitFor([&] { return !search.isStale() && !search.model()->isFiltering(); }),
+          label + ": results back");
+
+    // Панель Search скрыта (не live): фильтр вкладки прячет часть строк
+    // выдачи, а полный поиск отложен до показа панели. Выдача отстала от
+    // вкладки — отметок поиска нет (а не отметки только до первой спрятанной
+    // строки выдачи); панель показана — отметки по свежей выдаче.
+    search.setLive(false);
+    doc.model->setLogLevelFilter({ LogLevel::Error, LogLevel::Fatal });
+    testdocs::settle(*doc.model);
+    CHECK(searchRowsInSource(*search.model(), *doc.model).contains(-1),
+          label + ": stale results contain rows the tab now hides");
+    compareView(view, {}, label + ": stale results while the panel is hidden");
+    search.setLive(true);
+    CHECK(testdocs::waitFor([&] { return !search.model()->isFiltering()
+                                         && !searchRowsInSource(*search.model(), *doc.model).contains(-1); }),
+          label + ": results refresh when the panel is shown");
+    compareView(view, searchRowsInSource(*search.model(), *doc.model), label + ": refreshed results");
+    CHECK(!view.scrollbarMarksOverlay()->pixels(Category::Search).isEmpty(), label + ": refreshed search marks");
+    doc.model->setLogLevelFilter({});
+    testdocs::settle(*doc.model);
+    CHECK(testdocs::waitFor([&] { return !search.model()->isFiltering()
+                                         && search.model()->rowCount() == found.size(); }),
+          label + ": results back after the filter");
 
     search.clear();
     compareView(view, {}, label + ": search cleared");
     CHECK(view.scrollbarMarksOverlay()->pixels(Category::Search).isEmpty(), label + ": no search marks after clear");
+
+    // Поиск снят, пока идёт ПЕРВЫЙ расчёт с его выдачей: опубликованных
+    // отметок поиска ещё нет, но результат расчёта их принесёт — снятие
+    // обязано его отбросить или пересчитать.
+    otherView.hide();
+    search.setSource(other.model.get());
+    search.search(rules);
+    CHECK(testdocs::settle(*search.model()), label + ": other tab results settle");
+    CHECK(search.model()->rowCount() > 0, label + ": other tab has results");
+    otherView.show(); // показ запускает расчёт сразу, с выдачей
+    CHECK(otherView.scrollbarMarks()->isComputing(), label + ": compute with results is running");
+    CHECK(otherView.scrollbarMarks()->marks().rows[Category::Search].isEmpty(),
+          label + ": no search marks published yet");
+    search.clear();
+    compareView(otherView, {}, label + ": search cleared during the first compute");
+    CHECK(otherView.scrollbarMarks()->marks().rows[Category::Search].isEmpty(),
+          label + ": no stale search marks after clear");
+}
+
+// Дозапись на индексной вкладке с активным поиском: выдача проверяет новые
+// строки фоновым джобом (isFiltering), а расчёт отметок, запущенный в это
+// время, выдачу не берёт. Отметки поиска, уже найденные, при этом не должны
+// пропадать: прежние строки выдачи от дозаписи в конец не меняются.
+static void checkSearchDuringTail(const QDir& dir, const QString& schema)
+{
+    const QString label = QStringLiteral("search during tail, indexed");
+    const QStringList paths = makeFiles(dir, QStringLiteral("search-tail"), 1, 1500);
+    testdocs::Document doc = testdocs::buildIndexed(paths, schema);
+    LogListView view;
+    view.resize(900, 500);
+    view.setModel(doc.model.get());
+    SearchResultsController search;
+    view.scrollbarMarks()->setSearch(&search);
+    view.show();
+    search.setSource(doc.model.get());
+    FilterRuleSet rules;
+    FilterRule rule;
+    rule.text = QStringLiteral("timeout");
+    rules.rules = { rule };
+    search.search(rules);
+    CHECK(testdocs::settle(*search.model()), label + ": results settle");
+    compareView(view, searchRowsInSource(*search.model(), *doc.model), label + ": results");
+    ScrollbarMarks& marks = *view.scrollbarMarks();
+    CHECK(!marks.marks().rows[Category::Search].isEmpty(), label + ": search marks published");
+
+    // Слот после контроллера: выдача уже запустила джоб по новым строкам.
+    bool launchedWhileFiltering = false;
+    const QMetaObject::Connection inserted = QObject::connect(
+        doc.model.get(), &QAbstractItemModel::rowsInserted, &view, [&]() {
+            if (!search.model()->isFiltering() || marks.isComputing())
+                return;
+            marks.flush();
+            launchedWhileFiltering = launchedWhileFiltering || marks.isComputing();
+        });
+    int published = 0;
+    int publishedWithoutSearch = 0;
+    const QMetaObject::Connection changed = QObject::connect(
+        &marks, &ScrollbarMarks::marksChanged, &view, [&]() {
+            ++published;
+            if (marks.marks().rows[Category::Search].isEmpty())
+                ++publishedWithoutSearch;
+        });
+    QByteArray tail;
+    for (int i = 0; i < 2000; ++i)
+        tail += "2030-01-01 00:00:00.000 [main] WARN - timeout on appended row "
+            + QByteArray::number(i) + "\n";
+    CHECK(testdocs::appendIndexedTail(doc, 0, tail, schema), label + ": append");
+    CHECK(testdocs::settle(*search.model()), label + ": results follow the tail");
+    CHECK(marksReady(view), label + ": marks settle");
+    QObject::disconnect(inserted);
+    QObject::disconnect(changed);
+    CHECK(launchedWhileFiltering, label + ": a compute ran while the results were filtering");
+    CHECK(published > 0, label + ": marks were published");
+    CHECK(publishedWithoutSearch == 0,
+          QStringLiteral("%1: %2 of %3 publications dropped the search marks")
+              .arg(label).arg(publishedWithoutSearch).arg(published));
+    compareView(view, searchRowsInSource(*search.model(), *doc.model), label + ": after tail");
+
+    // Перестройка выдачи отбрасывает только расчёт, который её сопоставлял:
+    // расчёт одних уровней (выдача ещё считалась) доводится до конца.
+    const int discarded = marks.discardedCount();
+    search.search(rules); // полный поиск заново: выдача сброшена и считается
+    CHECK(search.model()->isFiltering(), label + ": full search is running");
+    marks.flush();
+    CHECK(marks.isComputing(), label + ": a compute without results is running");
+    search.clear();
+    CHECK(marks.discardedCount() == discarded,
+          label + ": results rebuilt, the compute that did not use them is kept");
+    compareView(view, {}, label + ": search cleared");
 }
 
 // ---------------------------------------------------------------------------
@@ -708,6 +867,11 @@ int main(int argc, char** argv)
     checkTabUpdates(dir, schema, true);
     checkSearch(dir, schema, false);
     checkSearch(dir, schema, true);
+    checkSearch(dir, schema, false, 1);
+    checkSearch(dir, schema, true, 1);
+    checkSearch(dir, schema, false, 1, true);
+    checkSearch(dir, schema, true, 1, true);
+    checkSearchDuringTail(dir, schema);
     checkLifecycle(dir, schema);
 
     if (failures) {
