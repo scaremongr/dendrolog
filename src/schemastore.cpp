@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,29 +20,11 @@ namespace {
 
 constexpr auto kSchemaGlob = "*.json";
 
-// Parses raw file/blob contents as a schema. On success fills *name (from the
-// embedded "name" key, falling back to \a fallbackName) and *canonical (the
-// re-serialized, canonical JSON the rest of the app uses). Returns false for
-// anything that is not a recognisable schema.
-bool parseSchemaBlob(const QByteArray& bytes,
-                     const QString& fallbackName,
-                     QString* name,
-                     QString* canonical)
+QByteArray readAllFrom(const QString& path, bool* ok)
 {
-    // Lenient (strict=false): an in-progress schema that was saved must load
-    // without being silently replaced; real validity is enforced at use time.
-    return BuiltinSchemas::parseSchemaFile(bytes, fallbackName, name, canonical,
-                                           /*strict=*/false);
-}
-
-// Serializes one schema for on-disk storage: the canonical schema JSON with
-// the display name injected, pretty-printed for hand-editing.
-QByteArray fileBytesFor(const QString& name, const QString& serialized)
-{
-    QJsonDocument doc = QJsonDocument::fromJson(serialized.toUtf8());
-    QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
-    obj.insert(QStringLiteral("name"), name);
-    return QJsonDocument(obj).toJson(QJsonDocument::Indented);
+    QFile f(path);
+    *ok = f.open(QIODevice::ReadOnly);
+    return *ok ? f.readAll() : QByteArray();
 }
 
 bool writeFileAtomic(const QString& path, const QByteArray& bytes, QString* error)
@@ -79,9 +62,88 @@ QString uniqueBasename(const QString& preferred, const QSet<QString>& usedLower)
     }
 }
 
+// Stem of a file name the store derived from a display name: the suggested
+// name itself or its _N variant (see uniqueBasename).
+bool isDerivedFileName(const QString& basename, const QString& name)
+{
+    QString stem = SchemaStore::suggestedFileName(name);
+    stem.chop(5);   // ".json"
+    if (!basename.endsWith(QStringLiteral(".json"), Qt::CaseInsensitive))
+        return false;
+    const QString base = basename.left(basename.size() - 5);
+    if (base.compare(stem, Qt::CaseInsensitive) == 0)
+        return true;
+    if (!base.startsWith(stem + QLatin1Char('_'), Qt::CaseInsensitive))
+        return false;
+    bool numeric = false;
+    base.mid(stem.size() + 1).toInt(&numeric);
+    return numeric;
+}
+
 } // namespace
 
 namespace SchemaStore {
+
+bool isSchemaFormatKey(const QString& key)
+{
+    // What LogPattern::serializeDefinition writes, plus the display name.
+    return key == QLatin1String("name")
+        || key == QLatin1String("version")
+        || key == QLatin1String("type")
+        || key == QLatin1String("linePrefix")
+        || key == QLatin1String("blocks");
+}
+
+QString SchemaEntry::description() const
+{
+    return meta.value(QStringLiteral("description")).toString();
+}
+
+void SchemaEntry::setDescription(const QString& text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty())
+        meta.remove(QStringLiteral("description"));
+    else
+        meta.insert(QStringLiteral("description"), trimmed);
+}
+
+bool parseEntry(const QByteArray& bytes, const QString& fallbackName, SchemaEntry* entry)
+{
+    // Lenient (strict=false): an in-progress schema that was saved must load
+    // without being silently replaced; real validity is enforced at use time.
+    SchemaEntry parsed;
+    if (!BuiltinSchemas::parseSchemaFile(bytes, fallbackName, &parsed.name, &parsed.schema,
+                                         /*strict=*/false))
+        return false;
+    // Same text parseSchemaFile looks at (trimmed, BOM-safe).
+    const QJsonDocument doc =
+        QJsonDocument::fromJson(QString::fromUtf8(bytes).trimmed().toUtf8());
+    if (doc.isObject()) {
+        const QJsonObject root = doc.object();
+        for (auto it = root.begin(); it != root.end(); ++it) {
+            if (!isSchemaFormatKey(it.key()))
+                parsed.meta.insert(it.key(), it.value());
+        }
+    }
+    if (entry)
+        *entry = parsed;
+    return true;
+}
+
+QByteArray fileBytes(const SchemaEntry& entry)
+{
+    // Metadata first, so a stray format key in it can never shadow the schema.
+    QJsonObject obj = entry.meta;
+    const QJsonDocument doc = QJsonDocument::fromJson(entry.schema.toUtf8());
+    if (doc.isObject()) {
+        const QJsonObject schema = doc.object();
+        for (auto it = schema.begin(); it != schema.end(); ++it)
+            obj.insert(it.key(), it.value());
+    }
+    obj.insert(QStringLiteral("name"), entry.name);
+    return QJsonDocument(obj).toJson(QJsonDocument::Indented);
+}
 
 QString patternsDir()
 {
@@ -147,15 +209,13 @@ SchemaList loadAll(const QStringList& orderNames)
 
     SchemaList loaded;
     for (const QString& file : files) {
-        QFile f(dir.filePath(file));
-        if (!f.open(QIODevice::ReadOnly))
-            continue;
-        const QByteArray bytes = f.readAll();
-        f.close();
-
-        QString name, canonical;
-        if (parseSchemaBlob(bytes, QFileInfo(file).completeBaseName(), &name, &canonical))
-            loaded.append({name, canonical});
+        bool ok = false;
+        const QByteArray bytes = readAllFrom(dir.filePath(file), &ok);
+        SchemaEntry entry;
+        if (ok && parseEntry(bytes, QFileInfo(file).completeBaseName(), &entry)) {
+            entry.fileName = file;
+            loaded.append(entry);
+        }
     }
 
     // Apply the saved display order: listed names first (in order), the rest
@@ -163,7 +223,7 @@ SchemaList loadAll(const QStringList& orderNames)
     QList<bool> taken(loaded.size(), false);
     for (const QString& wanted : orderNames) {
         for (int i = 0; i < loaded.size(); ++i) {
-            if (!taken[i] && loaded[i].first == wanted) {
+            if (!taken[i] && loaded[i].name == wanted) {
                 result.append(loaded[i]);
                 taken[i] = true;
                 break;
@@ -176,7 +236,7 @@ SchemaList loadAll(const QStringList& orderNames)
             rest.append(loaded[i]);
     std::stable_sort(rest.begin(), rest.end(),
         [](const SchemaEntry& a, const SchemaEntry& b) {
-            return a.first.compare(b.first, Qt::CaseInsensitive) < 0;
+            return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
         });
     result.append(rest);
     return result;
@@ -196,35 +256,56 @@ bool sync(const SchemaList& list, QString* errorMessage)
         dir.entryList(QStringList() << QString::fromLatin1(kSchemaGlob), QDir::Files, QDir::Name);
 
     struct Existing {
-        QString basename;
-        QString name;
-        QString canonical;
-        bool    claimed = false;
+        QString     basename;
+        SchemaEntry entry;
+        bool        parsed = false;   // unparsable files are still claimable by fileName
     };
     QList<Existing> existing;
+    QHash<QString, int> existingByLower;
     for (const QString& file : files) {
-        QFile f(dir.filePath(file));
-        if (!f.open(QIODevice::ReadOnly))
-            continue;
-        const QByteArray bytes = f.readAll();
-        f.close();
         Existing ex;
         ex.basename = file;
-        if (parseSchemaBlob(bytes, QFileInfo(file).completeBaseName(), &ex.name, &ex.canonical))
-            existing.append(ex);
+        bool ok = false;
+        const QByteArray bytes = readAllFrom(dir.filePath(file), &ok);
+        ex.parsed = ok && parseEntry(bytes, QFileInfo(file).completeBaseName(), &ex.entry);
+        existingByLower.insert(file.toLower(), existing.size());
+        existing.append(ex);
     }
 
     QVector<QString> basenameForEntry(list.size());
+    QVector<bool> needsWrite(list.size(), false);
     QSet<QString> usedLower;
 
-    // Pass 1 — reuse a matching existing file for each entry (no rewrite).
+    // Pass 1 — the entry's own file, rewritten in place when its content
+    // changed. A rename moves a file whose name was derived from the old
+    // display name (pass 3 gives it a new one); a curated or built-in file
+    // name stays.
     for (int e = 0; e < list.size(); ++e) {
-        for (Existing& ex : existing) {
-            if (!ex.claimed
-                    && ex.name == list[e].first
-                    && ex.canonical == list[e].second
+        const SchemaEntry& entry = list[e];
+        if (entry.fileName.isEmpty())
+            continue;
+        const QString lower = entry.fileName.toLower();
+        const auto it = existingByLower.constFind(lower);
+        if (it == existingByLower.constEnd() || usedLower.contains(lower))
+            continue;
+        const Existing& ex = existing[*it];
+        if (ex.parsed && ex.entry.name != entry.name
+                && isDerivedFileName(ex.basename, ex.entry.name)
+                && !isDerivedFileName(ex.basename, entry.name))
+            continue;
+        basenameForEntry[e] = ex.basename;
+        usedLower.insert(lower);
+        needsWrite[e] = !(ex.parsed && ex.entry.sameContent(entry));
+    }
+
+    // Pass 2 — an entry without a file of its own reuses a file with the same
+    // content (no rewrite).
+    for (int e = 0; e < list.size(); ++e) {
+        if (!basenameForEntry[e].isEmpty())
+            continue;
+        for (const Existing& ex : std::as_const(existing)) {
+            if (ex.parsed && ex.entry.sameContent(list[e])
                     && !usedLower.contains(ex.basename.toLower())) {
-                ex.claimed = true;
                 basenameForEntry[e] = ex.basename;
                 usedLower.insert(ex.basename.toLower());
                 break;
@@ -232,17 +313,22 @@ bool sync(const SchemaList& list, QString* errorMessage)
         }
     }
 
-    // Pass 2 — write a fresh file for every entry not matched above.
-    bool ok = true;
+    // Pass 3 — a fresh file for every entry still without one.
     for (int e = 0; e < list.size(); ++e) {
         if (!basenameForEntry[e].isEmpty())
             continue;
-        const QString base = uniqueBasename(suggestedFileName(list[e].first), usedLower);
+        const QString base = uniqueBasename(suggestedFileName(list[e].name), usedLower);
         usedLower.insert(base.toLower());
         basenameForEntry[e] = base;
+        needsWrite[e] = true;
+    }
+
+    bool ok = true;
+    for (int e = 0; e < list.size(); ++e) {
+        if (!needsWrite[e])
+            continue;
         QString writeError;
-        if (!writeFileAtomic(dir.filePath(base),
-                             fileBytesFor(list[e].first, list[e].second), &writeError)) {
+        if (!writeFileAtomic(dir.filePath(basenameForEntry[e]), fileBytes(list[e]), &writeError)) {
             ok = false;
             if (errorMessage)
                 *errorMessage = writeError;
@@ -269,8 +355,8 @@ SchemaEntry importFile(const QString& srcPath, QString* errorMessage)
     const QByteArray bytes = src.readAll();
     src.close();
 
-    QString name, canonical;
-    if (!parseSchemaBlob(bytes, QFileInfo(srcPath).completeBaseName(), &name, &canonical)) {
+    SchemaEntry entry;
+    if (!parseEntry(bytes, QFileInfo(srcPath).completeBaseName(), &entry)) {
         if (errorMessage)
             *errorMessage = QStringLiteral("The file is not a valid schema.");
         return {};
@@ -290,22 +376,22 @@ SchemaEntry importFile(const QString& srcPath, QString* errorMessage)
     for (const QString& file : existing)
         usedLower.insert(file.toLower());
 
-    const QString base = uniqueBasename(suggestedFileName(name), usedLower);
+    const QString base = uniqueBasename(suggestedFileName(entry.name), usedLower);
     QString writeError;
-    if (!writeFileAtomic(dir.filePath(base), fileBytesFor(name, canonical), &writeError)) {
+    if (!writeFileAtomic(dir.filePath(base), fileBytes(entry), &writeError)) {
         if (errorMessage)
             *errorMessage = writeError;
         return {};
     }
-    return {name, canonical};
+    entry.fileName = base;
+    return entry;
 }
 
-bool exportToFile(const QString& name,
-                  const QString& serialized,
+bool exportToFile(const SchemaEntry& entry,
                   const QString& destPath,
                   QString* errorMessage)
 {
-    return writeFileAtomic(destPath, fileBytesFor(name, serialized), errorMessage);
+    return writeFileAtomic(destPath, fileBytes(entry), errorMessage);
 }
 
 } // namespace SchemaStore

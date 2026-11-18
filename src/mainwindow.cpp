@@ -121,6 +121,15 @@ static QIcon levelDotIcon(const QColor& color)
 // это вспомогательный список (обычно 2–5 строк высотой), и при крупном
 // основном шрифте он съедал бы половину окна. Отдельной настройки нет
 // намеренно — размер всегда следует за настройкой шрифта лога.
+// Schema combo item: the description (if any) is its tooltip.
+static void addSchemaComboItem(QComboBox* combo, const SchemaStore::SchemaEntry& entry)
+{
+    combo->addItem(entry.name);
+    const QString description = entry.description();
+    if (!description.isEmpty())
+        combo->setItemData(combo->count() - 1, description, Qt::ToolTipRole);
+}
+
 static QFont searchResultsFont()
 {
     QFont f(AppSettings::instance().fontFamily());
@@ -960,7 +969,7 @@ void MainWindow::saveSettings()
         QStringList order;
         order.reserve(m_patternList.size());
         for (const auto& e : m_patternList)
-            order << e.first;
+            order << e.name;
         s.setValue("schemaOrder", order);
     }
     s.endGroup();
@@ -1056,13 +1065,13 @@ void MainWindow::loadSettings()
             const int cnt = qMin(names.size(), values.size());
             m_patternList.reserve(cnt);
             for (int i = 0; i < cnt; ++i)
-                m_patternList.append({names[i], values[i]});
+                m_patternList.append({names[i], values[i], {}, {}});
             // Even older single-string list.
             if (m_patternList.isEmpty()) {
                 const QStringList old = s.value("conversionPatternList").toStringList();
                 for (const auto& p : old)
                     if (!p.trimmed().isEmpty())
-                        m_patternList.append({p.trimmed(), p.trimmed()});
+                        m_patternList.append({p.trimmed(), p.trimmed(), {}, {}});
             }
             if (!m_patternList.isEmpty()) {
                 SchemaStore::sync(m_patternList);
@@ -1087,13 +1096,13 @@ void MainWindow::loadSettings()
             m_conversionPatternCombo->blockSignals(true);
             m_conversionPatternCombo->clear();
             for (const auto& e : m_patternList)
-                m_conversionPatternCombo->addItem(e.first);
+                addSchemaComboItem(m_conversionPatternCombo, e);
             // No active schema (the default — extraction off) must show as
             // none, not as the first schema that addItem() selects by itself.
             m_conversionPatternCombo->setCurrentIndex(-1);
             // Restore the active selection
             for (int i = 0; i < m_patternList.size(); ++i) {
-                if (m_patternList[i].second == m_conversionPattern) {
+                if (m_patternList[i].schema == m_conversionPattern) {
                     m_conversionPatternCombo->setCurrentIndex(i);
                     break;
                 }
@@ -1413,7 +1422,7 @@ void MainWindow::onConversionPatternApply()
 void MainWindow::onPatternComboChanged(int index)
 {
     if (index >= 0 && index < m_patternList.size())
-        m_conversionPattern = m_patternList[index].second;
+        m_conversionPattern = m_patternList[index].schema;
     else
         m_conversionPattern.clear();
 
@@ -1429,7 +1438,7 @@ void MainWindow::onManagePatterns()
         QStringList order;
         order.reserve(m_patternList.size());
         for (const auto& e : m_patternList)
-            order << e.first;
+            order << e.name;
         m_patternList = SchemaStore::loadAll(order);
     }
 
@@ -1469,7 +1478,7 @@ void MainWindow::onManagePatterns()
     m_conversionPatternCombo->blockSignals(true);
     m_conversionPatternCombo->clear();
     for (const auto& e : m_patternList)
-        m_conversionPatternCombo->addItem(e.first);
+        addSchemaComboItem(m_conversionPatternCombo, e);
     m_conversionPatternCombo->setCurrentIndex(-1);
     m_conversionPatternCombo->blockSignals(false);
 
@@ -1485,7 +1494,7 @@ void MainWindow::onManagePatterns()
         // Dialog closed without "Use Selected" — restore previous active pattern
         // in the combo, or leave unselected if it's no longer in the list.
         for (int i = 0; i < m_patternList.size(); ++i) {
-            if (m_patternList[i].second == m_conversionPattern) {
+            if (m_patternList[i].schema == m_conversionPattern) {
                 m_conversionPatternCombo->setCurrentIndex(i);
                 break;
             }

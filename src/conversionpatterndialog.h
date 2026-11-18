@@ -9,6 +9,7 @@
 #include <QVector>
 
 #include "logpattern.h"
+#include "schemastore.h"
 
 class PatternBlockCard;
 class SeparatorNode;
@@ -36,9 +37,11 @@ class ConversionPatternDialog : public QDialog
 {
     Q_OBJECT
 public:
-    /// A single schema entry: first = display name, second = serialized schema.
-    using PatternEntry = QPair<QString, QString>;
-    using PatternList  = QList<PatternEntry>;
+    /// Schemas come and go with their metadata (description, unknown keys)
+    /// and their file name, so saving them back loses nothing.
+    using PatternList = SchemaStore::SchemaList;
+    /// A user preset: first = name, second = serialized schema.
+    using PresetList  = QList<QPair<QString, QString>>;
 
     explicit ConversionPatternDialog(const PatternList& patterns,
                                      QWidget* parent = nullptr,
@@ -70,6 +73,7 @@ private slots:
     void onSchemaSelectionChanged(int currentRow, int currentColumn,
                                   int previousRow, int previousColumn);
     void onSchemaNameEdited(const QString& text);
+    void onSchemaDescriptionEdited(const QString& text);
     void onAddBlock();
     void onBlocksEdited();
     void onApplyChanges();
@@ -87,7 +91,8 @@ private:
     };
 
     void populateSchemas(const PatternList& list, const QString& activeSchema = QString());
-    void setSchemaRow(int row, const QString& name, const QString& serializedSchema);
+    void setSchemaRow(int row, const SchemaStore::SchemaEntry& entry);
+    SchemaStore::SchemaEntry schemaRow(int row) const;
     void updateSchemaSummary(int row);
     void loadSchemaRow(int row);
     void saveSchemaRow(int row);
@@ -105,8 +110,8 @@ private:
 
     void rebuildPresetMenu();
     void applyPreset(const PatternDefinition& definition);
-    PatternList userPresets() const;
-    void saveUserPresets(const PatternList& presets);
+    PresetList userPresets() const;
+    void saveUserPresets(const PresetList& presets);
 
     void schedulePreviewUpdate();
     void startPreviewJob();
