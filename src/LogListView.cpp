@@ -1476,11 +1476,21 @@ void LogListView::showSearchMatch(int row, const TextQuery& query)
     viewport()->update();
 }
 
-void LogListView::goToRow(int row)
+void LogListView::goToRow(int row, NavKind kind)
 {
     if (!model() || row < 0 || row >= model()->rowCount())
         return;
     const QModelIndex index = model()->index(row, 0);
+    // История переходов: откуда ушли — выбор пользователя (инвариант 10), а
+    // без него — первая строка экрана. Пишется ДО перехода.
+    if (kind != NavKind::History) {
+        if (auto* logModel = qobject_cast<LogModel*>(model())) {
+            int fromRow = userSelectedRow();
+            if (fromRow < 0 && model()->rowCount() > 0)
+                fromRow = qBound(0, rowAtY(scrollContentY()), model()->rowCount() - 1);
+            logModel->navHistory().recordJump(fromRow, row, kind);
+        }
+    }
     // Follow-tail вернул бы вид к хвосту на следующей же дописанной порции:
     // программная прокрутка его сама не снимает (только ползунок и колесо).
     if (m_followTail && row < model()->rowCount() - 1)
@@ -2199,6 +2209,12 @@ void LogListView::updateScrollbar() {
 
 // Обработка нажатия мыши для выделения текста
 void LogListView::mousePressEvent(QMouseEvent *event) {
+    // Боковые кнопки мыши — история переходов (R-7); выделение не трогаем.
+    if (event->button() == Qt::BackButton || event->button() == Qt::ForwardButton) {
+        emit historyNavigationRequested(event->button() == Qt::ForwardButton);
+        event->accept();
+        return;
+    }
     // Правая кнопка — не сбрасываем выделение, просто игнорируем (контекстное меню обработается через contextMenuEvent)
     if (event->button() == Qt::RightButton) {
         return;
@@ -2347,6 +2363,12 @@ void LogListView::mouseReleaseEvent(QMouseEvent *event) {
 // Двойной клик мыши — умное выделение токена под курсором
 void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    // Быстрый второй щелчок боковой кнопкой приходит двойным щелчком.
+    if (event->button() == Qt::BackButton || event->button() == Qt::ForwardButton) {
+        emit historyNavigationRequested(event->button() == Qt::ForwardButton);
+        event->accept();
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         QListView::mouseDoubleClickEvent(event);
         return;
@@ -2621,7 +2643,7 @@ void LogListView::goToNewLines()
     const int row = firstNewLineRow();
     if (row < 0 || !model() || row >= model()->rowCount())
         return;
-    goToRow(row);
+    goToRow(row, NavKind::NewLines);
     markNewLinesSeen();
 }
 

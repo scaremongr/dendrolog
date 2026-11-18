@@ -7,6 +7,17 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Navigation history.** `Alt+←` (`View → Navigate Back`) returns to the
+  place you jumped from — by Go to, the timeline, Statistics, a Search result,
+  the quick search, next error, a bookmark or the "↓ N new lines" badge;
+  `Alt+→` goes forward again, as in a browser. The mouse side buttons work too.
+  A run of `F3` (or `F8`) presses without moving in between is one step back.
+  Each tab keeps its own history of up to 100 places; it survives filters
+  (a hidden place leads to the nearest shown line), tail updates, a reload of
+  the same content and the switch to the large-file mode, skips places whose
+  line is gone, and is dropped with the tab.
+- A newly added default shortcut no longer takes away a key you already
+  assigned to another command: the key stays with your command.
 - **Marks on the scrollbar.** The vertical scrollbar of a log shows where the
   shown lines with errors (Error and Fatal) and warnings are, where the
   bookmarks are and, on the tab the Search panel searches, where its matches

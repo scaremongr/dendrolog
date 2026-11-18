@@ -433,8 +433,31 @@ MainWindow::MainWindow(QWidget *parent)
     m_goToAction = new QAction(tr("Go to Line / Time…"), this);
     connect(m_goToAction, &QAction::triggered, this, &MainWindow::showGoToDialog);
     ui->menuView->insertAction(ui->actionWordWrap, m_goToAction);
-    ui->menuView->insertSeparator(ui->actionWordWrap);
     m_shortcutActions.insert(QStringLiteral("goTo"), m_goToAction);
+
+    // История переходов вкладки (R-7): Alt+← / Alt+→, рядом с Go to.
+    // Доступность — по истории активной вкладки (updateNavHistoryActions).
+    {
+        const auto addHistoryAction = [this](const QString& text, const QString& shortcutId,
+                                             bool forward) {
+            auto* action = new QAction(text, this);
+            connect(action, &QAction::triggered, this, [this, forward]() {
+                if (!m_activeLogView)
+                    return;
+                if (!m_activeLogView->navigateHistory(forward))
+                    m_statusLabel->setText(forward ? tr("No later place in navigation history")
+                                                   : tr("No earlier place in navigation history"));
+                updateNavHistoryActions();
+            });
+            ui->menuView->insertAction(ui->actionWordWrap, action);
+            m_shortcutActions.insert(shortcutId, action);
+            return action;
+        };
+        m_navBackAction = addHistoryAction(tr("Navigate Back"), QStringLiteral("navigateBack"), false);
+        m_navForwardAction = addHistoryAction(tr("Navigate Forward"), QStringLiteral("navigateForward"), true);
+        updateNavHistoryActions();
+    }
+    ui->menuView->insertSeparator(ui->actionWordWrap);
 
     // Следующая / предыдущая ошибка (F8 / Shift+F8) и предупреждение
     // (F7 / Shift+F7) среди показанных строк активной вкладки.
@@ -688,6 +711,17 @@ void MainWindow::updateWelcomeVisibility()
         a->setEnabled(!empty);
     for (QAction* a : std::as_const(m_levelJumpActions))
         a->setEnabled(!empty);
+    updateNavHistoryActions();
+}
+
+// ---------------------------------------------------------------------------
+void MainWindow::updateNavHistoryActions()
+{
+    if (!m_navBackAction || !m_navForwardAction)
+        return;
+    const NavHistory* history = m_activeLogView ? &m_activeLogView->navHistory() : nullptr;
+    m_navBackAction->setEnabled(history && history->canGoBack());
+    m_navForwardAction->setEnabled(history && history->canGoForward());
 }
 
 // ---------------------------------------------------------------------------
@@ -2112,7 +2146,7 @@ void MainWindow::setupStatisticsDock()
                 if (!m_activeLogView || !m_activeLogView->model()
                     || !m_activeLogView->view())
                     return;
-                m_activeLogView->goToEntry(logicalEntryId, file.get());
+                m_activeLogView->goToEntry(logicalEntryId, file.get(), NavKind::Statistics);
             });
 
     if (ui->menuView) {
@@ -2308,6 +2342,8 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     connect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
     connect(logView, &LogViewWidget::bookmarkJumpFinished, this, &MainWindow::onBookmarkJumpFinished);
     connect(logView, &LogViewWidget::bookmarkNoteEditRequested, this, &MainWindow::editBookmarkNote);
+    connect(logView, &LogViewWidget::navHistoryChanged, this, &MainWindow::updateNavHistoryActions);
+    updateNavHistoryActions();
     if (m_bookmarkPanel)
         m_bookmarkPanel->setLogView(logView);
 
@@ -2392,6 +2428,7 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
     disconnect(logView, &LogViewWidget::levelJumpFinished, this, &MainWindow::onLevelJumpFinished);
     disconnect(logView, &LogViewWidget::bookmarkJumpFinished, this, &MainWindow::onBookmarkJumpFinished);
     disconnect(logView, &LogViewWidget::bookmarkNoteEditRequested, this, &MainWindow::editBookmarkNote);
+    disconnect(logView, &LogViewWidget::navHistoryChanged, this, &MainWindow::updateNavHistoryActions);
     // Поиск ушедшей вкладки больше некому показывать.
     logView->cancelQuickSearch();
     logView->cancelLevelJump();
@@ -2457,6 +2494,7 @@ void MainWindow::onCurrentTabChanged(int index)
         // Вкладок не осталось — очистить счётчик строк, маркер таймлайна
         // и панель деталей (иначе они показывали бы закрытый документ).
         updateLineInfoLabel(-1, 0);
+        updateNavHistoryActions();
     }
     // Переключение на вкладку — тоже «фокус на view»: с авто-обновлением она
     // должна показывать актуальные данные сразу, а не со следующего тика.
@@ -3341,7 +3379,7 @@ void MainWindow::onTimelineTimeClicked(const QDateTime& time, bool preferErrors)
     }
 
     // Общий путь переходов: строка — выбор пользователя, follow-tail снимается.
-    m_activeLogView->view()->goToRow(row);
+    m_activeLogView->view()->goToRow(row, NavKind::Timeline);
 }
 
 void MainWindow::onTimelineRangeSelected(const QDateTime& from, const QDateTime& to)
@@ -3457,7 +3495,7 @@ void MainWindow::showGoToDialog()
     // Вкладку могли закрыть, пока диалог был открыт (второй экземпляр, таймер).
     if (tab != m_activeLogView || dialog.target().row < 0)
         return;
-    tab->view()->goToRow(dialog.target().row);
+    tab->view()->goToRow(dialog.target().row, NavKind::GoTo);
     tab->view()->setFocus(Qt::OtherFocusReason);
     // Точное попадание пояснений не требует, но прошлое пояснение убираем.
     m_statusLabel->setText(dialog.targetNote().isEmpty() ? tr("Ready") : dialog.targetNote());
@@ -3557,7 +3595,7 @@ void MainWindow::onSearchResultActivated(const QModelIndex& current)
 
     // Двигаем текущую строку и центрируем — фокус остаётся на панели результатов,
     // так что стрелками можно продолжать листать совпадения.
-    m_activeLogView->goToEntry(key.logicalEntryId, key.sourceFile);
+    m_activeLogView->goToEntry(key.logicalEntryId, key.sourceFile, NavKind::Search);
 }
 
 void MainWindow::applyRowMarkersToActiveView()

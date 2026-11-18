@@ -178,6 +178,14 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - The line becomes the selected one, so it stays in place when filters change afterwards.
 - A large file opened alone is shown in file order; if its timestamps are not in order, a jump to a time is approximate there.
 
+## Navigation history
+
+- `Alt+←` (`View → Navigate Back`) returns to the place you jumped from; `Alt+→` (`View → Navigate Forward`) goes forward again, as in a browser. The side buttons of the mouse ("back" / "forward") over the log do the same.
+- Every jump to a line counts: Go to, a click on the timeline or in Statistics, a Search result, the quick search (`F3`), next error (`F8` / `F7`), bookmarks (`F2`, the Bookmarks panel) and the **↓ N new lines** badge. The history keeps the selected line you left (or, with nothing selected, the first line on screen) and the line you came to. Clicks, arrow keys and scrolling are not jumps and are not recorded.
+- A run of jumps of one kind with no move in between — `F3`, `F3`, `F3` through matches, `F8` after `F8`, arrowing through Search results — is one step: a single `Alt+←` brings you back to where you were reading before it. A new jump after going back drops the "forward" part, as in a browser. The history keeps the last 100 places.
+- Going back selects the line and switches Follow tail off, like any jump, and adds nothing to the history. A place hidden by filters leads to the nearest shown line. Places stay through tail updates, a reload of the same content and the switch to the large-file mode; a place whose line is gone (the file was rewritten or removed) is skipped.
+- Each tab has its own history; it is not saved and goes away when the tab is closed.
+
 ## Next and previous error
 
 - `F8` / `Shift+F8` (`View → Next Error` / `Previous Error`) jump from the selected line to the nearest entry of level **Error** or **Fatal**; `F7` / `Shift+F7` do the same for **Warn**. With nothing selected the search starts from the top (or, backwards, from the bottom).
@@ -251,6 +259,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Find all (Search panel) | `Ctrl+Shift+F` |
 | Quick find: match case / whole word / regex | `Alt+C` / `Alt+W` / `Alt+R` |
 | Go to line or time | `Ctrl+G` |
+| Navigate back / forward | `Alt+←` / `Alt+→`, mouse side buttons |
 | Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
 | Next / previous warning | `F7` / `Shift+F7` |
 | Add / remove bookmark | `Ctrl+F2` |

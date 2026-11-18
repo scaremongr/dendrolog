@@ -31,6 +31,9 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("findWholeWord"), tr("Quick search: whole word (toggle)"),   QKeySequence(Qt::ALT | Qt::Key_W) },
         { QStringLiteral("findRegex"),     tr("Quick search: regular expression (toggle)"), QKeySequence(Qt::ALT | Qt::Key_R) },
         { QStringLiteral("goTo"),        tr("Go to line or time…"),       QKeySequence(Qt::CTRL | Qt::Key_G) },
+        // История переходов (R-7): как «назад / вперёд» в браузере.
+        { QStringLiteral("navigateBack"),    tr("Navigate back (navigation history)"),    QKeySequence(Qt::ALT | Qt::Key_Left) },
+        { QStringLiteral("navigateForward"), tr("Navigate forward (navigation history)"), QKeySequence(Qt::ALT | Qt::Key_Right) },
         { QStringLiteral("nextError"),   tr("Next error"),                QKeySequence(Qt::Key_F8) },
         { QStringLiteral("prevError"),   tr("Previous error"),            QKeySequence(Qt::SHIFT | Qt::Key_F8) },
         { QStringLiteral("nextWarning"), tr("Next warning"),              QKeySequence(Qt::Key_F7) },
@@ -82,7 +85,16 @@ QKeySequence ShortcutManager::sequence(const QString& id) const
     const auto it = m_overrides.constFind(id);
     if (it != m_overrides.constEnd())
         return it.value();
-    return defaultSequence(id);
+    // Сочетание по умолчанию, которое пользователь уже отдал другой команде
+    // (например, новое сочетание вышедшей позже команды), остаётся у той
+    // команды: два действия на одной клавише не срабатывали бы оба.
+    const QKeySequence def = defaultSequence(id);
+    if (!def.isEmpty()) {
+        for (auto o = m_overrides.constBegin(); o != m_overrides.constEnd(); ++o)
+            if (o.key() != id && o.value() == def)
+                return QKeySequence();
+    }
+    return def;
 }
 
 // ---------------------------------------------------------------------------

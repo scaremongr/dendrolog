@@ -67,6 +67,8 @@ set(DENDROLOG_CORE_SOURCES
     src/recordid.h
     src/bookmarkstore.h
     src/bookmarkstore.cpp
+    src/navhistory.h
+    src/navhistory.cpp
     src/residentlogstore.h
     src/residentlogstore.cpp
     src/indexedlogstore.h
@@ -144,6 +146,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/apptheme.cpp
     src/appsettings.h
     src/appsettings.cpp
+    src/shortcutmanager.h
+    src/shortcutmanager.cpp
     src/colorschemecontroller.h
     src/colorschemecontroller.cpp
 
@@ -199,8 +203,6 @@ set(PROJECT_SOURCES
     src/logtabwidget.h
     src/logtabwidget.cpp
 
-    src/shortcutmanager.h
-    src/shortcutmanager.cpp
 
     src/settingsdialog.h
     src/settingsdialog.cpp

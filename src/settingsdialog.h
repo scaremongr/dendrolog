@@ -59,6 +59,11 @@ private:
     struct ShortcutRow {
         QString           id;            // ShortcutManager command id
         QKeySequenceEdit* edit = nullptr;
+        // Что показано при открытии: сохраняются только изменённые строки.
+        // Иначе пустое поле команды, чьё сочетание по умолчанию уступлено
+        // другой команде (ShortcutManager::sequence), стало бы пустым
+        // переопределением навсегда, едва та команда освободит клавишу.
+        QKeySequence initial;
     };
 
     // ---- Helpers -----------------------------------------------------------
