@@ -28,6 +28,7 @@ filtering, highlighting and live reload.
 - **Badges on the right:**
   - File badge — colour-coded source file (only when a tab holds several files).
   - `+N` / `−` — the line is longer than the visible width; click to expand/collapse it.
+- **Marks on the scrollbar** — short strokes on the vertical scrollbar show where the shown lines are: errors (Error and Fatal, red) and warnings (yellow) in the right half, bookmarks in the middle, matches of the running Search panel query on the left (on the tab it searches). A level mark stands for the first line of an entry, the same line `F8` goes to. When a line is on screen, its mark is inside the scrollbar handle, so dragging the handle to a mark brings that place into view. Marks follow filters, tail updates, reloads and added files; on a very large log they appear a moment after loading, computed in the background.
 - **Syntax highlighting** — strings, numbers, hex, URLs, file paths, GUIDs, timestamps, matching brackets.
 - **Word wrap** — toolbar button, `View → Word Wrap`, or `Alt+Z` (global default in **Settings → Appearance**).
 - **Font size** — `Ctrl` + mouse wheel over the log, `Ctrl++` / `Ctrl+-`, or `View → Larger Font / Smaller Font`; `Ctrl+0` returns to the default size. The size is remembered.

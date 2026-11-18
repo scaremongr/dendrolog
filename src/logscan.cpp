@@ -39,6 +39,17 @@ public:
         return m_entries.at(row)->level();
     }
 
+    qint64 lineAt(qint64 row, const LogFile** file) const override
+    {
+        if (row < 0 || row >= m_entries.size() || !m_entries.at(row)) {
+            *file = nullptr;
+            return 0;
+        }
+        const LogEntry& e = *m_entries.at(row);
+        *file = e.sourceFile().get();
+        return e.originalLineNumber();
+    }
+
     void forEachMeta(qint64 fromRow,
                      const std::function<bool(qint64, const LogEntryMeta&)>& visit)
         const override

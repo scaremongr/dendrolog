@@ -7,6 +7,14 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Marks on the scrollbar.** The vertical scrollbar of a log shows where the
+  shown lines with errors (Error and Fatal) and warnings are, where the
+  bookmarks are and, on the tab the Search panel searches, where its matches
+  are — without scrolling. A level mark stands for the first line of an entry,
+  the line `F8` goes to; a line on screen has its mark inside the scrollbar
+  handle. Marks follow filters, tail updates, reloads, added files, window
+  resizing and bookmark changes. They are computed in the background, so a
+  huge or fast-growing log stays as responsive as before.
 - **Bookmarks with notes.** `Ctrl+F2` bookmarks the selected line (or use
   **Add Bookmark** in a line's context menu); a ribbon in the left margin marks
   it. `F2` / `Shift+F2` jump to the next / previous bookmark among the shown

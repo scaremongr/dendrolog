@@ -5,6 +5,8 @@
 #include "highlightpalette.h"
 #include "lineclassifier.h"
 #include "newlinesindicator.h"
+#include "scrollbarmarks.h"
+#include "scrollbarmarksoverlay.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -48,6 +50,11 @@ LogListView::LogListView(QWidget *parent)
     // шрифт из настроек совпал с текущим, событие не придёт — инициализируем явно.
     updateFontMetricsCache();
     
+    // Отметки на полосе прокрутки (R-6): расчёт по модели и оверлей поверх
+    // скроллбара; сам скроллбар не подменяется.
+    m_scrollbarMarks = new ScrollbarMarks(this);
+    m_scrollbarMarksOverlay = new ScrollbarMarksOverlay(this, m_scrollbarMarks);
+
     // Подключаем сигнал скроллбара для плавной прокрутки
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
         // Прокрутка в окне дебаунса resize (переход, восстановление после
@@ -198,6 +205,7 @@ void LogListView::setModel(QAbstractItemModel *model) {
     {
         auto* logModel = qobject_cast<LogModel*>(model);
         m_indexedBackendModel = logModel && logModel->isIndexedBackend();
+        m_scrollbarMarks->setModel(logModel);
     }
     invalidateRowState();
     if (model) {
@@ -1091,6 +1099,32 @@ qint64 LogListView::rowYOffset(int row) const {
         y += getRowHeight(i);
     }
     return y;
+}
+
+// Отметки R-6: строка → значение скроллбара. Линейную сумму rowYOffset
+// (высоты ещё не построены) здесь звать нельзя — отметок десятки тысяч.
+qreal LogListView::markScrollValue(int row) const {
+    qint64 y;
+    if (m_uniformHeights) {
+        y = qint64(row) * singleRowHeight();
+    } else if (!m_heightsDirty && row >= 0 && row < m_rowPrefixY.size()) {
+        y = m_rowPrefixY[row];
+    } else {
+        const int rows = model() ? model()->rowCount() : 0;
+        if (rows <= 0)
+            return 0;
+        y = qint64(qreal(estimateTotalHeightForDirtyCache(rows)) * row / rows);
+    }
+    return m_scrollScale > 1.0 ? qreal(y) / m_scrollScale : qreal(y);
+}
+
+qint64 LogListView::markGeometryStamp() const {
+    // Всё, от чего зависит markScrollValue при тех же строках.
+    quint64 stamp = m_uniformHeights ? 1 : (m_heightsDirty ? 2 : 3);
+    stamp = stamp * 1000003u + quint64(m_totalHeight);
+    stamp = stamp * 1000003u + quint64(m_prefixDirtyFrom);
+    stamp = stamp * 1000003u + quint64(singleRowHeight());
+    return qint64(stamp);
 }
 
 // O(log N): индекс строки по Y-позиции в контенте
