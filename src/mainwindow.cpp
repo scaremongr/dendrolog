@@ -1,4 +1,5 @@
 ﻿#include "mainwindow.h"
+#include "quicksearchfield.h"
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
 #include "logtabwidget.h"
@@ -325,35 +326,67 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Search input is created in code because the .ui currently defines only actions.
     // Placeholder (с текущим сочетанием клавиш) ставит applyShortcuts().
-    m_searchLineEdit = new QLineEdit(ui->findToolBar);
+    m_searchLineEdit = new QuickSearchField(ui->findToolBar);
     m_searchLineEdit->setObjectName("searchLineEdit");
     m_searchLineEdit->setMinimumWidth(160);
     m_searchLineEdit->setMaximumWidth(280);
     m_searchLineEdit->setClearButtonEnabled(true);
     ui->findToolBar->insertWidget(ui->actionSearchPrevious, m_searchLineEdit);
 
-    // «Aa» — учитывать регистр (раньше быстрый поиск был только без учёта).
-    m_matchCaseAction = new QAction(QStringLiteral("Aa"), this);
-    m_matchCaseAction->setCheckable(true);
-    setBaseToolTip(m_matchCaseAction, tr("Match case"));
-    ui->findToolBar->insertAction(ui->actionSearchPrevious, m_matchCaseAction);
+    // Переключатели запроса — «Aa» (регистр), «ab» (слово целиком), «.*»
+    // (регекс) — рядом с полем; состояние и история живут между запусками.
+    {
+        AppSettings& settings = AppSettings::instance();
+        QuickSearchField* field = m_searchLineEdit;
+        field->matchCaseAction()->setChecked(settings.quickSearchMatchCase());
+        field->wholeWordAction()->setChecked(settings.quickSearchWholeWord());
+        field->regexAction()->setChecked(settings.quickSearchRegex());
+        field->setHistory(settings.quickSearchHistory());
+        const struct { QAction* action; const char* id; } toggles[] = {
+            {field->matchCaseAction(), "findMatchCase"},
+            {field->wholeWordAction(), "findWholeWord"},
+            {field->regexAction(), "findRegex"},
+        };
+        for (const auto& t : toggles) {
+            setBaseToolTip(t.action, t.action->toolTip());
+            ui->findToolBar->insertAction(ui->actionSearchPrevious, t.action);
+            m_shortcutActions.insert(QString::fromLatin1(t.id), t.action);
+        }
+        // В ini — сразу: не теряется при аварии, а у второго окна
+        // (--new-instance) пропадает только то, что оно перепишет само.
+        connect(field, &QuickSearchField::optionsChanged, this, [field]() {
+            AppSettings& s = AppSettings::instance();
+            s.setQuickSearchMatchCase(field->matchCaseAction()->isChecked());
+            s.setQuickSearchWholeWord(field->wholeWordAction()->isChecked());
+            s.setQuickSearchRegex(field->regexAction()->isChecked());
+            s.saveQuickSearch();
+        });
+        connect(field, &QuickSearchField::historyChanged, this, [](const QStringList& entries) {
+            AppSettings::instance().setQuickSearchHistory(entries);
+            AppSettings::instance().saveQuickSearch();
+        });
+        // Запрос из истории — сразу поиск вперёд: повтор без набора.
+        connect(field, &QuickSearchField::historyActivated, this,
+                [this]() { onSearchNextTriggered(); });
+    }
 
     // «All» — тот же текст, но списком всех строк в панели Search: поле
     // тулбара прыгает по совпадениям, панель их перечисляет.
     m_findAllAction = new QAction(tr("All"), this);
     setBaseToolTip(m_findAllAction,
         tr("Find all: list every line with this text in the Search panel\n"
-           "(the log is not filtered)"));
+           "(the log is not filtered; match case, whole word and regex carry over)"));
     ui->findToolBar->addAction(m_findAllAction);
     connect(m_findAllAction, &QAction::triggered, this, [this]() {
-        findAllInSearchPanel(m_searchLineEdit->text(), m_matchCaseAction->isChecked());
+        TextQuery query = m_searchLineEdit->query();
+        // Пустое поле — просто открыть панель; невалидный регекс — не идём.
+        if (!query.isEmpty() && !takeQuickSearchQuery(&query))
+            return;
+        findAllInSearchPanel(query);
     });
     m_shortcutActions.insert(QStringLiteral("findAll"), m_findAllAction);
-    // Красная подложка «не найдено» живёт до правки запроса.
-    connect(m_searchLineEdit, &QLineEdit::textChanged,
-            this, [this]() { setQuickSearchNotFound(false); });
-    connect(m_matchCaseAction, &QAction::toggled,
-            this, [this]() { setQuickSearchNotFound(false); });
+    // Подложка «не найдено» живёт до правки запроса или флагов — это делает
+    // само поле.
 
     // Connect search actions
     connect(m_searchLineEdit, &QLineEdit::returnPressed, this, &MainWindow::onSearchEnterPressed);
@@ -539,9 +572,21 @@ void MainWindow::applyShortcuts()
 
     const QKeySequence findSeq = mgr.sequence(QStringLiteral("focusSearch"));
     if (m_searchLineEdit)
+    {
         m_searchLineEdit->setPlaceholderText(findSeq.isEmpty()
             ? tr("Find in log")
             : tr("Find in log (%1)").arg(findSeq.toString(QKeySequence::NativeText)));
+        const auto keys = [&mgr](const char* id) {
+            return mgr.sequence(QString::fromLatin1(id)).toString(QKeySequence::NativeText);
+        };
+        QString tip = tr("Find in log: Enter — next");
+        if (!keys("searchNext").isEmpty())
+            tip += QStringLiteral(" (%1)").arg(keys("searchNext"));
+        if (!keys("searchPrev").isEmpty())
+            tip += tr(", %1 — previous").arg(keys("searchPrev"));
+        tip += QLatin1Char('\n') + tr("Down arrow — recent searches");
+        m_searchLineEdit->setBaseToolTip(tip);
+    }
     if (m_welcome)
         m_welcome->setShortcutHints(mgr.sequence(QStringLiteral("open")), findSeq);
 }
@@ -557,6 +602,11 @@ void MainWindow::refreshToolIcons()
     ui->actionWordWrap->setIcon(tintedIcon(QStringLiteral(":/icons/wordwrap.svg"), glyph));
     ui->actionSearchPrevious->setIcon(tintedIcon(QStringLiteral(":/icons/chevron-up.svg"), glyph));
     ui->actionSearchNext->setIcon(tintedIcon(QStringLiteral(":/icons/chevron-down.svg"), glyph));
+    if (m_searchLineEdit) {
+        m_searchLineEdit->historyAction()->setIcon(
+            tintedIcon(QStringLiteral(":/icons/chevron-down.svg"), glyph));
+        m_searchLineEdit->refreshStyle();
+    }
 
     const AppTheme& theme = AppTheme::instance();
     ui->actionFatal->setIcon(levelDotIcon(theme.forLevel(LogLevel::Fatal)));
@@ -3307,11 +3357,11 @@ void MainWindow::showGoToDialog()
     m_statusLabel->setText(dialog.targetNote().isEmpty() ? tr("Ready") : dialog.targetNote());
 }
 
-void MainWindow::findAllInSearchPanel(const QString& text, bool caseSensitive)
+void MainWindow::findAllInSearchPanel(const TextQuery& query)
 {
     if (!m_searchQuery || !m_searchDockWidget)
         return;
-    if (text.isEmpty()) {
+    if (query.isEmpty()) {
         m_searchDockWidget->show();
         m_searchDockWidget->raise();
         m_searchQuery->focusFirstRule();
@@ -3319,7 +3369,7 @@ void MainWindow::findAllInSearchPanel(const QString& text, bool caseSensitive)
     }
     // Сначала новый запрос, потом показ панели и поиск — иначе появление
     // панели успело бы запустить прежний запрос.
-    m_searchQuery->setSingleRule(text, caseSensitive);
+    m_searchQuery->setSingleRule(query);
     onSearchRequested();
     m_searchDockWidget->raise();
 }
@@ -3696,14 +3746,26 @@ void MainWindow::onSearchEnterPressed()
 
 void MainWindow::onSearchNextTriggered()
 {
-    if (m_activeLogView && m_searchLineEdit)
-    {
-        QString searchTerm = m_searchLineEdit->text();
-        if (!searchTerm.isEmpty())
-        {
-            m_activeLogView->searchTextNext(searchTerm, m_matchCaseAction->isChecked());
-        }
+    TextQuery query;
+    if (m_activeLogView && takeQuickSearchQuery(&query))
+        m_activeLogView->searchTextNext(query);
+}
+
+bool MainWindow::takeQuickSearchQuery(TextQuery* query)
+{
+    if (!m_searchLineEdit)
+        return false;
+    *query = m_searchLineEdit->query();
+    if (query->isEmpty())
+        return false;
+    // Невалидный регекс: поле уже в красной рамке, причина — в строке статуса.
+    const QString error = m_searchLineEdit->queryError();
+    if (!error.isEmpty()) {
+        m_statusLabel->setText(error);
+        return false;
     }
+    m_searchLineEdit->remember(query->text);
+    return true;
 }
 
 void MainWindow::onQuickSearchProgress(const QString& term, int percent)
@@ -3723,8 +3785,11 @@ void MainWindow::onQuickSearchFinished(const QString& term, bool found)
     }
     m_quickSearchStatusShown = false;
     // «Не найдено» видно и в самом поле, а не только в строке статуса.
-    if (m_searchLineEdit && m_searchLineEdit->text() == term)
-        setQuickSearchNotFound(!found);
+    // Только если поле всё ещё держит ТОТ запрос (текст и флаги): поиск,
+    // запущенный до переключения флага, поле не красит.
+    const auto* view = qobject_cast<const LogViewWidget*>(sender());
+    if (m_searchLineEdit && view && view->quickSearchQuery() == m_searchLineEdit->query())
+        m_searchLineEdit->setNotFound(!found);
 }
 
 void MainWindow::onLevelJumpProgress(LogLevelMask levels, bool forward, int percent)
@@ -3774,21 +3839,6 @@ void MainWindow::onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJu
     m_levelJumpStatusText = text;
 }
 
-void MainWindow::setQuickSearchNotFound(bool notFound)
-{
-    if (!m_searchLineEdit)
-        return;
-    if (!notFound) {
-        if (!m_searchLineEdit->styleSheet().isEmpty())
-            m_searchLineEdit->setStyleSheet(QString());
-        return;
-    }
-    const QColor bg = CardFrame::mixedColor(AppTheme::instance().logError,
-                                            palette().color(QPalette::Base), 0.72);
-    m_searchLineEdit->setStyleSheet(QStringLiteral("QLineEdit { background-color: %1; }")
-                                        .arg(bg.name()));
-}
-
 void MainWindow::updateSearchResultsStatus()
 {
     if (!m_searchResultsStatusLabel || !m_searchController)
@@ -3809,12 +3859,15 @@ void MainWindow::onViewTextAction(LogListView::TextAction action, const QString&
     switch (action) {
     case LogListView::TextAction::Find:
         if (m_searchLineEdit) {
+            // Выделенный текст — литерал: «.*» выключаем, а не экранируем
+            // текст (иначе в историю ушла бы экранированная строка).
+            m_searchLineEdit->regexAction()->setChecked(false);
             m_searchLineEdit->setText(text);
             onSearchNextTriggered();
         }
         break;
     case LogListView::TextAction::FindAll:
-        findAllInSearchPanel(text, /*caseSensitive=*/false);
+        findAllInSearchPanel(TextQuery(text, Qt::CaseInsensitive));
         break;
     case LogListView::TextAction::FilterInclude:
     case LogListView::TextAction::FilterExclude: {
@@ -3871,14 +3924,9 @@ void MainWindow::onViewTextAction(LogListView::TextAction action, const QString&
 
 void MainWindow::onSearchPreviousTriggered()
 {
-    if (m_activeLogView && m_searchLineEdit)
-    {
-        QString searchTerm = m_searchLineEdit->text();
-        if (!searchTerm.isEmpty())
-        {
-            m_activeLogView->searchTextPrevious(searchTerm, m_matchCaseAction->isChecked());
-        }
-    }
+    TextQuery query;
+    if (m_activeLogView && takeQuickSearchQuery(&query))
+        m_activeLogView->searchTextPrevious(query);
 }
 
 // ---------------------------------------------------------------------------

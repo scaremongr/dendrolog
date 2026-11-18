@@ -41,6 +41,8 @@ enum class ThemeMode {
     Dark,
 };
 
+class QSettings;
+
 class AppSettings : public QObject
 {
     Q_OBJECT
@@ -132,6 +134,24 @@ public:
     int  textCacheBudgetMB() const;
     void setTextCacheBudgetMB(int mb);
 
+    // ---- Быстрый поиск (поле в тулбаре) ----------------------------------- //
+
+    // Переключатели «Aa», «слово целиком», «.*» и история запросов; в ini —
+    // группа [QuickSearch]. История — только тексты, свежий первым (правила —
+    // QuickSearchHistory). Это состояние поля, а не предпочтение: сеттеры не
+    // шлют settingsChanged (иначе каждый запуск поиска переприменял бы
+    // настройки ко всем вкладкам). В ini — save() или saveQuickSearch()
+    // (только эта группа, сразу после изменения).
+    bool quickSearchMatchCase() const { return m_quickSearchMatchCase; }
+    void setQuickSearchMatchCase(bool on);
+    bool quickSearchWholeWord() const { return m_quickSearchWholeWord; }
+    void setQuickSearchWholeWord(bool on);
+    bool quickSearchRegex() const { return m_quickSearchRegex; }
+    void setQuickSearchRegex(bool on);
+    QStringList quickSearchHistory() const { return m_quickSearchHistory; }
+    void setQuickSearchHistory(const QStringList& entries);
+    void saveQuickSearch();
+
 signals:
     // Emitted after any call to a set*() method, so consumers (e.g. the
     // directory scanner) can update themselves without each class needing
@@ -139,6 +159,8 @@ signals:
     void settingsChanged();
 
 private:
+    void writeQuickSearch(QSettings& s) const;
+
     AppSettings()  = default;
     ~AppSettings() = default;
     Q_DISABLE_COPY_MOVE(AppSettings)
@@ -155,4 +177,8 @@ private:
     int         m_fontSize        { kDefaultFontSize };
     int         m_indexedThresholdMB { 512 };
     int         m_textCacheBudgetMB { 256 };
+    bool        m_quickSearchMatchCase { false };
+    bool        m_quickSearchWholeWord { false };
+    bool        m_quickSearchRegex { false };
+    QStringList m_quickSearchHistory;
 };

@@ -1339,9 +1339,9 @@ void LogListView::setTextHighlightPatterns(const QVector<HighlightPattern>& patt
     viewport()->update();
 }
 
-void LogListView::showSearchMatch(int row, const QString& term, bool caseSensitive)
+void LogListView::showSearchMatch(int row, const TextQuery& query)
 {
-    if (row < 0 || term.isEmpty() || !model() || row >= model()->rowCount()) {
+    if (row < 0 || query.isEmpty() || !model() || row >= model()->rowCount()) {
         clearSearchMatch();
         return;
     }
@@ -1351,11 +1351,9 @@ void LogListView::showSearchMatch(int row, const QString& term, bool caseSensiti
         removeRowPixmap(m_searchMatchRow);
 
     m_searchMatchRow = row;
-    HighlightPattern pattern;
-    pattern.text            = term;
-    pattern.color           = AppTheme::instance().searchMatch;
-    pattern.caseSensitivity = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    m_searchHighlighter.setPatterns({pattern});
+    // Тот же запрос, что нашёл строку (слово целиком и регекс — регексом):
+    // залито ровно найденное.
+    m_searchHighlighter.setPatterns({query.highlightPattern(AppTheme::instance().searchMatch)});
 
     // Свёрнутую строку раскрываем в многострочный режим, чтобы были видны
     // все вхождения (включая попавшие в скрытую часть). toggleRowMultiLine

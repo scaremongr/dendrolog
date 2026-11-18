@@ -11,6 +11,7 @@
 #include <limits>
 #include "syntaxhighlighter.h"
 #include "textmatchhighlighter.h"
+#include "textquery.h"
 #include "tabexpander.h"
 #include "linewrapper.h"
 
@@ -173,9 +174,10 @@ public:
 
     // ---- Подсветка результата поиска (одна строка) -------------------------
     // Раскрывает строку row (если она свёрнута в однострочный режим) и
-    // подсвечивает в ней — и только в ней — все вхождения term.
-    // Предыдущая поисковая подсветка снимается автоматически.
-    void showSearchMatch(int row, const QString& term, bool caseSensitive);
+    // подсвечивает в ней — и только в ней — все совпадения запроса
+    // (TextQuery::highlightPattern). Предыдущая поисковая подсветка
+    // снимается автоматически.
+    void showSearchMatch(int row, const TextQuery& query);
     // Переход к строке как выбор пользователя (Go to Line / Time, таймлайн,
     // статистика, Search, быстрый поиск, F8 — общий путь всех переходов): строка
     // становится текущей и выделенной — значит, и якорем восстановления

@@ -433,12 +433,13 @@ void FilterPanelWidget::focusFirstRule()
     m_cards.first()->focusText();
 }
 
-void FilterPanelWidget::setSingleRule(const QString& text, bool caseSensitive)
+void FilterPanelWidget::setSingleRule(const TextQuery& query)
 {
     while (!m_cards.isEmpty())
         removeCard(m_cards.last());
-    FilterRule rule = quickRule(text, /*exclude=*/false);
-    rule.caseSensitive = caseSensitive;
+    FilterRule rule = quickRule(query.patternText(), /*exclude=*/false);
+    rule.caseSensitive = query.caseSensitive;
+    rule.isRegex = query.needsRegex();
     addRule(rule);
 }
 

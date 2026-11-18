@@ -7,6 +7,16 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Whole word and regular expression in quick find.** Two toggles next to
+  **Aa** in the toolbar find box: **ab** (`Alt+W`) finds the text only as a
+  whole word, **.\*** (`Alt+R`) treats it as a regular expression with the same
+  syntax as Text Filters; `Alt+C` toggles **Aa**. An invalid expression marks
+  the box red and says where the error is. The toggles, **Aa** included, are
+  remembered between runs, and **All** (`Ctrl+Shift+F`) carries them over to
+  the Search panel.
+- **Recent searches in quick find:** the down arrow in the find box (or the
+  arrow at its right edge) lists the last 20 searches; picking one runs it
+  again. **Clear search history** forgets them.
 - **Next / Previous Error** (`F8` / `Shift+F8`) and **Next / Previous
   Warning** (`F7` / `Shift+F7`), `View` menu: jump from the selected line to
   the nearest shown entry of level Error or Fatal (or Warn). A multi-line

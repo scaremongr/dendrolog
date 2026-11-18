@@ -144,8 +144,10 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 ## Quick find (toolbar)
 
-- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
-- To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). The Search panel also takes several rules at once.
+- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). Three toggles next to the box refine it (see below). The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
+- The toggles: **Aa** (`Alt+C`) — match case; **ab** underlined (`Alt+W`) — whole word: the match may not touch a letter, digit or `_` on either side, so `error` skips `errors` and `my_error` but finds `[error]`; **.\*** (`Alt+R`) — regular expression, the same syntax as in Text Filters (see *Regular expressions* above: found anywhere in the line). Whole word works with a regex too: `\d+` then finds a number that is not glued to letters. An **invalid expression** gives the box a red border, its tooltip and the status bar say what is wrong and at which position, and nothing is searched until it is fixed. The toggles are remembered between runs.
+- **Recent searches:** the down arrow in the box (or the arrow button at its right edge) lists the last 20 searches, newest first; picking one runs it again. A query is remembered when it is actually searched (`Enter`, `F3`, `Shift+F3`, the arrow buttons, **All**), not while typing; only the text is kept, the toggles stay as they are. **Clear search history** at the bottom of the list forgets them.
+- To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). Match case, whole word and regex carry over: the panel gets one rule with the same case setting, and a regex or whole-word query becomes a **Regular expression** rule (whole word — the text wrapped in word-boundary checks). The Search panel also takes several rules at once.
 
 ## Go to line or time
 
@@ -213,6 +215,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Focus search field | `Ctrl+F` |
 | Search next / previous | `F3` / `Shift+F3` |
 | Find all (Search panel) | `Ctrl+Shift+F` |
+| Quick find: match case / whole word / regex | `Alt+C` / `Alt+W` / `Alt+R` |
 | Go to line or time | `Ctrl+G` |
 | Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
 | Next / previous warning | `F7` / `Shift+F7` |

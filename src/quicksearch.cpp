@@ -22,14 +22,14 @@ QuickSearch::~QuickSearch()
     cancel();
 }
 
-void QuickSearch::start(LogModel* model, const QString& text, Qt::CaseSensitivity cs,
-                        bool forward, int startRow, bool wrapAround)
+void QuickSearch::start(LogModel* model, const TextQuery& query, bool forward,
+                        int startRow, bool wrapAround)
 {
     launch(model, startRow,
-           [text, cs, forward, startRow, wrapAround](const LogScanSnapshot& snapshot,
-                                                     const std::atomic_bool* cancel,
-                                                     std::atomic<int>* progress) {
-               return scan(snapshot, text, cs, forward, startRow, wrapAround, cancel, progress);
+           [query, forward, startRow, wrapAround](const LogScanSnapshot& snapshot,
+                                                  const std::atomic_bool* cancel,
+                                                  std::atomic<int>* progress) {
+               return scan(snapshot, query, forward, startRow, wrapAround, cancel, progress);
            });
 }
 
@@ -139,66 +139,11 @@ void QuickSearch::detachModel()
     m_model = nullptr;
 }
 
-qint64 QuickSearch::scan(const LogScanSnapshot& snapshot, const QString& text,
-                         Qt::CaseSensitivity cs, bool forward, qint64 startRow,
-                         bool wrapAround, const std::atomic_bool* cancel,
-                         std::atomic<int>* progress)
+qint64 QuickSearch::scan(const LogScanSnapshot& snapshot, const TextQuery& query,
+                         bool forward, qint64 startRow, bool wrapAround,
+                         const std::atomic_bool* cancel, std::atomic<int>* progress)
 {
-    const qint64 n = snapshot.rowCount();
-    if (text.isEmpty() || n == 0)
-        return -1;
-
-    qint64 found = -1;
-    qint64 scanned = 0;
-    bool cancelled = false;
-    // Прогресс — доля просмотренных строк от всех: второй проход при
-    // заворачивании продолжает первый.
-    const auto check = [&](qint64 row, QStringView line) {
-        if ((++scanned & 0xFFF) == 0) {
-            if (cancel && cancel->load(std::memory_order_relaxed)) {
-                cancelled = true;
-                return false;
-            }
-            if (progress)
-                progress->store(int(qMin<qint64>(99, scanned * 100 / n)),
-                                std::memory_order_relaxed);
-        }
-        if (line.contains(text, cs)) {
-            found = row;
-            return false;
-        }
-        return true;
-    };
-
-    // Та же семантика, что у LogStore::findNext/PreviousOccurrence.
-    if (forward) {
-        const qint64 first = qBound<qint64>(0, startRow + 1, n);
-        snapshot.forEachLine(first, [&](qint64 row, const LogEntryMeta&, QStringView line) {
-            return check(row, line);
-        });
-        if (found < 0 && !cancelled && wrapAround) {
-            snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta&, QStringView line) {
-                if (row > startRow)
-                    return false;
-                return check(row, line);
-            });
-        }
-    } else {
-        const qint64 current = (startRow < 0 || startRow >= n) ? n - 1 : startRow - 1;
-        snapshot.forEachLineBackward(current, [&](qint64 row, const LogEntryMeta&, QStringView line) {
-            return check(row, line);
-        });
-        if (found < 0 && !cancelled && wrapAround) {
-            snapshot.forEachLineBackward(n - 1, [&](qint64 row, const LogEntryMeta&, QStringView line) {
-                if (row < startRow)
-                    return false;
-                return check(row, line);
-            });
-        }
-    }
-    if (progress)
-        progress->store(100, std::memory_order_relaxed);
-    return cancelled ? -1 : found;
+    return snapshot.findRowWithText(query, startRow, forward, wrapAround, cancel, progress);
 }
 
 qint64 QuickSearch::mapRow(qint64 row, const QVector<Insertion>& insertions)

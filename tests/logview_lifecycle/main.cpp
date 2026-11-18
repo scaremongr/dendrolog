@@ -139,9 +139,9 @@ static QString quickSearch(LogViewWidget& tab, bool forward, const std::function
         &tab, &LogViewWidget::quickSearchFinished,
         [&](const QString&, bool ok) { finished = true; found = ok; });
     if (forward)
-        tab.searchTextNext("NEEDLE", true);
+        tab.searchTextNext(TextQuery("NEEDLE", Qt::CaseSensitive));
     else
-        tab.searchTextPrevious("NEEDLE", true);
+        tab.searchTextPrevious(TextQuery("NEEDLE", Qt::CaseSensitive));
     if (meanwhile)
         meanwhile(); // до возврата в цикл событий: итог скана ещё не доставлен
     const bool done = testdocs::waitFor([&] { return finished; });

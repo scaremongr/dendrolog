@@ -93,6 +93,10 @@ set(DENDROLOG_CORE_SOURCES
     src/fieldreextraction.cpp
     src/quicksearch.h
     src/quicksearch.cpp
+    src/quicksearchhistory.h
+    src/quicksearchhistory.cpp
+    src/textquery.h
+    src/textquery.cpp
     src/gotolocation.h
     src/gotolocation.cpp
 )
@@ -104,6 +108,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/logviewwidget.cpp
     src/gotodialog.h
     src/gotodialog.cpp
+    src/quicksearchfield.h
+    src/quicksearchfield.cpp
     src/tabexpander.h
     src/linewrapper.h
     src/texttoken.h

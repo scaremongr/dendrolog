@@ -16,6 +16,8 @@
 #include "filterruleset.h"
 
 // Forward declarations for Qt classes used in members or method signatures
+class QuickSearchField;
+struct TextQuery;
 class QProgressBar;
 class QLabel;
 class LogViewWidget;
@@ -143,7 +145,11 @@ private slots:
     void onSearchCleared();
     // «Find All»: запрос из одного правила «Contains text» в панели Search
     // и поиск; пустой text — просто открыть панель с курсором в правиле.
-    void findAllInSearchPanel(const QString& text, bool caseSensitive);
+    void findAllInSearchPanel(const TextQuery& query);
+    // Запрос поля быстрого поиска, годный к запуску: непустой и валидный.
+    // Невалидный регекс — сообщение в строке статуса, false. Годный —
+    // запоминается в истории.
+    bool takeQuickSearchQuery(TextQuery* query);
     // Go to Line / Time (Ctrl+G): диалог над активной вкладкой.
     void showGoToDialog();
     void onViewExportFinished(const ViewExport::Result& result);
@@ -182,8 +188,8 @@ private:
     QProgressBar* m_progressBar;
     QLabel* m_statusLabel;
     QLabel* m_lineInfoLabel;
-    QLineEdit* m_searchLineEdit = nullptr;
-    QAction*   m_matchCaseAction = nullptr;   // «Aa» — учитывать регистр
+    // Поле быстрого поиска: запрос, переключатели «Aa» / слово / «.*», история.
+    QuickSearchField* m_searchLineEdit = nullptr;
     // Стартовый экран вместо пустой рамки, пока нет ни одной вкладки.
     WelcomeWidget* m_welcome = nullptr;
     // Строка статуса показывает прогресс быстрого поиска — вернуть её по итогу.
@@ -331,8 +337,6 @@ private:
     // либо весь диапазон её лога (а не «вчера–сегодня»).
     void seedTimeFilterEditors();
     void updateTimeFilterInfo();
-    // Подсветка поля быстрого поиска «не найдено».
-    void setQuickSearchNotFound(bool notFound);
     // Подпись списка результатов панели Search: статус контроллера + как
     // начать поиск.
     void updateSearchResultsStatus();

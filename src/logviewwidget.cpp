@@ -34,7 +34,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_quickSearch = new QuickSearch(this);
     connect(m_quickSearch, &QuickSearch::finished, this, &LogViewWidget::handleQuickSearchFinished);
     connect(m_quickSearch, &QuickSearch::progress, this,
-            [this](int percent) { emit quickSearchProgress(m_quickSearchTerm, percent); });
+            [this](int percent) { emit quickSearchProgress(m_quickSearchQuery.text, percent); });
     // Модель перестроилась посреди скана (фильтр, перезагрузка файла) —
     // ищем заново от текущей строки.
     connect(m_quickSearch, &QuickSearch::invalidated, this, &LogViewWidget::startQuickSearch);
@@ -659,22 +659,20 @@ void LogViewWidget::handleParsingProgress(int progressPercentage, const LogFileP
 }
 
 
-void LogViewWidget::searchTextNext(const QString& term, bool caseSensitive)
+void LogViewWidget::searchTextNext(const TextQuery& query)
 {
-    if (!m_model || term.isEmpty())
+    if (!m_model || query.isEmpty())
         return;
-    m_quickSearchTerm = term;
-    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchQuery = query;
     m_quickSearchForward = true;
     startQuickSearch();
 }
 
-void LogViewWidget::searchTextPrevious(const QString& term, bool caseSensitive)
+void LogViewWidget::searchTextPrevious(const TextQuery& query)
 {
-    if (!m_model || term.isEmpty())
+    if (!m_model || query.isEmpty())
         return;
-    m_quickSearchTerm = term;
-    m_quickSearchCaseSensitive = caseSensitive;
+    m_quickSearchQuery = query;
     m_quickSearchForward = false;
     startQuickSearch();
 }
@@ -690,9 +688,7 @@ void LogViewWidget::startQuickSearch()
                                                     m_view->selectedRecordId(),
                                                     m_view->selectedRecordFile(),
                                                     m_quickSearchForward);
-    m_quickSearch->start(m_model, m_quickSearchTerm,
-                         m_quickSearchCaseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive,
-                         m_quickSearchForward, currentRow);
+    m_quickSearch->start(m_model, m_quickSearchQuery, m_quickSearchForward, currentRow);
 }
 
 bool LogViewWidget::goToEntry(int logicalEntryId, const LogFile* sourceFile)
@@ -757,13 +753,13 @@ void LogViewWidget::finishLevelJump(int row, int startRow)
 
 void LogViewWidget::handleQuickSearchFinished(int row)
 {
-    const QString term = m_quickSearchTerm;
+    const QString term = m_quickSearchQuery.text;
     if (row >= 0 && row < m_model->rowCount()) {
         // Раскрыть найденную строку и подсветить в ней вхождения term ДО
         // перехода: раскрытие меняет высоту строки, и прокрутка должна
         // целиться уже в финальную геометрию. Сам переход — общий (goToRow):
         // строка становится выбором пользователя, follow-tail снимается.
-        m_view->showSearchMatch(row, term, m_quickSearchCaseSensitive);
+        m_view->showSearchMatch(row, m_quickSearchQuery);
         m_view->goToRow(row);
         emit quickSearchFinished(term, true);
     } else {

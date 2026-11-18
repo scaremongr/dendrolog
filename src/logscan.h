@@ -9,6 +9,8 @@
 #include <functional>
 #include <memory>
 
+struct TextQuery;
+
 // ============================================================================
 // LogEntryMeta / LogScanSnapshot — шов для последовательных сканов данных вне
 // модели (статистика, таймлайн, фильтры). Потребители не знают, КАК хранятся
@@ -29,8 +31,9 @@ struct LogEntryMeta {
     bool     isPlainText = false;
 };
 
-// Обход строк «ближайшая подходящая от startRow» (переход по уровню; поиск
-// текста держит ту же семантику своими циклами):
+// Обход строк «ближайшая подходящая от startRow» — один на переход по уровню
+// (findRowWithLevel) и на поиск текста (findRowWithText: быстрый поиск в фоне
+// и синхронный LogStore::findOccurrence):
 //   • вперёд — со startRow + 1 до конца; назад — со startRow - 1 до начала
 //     (startRow вне [0, n) — с последней строки);
 //   • wrapAround — затем с другого края до startRow ВКЛЮЧИТЕЛЬНО: строка, с
@@ -81,6 +84,16 @@ class LogScanSnapshot {
 public:
     // Реализация снапшота конкретного хранилища. forEachLine может читать
     // диск — реализация обязана быть самодостаточной (владеть всеми ручками).
+    // Чтение текста строк по одной в порядке обхода (вперёд или назад) —
+    // для сканов через scanRowsFrom. Держит свои ручки (индексный бэкенд —
+    // SequentialLineReader), принадлежит одному потоку. QStringView валиден
+    // до следующего вызова lineAt.
+    class LineCursor {
+    public:
+        virtual ~LineCursor() = default;
+        virtual QStringView lineAt(qint64 row) = 0;
+    };
+
     class Impl {
     public:
         virtual ~Impl() = default;
@@ -102,6 +115,7 @@ public:
             const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&
                 visit) const = 0;
         virtual QString textAt(qint64 row) const = 0;
+        virtual std::unique_ptr<LineCursor> lineCursor() const = 0;
         virtual LogFilePtr sourceFilePtrAt(qint64 row) const = 0;
         // Поля строки row, чей текст — text (как отдал forEachLine): те же,
         // что покажет модель. Резидентный снапшот читает поля записи (их
@@ -140,6 +154,15 @@ public:
     qint64 findRowWithLevel(LogLevelMask levels, qint64 startRow, bool forward,
                             bool wrapAround, const std::atomic_bool* cancel = nullptr,
                             std::atomic<int>* progress = nullptr) const;
+
+    // Ближайшая от startRow строка, подходящая под запрос (TextMatcher:
+    // подстрока, слово целиком, регекс); -1 — нет, запрос пуст или невалиден,
+    // либо отменено. Порядок обхода — scanRowsFrom, как у findRowWithLevel.
+    // Текст читается (индексный бэкенд — с диска): на большом документе —
+    // из воркера (QuickSearch).
+    qint64 findRowWithText(const TextQuery& query, qint64 startRow, bool forward,
+                           bool wrapAround, const std::atomic_bool* cancel = nullptr,
+                           std::atomic<int>* progress = nullptr) const;
 
     // Последовательный обход от fromRow до конца; visit вернул false — стоп.
     void forEachMeta(qint64 fromRow,

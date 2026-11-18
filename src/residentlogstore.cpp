@@ -486,59 +486,6 @@ int ResidentLogStore::nearestVisibleRowForLine(qint64 lineNumber,
     return qMin(found.row, int(m_filteredEntries.size()) - 1);
 }
 
-int ResidentLogStore::findNextOccurrence(const QString& text, int startRow,
-                                         Qt::CaseSensitivity cs, bool wrapAround) const
-{
-    if (text.isEmpty() || m_filteredEntries.isEmpty())
-        return -1;
-
-    const int numRows = int(m_filteredEntries.size());
-    const int firstRow = qBound(0, startRow + 1, numRows);
-
-    // Search from startRow + 1 to the end
-    for (int i = firstRow; i < numRows; ++i) {
-        if (m_filteredEntries[i] && m_filteredEntries[i]->message().contains(text, cs))
-            return i;
-    }
-
-    // If wrapAround is true and not found, search from the beginning to startRow
-    if (wrapAround) {
-        for (int i = 0; i <= startRow && i < numRows; ++i) {
-            if (m_filteredEntries[i] && m_filteredEntries[i]->message().contains(text, cs))
-                return i;
-        }
-    }
-    return -1;
-}
-
-int ResidentLogStore::findPreviousOccurrence(const QString& text, int startRow,
-                                             Qt::CaseSensitivity cs, bool wrapAround) const
-{
-    if (text.isEmpty() || m_filteredEntries.isEmpty())
-        return -1;
-
-    const int numRows = int(m_filteredEntries.size());
-    int currentRow = startRow - 1;
-    if (startRow < 0 || startRow >= numRows) { // If startRow is out of bounds, start from the end
-        currentRow = numRows - 1;
-    }
-
-    // Search from startRow - 1 to the beginning
-    for (int i = currentRow; i >= 0; --i) {
-        if (m_filteredEntries[i] && m_filteredEntries[i]->message().contains(text, cs))
-            return i;
-    }
-
-    // If wrapAround is true and not found, search from the end to startRow
-    if (wrapAround) {
-        for (int i = numRows - 1; i >= startRow && i >= 0; --i) {
-            if (m_filteredEntries[i] && m_filteredEntries[i]->message().contains(text, cs))
-                return i;
-        }
-    }
-    return -1;
-}
-
 LogScanSnapshot ResidentLogStore::scanSnapshot(bool filteredOnly) const
 {
     return LogScanSnapshot::fromEntries(filteredOnly ? m_filteredEntries
