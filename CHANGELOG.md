@@ -37,6 +37,13 @@ All notable changes to DendroLog are documented here. The format follows
   the counters, so they agree with the opened tab.
 
 ### Fixed
+- **UTF-16 logs that grow.** Lines appended to an open UTF-16 file (and
+  UTF-32) used to show as garbage: the new part was read as UTF-8. It is now
+  read in the file's encoding, a line written in several parts stays one
+  line, and a line continuing a multi-line entry stays in that entry.
+- A UTF-16 file larger than the indexed-backend threshold is no longer read
+  again from the start on every auto-reload tick and every `F5`; only the
+  appended part is read.
 - With **Follow tail** on, a jump no longer snaps back to the end of a growing
   log on the next appended lines. A click on the timeline, a jump from
   Statistics, a result picked in the Search panel and a quick-search match

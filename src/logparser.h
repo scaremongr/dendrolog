@@ -6,6 +6,7 @@
 #include "lineclassifier.h"
 #include <QVector>
 #include <QString>
+#include <QStringConverter>
 #include <QDateTime>
 #include <QThreadPool>
 #include <atomic>
@@ -62,8 +63,11 @@ public slots:
     void startParsing(const LogFilePtr& logFile);
     // Incremental parse: read only bytes starting at startOffset (a line
     // boundary), continuing the numbering and the current record of context.
+    // encoding is the one the file was first read in (tailState reports it):
+    // there is no BOM in the middle of a file, so a tail cannot detect it.
     void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
-                          const ResumeContext& context);
+                          const ResumeContext& context,
+                          QStringConverter::Encoding encoding = QStringConverter::Utf8);
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
@@ -71,9 +75,12 @@ signals:
     // Right before parsingFinished of a successful parse: the exact byte
     // offset reading stopped at (the next incremental parse starts there), and
     // whether the last line had no newline yet — then lastLineStart is its
-    // byte offset, to read it again once the writer completes it.
+    // byte offset, to read it again once the writer completes it. Both offsets
+    // fall on a code unit boundary (UTF-16: even, UTF-32: multiple of four).
+    // encoding (a QStringConverter::Encoding) is what the bytes were decoded
+    // as — pass it to startParsingFrom for the tail.
     void tailState(const LogFilePtr& logFile, qint64 endOffset, bool lastLinePartial,
-                   qint64 lastLineStart);
+                   qint64 lastLineStart, int encoding);
     void parsingFinished(int totalEntries, const LogFilePtr& logFile);
     void parsingFailed(const LogFilePtr& logFile);
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
@@ -88,7 +95,8 @@ private:
     // parsingStarted/Failed) and an incremental read.
     void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                    const ResumeContext& context, const LogPattern& pattern,
-                   bool extraction, bool initial);
+                   bool extraction, bool initial,
+                   QStringConverter::Encoding encoding);
 
     // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
     // безопасно читается воркерами пула (см. LineClassifier).
