@@ -18,6 +18,7 @@
 #include <QString>
 #include <QStringDecoder>
 #include <QStringEncoder>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTextStream>
 
@@ -628,6 +629,351 @@ static void testDecideFuzz()
 }
 
 // ---------------------------------------------------------------------------
+// Шаг 3а: предварительное решение и свидетельство
+// ---------------------------------------------------------------------------
+
+// Сжатое свидетельство решает так же, как исходные байты: ASCII в decide
+// значит только «разделяет байты ≥ 0x80».
+static void testEvidenceCompression()
+{
+    std::mt19937 rng(3);
+    const TextEncoding all[] = {TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                TextEncoding::Koi8R, TextEncoding::Windows1252};
+    int mismatches = 0, trials = 0;
+    for (int t = 0; t < 4000; ++t) {
+        QString text;
+        const int lines = std::uniform_int_distribution<int>(1, 5)(rng);
+        for (int i = 0; i < lines; ++i)
+            text += randomLine(rng) + QLatin1Char('\n');
+        const int kind = t % 5;
+        QByteArray raw = kind == 4 ? text.toUtf8()
+                                   : *encode(text, encodingOf(TextEncoding(int(TextEncoding::Windows1251) + kind % 3)));
+        // Мусорные байты и обрыв окна посреди последовательности.
+        if (std::uniform_int_distribution<int>(0, 3)(rng) == 0)
+            raw.insert(std::uniform_int_distribution<int>(0, int(raw.size()))(rng), char(0xFF));
+        if (std::uniform_int_distribution<int>(0, 3)(rng) == 0)
+            raw.chop(std::uniform_int_distribution<int>(0, 3)(rng));
+        EncodingEvidence ev;
+        const qsizetype used = EncodingDetector::appendEvidence(ev, raw.constData(), raw.size(),
+                                                                qsizetype(1) << 30);
+        CHECK(used == raw.size(), "evidence: unlimited append consumes everything");
+        for (const TextEncoding fallback : all) {
+            ++trials;
+            mismatches += EncodingDetector::decide(QByteArrayView(ev.bytes), fallback)
+                       != EncodingDetector::decide(raw, fallback);
+        }
+        CHECK(qsizetype(ev.bytes.size()) <= 2 * ev.highBytes + 1, "evidence: ASCII runs collapse");
+    }
+    CHECK(mismatches == 0, QString("evidence: compressed decides differently in %1/%2").arg(mismatches).arg(trials));
+    // Лимит: ровно столько байтов ≥ 0x80, остаток не поглощается.
+    EncodingEvidence ev;
+    const QByteArray raw = QByteArray("ab\xD0\x96 cd\xD0\x96\xD0\x96 ef");
+    const qsizetype used = EncodingDetector::appendEvidence(ev, raw.constData(), raw.size(), 3);
+    CHECK(ev.highBytes == 3 && ev.bytes == std::string("\xD0\x96\n\xD0") && used == 8,
+          "evidence: stops at the limit");
+}
+
+// Файл для advance: окно у первого решения дочитывается из файла.
+struct FeedFile {
+    QString path;
+    QByteArray bytes;
+};
+
+static FeedFile writeFeedFile(const QString& dir, const QString& name, const QByteArray& bytes)
+{
+    FeedFile f{dir + QLatin1Char('/') + name, bytes};
+    QFile out(f.path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(bytes) != bytes.size())
+        std::abort();
+    return f;
+}
+
+struct FeedResult {
+    FileEncoding state;
+    QVector<FileEncoding> changes; // что advance сообщил (true)
+};
+
+// Как индексатор: подряд идущие порции (буферы) случайного размера с from.
+static FeedResult feedChunks(const FeedFile& f, FileEncoding state, std::mt19937& rng,
+                             qint64 from = 0, qint64 to = -1)
+{
+    FeedResult r;
+    const qint64 end = to < 0 ? f.bytes.size() : to;
+    for (qint64 pos = from; pos < end;) {
+        const qint64 n = qMin<qint64>(end - pos, std::uniform_int_distribution<int>(1, 300000)(rng));
+        if (EncodingDetector::advance(state, QByteArrayView(f.bytes).sliced(pos, n), pos, f.path,
+                                      TextEncoding::Windows1251))
+            r.changes.append(state);
+        pos += n;
+    }
+    r.state = state;
+    return r;
+}
+
+// Как парсер: только не-ASCII строки, без EOL, с '\n', если строка им кончилась.
+static FeedResult feedLines(const FeedFile& f, FileEncoding state, qint64 from = 0,
+                            qint64 to = -1)
+{
+    FeedResult r;
+    const qint64 end = to < 0 ? f.bytes.size() : to;
+    for (qint64 pos = from; pos < end;) {
+        qint64 nl = f.bytes.indexOf('\n', pos);
+        const bool complete = nl >= 0 && nl < end;
+        const qint64 lineEnd = complete ? nl : end;
+        qint64 len = lineEnd - pos;
+        if (complete && len > 0 && f.bytes.at(lineEnd - 1) == '\r')
+            --len;
+        QByteArray portion = f.bytes.mid(pos, len);
+        if (!state.settled() && EncodingDetector::firstHighByte(portion) >= 0) {
+            if (complete)
+                portion.append('\n');
+            if (EncodingDetector::advance(state, portion, pos, f.path, TextEncoding::Windows1251))
+                r.changes.append(state);
+        }
+        pos = complete ? nl + 1 : end;
+    }
+    r.state = state;
+    return r;
+}
+
+static bool sameDecision(const FileEncoding& a, const FileEncoding& b)
+{
+    return a.decoder == b.decoder && a.source == b.source && a.provisional == b.provisional
+        && (a.provisional ? a.evidence.bytes == b.evidence.bytes : true);
+}
+
+static QByteArray asciiFiller(qint64 bytes)
+{
+    QByteArray out;
+    int i = 0;
+    while (out.size() < bytes)
+        out += "2026-11-18 12:00:" + QByteArray::number(10 + i++ % 50) + ".000 INFO [app] plain ascii line\n";
+    return out;
+}
+
+static QByteArray cyrillicLines(std::mt19937& rng, int lines, TextEncoding enc)
+{
+    QString text;
+    for (int i = 0; i < lines; ++i)
+        text += randomLine(rng) + QLatin1Char('\n');
+    return enc == TextEncoding::Utf8 ? text.toUtf8() : *encode(text, encodingOf(enc));
+}
+
+static void testProvisionalScenarios()
+{
+    QTemporaryDir tmp;
+    CHECK(tmp.isValid(), "provisional: temp dir");
+    std::mt19937 rng(77);
+    const qint64 window = EncodingDetector::kWindowBytes;
+
+    // 1. Мусорный байт, больше окна ASCII, затем кириллица UTF-8: первое
+    //    решение по одному байту — предварительное однобайтное, итог — UTF-8,
+    //    окончательно.
+    {
+        const QByteArray bytes = "head \xFF tail\n" + asciiFiller(window + 1000)
+                               + cyrillicLines(rng, 40, TextEncoding::Utf8);
+        const FeedFile f = writeFeedFile(tmp.path(), "garbage_utf8.log", bytes);
+        for (int mode = 0; mode < 2; ++mode) {
+            const FeedResult r = mode ? feedLines(f, {}) : feedChunks(f, {}, rng);
+            const QString tag = mode ? "lines" : "chunks";
+            // Строками (и буферами, если первый кончился до кириллицы) первое
+            // решение — по одному байту.
+            if (mode)
+                CHECK(r.changes.size() >= 2 && r.changes.first().provisional
+                          && r.changes.first().decoder.encoding() == TextEncoding::Windows1251,
+                      "provisional garbage: first decision is provisional single-byte, " + tag);
+            CHECK(r.state.decoder.isUtf8() && r.state.source == FileEncoding::Source::Auto
+                      && !r.state.provisional,
+                  "provisional garbage: revised to final UTF-8, " + tag);
+        }
+    }
+    // 3. Одно короткое слово cp1251 — cp1251, предварительно.
+    {
+        const QString line = QStringLiteral("2026-11-18 12:00:00.000 INFO [app] ") + QString::fromUtf16(u"ошибка") + "\n";
+        const FeedFile f = writeFeedFile(tmp.path(), "one_word.log",
+                                         asciiFiller(5000) + *encode(line, encodingOf(TextEncoding::Windows1251))
+                                             + asciiFiller(5000));
+        for (int mode = 0; mode < 2; ++mode) {
+            const FeedResult r = mode ? feedLines(f, {}) : feedChunks(f, {}, rng);
+            CHECK(r.changes.size() == 1 && r.state.decoder.encoding() == TextEncoding::Windows1251
+                      && r.state.provisional,
+                  "provisional one word: cp1251, provisional");
+        }
+    }
+    // 4. cp1251: короткое слово, затем за окном — русский текст. Кодировка не
+    //    меняется ни разу, решение становится окончательным.
+    {
+        const QString word = QStringLiteral("2026-11-18 12:00:00.000 INFO [app] ") + QString::fromUtf16(u"старт") + "\n";
+        const QByteArray bytes = *encode(word, encodingOf(TextEncoding::Windows1251))
+                               + asciiFiller(window + 5000)
+                               + cyrillicLines(rng, 200, TextEncoding::Windows1251);
+        const FeedFile f = writeFeedFile(tmp.path(), "late_1251.log", bytes);
+        for (int mode = 0; mode < 2; ++mode) {
+            const FeedResult r = mode ? feedLines(f, {}) : feedChunks(f, {}, rng);
+            bool same = true;
+            for (const FileEncoding& c : r.changes)
+                same = same && c.decoder.encoding() == TextEncoding::Windows1251;
+            CHECK(same && r.changes.size() == 2 && r.changes.first().provisional
+                      && !r.changes.last().provisional,
+                  "provisional late cp1251: one encoding, provisional then final");
+        }
+    }
+    // 5. Окончательное UTF-8 не пересматривается блоком мусора.
+    {
+        QByteArray garbage;
+        for (int i = 0; i < 4000; ++i)
+            garbage += char(0x80 + i % 0x7F);
+        const QByteArray bytes = asciiFiller(1000) + cyrillicLines(rng, 30, TextEncoding::Utf8)
+                               + asciiFiller(window * 2) + garbage + "\n"
+                               + cyrillicLines(rng, 30, TextEncoding::Windows1251);
+        const FeedFile f = writeFeedFile(tmp.path(), "final_utf8.log", bytes);
+        for (int mode = 0; mode < 2; ++mode) {
+            const FeedResult r = mode ? feedLines(f, {}) : feedChunks(f, {}, rng);
+            CHECK(r.changes.size() == 1 && r.state.decoder.isUtf8() && !r.state.provisional,
+                  "provisional final utf8: one final decision survives garbage");
+        }
+    }
+    // 6. BOM и выбор пользователя не пересматриваются.
+    {
+        const FeedFile f = writeFeedFile(tmp.path(), "user.log",
+                                         cyrillicLines(rng, 30, TextEncoding::Windows1251));
+        const FileEncoding user = FileEncoding().withUserChoice(TextDecoder(TextEncoding::Utf8));
+        FileEncoding bom{TextDecoder(TextEncoding::Utf8), FileEncoding::Source::Bom};
+        for (const FileEncoding& start : {user, bom}) {
+            const FeedResult r = feedChunks(f, start, rng);
+            CHECK(r.changes.isEmpty() && r.state.decoder.isUtf8() && r.state.source == start.source,
+                  "provisional: user choice and BOM are never revised");
+        }
+        // Выбор пользователя хранит решение автоматики рядом.
+        FileEncoding autoState = feedLines(f, {}).state;
+        const FileEncoding chosen = autoState.withUserChoice(TextDecoder(TextEncoding::Koi8R));
+        CHECK(chosen.source == FileEncoding::Source::User
+                  && chosen.decoder.encoding() == TextEncoding::Koi8R
+                  && sameDecision(chosen.automatic(), autoState),
+              "provisional: user choice keeps the automatic decision beside it");
+        CHECK(sameDecision(chosen.withAutomatic(autoState).automatic(), autoState)
+                  && chosen.withAutomatic(autoState).decoder.encoding() == TextEncoding::Koi8R,
+              "provisional: a late automatic decision updates the kept one, not the choice");
+    }
+    // Буфер индексатора кончается ведущим байтом UTF-8, следующий — только
+    // ASCII: строка парсера с этим байтом в конце подаётся с '\n' (байт
+    // битый), и буферы обязаны прийти к тому же — разделитель ставит
+    // ASCII-порция, а не только следующий байт ≥ 0x80.
+    {
+        // Мусор (предварительное), затем больше окна ASCII: окно кончается
+        // раньше края буфера.
+        // Счёт подобран так, что битый байт решает: 1 мусорный + 1 битый
+        // против двух «Ж» — запасная; без него — UTF-8.
+        const QByteArray head = "x \xFF y\n" + asciiFiller(window + 1000);
+        const QByteArray cut = "ab \xD0\x96 \xD0\x96 \xD0"; // две «Ж» и оборванный ведущий байт
+        const QByteArray bytes = head + cut + "\n" + asciiFiller(1000);
+        const FeedFile f = writeFeedFile(tmp.path(), "edge_lead.log", bytes);
+        const qint64 split = head.size() + cut.size();
+        FileEncoding byBuffers;
+        EncodingDetector::advance(byBuffers, QByteArrayView(bytes).first(split), 0, f.path,
+                                  TextEncoding::Windows1251);
+        EncodingDetector::advance(byBuffers, QByteArrayView(bytes).sliced(split, 500), split,
+                                  f.path, TextEncoding::Windows1251);
+        EncodingDetector::advance(byBuffers, QByteArrayView(bytes).sliced(split + 500), split + 500,
+                                  f.path, TextEncoding::Windows1251);
+        const FileEncoding byLines = feedLines(f, {}).state;
+        CHECK(byBuffers.provisional && sameDecision(byBuffers, byLines),
+              "provisional: a lead byte at a buffer edge followed by ASCII counts the same as in lines");
+    }
+    // Независимость от порций: случайные файлы, случайное чтение —
+    // буферами, строками, двумя проходами (дозапись посреди строки с
+    // перечитыванием предварительной строки, переход между «бэкендами»).
+    {
+        int mismatches = 0;
+        const TextEncoding kinds[] = {TextEncoding::Utf8, TextEncoding::Windows1251,
+                                      TextEncoding::Ibm866, TextEncoding::Koi8R};
+        for (int t = 0; t < 120; ++t) {
+            QByteArray bytes;
+            const int parts = std::uniform_int_distribution<int>(1, 8)(rng);
+            for (int p = 0; p < parts; ++p) {
+                const int what = std::uniform_int_distribution<int>(0, 9)(rng);
+                if (what < 4)
+                    bytes += asciiFiller(std::uniform_int_distribution<int>(10, 90000)(rng));
+                else if (what == 4)
+                    bytes += QByteArray("x\xFF\xFE y\r\n");
+                else
+                    bytes += cyrillicLines(rng, std::uniform_int_distribution<int>(1, 4)(rng),
+                                           kinds[t % 4]);
+            }
+            if (t % 3 == 0)
+                bytes.replace("\n", "\r\n");
+            if (t % 4 == 1)
+                bytes.chop(std::uniform_int_distribution<int>(1, 5)(rng)); // хвост без '\n'
+            const FeedFile f = writeFeedFile(tmp.path(), QStringLiteral("rand%1.log").arg(t), bytes);
+            const FileEncoding byChunks = feedChunks(f, {}, rng).state;
+            const FileEncoding byLines = feedLines(f, {}).state;
+            // Два прохода: первый кончается посреди строки (предварительная),
+            // второй перечитывает её с начала, вторым «бэкендом».
+            const qint64 cut = std::uniform_int_distribution<qint64>(0, bytes.size())(rng);
+            qint64 lineStart = bytes.lastIndexOf('\n', cut - 1) + 1;
+            if (cut == 0)
+                lineStart = 0;
+            const FileEncoding first = feedLines(f, {}, 0, cut).state;
+            const FileEncoding twoPass = feedChunks(f, first, rng, lineStart).state;
+            const FileEncoding firstChunks = feedChunks(f, {}, rng, 0, cut).state;
+            const FileEncoding twoPassRev = feedLines(f, firstChunks, lineStart).state;
+            const bool ok = sameDecision(byChunks, byLines) && sameDecision(byChunks, twoPass)
+                         && sameDecision(byChunks, twoPassRev);
+            if (!ok && qEnvironmentVariableIsSet("TEXTENCODING_DUMP"))
+                std::printf("  chunking mismatch #%d: %s/%s/%s/%s\n", t,
+                            qPrintable(TextEncodings::displayName(byChunks.decoder.encoding())),
+                            qPrintable(TextEncodings::displayName(byLines.decoder.encoding())),
+                            qPrintable(TextEncodings::displayName(twoPass.decoder.encoding())),
+                            qPrintable(TextEncodings::displayName(twoPassRev.decoder.encoding())));
+            mismatches += !ok;
+        }
+        CHECK(mismatches == 0, QString("provisional: decision depends on chunking in %1/120 files").arg(mismatches));
+    }
+}
+
+// Порог окончательности: на свидетельстве из kFinalHighBytes байтов ≥ 0x80
+// decide не ошибается. Печатает долю ошибок для меньших порогов — таблица в
+// docs/design/F-1.md, «Шаг 3а». Свидетельство — строки лога с 1–3 словами
+// кириллицы (разреженный лог: каждое слово — отдельная порция), иногда
+// мусорный байт в начале.
+static void testProvisionalFuzz()
+{
+    std::mt19937 rng(20261118 + 3);
+    const TextEncoding kinds[] = {TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                  TextEncoding::Koi8R, TextEncoding::Utf8};
+    const qsizetype thresholds[] = {8, 16, 32, 64, 128, 256};
+    const int kTrials = 3000;
+    for (const bool garbage : {false, true}) {
+        for (const TextEncoding id : kinds) {
+            QString row;
+            for (const qsizetype k : thresholds) {
+                int wrong = 0;
+                for (int t = 0; t < kTrials; ++t) {
+                    EncodingEvidence ev;
+                    if (garbage)
+                        EncodingDetector::appendEvidence(ev, "\xFF\n", 2, k);
+                    while (ev.highBytes < k) {
+                        const QString phrase = randomPhrase(rng, std::uniform_int_distribution<int>(1, 3)(rng))
+                                             + QLatin1Char('\n');
+                        const QByteArray raw = id == TextEncoding::Utf8 ? phrase.toUtf8()
+                                                                         : *encode(phrase, encodingOf(id));
+                        EncodingDetector::appendEvidence(ev, raw.constData(), raw.size(), k);
+                    }
+                    wrong += EncodingDetector::decide(QByteArrayView(ev.bytes), TextEncoding::Windows1251) != id;
+                }
+                row += QStringLiteral(" K=%1: %2%").arg(k).arg(100.0 * wrong / kTrials, 0, 'f', 2);
+                if (k == EncodingDetector::kFinalHighBytes)
+                    CHECK(wrong == 0, QString("provisional fuzz %1%2: final threshold misdetects %3/%4")
+                                          .arg(TextEncodings::displayName(id), garbage ? " +garbage" : "")
+                                          .arg(wrong).arg(kTrials));
+            }
+            std::printf("fuzz threshold %-12s%s%s\n", qPrintable(TextEncodings::displayName(id)),
+                        garbage ? " +garbage" : "         ", qPrintable(row));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Вывод F-1 «классификатор смотрит только на ASCII»: одна и та же строка,
 // прочитанная как UTF-8 и в своей однобайтной кодировке, даёт тот же момент,
 // уровень и признак ведущей метки — после F-10 (новые формы меток) и F-12
@@ -880,6 +1226,9 @@ int main(int argc, char** argv)
     testCountUtf8();
     testDecideFixed();
     testDecideFuzz();
+    testEvidenceCompression();
+    testProvisionalScenarios();
+    testProvisionalFuzz();
     testClassifierIsAsciiOnly();
     testTextStreamLatin1Transport();
     if (failures) {

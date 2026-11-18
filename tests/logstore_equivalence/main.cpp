@@ -1468,6 +1468,190 @@ static void testResidentEncodings(const QDir& dir, const QString& schema,
     }
 }
 
+// Шаг 3а F-1: предварительное решение кодировки. Строки лога с
+// возрастающими метками от second; в строке word (если ≥ 0) — слово text.
+static QString asciiRecords(int count, int second, int wordLine = -1,
+                            const QString& word = QString())
+{
+    const QDateTime base = fixtureBaseTime();
+    QString out;
+    for (int i = 0; i < count; ++i)
+        out += QStringLiteral("%1 [main] INFO - ascii filler line %2%3\n")
+                   .arg(base.addSecs(second + i).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")))
+                   .arg(i)
+                   .arg(i == wordLine ? QStringLiteral(" ") + word : QString());
+    return out;
+}
+
+// Видимые строки по тексту и уровню — против эталона, у которого нет
+// отметок «новых» строк (он не дописывался).
+static void compareTextWithReference(const LogModel& got, const LogModel& ref, const QString& what)
+{
+    QStringList a, b;
+    for (int row = 0; row < got.rowCount(); ++row)
+        a << QStringLiteral("%1 %2").arg(int(got.visibleLevelAt(row))).arg(got.messageAt(row));
+    for (int row = 0; row < ref.rowCount(); ++row)
+        b << QStringLiteral("%1 %2").arg(int(ref.visibleLevelAt(row))).arg(ref.messageAt(row));
+    CHECK_EQ(a.join(QLatin1Char('\n')), b.join(QLatin1Char('\n')), what);
+}
+
+static bool sameAutoState(const FileEncoding& a, const FileEncoding& b)
+{
+    return a.decoder == b.decoder && a.source == b.source && a.provisional == b.provisional;
+}
+
+static QString describeState(const FileEncoding& e)
+{
+    return QStringLiteral("%1%2").arg(TextEncodings::displayName(e.decoder.encoding()),
+                                      e.provisional ? QStringLiteral(" (предварительно)") : QString());
+}
+
+static void testProvisionalEncodings(const QDir& dir, const QString& schema,
+                                     const QStringList& fieldNames)
+{
+    QDir().mkpath(dir.filePath(QStringLiteral("prov-enc")));
+    const QDir encDir(dir.filePath(QStringLiteral("prov-enc")));
+    const int kFiller = 1100; // строк ASCII: больше окна 64 КБ
+
+    struct Case {
+        QString name;
+        QByteArray bytes;
+        TextEncoding want;
+        bool provisional;
+        bool fullRun; // весь API (runResidentEncodingFixture)
+    };
+    // 1. Мусорный байт в начале UTF-8-лога, кириллица за окном.
+    QByteArray garbageUtf8 = (asciiRecords(kFiller, 0) + cyrillicLogText(0, kFiller)).toUtf8();
+    garbageUtf8.insert(garbageUtf8.indexOf(" line 0") + 7, " \xFF");
+    // 3. Одно короткое слово в Windows-1251.
+    const QByteArray oneWord = encodeText(asciiRecords(40, 0, 7, QStringLiteral("ошибка")),
+                                          TextEncoding::Windows1251);
+    // 4. Короткое слово, затем русский текст за окном — Windows-1251.
+    const QByteArray late1251 = encodeText(asciiRecords(kFiller, 0, 3, QStringLiteral("старт"))
+                                               + cyrillicLogText(0, kFiller),
+                                           TextEncoding::Windows1251);
+    // 5. Окончательное UTF-8, затем блок мусора и текст в Windows-1251.
+    QByteArray garbage;
+    for (int i = 0; i < 600; ++i)
+        garbage += char(0x80 + (i * 7) % 0x80);
+    const QByteArray finalUtf8 = cyrillicLogText(0).toUtf8()
+        + asciiRecords(kFiller, 100).toUtf8()
+        + "2026-03-05 10:30:00.000 [main] WARN - binary " + garbage + "\n"
+        + encodeText(cyrillicLogText(0, 2000), TextEncoding::Windows1251);
+    const QVector<Case> cases = {
+        { QStringLiteral("мусорный байт + UTF-8"), garbageUtf8, TextEncoding::Utf8, false, true },
+        { QStringLiteral("одно слово Windows-1251"), oneWord, TextEncoding::Windows1251, true, false },
+        { QStringLiteral("слово, затем текст Windows-1251"), late1251, TextEncoding::Windows1251, false, false },
+        { QStringLiteral("окончательное UTF-8 и мусор"), finalUtf8, TextEncoding::Utf8, false, false },
+    };
+    for (const Case& c : cases) {
+        const QString path = writeFile(encDir, c.name + QStringLiteral(".log"), c.bytes);
+        if (c.fullRun)
+            runResidentEncodingFixture(QStringLiteral("предварительное, ") + c.name, { path },
+                                       schema, fieldNames);
+        g_context = QStringLiteral("предварительное, %1").arg(c.name);
+        g_contextFailures = 0;
+        Document res = loadResident({ path }, schema);
+        Document idx = loadIndexed({ path }, schema);
+        const FileEncoding resState = res.encodings.value(path);
+        const FileEncoding idxState = idx.model->indexedOrNull()->fileEncoding(idx.files.value(0));
+        CHECK(resState.source == FileEncoding::Source::Auto && resState.decoder.encoding() == c.want
+                  && resState.provisional == c.provisional,
+              QStringLiteral("резидентный решил %1").arg(describeState(resState)));
+        CHECK(sameAutoState(resState, idxState),
+              QStringLiteral("бэкенды решили по-разному: %1 против %2")
+                  .arg(describeState(resState), describeState(idxState)));
+        const QString text = TextDecoder(c.want).decode(c.bytes);
+        checkResidentText(QStringLiteral("текст резидентной вкладки"), res, text);
+        compareVisibleRows(*res.model, *idx.model);
+    }
+
+    // 2. Кириллица UTF-8 дозаписью в лог, решённый по мусорному байту
+    // (предварительно Windows-1251): пересмотр на обоих бэкендах, текст —
+    // как у файла, сразу открытого в UTF-8; правило с кириллицей и Find All —
+    // как на нём же.
+    {
+        g_context = QStringLiteral("предварительное, пересмотр дозаписью");
+        g_contextFailures = 0;
+        QByteArray head = asciiRecords(60, 0).toUtf8();
+        head.insert(head.indexOf(" line 0") + 7, " \xFF");
+        const QByteArray tail1 = cyrillicLogText(0, 100).toUtf8();
+        const QByteArray tail2 = cyrillicLogText(0, 200).toUtf8();
+        QDir().mkpath(encDir.filePath(QStringLiteral("tail-res")));
+        QDir().mkpath(encDir.filePath(QStringLiteral("tail-idx")));
+        QDir().mkpath(encDir.filePath(QStringLiteral("tail-ref")));
+        const QString resPath = writeFile(QDir(encDir.filePath(QStringLiteral("tail-res"))),
+                                          QStringLiteral("tail.log"), head);
+        const QString idxPath = writeFile(QDir(encDir.filePath(QStringLiteral("tail-idx"))),
+                                          QStringLiteral("tail.log"), head);
+        Document res = loadResident({ resPath }, schema);
+        Document idx = loadIndexed({ idxPath }, schema);
+        const FileEncoding before = res.encodings.value(resPath);
+        CHECK(before.decoder.encoding() == TextEncoding::Windows1251 && before.provisional,
+              QStringLiteral("мусорный байт должен дать предварительное Windows-1251: ")
+                  + describeState(before));
+        for (const QByteArray& tail : { tail1, tail2 }) {
+            CHECK(appendResidentTail(res, 0, tail, schema),
+                  QStringLiteral("резидентная дозапись не прочитана"));
+            CHECK(appendIndexedTail(idx, 0, tail, schema),
+                  QStringLiteral("индексная дозапись не прочитана"));
+            // После каждой порции — в том числе той, что пересмотрела
+            // решение: текст и отметки «новых» строк хвоста у бэкендов одни.
+            settleChecked(*res.model);
+            settleChecked(*idx.model);
+            g_fileNameOnly = true;
+            compareVisibleRows(*res.model, *idx.model);
+            g_fileNameOnly = false;
+        }
+        const FileEncoding resState = res.encodings.value(resPath);
+        const FileEncoding idxState = idx.model->indexedOrNull()->fileEncoding(idx.files.value(0));
+        CHECK(resState.decoder.isUtf8() && resState.source == FileEncoding::Source::Auto
+                  && !resState.provisional,
+              QStringLiteral("дозапись не пересмотрела решение: ") + describeState(resState));
+        CHECK(sameAutoState(resState, idxState),
+              QStringLiteral("бэкенды после дозаписи решили по-разному: %1 против %2")
+                  .arg(describeState(resState), describeState(idxState)));
+        const QByteArray all = head + tail1 + tail2;
+        checkResidentText(QStringLiteral("текст после пересмотра"), res, QString::fromUtf8(all));
+        g_fileNameOnly = true; // файлы разные — сравниваются по имени
+        compareVisibleRows(*res.model, *idx.model);
+
+        // Эталон — тот же файл, сразу открытый (решение UTF-8 с первой порции
+        // кириллицы невозможно: мусорный байт раньше — поэтому эталон читает
+        // его выбором пользователя UTF-8).
+        const QString refPath = writeFile(QDir(encDir.filePath(QStringLiteral("tail-ref"))),
+                                          QStringLiteral("tail.log"), all);
+        Document ref = loadIndexed({ refPath }, schema);
+        ref.model->indexedOrNull()->setFileEncoding(ref.files.value(0), TextDecoder(TextEncoding::Utf8));
+        settleChecked(*ref.model);
+        compareTextWithReference(*res.model, *ref.model, QStringLiteral("текст против эталона"));
+        for (const FilterConfig& cfg : encodingConfigs()) {
+            g_context = QStringLiteral("предварительное, пересмотр дозаписью / ") + cfg.name;
+            g_contextFailures = 0;
+            applyConfig(*res.model, cfg, fieldNames);
+            applyConfig(*idx.model, cfg, fieldNames);
+            applyConfig(*ref.model, cfg, fieldNames);
+            compareVisibleRows(*res.model, *idx.model);
+            compareTextWithReference(*res.model, *ref.model, QStringLiteral("резидентный против эталона"));
+            if (!cfg.rules.rules.isEmpty()) {
+                FilterRuleSet query;
+                query.rules = { rule(FilterRule::Action::Include, QStringLiteral("ЖУРНАЛ")) };
+                query.bindFields(fieldNames, true);
+                LogModel resResults, idxResults, refResults;
+                resResults.searchVisible(*res.model, query);
+                idxResults.searchVisible(*idx.model, query);
+                refResults.searchVisible(*ref.model, query);
+                settleChecked(resResults);
+                settleChecked(idxResults);
+                settleChecked(refResults);
+                compareVisibleRows(resResults, idxResults);
+                compareTextWithReference(resResults, refResults, QStringLiteral("Find All против эталона"));
+            }
+        }
+        g_fileNameOnly = false;
+    }
+}
+
 static void checkLineNumbers(const QString& what, const Document& res, const Document& idx,
                              const QByteArray& bytes)
 {
@@ -1645,6 +1829,7 @@ int main(int argc, char** argv)
         }
     }
 
+    if (qEnvironmentVariableIsSet("EQ_ONLY_PROV")) { testProvisionalEncodings(dir, schema, fieldNames); return g_failures ? 1 : 0; }
     runFixture(QStringLiteral("один файл (LF)"), { fileA }, schema, fieldNames);
     runFixture(QStringLiteral("один файл (CRLF, без \\n в конце)"), { fileB }, schema, fieldNames);
 
@@ -1671,6 +1856,7 @@ int main(int argc, char** argv)
     testLineNumbers(dir, schema);
     testEncodings(dir, schema, fieldNames);
     testResidentEncodings(dir, schema, fieldNames);
+    testProvisionalEncodings(dir, schema, fieldNames);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

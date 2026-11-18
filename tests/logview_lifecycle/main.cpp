@@ -1079,6 +1079,241 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
               + model.messageAt(model.rowCount() - 1));
 }
 
+// Шаг 3а F-1: предварительное решение кодировки на живой вкладке.
+// Растущий UTF-8-лог, первый байт ≥ 0x80 которого — одиночный мусорный байт
+// (предварительное Windows-1251). Кириллица UTF-8 приходит дозаписью: сперва
+// в предварительную строку без '\n', оборванную посреди символа, затем
+// остальным. Решение пересматривается без переиндексации и без полной
+// перезагрузки, текущая строка, выделение и её место на экране — на месте;
+// итоговый текст — чтение файла как UTF-8.
+static void checkProvisionalRevision(const QDir& dir, const QString& name, const QString& schema)
+{
+    QByteArray head;
+    for (int i = 0; i < 1500; ++i)
+        head += record(i / 10, "INFO", "ascii head " + QByteArray::number(i));
+    head.insert(head.indexOf('\n'), " \xFF");
+    const QString path = testdocs::writeFile(dir, name + "-provisional.log", head);
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), name + " provisional: initial load");
+    testdocs::pump(200);
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(tab.fileEncoding(file).decoder.encoding() == TextEncoding::Windows1251
+              && tab.fileEncoding(file).provisional,
+          name + " provisional: a lone garbage byte decides Windows-1251 provisionally");
+
+    int indexingStarts = 0, parsingStarts = 0, resets = 0;
+    QObject spies;
+    QObject::connect(&tab, &LogViewWidget::fileParsingStarted, &spies, [&] { ++parsingStarts; });
+    QObject::connect(&model, &QAbstractItemModel::modelReset, &spies, [&] { ++resets; });
+    const auto spyIndexers = [&] {
+        for (LogIndexer* indexer : tab.findChildren<LogIndexer*>())
+            QObject::connect(indexer, &LogIndexer::indexingStarted, &spies, [&] { ++indexingStarts; },
+                             Qt::UniqueConnection);
+    };
+    spyIndexers();
+
+    view.goToRow(700);
+    testdocs::pump(100);
+    const QModelIndex start = view.currentIndex();
+    const auto entry = start.isValid() ? model.entryAt(start.row()) : nullptr;
+    const int lineNumber = entry ? entry->originalLineNumber() : -1;
+    const QRect rect = view.visualRect(start);
+    const auto checkPlace = [&](const QString& what) {
+        const QModelIndex cur = view.currentIndex();
+        const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
+        CHECK(now && lineNumber == 701 && now->originalLineNumber() == lineNumber,
+              what + QStringLiteral(": the current line is kept (%1)").arg(now ? now->originalLineNumber() : -1));
+        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
+              what + ": the current row stays selected");
+        CHECK(cur.isValid() && view.visualRect(cur).top() == rect.top(),
+              what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
+                         .arg(rect.top()).arg(cur.isValid() ? view.visualRect(cur).top() : -1));
+    };
+    const auto append = [&](const QByteArray& bytes, const QString& what) {
+        CHECK(testdocs::appendToFile(path, bytes), what + ": append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), what + ": settles");
+        testdocs::pump(100);
+        spyIndexers();
+    };
+
+    // Предварительная строка без '\n', оборванная посреди «к» (UTF-8).
+    const QByteArray cyr = QStringLiteral("Ошибка соединения с базой данных, повтор через минуту").toUtf8();
+    const QByteArray first = record(200, "ERROR", cyr).chopped(1);
+    const qsizetype cut = first.indexOf("\xD0\xBA") + 1; // внутри «к»
+    append(first.left(cut), name + " provisional: partial line");
+    CHECK(tab.fileEncoding(file).decoder.isUtf8(),
+          name + " provisional: UTF-8 in the provisional line revises the decision: "
+              + TextEncodings::displayName(tab.fileEncoding(file).decoder.encoding()));
+    checkPlace(name + " provisional: after the partial line");
+    // Остаток строки и ещё кириллица — частями.
+    QByteArray rest = first.mid(cut) + '\n';
+    for (int i = 0; i < 6; ++i)
+        rest += record(201 + i, i % 2 ? "WARN" : "INFO",
+                       QStringLiteral("Запись номер %1: диск заполнен на девяносто процентов").arg(i).toUtf8());
+    append(rest.left(rest.size() / 2), name + " provisional: first half");
+    append(rest.mid(rest.size() / 2), name + " provisional: second half");
+    checkPlace(name + " provisional: after the tail");
+    const FileEncoding final = tab.fileEncoding(file);
+    CHECK(final.decoder.isUtf8() && final.source == FileEncoding::Source::Auto && !final.provisional,
+          name + " provisional: UTF-8, final, still automatic");
+
+    CHECK(indexingStarts == 0 && parsingStarts == 0,
+          name + QStringLiteral(" provisional: no reindexing / full reload (%1 indexer start(s), "
+                                "%2 parse start(s))").arg(indexingStarts).arg(parsingStarts));
+    CHECK(resets >= 1, name + " provisional: the revision rereads shown rows (reset)");
+
+    QFile f(path);
+    CHECK(f.open(QIODevice::ReadOnly), name + " provisional: reopen");
+    QStringList want = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'));
+    if (!want.isEmpty() && want.constLast().isEmpty())
+        want.removeLast();
+    CHECK(rows(model) == want, name + " provisional: every row reads as the file in UTF-8");
+
+    // Окончательное решение не пересматривается: блок мусора и Windows-1251.
+    QByteArray garbage;
+    for (int i = 0; i < 400; ++i)
+        garbage += char(0x80 + (i * 5) % 0x80);
+    append(record(300, "WARN", "binary " + garbage)
+               + record(301, "INFO", testdocs::encodeText(QStringLiteral("Запись в чужой кодировке"),
+                                                          TextEncoding::Windows1251)),
+           name + " provisional: garbage after final");
+    CHECK(tab.fileEncoding(file).decoder.isUtf8(),
+          name + " provisional: a final decision survives garbage");
+}
+
+// Шаг 3а: решение, которое по ходу загрузки только набирает силу, лишних
+// reset и перечитываний не делает. Windows-1251-лог: короткое слово в
+// начале (предварительно), русский текст — дальше окна 64 КБ (окончательно,
+// та же кодировка). Сравнение — с тем же логом без раннего слова
+// (окончательно с первой порции). Ещё: выбор пользователя автоматикой не
+// пересматривается.
+static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, const QString& schema)
+{
+    QString filler;
+    for (int i = 0; i < 1300; ++i)
+        filler += recordText(i / 10, "INFO", QStringLiteral("ascii filler %1").arg(i));
+    QString russian;
+    for (int i = 0; i < 300; ++i)
+        russian += recordText(200 + i / 10, i % 3 ? "INFO" : "ERROR",
+                              QStringLiteral("Запись номер %1: ошибка диска").arg(i));
+    QString withWord = filler;
+    withWord.replace(QStringLiteral("ascii filler 3\n"), QStringLiteral("ascii filler 3 старт\n"));
+    struct Load { int resets = 0; int parsers = 0; int indexerStarts = 0; FileEncoding encoding; QString row; };
+    const auto load = [&](const QString& text, const QString& tag) {
+        Load out;
+        const QString path = testdocs::writeFile(dir, name + "-" + tag + ".log",
+                                                 testdocs::encodeText(text, TextEncoding::Windows1251));
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.setExtractionEnabled(true);
+        tab.setFallbackEncoding(TextEncoding::Windows1251);
+        QObject spies;
+        QObject::connect(tab.model(), &QAbstractItemModel::modelReset, &spies, [&] { ++out.resets; });
+        QObject::connect(&tab, &LogViewWidget::fileParsingStarted, &spies, [&] { ++out.indexerStarts; });
+        tab.addLogFile(path);
+        CHECK(settled(tab), name + " no extra work: load " + tag);
+        testdocs::pump(100);
+        out.parsers = int(tab.findChildren<LogParser*>().size());
+        out.encoding = tab.fileEncoding(tab.loadedFiles().value(0));
+        out.row = tab.model()->messageAt(tab.model()->rowCount() - 1);
+        return out;
+    };
+    const Load late = load(withWord + russian, "late-word");
+    const Load dense = load(filler + russian, "dense");
+    CHECK(late.encoding.decoder.encoding() == TextEncoding::Windows1251
+              && late.encoding.source == FileEncoding::Source::Auto && !late.encoding.provisional,
+          name + " no extra work: stays Windows-1251 and becomes final");
+    CHECK(late.resets == dense.resets && late.parsers == dense.parsers
+              && late.indexerStarts == dense.indexerStarts,
+          name + QStringLiteral(" no extra work: resets %1/%2, parsers %3/%4, starts %5/%6")
+                     .arg(late.resets).arg(dense.resets).arg(late.parsers).arg(dense.parsers)
+                     .arg(late.indexerStarts).arg(dense.indexerStarts));
+    CHECK(late.row.endsWith(QStringLiteral("Запись номер 299: ошибка диска")),
+          name + " no extra work: text readable: " + late.row);
+
+    // Выбор пользователя на предварительном решении: дозапись, которая
+    // пересмотрела бы автоматику, его не трогает; решение автоматики
+    // хранится рядом (для «Определить автоматически» шага 4).
+    {
+        const QString path = testdocs::writeFile(dir, name + "-user.log",
+                                                 testdocs::encodeText(withWord, TextEncoding::Windows1251));
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.setExtractionEnabled(true);
+        tab.setFallbackEncoding(TextEncoding::Windows1251);
+        tab.addLogFile(path);
+        CHECK(settled(tab), name + " user: load");
+        const LogFilePtr file = tab.loadedFiles().value(0);
+        CHECK(tab.fileEncoding(file).provisional, name + " user: provisional before the choice");
+        tab.setFileEncoding(file, TextEncoding::Koi8R);
+        CHECK(settled(tab), name + " user: switch settles");
+        CHECK(testdocs::appendToFile(path, russian.toUtf8()), name + " user: append UTF-8");
+        tab.reloadChangedFiles(true);
+        CHECK(settled(tab), name + " user: reload settles");
+        const FileEncoding enc = tab.fileEncoding(file);
+        CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Koi8R
+                  && enc.automatic().decoder.encoding() == TextEncoding::Windows1251,
+              name + " user: the choice stands, the automatic decision is kept beside it");
+    }
+}
+
+// Шаг 3а: переход порога резидентная → индексная сохраняет предварительное
+// решение предварительным (и накопленное свидетельство): индексатор
+// продолжает копить, кириллица UTF-8 после перехода пересматривает решение.
+// Обратного перехода с тем же содержимым не бывает (индексная вкладка
+// откатывается в резидентную только на переписанном в UTF-16 файле — решение
+// автоматики к новому содержимому не относится); перенос состояния туда же
+// проверяет tests/textencoding (два прохода разными «бэкендами»).
+static void checkProvisionalThreshold(const QDir& dir, const QString& schema)
+{
+    QByteArray head;
+    for (int i = 0; i < 400; ++i)
+        head += record(i / 10, "INFO", "ascii head " + QByteArray::number(i));
+    head.insert(head.indexOf('\n'), " \xFF");
+    const QString path = testdocs::writeFile(dir, "provisional-threshold.log", head);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), "provisional threshold: initial load");
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(!tab.model()->isIndexedBackend() && tab.fileEncoding(file).provisional,
+          "provisional threshold: resident, provisional");
+    QByteArray more;
+    for (int i = 400; i < 24000; ++i)
+        more += record(i / 10, "INFO", "ascii more " + QByteArray::number(i));
+    CHECK(testdocs::appendToFile(path, more), "provisional threshold: append past 1 MB");
+    tab.reloadChangedFiles(true);
+    CHECK(settled(tab), "provisional threshold: conversion settles");
+    CHECK(tab.model()->isIndexedBackend(), "provisional threshold: converted to indexed");
+    const FileEncoding carried = tab.fileEncoding(file);
+    CHECK(carried.source == FileEncoding::Source::Auto && carried.provisional
+              && carried.decoder.encoding() == TextEncoding::Windows1251,
+          "provisional threshold: the decision stays provisional across the threshold");
+    QByteArray tail;
+    for (int i = 0; i < 6; ++i)
+        tail += record(3000 + i, "ERROR", QStringLiteral("Ошибка диска номер %1, повтор через минуту").arg(i).toUtf8());
+    CHECK(testdocs::appendToFile(path, tail), "provisional threshold: append UTF-8");
+    tab.reloadChangedFiles(true);
+    CHECK(settled(tab), "provisional threshold: tail settles");
+    const FileEncoding revised = tab.fileEncoding(file);
+    CHECK(revised.decoder.isUtf8() && !revised.provisional,
+          "provisional threshold: the indexed tab revises to final UTF-8");
+    CHECK(tab.model()->messageAt(tab.model()->rowCount() - 1)
+              .endsWith(QStringLiteral("Ошибка диска номер 5, повтор через минуту")),
+          "provisional threshold: the tail reads as UTF-8");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1104,10 +1339,15 @@ int main(int argc, char** argv)
                   QByteArray("\xFF\xFE\x00\x00", 4));
     checkGrowingSingleByte(dir, QStringLiteral("resident"), schema);
     checkResidentEncodingSwitch(dir, schema);
+    checkProvisionalRevision(dir, QStringLiteral("resident"), schema);
+    checkProvisionalNoExtraWork(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(1);
     checkWideAboveThreshold(dir, schema);
     checkThresholdKeepsEncoding(dir, schema);
+    checkProvisionalThreshold(dir, schema);
     settings.setIndexedThresholdMB(0);
+    checkProvisionalRevision(dir, QStringLiteral("indexed"), schema);
+    checkProvisionalNoExtraWork(dir, QStringLiteral("indexed"), schema);
     checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);

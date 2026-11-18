@@ -177,14 +177,20 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // Автоопределение кодировки (F-1): буфер, в котором впервые встретился
     // байт ≥ 0x80, решает до разбора своих строк. Строки, разобранные раньше,
     // — ASCII (иначе решение было бы принято на их буфере). Окно — от этого
-    // байта: ASCII до него в decide ничего не добавил бы.
+    // байта: ASCII до него в decide ничего не добавил бы. Предварительное
+    // решение (шаг 3а) advance продолжает пересматривать по каждому буферу;
+    // пересмотр приходит сигналом до порции, как первое решение (стор
+    // перечитывает уже показанные строки новым декодером — reset).
+    qint64 reportedEvidenceEnd = encoding.evidence.end;
     const auto decideOn = [&](const char* data, qint64 len, qint64 dataFileOffset) {
         if (EncodingDetector::advance(encoding, QByteArrayView(data, len), dataFileOffset,
-                                      logFile->filePath, fallback))
+                                      logFile->filePath, fallback)) {
             emit encodingDecided(logFile, encoding);
-        // false — только ASCII либо единственная последовательность оборвана
-        // концом файла: остаёмся «не решёнными», решит следующий буфер или
-        // дозапись.
+            reportedEvidenceEnd = encoding.evidence.end;
+        }
+        // false — только ASCII, решение не изменилось либо единственная
+        // последовательность оборвана концом файла («не решено» — решит
+        // следующий буфер или дозапись).
     };
 
     // Классификация и запись одной строки (bytes БЕЗ EOL-байт).
@@ -313,6 +319,11 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         carry.clear();
     }
 
+    // Свидетельство предварительного решения подросло без смены решения —
+    // отдаём его стору: следующий проход (дозапись, переход порога)
+    // продолжит копить с этого места, а не с прошлого.
+    if (!encoding.settled() && encoding.evidence.end != reportedEvidenceEnd)
+        emit encodingDecided(logFile, encoding);
     publishPending(/*force=*/true);
     if (initial && lastReportedProgress < 100)
         emit indexingProgress(100, logFile);

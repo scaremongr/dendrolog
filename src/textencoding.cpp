@@ -481,34 +481,108 @@ std::optional<TextEncoding> decide(QByteArrayView window, TextEncoding fallback)
     return fallback;
 }
 
+qsizetype appendEvidence(EncodingEvidence& evidence, const char* data, qsizetype len,
+                         qsizetype limit)
+{
+    const auto* p = reinterpret_cast<const unsigned char*>(data);
+    qsizetype i = 0;
+    while (i < len && evidence.highBytes < limit) {
+        if (p[i] < 0x80) {
+            // Промежуток ASCII — один разделитель; firstHighByte прыгает
+            // через него по 8 байт (горячий путь индексатора на файле, где
+            // решение предварительное до конца).
+            if (!evidence.bytes.empty() && evidence.bytes.back() != '\n')
+                evidence.bytes.push_back('\n');
+            const qsizetype next = firstHighByte(data + i, len - i);
+            if (next < 0)
+                return len;
+            i += next;
+            continue;
+        }
+        evidence.bytes.push_back(char(p[i]));
+        ++evidence.highBytes;
+        ++i;
+    }
+    return i;
+}
+
+namespace {
+
+// Решение по свидетельству: окончательное, если его хватает.
+void decideOnEvidence(FileEncoding& state, TextEncoding encoding)
+{
+    state.decoder = TextDecoder(encoding);
+    state.source = FileEncoding::Source::Auto;
+    state.provisional = state.evidence.highBytes < kFinalHighBytes;
+    if (!state.provisional)
+        state.evidence.bytes = std::string(); // дальше не нужно
+}
+
+} // namespace
+
 bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
              const QString& filePath, TextEncoding fallback)
 {
-    if (state.decided())
+    if (state.settled())
         return false;
-    const qsizetype high = firstHighByte(data);
-    if (high < 0)
-        return false;
-    const qint64 windowStart = dataFileOffset + high;
-    QByteArray windowBytes;
-    QByteArrayView window;
-    if (data.size() - high >= kWindowBytes) {
-        window = data.sliced(high, kWindowBytes);
-    } else {
-        // Окно выходит за порцию: дочитываем вторым дескриптором — позиция
-        // основного чтения вызывающего не трогается.
-        QFile windowFile(filePath);
-        if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
-            windowBytes = windowFile.read(kWindowBytes);
-        if (windowBytes.size() < data.size() - high) // файл укоротили — что есть в порции
-            windowBytes = data.sliced(high).toByteArray();
-        window = QByteArrayView(windowBytes);
+    const qint64 dataEnd = dataFileOffset + data.size();
+
+    if (!state.decided()) {
+        const qsizetype high = firstHighByte(data);
+        if (high < 0)
+            return false;
+        const qint64 windowStart = dataFileOffset + high;
+        QByteArray windowBytes;
+        QByteArrayView window;
+        if (data.size() - high >= kWindowBytes) {
+            window = data.sliced(high, kWindowBytes);
+        } else {
+            // Окно выходит за порцию: дочитываем вторым дескриптором — позиция
+            // основного чтения вызывающего не трогается.
+            QFile windowFile(filePath);
+            if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
+                windowBytes = windowFile.read(kWindowBytes);
+            if (windowBytes.size() < data.size() - high) // файл укоротили — что есть в порции
+                windowBytes = data.sliced(high).toByteArray();
+            window = QByteArrayView(windowBytes);
+        }
+        EncodingEvidence evidence;
+        evidence.end = windowStart + appendEvidence(evidence, window.data(), window.size());
+        // Порция может тянуться за окно (буфер индексатора) — остаток тоже
+        // свидетельство, решение — по всему сразу. (Окно короче 64 КБ — до
+        // конца файла, тогда остатка нет.)
+        if (evidence.highBytes < kFinalHighBytes && dataEnd > evidence.end) {
+            const qsizetype from = qsizetype(evidence.end - dataFileOffset);
+            evidence.end += appendEvidence(evidence, data.data() + from, data.size() - from);
+        }
+        const std::optional<TextEncoding> decided = decide(QByteArrayView(evidence.bytes), fallback);
+        if (!decided)
+            return false; // единственная последовательность оборвана концом файла
+        state.evidence = std::move(evidence);
+        decideOnEvidence(state, *decided);
+        return true;
     }
-    const std::optional<TextEncoding> decided = decide(window, fallback);
-    if (!decided)
-        return false; // единственная последовательность оборвана концом файла
-    state = FileEncoding{TextDecoder(*decided), FileEncoding::Source::Auto};
-    return true;
+
+    // Предварительное решение: копим байты за прочитанным свидетельством.
+    if (dataEnd <= state.evidence.end)
+        return false; // перечитанный предварительный хвост — уже учтён
+    EncodingEvidence& evidence = state.evidence;
+    const std::size_t before = evidence.bytes.size();
+    // Между свидетельством и порцией — ASCII (пропущенные строки, перевод
+    // строки): разделитель. Вплотную (следующий буфер) — продолжение:
+    // оборванная краем порции последовательность срастается, а если порция
+    // начинается с ASCII, разделитель поставит appendEvidence — так же, как
+    // строка парсера, поданная с '\n'.
+    if (dataFileOffset > evidence.end && !evidence.bytes.empty() && evidence.bytes.back() != '\n')
+        evidence.bytes.push_back('\n');
+    const qsizetype from = qsizetype(qMax<qint64>(0, evidence.end - dataFileOffset));
+    evidence.end = dataFileOffset + from
+        + appendEvidence(evidence, data.data() + from, data.size() - from);
+    if (evidence.bytes.size() == before)
+        return false; // только ASCII вслед за разделителем — решать заново нечего
+    const TextDecoder previous = state.decoder;
+    decideOnEvidence(state, *decide(QByteArrayView(evidence.bytes), fallback));
+    return state.decoder != previous || !state.provisional;
 }
 
 } // namespace EncodingDetector

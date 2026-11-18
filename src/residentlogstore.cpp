@@ -1,4 +1,6 @@
 #include "residentlogstore.h"
+
+#include <QSet>
 #include "logmodel.h"
 
 #include <QFutureWatcher>
@@ -193,13 +195,20 @@ void ResidentLogStore::replaceEntriesForFile(
     const auto ofFile = [&filePath](const std::shared_ptr<LogEntry>& e) {
         return e && e->sourceFile() && e->sourceFile()->filePath == filePath;
     };
-    // Отметки «новых» строк — указатели на записи: у этого файла они уходят.
+    // Отметки «новых» строк — указатели на записи: переходят к перечитанным
+    // записям тех же строк файла (пересмотр кодировки дозаписью, F-1 шаг 3а,
+    // не должен гасить зелёный маркер только что пришедшего хвоста — как и
+    // reset индексной вкладки).
+    QSet<int> newLines;
     for (const auto& e : std::as_const(m_allEntries))
-        if (ofFile(e))
-            m_newEntries.remove(e.get());
-    for (const auto& entry : sortedEntries)
+        if (ofFile(e) && m_newEntries.remove(e.get()))
+            newLines.insert(e->originalLineNumber());
+    for (const auto& entry : sortedEntries) {
         if (entry && entry->sourceFile())
             m_model.ensureFileColor(entry->sourceFile()->filePath);
+        if (entry && !newLines.isEmpty() && newLines.contains(entry->originalLineNumber()))
+            m_newEntries.insert(entry.get());
+    }
 
     m_model.beginResetModel();
     m_allEntries.erase(std::remove_if(m_allEntries.begin(), m_allEntries.end(), ofFile),

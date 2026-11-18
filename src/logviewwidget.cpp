@@ -180,7 +180,7 @@ void LogViewWidget::setFileEncoding(const LogFilePtr& logFile, TextEncoding enco
         return;
     FileEncoding& current = m_fileEncodings[logFile->filePath];
     const bool changed = current.decoder != decoder;
-    current = FileEncoding{decoder, FileEncoding::Source::User};
+    current = current.withUserChoice(decoder);
     if (!changed)
         return;
     // Текст записей резидентного пути уже декодирован — файл перечитывается.
@@ -271,23 +271,35 @@ void LogViewWidget::handleReencodeFailed(const LogFilePtr& logFile)
 void LogViewWidget::handleEncodingDecided(const LogFilePtr& logFile,
                                           const FileEncoding& encoding)
 {
-    // Решение резидентного парсера. Строки до первой не-ASCII — ASCII, их
-    // текст от решения не зависит; записи с ней парсер отдал уже
-    // декодированными. Выбор пользователя автоматикой не заменяется (парсер с
-    // ним и не решает, но проход мог начаться до выбора).
+    // Решение резидентного парсера. Первое решение: строки до первой
+    // не-ASCII — ASCII, их текст от решения не зависит; записи с ней парсер
+    // отдал уже декодированными. Выбор пользователя автоматикой не
+    // заменяется (парсер с ним и не решает, но проход мог начаться до
+    // выбора) — решение автоматики хранится рядом.
     if (!logFile || m_model->isIndexedBackend())
         return;
-    FileEncoding& current = m_fileEncodings[logFile->filePath];
-    if (current.source == FileEncoding::Source::User)
+    // Пересмотр предварительного решения (шаг 3а): записи, отданные прежде,
+    // декодированы прежней кодировкой — перечитываем файл тем же путём, что
+    // ручную смену (подмена записей под одним reset), источник — «авто».
+    if (!m_fileEncodings[logFile->filePath].adopt(encoding))
         return;
-    current = encoding;
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    if (st.loadInFlight) {
+        st.reparsePending = true; // по окончании прохода, как у ручной смены
+        return;
+    }
+    startReencode(logFile);
 }
 
 void LogViewWidget::forgetAutoEncoding(const QString& filePath)
 {
     const auto it = m_fileEncodings.find(filePath);
-    if (it != m_fileEncodings.end() && it->source != FileEncoding::Source::User)
+    if (it == m_fileEncodings.end())
+        return;
+    if (it->source != FileEncoding::Source::User)
         m_fileEncodings.erase(it);
+    else
+        *it = FileEncoding().withUserChoice(it->decoder);
 }
 
 QHash<QString, FileEncoding> LogViewWidget::takeEncodingsForIndexed()
@@ -471,7 +483,9 @@ void LogViewWidget::ensureIndexer()
             this, &LogViewWidget::handleResidentFallback);
     // Решение о кодировке приходит раньше порции с первой не-ASCII строкой
     // (очередь сигналов воркера сохраняет порядок): стор читает её уже новым
-    // декодером. Прежние строки — ASCII, reset не нужен.
+    // декодером. Первое решение — без reset (прежние строки — ASCII);
+    // пересмотр предварительного (шаг 3а) — reset и при текстовых правилах
+    // перефильтрация, как ручная смена (IndexedLogStore::adoptDetectedEncoding).
     connect(m_indexer, &LogIndexer::encodingDecided, this,
             [this](const LogFilePtr& logFile, const FileEncoding& encoding) {
                 if (auto* store = m_model->indexedOrNull())
@@ -489,8 +503,10 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile, FileEncoding enc
     auto index = std::make_shared<LineIndex>();
     store->attachFile(logFile, index);
     // Кодировка, решённая резидентным путём до перехода порога: стор читает
-    // текст ею с первой строки, индексатор не решает заново (решённый файл
-    // EncodingDetector::advance не трогает; BOM UTF-8 — то же решение).
+    // текст ею с первой строки, индексатор не решает заново — окончательное
+    // решение EncodingDetector::advance не трогает (BOM UTF-8 — то же
+    // решение), предварительное (шаг 3а) продолжает копить свидетельство с
+    // того места, где остановился резидентный путь, и может быть пересмотрено.
     if (encoding.decided())
         store->adoptDetectedEncoding(logFile, encoding);
     FileReloadState& st = m_fileReloadStates[logFile->filePath];

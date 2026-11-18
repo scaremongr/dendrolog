@@ -328,6 +328,58 @@ struct Document {
     QHash<QString, FileEncoding> encodings;
 };
 
+// Решение парсера → состояние документа, как LogViewWidget::
+// handleEncodingDecided (FileEncoding::adopt): выбор пользователя хранит
+// автоматику рядом; true —
+// пересмотр предварительного решения (шаг 3а): записи, отданные прежде,
+// декодированы прежней кодировкой, файл надо перечитать.
+inline bool adoptResidentEncoding(Document& doc, const LogFilePtr& lf, const FileEncoding& encoding)
+{
+    return doc.encodings[lf->filePath].adopt(encoding);
+}
+
+// Полный разбор файла с состоянием кодировки документа. Пересмотр посреди
+// разбора — файл перечитывается целиком новым состоянием (как
+// LogViewWidget::startReencode), пока решение не перестанет меняться.
+// revisions — сколько перечитываний понадобилось.
+inline QVector<std::shared_ptr<LogEntry>> parseResidentWhole(Document& doc, const LogFilePtr& logFile,
+                                                              const QString& schema,
+                                                              int* revisions = nullptr)
+{
+    QVector<std::shared_ptr<LogEntry>> entries;
+    for (int pass = 0; pass < 16; ++pass) {
+        LogParser parser;
+        parser.setPattern(schema);
+        parser.setExtractionEnabled(true);
+        parser.setFallbackEncoding(kTestFallbackEncoding);
+        entries.clear();
+        bool done = false;
+        bool revised = false;
+        QObject relay;
+        QObject::connect(&parser, &LogParser::encodingDecided, &relay,
+                         [&](const LogFilePtr& lf, const FileEncoding& encoding) {
+                             revised = adoptResidentEncoding(doc, lf, encoding) || revised;
+                         });
+        QObject::connect(&parser, &LogParser::entriesParsed, &relay,
+                         [&](const QVector<std::shared_ptr<LogEntry>>& batch,
+                             const LogFilePtr&) { entries += batch; });
+        QObject::connect(&parser, &LogParser::parsingFinished, &relay,
+                         [&](int, const LogFilePtr&) { done = true; });
+        QObject::connect(&parser, &LogParser::parsingFailed, &relay,
+                         [&](const LogFilePtr&) { done = true; });
+        parser.startParsing(logFile, doc.encodings.value(logFile->filePath));
+        if (!waitFor([&done] { return done; })) {
+            doc.errors << QStringLiteral("резидентный парсинг %1 не завершился").arg(logFile->filePath);
+            break;
+        }
+        if (!revised)
+            break;
+        if (revisions)
+            ++*revisions;
+    }
+    return entries;
+}
+
 // Резидентный путь: LogParser → mergeEntries, как в LogViewWidget. Файлы
 // добавляются в УЖЕ существующую модель — так же, как дописывание файла во
 // вкладку (строки второго файла встают в середину по времени).
@@ -336,34 +388,11 @@ inline void addResidentFiles(Document& doc, const QStringList& paths, const QStr
     for (const QString& path : paths) {
         auto logFile = std::make_shared<LogFile>(path);
         doc.files.append(logFile);
-
-        LogParser parser;
-        parser.setPattern(schema);
-        parser.setExtractionEnabled(true);
-        parser.setFallbackEncoding(kTestFallbackEncoding);
-
-        QVector<QVector<std::shared_ptr<LogEntry>>> batches;
-        bool done = false;
-
-        QObject relay;
-        QObject::connect(&parser, &LogParser::encodingDecided, &relay,
-                         [&doc](const LogFilePtr& lf, const FileEncoding& encoding) {
-                             doc.encodings.insert(lf->filePath, encoding);
-                         });
-        QObject::connect(&parser, &LogParser::entriesParsed, &relay,
-                         [&](const QVector<std::shared_ptr<LogEntry>>& batch,
-                             const LogFilePtr&) { batches.append(batch); });
-        QObject::connect(&parser, &LogParser::parsingFinished, &relay,
-                         [&](int, const LogFilePtr&) { done = true; });
-        QObject::connect(&parser, &LogParser::parsingFailed, &relay,
-                         [&](const LogFilePtr&) { done = true; });
-
-        parser.startParsing(logFile);
-        if (!waitFor([&done] { return done; }))
-            doc.errors << QStringLiteral("резидентный парсинг %1 не завершился").arg(path);
-
-        // Порядок подачи как в production: батч сортируется и сливается.
-        for (auto& batch : batches) {
+        QVector<std::shared_ptr<LogEntry>> entries = parseResidentWhole(doc, logFile, schema);
+        // Порядок подачи как в production: батчи по 5000 сортируются и
+        // сливаются.
+        for (qsizetype from = 0; from < entries.size(); from += 5000) {
+            QVector<std::shared_ptr<LogEntry>> batch = entries.mid(from, 5000);
             std::sort(batch.begin(), batch.end(), logEntryPtrLess);
             doc.model->mergeEntries(batch);
         }
@@ -579,10 +608,11 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     parser.setFallbackEncoding(kTestFallbackEncoding);
     QVector<QVector<std::shared_ptr<LogEntry>>> batches;
     bool done = false;
+    bool revised = false;
     QObject relay;
     QObject::connect(&parser, &LogParser::encodingDecided, &relay,
-                     [&doc](const LogFilePtr& lf, const FileEncoding& encoding) {
-                         doc.encodings.insert(lf->filePath, encoding);
+                     [&](const LogFilePtr& lf, const FileEncoding& encoding) {
+                         revised = adoptResidentEncoding(doc, lf, encoding) || revised;
                      });
     QObject::connect(&parser, &LogParser::entriesParsed, &relay,
                      [&](const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr&) {
@@ -599,6 +629,13 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
         return false;
     for (const auto& batch : batches)
         doc.model->appendEntries(batch);
+    if (revised) {
+        // Пересмотр кодировки хвостом (шаг 3а): файл перечитывается целиком и
+        // его записи подменяются под одним reset — LogViewWidget::startReencode.
+        QVector<std::shared_ptr<LogEntry>> entries = parseResidentWhole(doc, logFile, schema);
+        std::sort(entries.begin(), entries.end(), logEntryPtrLess);
+        doc.model->replaceEntriesForFile(logFile->filePath, entries);
+    }
     return true;
 }
 

@@ -305,6 +305,58 @@ static void testEncodingLiveSearch(const QDir& dir, const QString& schema)
     }
 }
 
+// Шаг 3а F-1: решение по мусорному байту в ASCII-голове — предварительное
+// Windows-1251; кириллица UTF-8 приходит дозаписью и пересматривает его.
+// Источник перечитывается (reset), выдача ищется заново и даёт то же, что
+// на файле, открытом в UTF-8, — на обоих бэкендах.
+static void testProvisionalLiveSearch(const QDir& dir, const QString& schema)
+{
+    QByteArray head = growingBase(0);
+    head.insert(head.indexOf('\n'), " \xFF");
+    QByteArray tail;
+    for (int i = 0; i < 3; ++i)
+        tail += logLine(100, "ERROR", "ОШИБКА диска " + QByteArray::number(i)
+                                          + " при записи журнала, повтор через минуту");
+    tail += logLine(100, "INFO", "обычная строка без совпадения");
+    for (const bool indexed : {true, false}) {
+        const QString tag = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
+        const QString path = testdocs::writeFile(dir, "provisional-" + tag + ".log", head);
+        auto doc = indexed ? testdocs::buildIndexed({path}, schema)
+                           : testdocs::buildResident({path}, schema);
+        const auto state = [&] {
+            return indexed ? doc.model->indexedOrNull()->fileEncoding(doc.files.value(0))
+                           : doc.encodings.value(path);
+        };
+        CHECK(state().decoder.encoding() == TextEncoding::Windows1251 && state().provisional,
+              tag + " provisional: a lone garbage byte gives a provisional Windows-1251");
+        SearchResultsController c;
+        c.setSource(doc.model.get());
+        c.search(query(QStringLiteral("ошибка")));
+        CHECK(waitResults(c, 0), tag + " provisional: nothing in the head");
+        CHECK(indexed ? testdocs::appendIndexedTail(doc, 0, tail, schema)
+                      : testdocs::appendResidentTail(doc, 0, tail, schema),
+              tag + " provisional: append a UTF-8 tail");
+        CHECK(state().decoder.isUtf8() && state().source == FileEncoding::Source::Auto,
+              tag + " provisional: the tail revises the decision to UTF-8");
+        CHECK(waitResults(c, 3), tag + " provisional: the Cyrillic tail is found after the revision");
+        CHECK(c.model()->messageAt(0).endsWith(QStringLiteral("ОШИБКА диска 0 при записи журнала, повтор через минуту")),
+              tag + " provisional: results are decoded with the revised encoding: "
+                  + c.model()->messageAt(0));
+        // Эталон — тот же файл, прочитанный как UTF-8 с самого начала.
+        const QString refPath = testdocs::writeFile(dir, "provisional-ref-" + tag + ".log", head + tail);
+        auto ref = testdocs::buildIndexed({refPath}, schema);
+        ref.model->indexedOrNull()->setFileEncoding(ref.files.value(0), TextDecoder(TextEncoding::Utf8));
+        SearchResultsController rc;
+        rc.setSource(ref.model.get());
+        rc.search(query(QStringLiteral("ошибка")));
+        CHECK(waitResults(rc, 3), tag + " provisional: reference finds the same rows");
+        bool same = true;
+        for (int row = 0; row < 3; ++row)
+            same = same && rc.model()->messageAt(row) == c.model()->messageAt(row);
+        CHECK(same, tag + " provisional: results equal the reference opened as UTF-8");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -467,6 +519,7 @@ int main(int argc, char** argv)
 
     testLiveSearch(dir, schema, path);
     testEncodingLiveSearch(dir, schema);
+    testProvisionalLiveSearch(dir, schema);
     std::fprintf(stdout, "Search results: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

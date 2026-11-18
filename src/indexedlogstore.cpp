@@ -455,6 +455,9 @@ void IndexedLogStore::resetFileIndex(const LogFilePtr& logFile,
         if (m_files[fileId].encoding.source != FileEncoding::Source::User) {
             m_files[fileId].encoding = FileEncoding();
             m_textCache.setFileDecoder(m_files[fileId].cacheFileId, TextDecoder());
+        } else {
+            m_files[fileId].encoding =
+                FileEncoding().withUserChoice(m_files[fileId].encoding.decoder);
         }
         if (!identityAll()) {
             m_allRefs.erase(std::remove_if(m_allRefs.begin(), m_allRefs.end(),
@@ -497,10 +500,14 @@ void IndexedLogStore::adoptDetectedEncoding(const LogFilePtr& logFile,
     if (fileId < 0)
         return;
     IndexedFile& f = m_files[fileId];
-    if (f.encoding.source == FileEncoding::Source::User)
-        return;
-    f.encoding = encoding;
-    m_textCache.setFileDecoder(f.cacheFileId, encoding.decoder);
+    // Пересмотр предварительного решения (шаг 3а): строки файла уже
+    // показаны прежним декодером — как ручная смена, только источник
+    // остаётся «авто». Первое решение reset не требует (показанные строки —
+    // ASCII); выбор пользователя остаётся (FileEncoding::adopt).
+    const bool revised = f.encoding.adopt(encoding);
+    m_textCache.setFileDecoder(f.cacheFileId, f.encoding.decoder);
+    if (revised)
+        rereadWithNewDecoder();
 }
 
 void IndexedLogStore::setFileEncoding(const LogFilePtr& logFile, TextDecoder decoder)
@@ -510,11 +517,15 @@ void IndexedLogStore::setFileEncoding(const LogFilePtr& logFile, TextDecoder dec
         return;
     IndexedFile& f = m_files[fileId];
     const bool changed = f.encoding.decoder != decoder;
-    f.encoding = FileEncoding{decoder, FileEncoding::Source::User};
+    f.encoding = f.encoding.withUserChoice(decoder);
     if (!changed)
         return;
     m_textCache.setFileDecoder(f.cacheFileId, decoder);
+    rereadWithNewDecoder();
+}
 
+void IndexedLogStore::rereadWithNewDecoder()
+{
     // Видимый набор зависит от текста только через текстовые правила. Без
     // них уровни и время те же, m_visibleRefs остаётся; с ними — пересчёт
     // заново (applyFilter отменяет джоб со старым декодером поколением и

@@ -2003,8 +2003,24 @@ static void testEncodingInTail(const QDir& dir)
         const QString more = cyrLine(3, "INFO", u"Журнал очищен");
         text += more;
         appendToFile(path, encodeAs(more, enc));
+        // Решение по двум строкам предварительное (шаг 3а): дозапись копит
+        // свидетельство дальше и может сообщить его, но кодировка та же.
+        CHECK(third.decisions.value(0).provisional,
+              qPrintable(tag + ": a decision on two lines is provisional"));
         const EncodingRun fourth = indexWithEncoding(lf, third.decisions.value(0), run.index, true);
-        CHECK(fourth.decisions.isEmpty(), qPrintable(tag + ": a decided file is not re-decided"));
+        bool sameDecoder = true;
+        for (const FileEncoding& d : fourth.decisions)
+            sameDecoder = sameDecoder && d.decoder.encoding() == enc
+                          && d.source == FileEncoding::Source::Auto;
+        CHECK(sameDecoder, qPrintable(tag + ": a decided file keeps its encoding"));
+        // Окончательное решение не трогается вовсе.
+        FileEncoding final = fourth.decisions.isEmpty() ? third.decisions.value(0)
+                                                        : fourth.decisions.last();
+        final.provisional = false;
+        appendToFile(path, encodeAs(more, enc));
+        text += more;
+        const EncodingRun fifth = indexWithEncoding(lf, final, run.index, true);
+        CHECK(fifth.decisions.isEmpty(), qPrintable(tag + ": a settled file is not re-decided"));
         checkIndexedText(tag + " after decision", path, *run.index, linesOf(text), enc);
     }
 }

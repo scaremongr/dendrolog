@@ -37,7 +37,12 @@ All notable changes to DendroLog are documented here. The format follows
   on both sides of the threshold, and a growing log keeps its encoding when it
   crosses the threshold. The encoding is detected by the file itself at its
   first non-ASCII line, wherever that is, also when it arrives as an appended
-  tail; the tail of a growing log is read in the file's encoding. Every file
+  tail; the tail of a growing log is read in the file's encoding. While a file
+  has only a little non-ASCII text so far (a stray broken byte, a single
+  word), the guess stays open: when more text further on or in the appended
+  tail shows another encoding, the file is reread in it, keeping the selected
+  line and its place on screen — a UTF-8 log that starts with one broken byte
+  is no longer shown as garbage. Every file
   of a tab with several files keeps its own encoding. **Save View As** writes
   the text as shown, in UTF-8. Choosing the encoding by hand when detection
   guesses wrong comes in the next step (part 2).

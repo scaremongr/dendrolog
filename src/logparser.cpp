@@ -200,14 +200,19 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         in.setEncoding(QStringConverter::Latin1);
     else if (!detectUnicodeBom)
         in.setEncoding(TextEncodings::toQt(streamEncoding).value_or(QStringConverter::Utf8));
-    // Сырые байты строки и её начало в файле — только для решения о
-    // кодировке, то есть только для не-ASCII строк, пока файл «не решён».
+    // Начало строки в файле и её перевод строки — только для решения о
+    // кодировке, то есть только для не-ASCII строк, пока решение не
+    // окончательное. Цена — pos() и чтение двух байтов вторым дескриптором;
+    // таких строк за проход меньше 2 × kFinalHighBytes: строки внутри
+    // свидетельства несут его байты ≥ 0x80, каждая следующая добавляет хотя
+    // бы один, а набралось kFinalHighBytes — решение окончательное.
     QFile rawLine(logFile->filePath);
-    const auto lineStartOf = [&](const QString& text) -> qint64 {
+    struct LinePlace { qint64 start = -1; int eol = 0; };
+    const auto placeOf = [&](const QString& text) -> LinePlace {
         const qint64 after = in.pos();
         if (after < 0)
-            return -1;
-        qint64 eol = 0;
+            return {};
+        int eol = 0;
         if (rawLine.isOpen() || rawLine.open(QIODevice::ReadOnly)) {
             const qint64 from = qMax<qint64>(0, after - 2);
             if (rawLine.seek(from)) {
@@ -216,8 +221,9 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                     eol = tail.endsWith("\r\n") ? 2 : 1;
             }
         }
-        return after - eol - text.size();
+        return {after - eol - text.size(), eol};
     };
+    qint64 reportedEvidenceEnd = fileEncoding.evidence.end;
     QVector<std::shared_ptr<LogEntry>> batchEntries;
     const int BATCH_SIZE = 5000;
     batchEntries.reserve(BATCH_SIZE);
@@ -261,13 +267,23 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             // Первая не-ASCII строка «не решённого» файла решает кодировку —
             // правилом индексатора, по окну от её первого байта ≥ 0x80
             // (EncodingDetector::advance). Строки до неё — ASCII: их текст от
-            // решения не зависит.
-            if (!fileEncoding.decided()) {
-                const qint64 start = lineStartOf(line);
-                if (start >= 0
-                    && EncodingDetector::advance(fileEncoding, line.toLatin1(), start,
-                                                 logFile->filePath, fallback))
-                    emit encodingDecided(logFile, fileEncoding);
+            // решения не зависит. Предварительное решение (шаг 3а) копит
+            // свидетельство по каждой следующей не-ASCII строке; строка
+            // подаётся с '\n', если кончилась переводом строки — как в
+            // буфере индексатора (оборванная последовательность в конце
+            // строки — битая, а не «оборвана краем»).
+            if (!fileEncoding.settled()) {
+                const LinePlace place = placeOf(line);
+                if (place.start >= 0) {
+                    QByteArray raw = line.toLatin1();
+                    if (place.eol > 0)
+                        raw.append('\n');
+                    if (EncodingDetector::advance(fileEncoding, raw, place.start,
+                                                  logFile->filePath, fallback)) {
+                        emit encodingDecided(logFile, fileEncoding);
+                        reportedEvidenceEnd = fileEncoding.evidence.end;
+                    }
+                }
             }
             if (fileEncoding.decoder.isUtf8())
                 line = QString::fromUtf8(std::move(line).toLatin1());
@@ -370,6 +386,10 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             }
         }
     }
+    // Свидетельство предварительного решения подросло без смены решения —
+    // отдаём его вкладке: следующий проход продолжит копить с этого места.
+    if (byteMode && !fileEncoding.settled() && fileEncoding.evidence.end != reportedEvidenceEnd)
+        emit encodingDecided(logFile, fileEncoding);
     emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, reported);
     emit parsingFinished(totalParsedEntries, logFile);
 }
