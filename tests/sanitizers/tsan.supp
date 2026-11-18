@@ -1,0 +1,42 @@
+# Подавления ThreadSanitizer. Подключаются через TSAN_OPTIONS в
+# tests/CMakeLists.txt при -DDENDROLOG_SANITIZER=thread.
+#
+# Правило: здесь только чужой код. Находки в src/ и tests/ не подавляются —
+# их исправляют или записывают задачей в docs/roadmap.md. Синхронизацию,
+# которую Qt делает внутри себя (очередь событий, пул потоков, QFuture), TSan
+# узнаёт не отсюда, а из tests/sanitizers/tsan_qt_sync.cpp.
+
+# Qt собран без TSan. Его внутренние мьютексы невидимы, поэтому выделение,
+# освобождение и копирование памяти (operator new/delete, memcpy, memmove —
+# перехватчики TSan), сделанные ИЗНУТРИ библиотек Qt в разных потоках, выглядят
+# гонками Qt с самим собой: пул отрисовки QtGui (blend_untransformed_generic),
+# QMetaCallEvent, QThreadPool, QFutureInterface. called_from_lib отключает
+# только перехватчики, вызванные прямо из названной библиотеки; доступы нашего
+# инструментированного кода (включая inline-код заголовков Qt: QList, QString,
+# QHash) проверяются как обычно. Без записи для libQt6Core прогон даёт ~290
+# отчётов о внутренностях Qt (проверено).
+#
+# Слепое пятно: если два наших потока портят общий объект Qt и оба
+# конфликтующих доступа — memcpy/realloc/free ВНУТРИ невстроенной функции Qt
+# (например, QString::append с перевыделением), TSan этого не увидит. Закрыть
+# его может только Qt, собранный с TSan, — задача P-4 в docs/roadmap.md.
+called_from_lib:libQt6Core.so
+called_from_lib:libQt6Gui.so
+called_from_lib:libQt6Widgets.so
+
+# glibc: mktime()/localtime_r() перечитывают TZ в tzset_internal — освобождают
+# и заново выделяют копию строки (free/strdup) под внутренним tzset_lock.
+# Блокировку неинструментированной libc TSan не видит, а free/malloc
+# перехватывает, отсюда «гонка» двух воркеров, одновременно переводящих метки
+# времени. Сами вызовы потокобезопасны.
+race:tzset_internal
+
+# QtConcurrent::mapped()/filtered() по временной последовательности: ядро
+# хранит её копию (SequenceHolder1) и в finish() освобождает в потоке, который
+# вышел из ядра последним. Остальные потоки ядра к этому моменту закончили
+# читать элементы: их сводит барьер-семафор ThreadEngineBase внутри Qt,
+# которого TSan не видит. tsan_qt_sync.cpp принимает их работу перед
+# reportFinished(), но finish() Qt зовёт раньше и без единого вызова в
+# библиотеку, за который можно зацепиться. Запись закрывает только стеки с
+# кадром finish() хранителя последовательности, наш функтор проверяется.
+race:QtConcurrent::SequenceHolder1<*>::finish

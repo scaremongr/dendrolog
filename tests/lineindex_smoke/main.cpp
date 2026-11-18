@@ -82,9 +82,11 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
                                             bool* fallback = nullptr)
 {
     auto index = std::make_shared<LineIndex>();
-    LogIndexer indexer;
+    // Флаги объявлены ДО индексатора: при таймауте его деструктор дожидается
+    // воркера, а тот ещё пишет в них из direct-слота.
     std::atomic_bool done{false};
     std::atomic_bool fb{false};
+    LogIndexer indexer;
     QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
                      [&](qint64, const LogFilePtr&) { done = true; },
                      Qt::DirectConnection);
@@ -125,8 +127,8 @@ static void indexAppend(LogIndexer& indexer, const LogFilePtr& lf,
 static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf)
 {
     QVector<std::shared_ptr<LogEntry>> all;
+    std::atomic_bool done{false}; // до парсера — см. indexFile()
     LogParser parser;
-    std::atomic_bool done{false};
     QObject::connect(&parser, &LogParser::entriesParsed, &parser,
                      [&](const QVector<std::shared_ptr<LogEntry>>& batch,
                          const LogFilePtr&) { all += batch; },
@@ -335,14 +337,17 @@ static void testAppendReindex(const QDir& dir)
     auto index = std::make_shared<LineIndex>();
     {
         std::atomic_bool done{false};
-        QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
-                         [&](qint64, const LogFilePtr&) { done = true; },
-                         Qt::DirectConnection);
+        auto conn = QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
+                                     [&](qint64, const LogFilePtr&) { done = true; },
+                                     Qt::DirectConnection);
         indexer.startIndexing(lf, index);
         QElapsedTimer t; t.start();
         while (!done && t.elapsed() < 30000)
             QThread::msleep(2);
         CHECK(done.load(), "append: initial indexing timeout");
+        // Индексатор живёт дольше флага: без disconnect следующая дозапись
+        // записала бы в `done` за пределами его области (находка ASan).
+        QObject::disconnect(conn);
     }
     CHECK(index->lineCount() == 2, "append: initial line count");
     CHECK(index->lastLineProvisional(), "append: tail must be provisional");

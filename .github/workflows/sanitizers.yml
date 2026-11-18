@@ -1,0 +1,59 @@
+# Тесты под санитайзерами: ASan + UBSan и отдельно TSan (Linux, GCC).
+#
+# Намеренно отдельный workflow, а не job в build.yml: красный санитайзер не
+# должен мешать сборке установщиков и релизу. Флаги включает опция CMake
+# DENDROLOG_SANITIZER; опции рантайма, подавления (tests/sanitizers/*.supp) и
+# увеличенные таймауты задаёт tests/CMakeLists.txt.
+
+name: Sanitizers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  QT_VERSION: '6.8.*'
+
+jobs:
+  sanitize:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      # Варианты независимы: находка ASan не должна отменять прогон TSan.
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            sanitizer: address
+          - name: TSan
+            sanitizer: thread
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev \
+            libxcb-cursor0 ninja-build
+
+      # TSan (и ASan на старых рантаймах) не переносит 32 бита энтропии ASLR,
+      # выставленные на раннерах GitHub: «unexpected memory mapping».
+      - name: Lower ASLR entropy
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DDENDROLOG_SANITIZER=${{ matrix.sanitizer }}
+          cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

@@ -195,8 +195,8 @@ inline bool waitFor(const std::function<bool()>& ready, int timeoutMs = 60000)
 
 // Ожидание тишины модели: фильтрация индексного бэкенда всегда асинхронна (у
 // резидентного — от 100k записей) и может идти несколькими инкрементальными
-// джобами, поэтому ждём, пока перестанут приходить modelFiltered /
-// filterProgress И перестанет меняться rowCount(). Заодно отрабатывают
+// джобами, поэтому ждём, пока модель не закончит фильтровать, перестанут
+// приходить modelFiltered / filterProgress И перестанет меняться rowCount(). Заодно отрабатывают
 // отложенные таймеры view (singleShot(0) восстановления прокрутки).
 // false — модель не успокоилась за timeoutMs.
 inline bool settle(LogModel& model, int quietMs = 80, int timeoutMs = 60000)
@@ -224,7 +224,10 @@ inline bool settle(LogModel& model, int quietMs = 80, int timeoutMs = 60000)
             lastRows = rows;
             quiet.restart();
         }
-        if (!progressPending && quiet.elapsed() >= quietMs) {
+        // isFiltering(): тишина сама по себе не значит, что джоб закончился —
+        // на медленной машине (санитайзеры) фоновый фильтр молчит дольше
+        // quietMs между стартом и первым сообщением о прогрессе.
+        if (!progressPending && !model.isFiltering() && quiet.elapsed() >= quietMs) {
             calm = true;
             break;
         }

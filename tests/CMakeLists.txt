@@ -8,6 +8,27 @@ if(WIN32)
     get_filename_component(DENDROLOG_QT_BIN_DIR "${_qt_core_loc}" DIRECTORY)
 endif()
 
+# Прогон под санитайзером (DENDROLOG_SANITIZER в корневом CMakeLists.txt):
+# опции рантайма и файлы подавлений — через окружение теста, таймауты
+# умножаются. Qt не инструментирован, поэтому TSan замедляет тесты в разы
+# сильнее, чем ASan.
+set(DENDROLOG_SANITIZER_ENV "")
+set(DENDROLOG_TEST_TIMEOUT_FACTOR 1)
+set(_supp_dir "${CMAKE_CURRENT_SOURCE_DIR}/sanitizers")
+if(DENDROLOG_SANITIZER STREQUAL "address")
+    set(DENDROLOG_TEST_TIMEOUT_FACTOR 4)
+    set(DENDROLOG_SANITIZER_ENV
+        "ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1:check_initialization_order=1"
+        "LSAN_OPTIONS=suppressions=${_supp_dir}/lsan.supp:print_suppressions=0"
+        # Сборка оставляет UBSan «восстановимым», иначе рантайм не смотрит в
+        # подавления; падать на первой находке велит halt_on_error.
+        "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:suppressions=${_supp_dir}/ubsan.supp")
+elseif(DENDROLOG_SANITIZER STREQUAL "thread")
+    set(DENDROLOG_TEST_TIMEOUT_FACTOR 10)
+    set(DENDROLOG_SANITIZER_ENV
+        "TSAN_OPTIONS=suppressions=${_supp_dir}/tsan.supp:print_suppressions=0:second_deadlock_stack=1")
+endif()
+
 # dendrolog_add_test(<имя теста> LIBRARIES <цели>...
 #                    [TARGET <имя exe>] [TIMEOUT <секунды>])
 # Исходник — main.cpp в каталоге, откуда вызвана функция; имя exe по
@@ -24,7 +45,12 @@ function(dendrolog_add_test test_name)
 
     add_test(NAME ${test_name} COMMAND ${ARG_TARGET})
     if(ARG_TIMEOUT)
-        set_tests_properties(${test_name} PROPERTIES TIMEOUT ${ARG_TIMEOUT})
+        math(EXPR _timeout "${ARG_TIMEOUT} * ${DENDROLOG_TEST_TIMEOUT_FACTOR}")
+        set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_timeout})
+    endif()
+    if(DENDROLOG_SANITIZER_ENV)
+        set_tests_properties(${test_name} PROPERTIES
+            ENVIRONMENT "${DENDROLOG_SANITIZER_ENV}")
     endif()
     if(WIN32)
         set_tests_properties(${test_name} PROPERTIES
@@ -42,3 +68,9 @@ add_subdirectory(search_results)
 add_subdirectory(field_reextraction)
 add_subdirectory(quick_search)
 add_subdirectory(logview_lifecycle)
+
+# Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
+# пропускать правильные передачи через Qt как гонки, ни прятать настоящие.
+if(DENDROLOG_SANITIZER STREQUAL "thread")
+    add_subdirectory(tsan_canary)
+endif()

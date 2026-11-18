@@ -115,6 +115,41 @@ Qt DLL на Windows) плюс `add_subdirectory` там же.
 У `lineindex_smoke` есть режимы профилирования: `--bench <file> [pattern]` и
 `--bench-stages <file>` (ступенчатая атрибуция I/O → декод → timestamp → level).
 
+### Санитайзеры
+
+Опция CMake `DENDROLOG_SANITIZER` (GCC/Clang): `address` — ASan + UBSan,
+`thread` — TSan. Отдельный каталог сборки на каждый вариант; обычная сборка
+флагов не получает.
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=/opt/qt6 -DDENDROLOG_SANITIZER=address
+cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-failure
+```
+
+Для TSan — то же с `build-tsan` и `thread`. Запускать через `ctest`: опции
+рантайма, подавления и увеличенные таймауты он берёт из `tests/CMakeLists.txt`
+(тест напрямую — с `TSAN_OPTIONS=suppressions=tests/sanitizers/tsan.supp`).
+Прогон — примерно как обычный, 2–4 минуты. В CI — отдельный workflow
+`.github/workflows/sanitizers.yml` (пуш в `main` и вручную); его красный
+статус не блокирует сборку установщиков, но чинить его нужно так же.
+
+- Подавления — `tests/sanitizers/{lsan,ubsan,tsan}.supp`, у каждой записи
+  комментарий, почему это не наш дефект. **Находки в `src/` и `tests/` не
+  подавлять**: исправить или записать задачей в `docs/roadmap.md`.
+- Qt не инструментирован, и TSan не видит его мьютексов: передача данных через
+  queued-сигнал, `QThreadPool` и `QFuture` выглядела бы гонкой. Об этих
+  передачах ему сообщает `tests/sanitizers/tsan_qt_sync.cpp` (обёртки линкера
+  `--wrap` над вызовами в Qt, список символов — в корневом `CMakeLists.txt`).
+  Новый способ передать данные между потоками (например, queued
+  `QMetaObject::invokeMethod` из воркера) даст ложные отчёты, пока его нет в
+  этом слое, — дополнять слой, а не файл подавлений.
+- `tests/tsan_canary` (только при TSan) проверяет сам слой: режим `clean` —
+  правильные передачи без отчётов, режим `race` — настоящая гонка обязана
+  дать отчёт. Упал `race` — слой ослепил TSan, зелёным остальным тестам
+  верить нельзя.
+- Тест, который ждёт «тишины» по таймеру, под санитайзером ненадёжен: ждать
+  состояние (`testdocs::settle` смотрит `isFiltering()`), а не время.
+
 ## С чего начать чтение
 
 Порядок, в котором код складывается в голове быстрее всего:
