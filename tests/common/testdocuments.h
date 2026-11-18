@@ -314,10 +314,18 @@ inline bool settle(LogModel& model, int quietMs = 80, int timeoutMs = 60000)
 // Документ: модель + её файлы
 // ---------------------------------------------------------------------------
 
+// Запасная кодировка автоопределения в тестах (F-1): как у машины с
+// кириллической локалью — тогда decide выбирает между Windows-1251, IBM866 и
+// KOI8-R. UTF-8-фикстуры от неё не зависят.
+constexpr TextEncoding kTestFallbackEncoding = TextEncoding::Windows1251;
+
 struct Document {
     std::unique_ptr<LogModel> model;
     QVector<LogFilePtr>       files;
     QStringList               errors;   // пусто — загрузка прошла чисто
+    // Резидентный путь: кодировка файла (ключ — путь), как её держит вкладка
+    // (LogViewWidget::m_fileEncodings) — для дозаписи. У индексного — в сторе.
+    QHash<QString, FileEncoding> encodings;
 };
 
 // Резидентный путь: LogParser → mergeEntries, как в LogViewWidget. Файлы
@@ -332,11 +340,16 @@ inline void addResidentFiles(Document& doc, const QStringList& paths, const QStr
         LogParser parser;
         parser.setPattern(schema);
         parser.setExtractionEnabled(true);
+        parser.setFallbackEncoding(kTestFallbackEncoding);
 
         QVector<QVector<std::shared_ptr<LogEntry>>> batches;
         bool done = false;
 
         QObject relay;
+        QObject::connect(&parser, &LogParser::encodingDecided, &relay,
+                         [&doc](const LogFilePtr& lf, const FileEncoding& encoding) {
+                             doc.encodings.insert(lf->filePath, encoding);
+                         });
         QObject::connect(&parser, &LogParser::entriesParsed, &relay,
                          [&](const QVector<std::shared_ptr<LogEntry>>& batch,
                              const LogFilePtr&) { batches.append(batch); });
@@ -382,11 +395,6 @@ inline QString describe(IndexedLoad mode)
     return mode == IndexedLoad::Sequential ? QStringLiteral("по очереди")
                                            : QStringLiteral("разом");
 }
-
-// Запасная кодировка автоопределения в тестах (F-1): как у машины с
-// кириллической локалью — тогда decide выбирает между Windows-1251, IBM866 и
-// KOI8-R. UTF-8-фикстуры от неё не зависят.
-constexpr TextEncoding kTestFallbackEncoding = TextEncoding::Windows1251;
 
 // Индексатор в тестах: схема, извлечение полей и запасная кодировка — как
 // у вкладки, плюс решение о кодировке → стор (LogViewWidget::ensureIndexer).
@@ -568,9 +576,14 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     LogParser parser;
     parser.setPattern(schema);
     parser.setExtractionEnabled(true);
+    parser.setFallbackEncoding(kTestFallbackEncoding);
     QVector<QVector<std::shared_ptr<LogEntry>>> batches;
     bool done = false;
     QObject relay;
+    QObject::connect(&parser, &LogParser::encodingDecided, &relay,
+                     [&doc](const LogFilePtr& lf, const FileEncoding& encoding) {
+                         doc.encodings.insert(lf->filePath, encoding);
+                     });
     QObject::connect(&parser, &LogParser::entriesParsed, &relay,
                      [&](const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr&) {
                          batches.append(batch);
@@ -579,7 +592,9 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
                      [&done](int, const LogFilePtr&) { done = true; });
     QObject::connect(&parser, &LogParser::parsingFailed, &relay,
                      [&done](const LogFilePtr&) { done = true; });
-    parser.startParsingFrom(logFile, oldSize, context);
+    // Кодировка хвоста (F-1) — состояние файла: «не решено» решит хвост.
+    parser.startParsingFrom(logFile, oldSize, context, TextEncoding::Utf8,
+                            doc.encodings.value(logFile->filePath));
     if (!waitFor([&done] { return done; }))
         return false;
     for (const auto& batch : batches)

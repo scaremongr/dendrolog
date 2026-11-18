@@ -799,6 +799,279 @@ static void checkEncodingSwitch(const QDir& dir, const QString& schema)
           "encoding tail: the user's choice stands");
 }
 
+// Растущий лог в Windows-1251 (F-1, шаг 3) на обоих бэкендах: файл начался
+// ASCII («не решено»), кириллица пришла дозаписью — частями, с продолжением
+// записи и строкой, дописанной в два приёма. Кодировку решает первая
+// не-ASCII строка хвоста, дальше хвост читается ею же.
+static void checkGrowingSingleByte(const QDir& dir, const QString& name, const QString& schema)
+{
+    const auto cp = [](const QString& text) {
+        return testdocs::encodeText(text, TextEncoding::Windows1251);
+    };
+    const QString path = testdocs::writeFile(dir, name + "-cp1251-grows.log",
+        record(0, "INFO", "ascii head") + record(1, "INFO", "still ascii"));
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    CHECK(settled(tab), name + " cp1251: initial load");
+    LogModel& model = *tab.model();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(!tab.fileEncoding(file).decided(), name + " cp1251: an ASCII file is undecided");
+
+    const auto append = [&](const QByteArray& bytes) {
+        CHECK(testdocs::appendToFile(path, bytes), name + " cp1251: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + " cp1251: reload settles");
+    };
+    append(cp(recordText(2, "ERROR", QStringLiteral("Ошибка соединения: таймаут"))));
+    const FileEncoding decided = tab.fileEncoding(file);
+    CHECK(decided.source == FileEncoding::Source::Auto
+              && decided.decoder.encoding() == TextEncoding::Windows1251,
+          name + " cp1251: the tail decided Windows-1251: "
+              + TextEncodings::displayName(decided.decoder.encoding()));
+    CHECK(model.rowCount() == 3
+              && model.messageAt(2).endsWith(QStringLiteral("Ошибка соединения: таймаут")),
+          name + " cp1251: the appended record is readable: " + rows(model).join(" | "));
+    append(cp(QStringLiteral("    в модуле Хранилище\n")));
+    CHECK(model.rowCount() == 4 && model.messageAt(3) == QStringLiteral("    в модуле Хранилище")
+              && model.keyForRow(3).logicalEntryId == model.keyForRow(2).logicalEntryId,
+          name + " cp1251: a Cyrillic continuation stays in its record: " + rows(model).join(" | "));
+    // Строка в два приёма: оборвана посреди слова.
+    append(cp(QStringLiteral("    повторная попы")));
+    append(cp(QStringLiteral("тка через 5 с\n")));
+    CHECK(model.rowCount() == 5
+              && model.messageAt(4) == QStringLiteral("    повторная попытка через 5 с"),
+          name + " cp1251: a line written in two parts is one readable row: "
+              + rows(model).join(" | "));
+    append(cp(recordText(3, "WARN", QStringLiteral("ДИСК заполнен"))));
+    CHECK(model.rowCount() == 6 && model.messageAt(5).endsWith(QStringLiteral("ДИСК заполнен")),
+          name + " cp1251: later tails keep the decided encoding");
+    CHECK(tab.fileEncoding(file).decoder.encoding() == TextEncoding::Windows1251,
+          name + " cp1251: decided once");
+}
+
+// Переход порога сохраняет кодировку (F-1, шаг 3): решение резидентного пути
+// и выбор пользователя передаются индексатору, а не определяются заново; и
+// обратно — индексная вкладка, откатившаяся в резидентный путь, выбор
+// пользователя не теряет. Порог 1 МБ выставляет вызывающий.
+static void checkThresholdKeepsEncoding(const QDir& dir, const QString& schema)
+{
+    QString head;
+    for (int i = 0; i < 400; ++i)
+        head += recordText(i / 50, i % 2 ? "ERROR" : "INFO",
+                           QStringLiteral("Запись номер %1: ошибка диска").arg(i));
+    QString more;
+    for (int i = 400; i < 24000; ++i)
+        more += recordText(i / 50, "INFO", QStringLiteral("Строка %1 после порога").arg(i));
+    const QByteArray moreBytes = testdocs::encodeText(more, TextEncoding::Windows1251);
+    CHECK(moreBytes.size() > 1024 * 1024, "threshold encoding: the tail crosses 1 MB");
+
+    // 1. Решение автоматики. Запасную кодировку меняем до перехода: если бы
+    // индексатор решал заново, окно cp1251 под запасной Windows-1252 дало бы
+    // Windows-1252.
+    {
+        const QString path = testdocs::writeFile(dir, "threshold-auto.log",
+            testdocs::encodeText(head, TextEncoding::Windows1251));
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.setExtractionEnabled(true);
+        tab.setFallbackEncoding(TextEncoding::Windows1251);
+        tab.addLogFile(path);
+        CHECK(settled(tab), "threshold auto: initial load");
+        const LogFilePtr file = tab.loadedFiles().value(0);
+        CHECK(!tab.model()->isIndexedBackend()
+                  && tab.fileEncoding(file).decoder.encoding() == TextEncoding::Windows1251,
+              "threshold auto: resident tab detected Windows-1251");
+        tab.setFallbackEncoding(TextEncoding::Windows1252);
+        CHECK(testdocs::appendToFile(path, moreBytes), "threshold auto: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), "threshold auto: conversion settles");
+        LogModel& model = *tab.model();
+        IndexedLogStore* store = model.indexedOrNull();
+        CHECK(store != nullptr, "threshold auto: converted to indexed");
+        if (store) {
+            const FileEncoding enc = store->fileEncoding(file);
+            CHECK(enc.source == FileEncoding::Source::Auto
+                      && enc.decoder.encoding() == TextEncoding::Windows1251,
+                  "threshold auto: the decision is carried over: "
+                      + TextEncodings::displayName(enc.decoder.encoding()));
+        }
+        CHECK(model.rowCount() == 24000
+                  && model.messageAt(0).endsWith(QStringLiteral("Запись номер 0: ошибка диска"))
+                  && model.messageAt(23999).endsWith(QStringLiteral("Строка 23999 после порога")),
+              "threshold auto: text readable after conversion: " + model.messageAt(0));
+    }
+
+    // 2. Выбор пользователя на резидентной вкладке (заведомо неверный KOI8-R)
+    // переживает переход порога — и обратный переход индексной вкладки в
+    // резидентный путь (файл переписан в UTF-16), и снова индексный.
+    {
+        const QString path = testdocs::writeFile(dir, "threshold-user.log",
+            testdocs::encodeText(head, TextEncoding::Windows1251));
+        LogViewWidget tab;
+        tab.setParserPattern(schema);
+        tab.setExtractionEnabled(true);
+        tab.setFallbackEncoding(TextEncoding::Windows1251);
+        tab.addLogFile(path);
+        CHECK(settled(tab), "threshold user: initial load");
+        LogModel& model = *tab.model();
+        const LogFilePtr file = tab.loadedFiles().value(0);
+        const QString readable = model.messageAt(7);
+        tab.setFileEncoding(file, TextEncoding::Koi8R);
+        CHECK(settled(tab), "threshold user: resident switch settles");
+        CHECK(model.rowCount() == 400 && model.messageAt(7) != readable
+                  && !model.messageAt(7).contains(QStringLiteral("Запись")),
+              "threshold user: the resident tab rereads the file with KOI8-R: " + model.messageAt(7));
+        CHECK(tab.fileEncoding(file).source == FileEncoding::Source::User,
+              "threshold user: the choice is recorded");
+        tab.setFileEncoding(file, TextEncoding::Windows1251);
+        CHECK(settled(tab), "threshold user: switch back settles");
+        CHECK(model.messageAt(7) == readable, "threshold user: back to readable text");
+        tab.setFileEncoding(file, TextEncoding::Koi8R);
+        CHECK(settled(tab), "threshold user: KOI8-R again");
+
+        CHECK(testdocs::appendToFile(path, moreBytes), "threshold user: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), "threshold user: conversion settles");
+        IndexedLogStore* store = model.indexedOrNull();
+        CHECK(store != nullptr, "threshold user: converted to indexed");
+        if (!store)
+            return;
+        CHECK(store->fileEncoding(file).source == FileEncoding::Source::User
+                  && store->fileEncoding(file).decoder.encoding() == TextEncoding::Koi8R,
+              "threshold user: the user's choice is carried over");
+        CHECK(model.rowCount() == 24000 && !model.messageAt(7).contains(QStringLiteral("Запись")),
+              "threshold user: the indexed tab reads KOI8-R: " + model.messageAt(7));
+
+        // Обратно: файл переписан в UTF-16 — индексатор возвращает вкладку
+        // в резидентный путь; выбор пользователя переходит вместе с файлом.
+        QString wide;
+        for (int i = 0; i < 30000; ++i)
+            wide += recordText(i / 50, "INFO", QStringLiteral("широкая %1").arg(i));
+        testdocs::writeFile(dir, "threshold-user.log",
+                            QByteArray("\xFF\xFE", 2) + encoded(QStringConverter::Utf16LE, wide));
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), "threshold user: UTF-16 rewrite settles");
+        CHECK(!model.isIndexedBackend() && model.rowCount() == 30000
+                  && model.messageAt(29999).endsWith(QStringLiteral("широкая 29999")),
+              "threshold user: a UTF-16 file falls back to resident");
+        CHECK(tab.fileStreamEncoding(file) == TextEncoding::Utf16LE,
+              "threshold user: read as UTF-16LE");
+        CHECK(tab.fileEncoding(file).source == FileEncoding::Source::User
+                  && tab.fileEncoding(file).decoder.encoding() == TextEncoding::Koi8R,
+              "threshold user: the choice survives the fallback");
+
+        // И снова однобайтный файл выше порога — индексный, с тем же выбором.
+        testdocs::writeFile(dir, "threshold-user.log",
+                            testdocs::encodeText(head + more, TextEncoding::Windows1251));
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), "threshold user: rewrite settles");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), "threshold user: rewrite settles again");
+        store = model.indexedOrNull();
+        CHECK(store && store->fileEncoding(file).source == FileEncoding::Source::User
+                  && store->fileEncoding(file).decoder.encoding() == TextEncoding::Koi8R,
+              "threshold user: the choice survives the way back to indexed");
+        CHECK(model.rowCount() == 24000 && !model.messageAt(7).contains(QStringLiteral("Запись")),
+              "threshold user: read with KOI8-R again: " + model.messageAt(7));
+    }
+}
+
+// Смена кодировки на резидентной вкладке (F-1, шаг 3 — механизм; триггер в
+// logview_state по трём путям — шаг 4): файл перечитывается выбранной
+// кодировкой; текущая запись, выделение и позиция остаются.
+static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
+{
+    QString text;
+    for (int i = 0; i < 1500; ++i)
+        text += recordText(i / 50, i % 2 ? "ERROR" : "INFO",
+                           QStringLiteral("Запись номер %1: ошибка диска").arg(i));
+    const QString path = testdocs::writeFile(dir, "resident-switch.log",
+        testdocs::encodeText(text, TextEncoding::Windows1251));
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.setFallbackEncoding(TextEncoding::Windows1251);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), "resident switch: initial load");
+    testdocs::pump(200);
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(!model.isIndexedBackend(), "resident switch: the tab is resident");
+
+    const auto switchTo = [&](TextEncoding encoding, const QString& what) {
+        view.goToRow(700);
+        testdocs::pump(100);
+        const auto entry = model.entryAt(view.currentIndex().row());
+        const qint64 lineNumber = entry ? entry->originalLineNumber() : -1;
+        const int scroll = view.verticalScrollBar()->value();
+        const QRect rect = view.visualRect(view.currentIndex());
+        tab.setFileEncoding(file, encoding);
+        CHECK(settled(tab), what + ": settles");
+        testdocs::pump(200);
+        const QModelIndex cur = view.currentIndex();
+        const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
+        CHECK(now && lineNumber == 701 && now->originalLineNumber() == lineNumber,
+              what + QStringLiteral(": the current line is kept (%1)")
+                         .arg(now ? now->originalLineNumber() : -1));
+        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
+              what + ": the current row stays selected");
+        CHECK(view.verticalScrollBar()->value() == scroll && view.visualRect(cur) == rect,
+              what + QStringLiteral(": the viewport stays put (scroll %1 → %2)")
+                         .arg(scroll).arg(view.verticalScrollBar()->value()));
+        CHECK(tab.fileEncoding(file).source == FileEncoding::Source::User
+                  && tab.fileEncoding(file).decoder.encoding() == encoding,
+              what + ": the tab records the user's choice");
+        return cur.row();
+    };
+    int row = switchTo(TextEncoding::Koi8R, "resident switch KOI8-R");
+    CHECK(model.rowCount() == 1500 && !model.messageAt(row).contains(QStringLiteral("Запись")),
+          "resident switch KOI8-R: reread with the new encoding: " + model.messageAt(row));
+    row = switchTo(TextEncoding::Windows1251, "resident switch back");
+    CHECK(model.messageAt(row).endsWith(QStringLiteral("Запись номер 700: ошибка диска")),
+          "resident switch back: original text: " + model.messageAt(row));
+
+    // Выбор посреди первой загрузки: загрузка доходит, затем файл
+    // перечитывается выбранной кодировкой; решение автоматики, пришедшее
+    // позже выбора, его не заменяет.
+    {
+        LogViewWidget early;
+        early.setParserPattern(schema);
+        early.setExtractionEnabled(true);
+        early.setFallbackEncoding(TextEncoding::Windows1251);
+        early.addLogFile(path);
+        const LogFilePtr earlyFile = early.loadedFiles().value(0);
+        early.setFileEncoding(earlyFile, TextEncoding::Koi8R);
+        CHECK(settled(early), "resident switch during load: settles");
+        testdocs::pump(50);
+        CHECK(settled(early), "resident switch during load: the reread settles");
+        const FileEncoding enc = early.fileEncoding(earlyFile);
+        CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Koi8R,
+              "resident switch during load: the user's choice stands");
+        CHECK(early.model()->rowCount() == 1500
+                  && !early.model()->messageAt(700).contains(QStringLiteral("Запись")),
+              "resident switch during load: the file is read with the choice: "
+                  + early.model()->messageAt(700));
+    }
+
+    // Выбор переживает дозапись.
+    tab.setFileEncoding(file, TextEncoding::Ibm866);
+    CHECK(settled(tab), "resident switch tail: settles");
+    CHECK(testdocs::appendToFile(path, testdocs::encodeText(
+              recordText(3000, "INFO", QStringLiteral("хвост после выбора")), TextEncoding::Ibm866)),
+          "resident switch tail: append");
+    tab.reloadChangedFiles(/*force=*/true);
+    CHECK(settled(tab), "resident switch tail: reload settles");
+    CHECK(model.messageAt(model.rowCount() - 1).endsWith(QStringLiteral("хвост после выбора")),
+          "resident switch tail: the tail is read with the user's encoding: "
+              + model.messageAt(model.rowCount() - 1));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -822,9 +1095,13 @@ int main(int argc, char** argv)
                   QByteArray("\xFE\xFF", 2));
     checkWideTail(dir, QStringLiteral("utf32le"), schema, QStringConverter::Utf32LE,
                   QByteArray("\xFF\xFE\x00\x00", 4));
+    checkGrowingSingleByte(dir, QStringLiteral("resident"), schema);
+    checkResidentEncodingSwitch(dir, schema);
     settings.setIndexedThresholdMB(1);
     checkWideAboveThreshold(dir, schema);
+    checkThresholdKeepsEncoding(dir, schema);
     settings.setIndexedThresholdMB(0);
+    checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);
     checkJumps(dir, QStringLiteral("indexed"), schema);

@@ -1147,8 +1147,8 @@ static void testAttachWithActiveFilter(const QString& unsortedPath, const QStrin
 // вкладка на ТОМ ЖЕ тексте в UTF-8: файл в однобайтной кодировке обязан дать
 // строка в строку тот же текст, поля, фильтры (кириллица без учёта регистра,
 // регекс, правило по полю), поиск, переходы по уровню, снапшоты и Find All.
-// Сверка с резидентным бэкендом — шаг 3 (резидентный путь однобайтных
-// кодировок пока не понимает).
+// Сверка резидентного бэкенда с индексным на тех же файлах — шаг 3, ниже
+// (testResidentEncodings).
 // ---------------------------------------------------------------------------
 
 static QVector<FilterConfig> encodingConfigs()
@@ -1302,6 +1302,169 @@ static void testEncodings(const QDir& dir, const QString& schema, const QStringL
             got << doc.model->messageAt(row);
         CHECK_EQ(got.join(QLatin1Char('\n')), want.join(QLatin1Char('\n')),
                  QStringLiteral("текст после дозаписи"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Кодировки на резидентном бэкенде (F-1, шаг 3): один и тот же файл ниже и
+// выше порога обязан дать один текст, один порядок и одни ключи строк.
+// Эталон — индексный бэкенд на ТЕХ ЖЕ файлах (он сверен с UTF-8-текстом в
+// testEncodings), а текст резидентного — ещё и напрямую с исходным текстом:
+// общую ошибку декодера сравнение бэкендов не увидело бы.
+// ---------------------------------------------------------------------------
+
+static void runResidentEncodingFixture(const QString& name, const QStringList& paths,
+                                       const QString& schema, const QStringList& fieldNames,
+                                       IndexedLoad mode = IndexedLoad::Sequential)
+{
+    // Весь API на обычных конфигурациях (ASCII-правила, случайные).
+    runFixture(name, paths, schema, fieldNames, mode);
+
+    // Правила с кириллицей и Find All — как в testEncodings, но резидентный
+    // против индексного.
+    g_context = name + QStringLiteral(" / кириллица / загрузка");
+    g_contextFailures = 0;
+    Document res = loadResident(paths, schema);
+    Document idx = loadIndexed(paths, schema, mode);
+    const AllLines resAll = collectAllLines(res);
+    const AllLines idxAll = collectAllLines(idx);
+    for (const FilterConfig& cfg : encodingConfigs()) {
+        g_context = name + QStringLiteral(" / ") + cfg.name;
+        g_contextFailures = 0;
+        applyConfig(*res.model, cfg, fieldNames);
+        applyConfig(*idx.model, cfg, fieldNames);
+        if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
+            CHECK(res.model->rowCount() > 0,
+                  QStringLiteral("правило с кириллицей ничего не нашло на резидентном бэкенде"));
+        compareAll(res, idx);
+        compareRecordKeys(res, idx, resAll, idxAll, /*sameOrder=*/true);
+        if (!cfg.rules.rules.isEmpty()) {
+            FilterRuleSet query;
+            query.rules = { rule(FilterRule::Action::Include, QStringLiteral("ЖУРНАЛ")) };
+            query.bindFields(fieldNames, true);
+            LogModel resResults;
+            LogModel idxResults;
+            resResults.searchVisible(*res.model, query);
+            idxResults.searchVisible(*idx.model, query);
+            settleChecked(resResults);
+            settleChecked(idxResults);
+            g_context = name + QStringLiteral(" / ") + cfg.name + QStringLiteral(" / Find All");
+            compareVisibleRows(resResults, idxResults);
+        }
+    }
+}
+
+// Текст строк одно-файловой вкладки по порядку — против исходного текста.
+static void checkResidentText(const QString& what, const Document& doc, const QString& text)
+{
+    QStringList want = text.split(QLatin1Char('\n'));
+    if (!want.isEmpty() && want.constLast().isEmpty())
+        want.removeLast();
+    QStringList got;
+    for (int row = 0; row < doc.model->rowCount(); ++row)
+        got << doc.model->messageAt(row);
+    CHECK_EQ(got.join(QLatin1Char('\n')), want.join(QLatin1Char('\n')), what);
+}
+
+static void testResidentEncodings(const QDir& dir, const QString& schema,
+                                  const QStringList& fieldNames)
+{
+    const QString textA = cyrillicLogText(40);
+    const QString textB = cyrillicLogText(0, 7);
+    QDir().mkpath(dir.filePath(QStringLiteral("res-enc")));
+    const QDir encDir(dir.filePath(QStringLiteral("res-enc")));
+
+    for (const TextEncoding enc : { TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                    TextEncoding::Koi8R }) {
+        const QString encName = TextEncodings::displayName(enc);
+        const QString path = writeFile(encDir, encName + QStringLiteral(".log"),
+                                       encodeText(textA, enc));
+        // KOI8-R — только текст и решение: полный прогон на двух кодировках
+        // из задачи (cp1251, cp866) уже держит механизм.
+        if (enc != TextEncoding::Koi8R)
+            runResidentEncodingFixture(QStringLiteral("резидентный, %1, один файл").arg(encName),
+                                       { path }, schema, fieldNames);
+
+        g_context = QStringLiteral("резидентный, %1, текст").arg(encName);
+        g_contextFailures = 0;
+        Document doc = loadResident({ path }, schema);
+        checkResidentText(QStringLiteral("текст резидентной вкладки"), doc, textA);
+        const FileEncoding state = doc.encodings.value(path);
+        CHECK(state.source == FileEncoding::Source::Auto && state.decoder.encoding() == enc,
+              QStringLiteral("%1: парсер решил %2")
+                  .arg(encName, TextEncodings::displayName(state.decoder.encoding())));
+        // То же решение, что у индексатора: правило одно.
+        Document idx = loadIndexed({ path }, schema);
+        const FileEncoding idxState = idx.model->indexedOrNull()->fileEncoding(idx.files.value(0));
+        CHECK(idxState.decoder == state.decoder && idxState.source == state.source,
+              QStringLiteral("%1: бэкенды решили по-разному").arg(encName));
+    }
+
+    // Слитая вкладка: UTF-8 + Windows-1251 — каждый файл своим декодером.
+    const QString mixedA = writeFile(encDir, QStringLiteral("mixed-a.log"),
+                                     encodeText(textA, TextEncoding::Utf8));
+    const QString mixedB = writeFile(encDir, QStringLiteral("mixed-b.log"),
+                                     encodeText(textB, TextEncoding::Windows1251));
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        runResidentEncodingFixture(
+            QStringLiteral("резидентный, слитая вкладка UTF-8 + Windows-1251, ") + describe(mode),
+            { mixedA, mixedB }, schema, fieldNames, mode);
+
+    // UTF-8 с BOM: решение Bom, текст без BOM — на обоих бэкендах.
+    {
+        g_context = QStringLiteral("резидентный, UTF-8 с BOM");
+        g_contextFailures = 0;
+        const QString path = writeFile(encDir, QStringLiteral("bom.log"),
+                                       QByteArray("\xEF\xBB\xBF") + textA.toUtf8());
+        Document doc = loadResident({ path }, schema);
+        checkResidentText(QStringLiteral("текст UTF-8 с BOM"), doc, textA);
+        CHECK(doc.encodings.value(path).source == FileEncoding::Source::Bom,
+              QStringLiteral("BOM UTF-8 не дал решения Bom"));
+        runFixture(QStringLiteral("резидентный, UTF-8 с BOM"), { path }, schema, fieldNames);
+    }
+
+    // Кириллица пришла дозаписью в ASCII-файл: «не решено» переживает
+    // загрузку, решает первая не-ASCII строка хвоста — на обоих бэкендах.
+    {
+        g_context = QStringLiteral("резидентный, кодировка в дозаписи");
+        g_contextFailures = 0;
+        QString head;
+        for (int i = 0; i < 30; ++i)
+            head += QStringLiteral("2026-03-05 09:%1:00.000 [main] INFO - ascii only %2\n")
+                        .arg(i, 2, 10, QChar('0')).arg(i);
+        const QString tail = cyrillicLogText(0, 4000);
+        // Один файл на бэкенд (дозапись меняет его), одно имя — для сравнения.
+        QDir().mkpath(encDir.filePath(QStringLiteral("tail-res")));
+        QDir().mkpath(encDir.filePath(QStringLiteral("tail-idx")));
+        const QString resPath = writeFile(QDir(encDir.filePath(QStringLiteral("tail-res"))),
+                                          QStringLiteral("tail.log"),
+                                          encodeText(head, TextEncoding::Koi8R));
+        const QString idxPath = writeFile(QDir(encDir.filePath(QStringLiteral("tail-idx"))),
+                                          QStringLiteral("tail.log"),
+                                          encodeText(head, TextEncoding::Koi8R));
+        Document res = loadResident({ resPath }, schema);
+        Document idx = loadIndexed({ idxPath }, schema);
+        CHECK(!res.encodings.value(resPath).decided(),
+              QStringLiteral("ASCII-файл не должен быть «решён»"));
+        CHECK(appendResidentTail(res, 0, encodeText(tail, TextEncoding::Koi8R), schema),
+              QStringLiteral("резидентная дозапись не прочитана"));
+        CHECK(appendIndexedTail(idx, 0, encodeText(tail, TextEncoding::Koi8R), schema),
+              QStringLiteral("индексная дозапись не прочитана"));
+        settleChecked(*res.model);
+        settleChecked(*idx.model);
+        CHECK(res.encodings.value(resPath).decoder.encoding() == TextEncoding::Koi8R,
+              QStringLiteral("резидентная дозапись не решила KOI8-R"));
+        checkResidentText(QStringLiteral("текст после резидентной дозаписи"), res, head + tail);
+        g_fileNameOnly = true; // файлы разные — сравниваются по имени
+        compareVisibleRows(*res.model, *idx.model);
+        g_fileNameOnly = false;
+
+        // Решённый файл не решается заново: ещё одна порция декодируется KOI8-R.
+        const QString more = cyrillicLogText(0, 8000);
+        CHECK(appendResidentTail(res, 0, encodeText(more, TextEncoding::Koi8R), schema),
+              QStringLiteral("вторая дозапись не прочитана"));
+        settleChecked(*res.model);
+        checkResidentText(QStringLiteral("текст после второй дозаписи"), res, head + tail + more);
     }
 }
 
@@ -1507,6 +1670,7 @@ int main(int argc, char** argv)
     testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);
     testLineNumbers(dir, schema);
     testEncodings(dir, schema, fieldNames);
+    testResidentEncodings(dir, schema, fieldNames);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

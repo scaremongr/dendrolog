@@ -179,30 +179,12 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // — ASCII (иначе решение было бы принято на их буфере). Окно — от этого
     // байта: ASCII до него в decide ничего не добавил бы.
     const auto decideOn = [&](const char* data, qint64 len, qint64 dataFileOffset) {
-        const qsizetype high = EncodingDetector::firstHighByte(data, len);
-        if (high < 0)
-            return;
-        const qint64 windowStart = dataFileOffset + high;
-        QByteArray windowBytes;
-        QByteArrayView window;
-        if (len - high >= EncodingDetector::kWindowBytes) {
-            window = QByteArrayView(data + high, EncodingDetector::kWindowBytes);
-        } else {
-            // Окно выходит за буфер: дочитываем вторым дескриптором, позиция
-            // основного чтения не трогается.
-            QFile windowFile(logFile->filePath);
-            if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
-                windowBytes = windowFile.read(EncodingDetector::kWindowBytes);
-            if (windowBytes.size() < len - high) // файл укоротили — что есть в буфере
-                windowBytes = QByteArray(data + high, int(len - high));
-            window = QByteArrayView(windowBytes);
-        }
-        if (const auto decided = EncodingDetector::decide(window, fallback)) {
-            encoding = FileEncoding{TextDecoder(*decided), FileEncoding::Source::Auto};
+        if (EncodingDetector::advance(encoding, QByteArrayView(data, len), dataFileOffset,
+                                      logFile->filePath, fallback))
             emit encodingDecided(logFile, encoding);
-        }
-        // nullopt — единственная последовательность оборвана концом файла:
-        // остаёмся «не решёнными», решит следующий буфер или дозапись.
+        // false — только ASCII либо единственная последовательность оборвана
+        // концом файла: остаёмся «не решёнными», решит следующий буфер или
+        // дозапись.
     };
 
     // Классификация и запись одной строки (bytes БЕЗ EOL-байт).
@@ -278,8 +260,9 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
             break; // EOF
 
         const char* p = buf.constData();
-        if (!encoding.decided())
-            decideOn(p, got, file.pos() - got);
+        // Решённый файл advance не трогает (проверка — там же, а не здесь:
+        // правило решения меняется в одном месте для обоих бэкендов).
+        decideOn(p, got, file.pos() - got);
         qint64 pos = 0;
         while (pos < got) {
             if (m_abort.load(std::memory_order_relaxed))

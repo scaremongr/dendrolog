@@ -278,6 +278,31 @@ static void testEncodingLiveSearch(const QDir& dir, const QString& schema)
     CHECK(waitResults(c, 3), "encoding: back to Windows-1251 finds the tail again");
     CHECK(c.model()->messageAt(0).endsWith(QStringLiteral("ОШИБКА диска 0")),
           "encoding: result text after the switch back");
+
+    // Резидентный путь (F-1, шаг 3): та же дозапись решает кодировку у
+    // парсера, выдача растёт вставками и находит кириллицу без учёта регистра.
+    {
+        const QString residentPath = testdocs::writeFile(dir, "grow-cp1251-resident.log",
+                                                         growingBase(0));
+        auto res = testdocs::buildResident({residentPath}, schema);
+        SearchResultsController rc;
+        int residentResets = 0;
+        QObject::connect(rc.model(), &QAbstractItemModel::modelReset, [&] { ++residentResets; });
+        rc.setSource(res.model.get());
+        rc.search(query(QStringLiteral("ошибка")));
+        CHECK(waitResults(rc, 0), "resident encoding: nothing found in the ASCII head");
+        const int residentBefore = residentResets;
+        CHECK(testdocs::appendResidentTail(res, 0, testdocs::encodeText(tail, TextEncoding::Windows1251),
+                                           schema),
+              "resident encoding: append Windows-1251 tail");
+        CHECK(res.encodings.value(residentPath).decoder.encoding() == TextEncoding::Windows1251,
+              "resident encoding: the tail decided Windows-1251");
+        CHECK(waitResults(rc, 3), "resident encoding: Cyrillic tail found case-insensitively");
+        CHECK(residentResets == residentBefore, "resident encoding: results grow without reset");
+        CHECK(rc.model()->rowCount() == 3
+                  && rc.model()->messageAt(2).endsWith(QStringLiteral("ОШИБКА диска 2")),
+              "resident encoding: result text decoded with the file's encoding");
+    }
 }
 
 int main(int argc, char** argv)

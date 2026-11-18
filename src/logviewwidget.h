@@ -55,12 +55,28 @@ public:
     void setParserPattern(const QString& pattern);
     void setExtractionEnabled(bool enabled);
     // Запасная кодировка автоопределения (F-1): однобайтная, которую
-    // индексатор выбирает, если окно у первого байта ≥ 0x80 не похоже на
-    // UTF-8. Действует на проходы индексатора, начатые после вызова, — новые
-    // файлы и дозапись файлов, кодировка которых ещё не решена; решённые не
-    // меняются. Резидентный путь её пока не читает (шаг 3). Умолчание — по
-    // локали системы.
+    // индексатор и резидентный парсер выбирают, если окно у первого байта
+    // ≥ 0x80 не похоже на UTF-8. Действует на проходы, начатые после вызова,
+    // — новые файлы и дозапись файлов, кодировка которых ещё не решена;
+    // решённые не меняются. Умолчание — по локали системы.
     void setFallbackEncoding(TextEncoding encoding);
+    // Кодировка файла вкладки и откуда она (F-1) — на любом бэкенде: у
+    // индексного её держит стор, у резидентного — вкладка (m_fileEncodings).
+    // Файл UTF-16/32 (только резидентный путь) — «не решено»; как он читается,
+    // говорит fileStreamEncoding.
+    FileEncoding fileEncoding(const LogFilePtr& logFile) const;
+    // Кодировка, в которой байты файла превращаются в текст: UTF-16/32 по
+    // BOM, иначе кодировка декодера файла (UTF-8, пока «не решено»).
+    TextEncoding fileStreamEncoding(const LogFilePtr& logFile) const;
+    // Выбор кодировки пользователем (F-1; интерфейс — шаг 4). Индексная
+    // вкладка — IndexedLogStore::setFileEncoding, без переиндексации.
+    // Резидентная — файл перечитывается этой кодировкой в сторону, и его
+    // записи подменяются под одним reset (startReencode): текущая запись,
+    // выделение и позиция остаются. Загрузка в полёте — сразу после неё. Выбор живёт, пока открыта
+    // вкладка: переживает дозапись, перечитывание переписанного файла и
+    // переход порога в обе стороны. UTF-16/32 и недекодируемые кодировки
+    // игнорируются.
+    void setFileEncoding(const LogFilePtr& logFile, TextEncoding encoding);
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
@@ -166,8 +182,27 @@ private slots:
 private:
     // Ленивая инициализация LogIndexer с подключением сигналов.
     void ensureIndexer();
-    // Запуск полной индексации файла (store уже индексный).
-    void startIndexedLoad(const LogFilePtr& logFile);
+    // Запуск полной индексации файла (store уже индексный). encoding —
+    // кодировка, уже решённая для файла резидентным путём (переход порога):
+    // индексатор и стор начинают с неё, а не определяют заново.
+    void startIndexedLoad(const LogFilePtr& logFile, FileEncoding encoding = {});
+    // Состояние кодировок резидентных файлов → индексная вкладка и обратно:
+    // одна точка на каждый переход бэкенда, чтобы решение не терялось.
+    QHash<QString, FileEncoding> takeEncodingsForIndexed();
+    void captureEncodingsFromIndexed();
+    // Файл переписан (полное перечитывание): решение автоматики относится к
+    // старому содержимому — «не решено»; выбор пользователя остаётся (как
+    // IndexedLogStore::resetFileIndex).
+    void forgetAutoEncoding(const QString& filePath);
+    // Смена кодировки резидентного файла: полный разбор отдельным парсером в
+    // буфер, затем LogModel::replaceEntriesForFile (один reset, якорь view
+    // переживает — в отличие от startFullReload, где строки сначала
+    // удаляются). Загрузка файла в полёте на всё время разбора.
+    void startReencode(const LogFilePtr& logFile);
+    void finishReencode(const LogFilePtr& logFile);
+    void handleReencodeFailed(const LogFilePtr& logFile);
+    LogParser* m_reencodeParser = nullptr; // ленивый
+    QHash<QString, QVector<std::shared_ptr<LogEntry>>> m_reencodeBuffers;
 
     // Дешёвая подпись файла на диске: пара (размер, mtime). Нужна только
     // чтобы понять «изменилось ли на диске хоть что-то» после неудачной
@@ -244,9 +279,14 @@ private:
         qint64 endOffset = -1;
         bool   lastLinePartial = false;
         qint64 lastLineStart = -1;
-        // Кодировка, в которой файл прочитан: дозапись читается в ней же
-        // (BOM есть только в начале файла).
-        QStringConverter::Encoding encoding = QStringConverter::Utf8;
+        // Как читались байты (LogParser::tailState): UTF-16/32 по BOM — у
+        // дозаписи BOM нет, она читается в той же кодировке; иначе —
+        // кодировка декодера файла. Декодирует однобайтный хвост состояние
+        // файла (m_fileEncodings), не это поле.
+        TextEncoding encoding = TextEncoding::Utf8;
+        // Пользователь сменил кодировку, пока файл читался: перечитать его,
+        // как только загрузка закончится.
+        bool   reparsePending = false;
         // Две последние строки файла: контекст дочитывания (продолжение в
         // начале дозаписи принадлежит последней записи) и предварительная
         // строка, которую надо убрать перед перечитыванием.
@@ -257,7 +297,14 @@ private:
     static void rememberLastLines(FileReloadState& state,
                                   const QVector<std::shared_ptr<LogEntry>>& batch);
     void handleTailState(const LogFilePtr& logFile, qint64 endOffset,
-                         bool lastLinePartial, qint64 lastLineStart, int encoding);
+                         bool lastLinePartial, qint64 lastLineStart, TextEncoding encoding);
+    // Резидентный путь: кодировка файла и откуда она (F-1). Ключ — путь
+    // файла. Переживает сброс FileReloadState (перечитывание, дозапись) и
+    // переходы бэкенда: при конвертации в индексный путь уходит в стор
+    // (takeEncodingsForIndexed), при откате — возвращается из стора. У
+    // индексной вкладки не используется: там состояние держит стор.
+    QHash<QString, FileEncoding> m_fileEncodings;
+    void handleEncodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
     // Файлы, которые индексный путь вернул в резидентный (UTF-16/32): по
     // порогу размера вкладка с таким файлом не конвертируется — индексатор
     // откатил бы её снова, и файл перечитывался бы целиком на каждый тик.

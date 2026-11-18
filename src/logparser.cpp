@@ -26,40 +26,39 @@ LogParser::~LogParser()
     m_pool.waitForDone();
 }
 
-void LogParser::startParsing(const LogFilePtr& logFile)
+void LogParser::startParsing(const LogFilePtr& logFile, FileEncoding encoding)
 {
     // Snapshot the schema + flag on the GUI thread so the worker never reads
     // the mutable members (which setPattern may rebuild concurrently). The
     // task runs on our own pool, which the destructor joins.
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, patternSnapshot, extraction]() {
-        this->doParse(logFile, patternSnapshot, extraction);
+    const TextEncoding fallback = m_fallbackEncoding;
+    (void)QtConcurrent::run(&m_pool, [this, logFile, patternSnapshot, extraction,
+                                      encoding, fallback]() {
+        this->parseFrom(logFile, 0, ResumeContext(), patternSnapshot, extraction,
+                        /*initial=*/true, TextEncoding::Utf8, encoding, fallback);
     });
 }
 
 void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                                  const ResumeContext& context,
-                                 QStringConverter::Encoding encoding)
+                                 TextEncoding streamEncoding, FileEncoding encoding)
 {
     const LogPattern patternSnapshot = m_pattern;
     const bool extraction = m_extractionEnabled;
+    const TextEncoding fallback = m_fallbackEncoding;
     (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, context,
-                                      patternSnapshot, extraction, encoding]() {
+                                      patternSnapshot, extraction, streamEncoding,
+                                      encoding, fallback]() {
         this->parseFrom(logFile, startOffset, context, patternSnapshot, extraction,
-                        /*initial=*/false, encoding);
+                        /*initial=*/false, streamEncoding, encoding, fallback);
     });
 }
 
 void LogParser::setPattern(const QString& schemaString)
 {
     m_pattern.setPattern(schemaString);
-}
-
-void LogParser::doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction)
-{
-    parseFrom(logFile, 0, ResumeContext(), pattern, extraction, /*initial=*/true,
-              QStringConverter::Utf8);
 }
 
 namespace {
@@ -130,7 +129,8 @@ bool isOnlyByteOrderMark(const QString& path)
 void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                           const ResumeContext& context, const LogPattern& pattern,
                           bool extraction, bool initial,
-                          QStringConverter::Encoding tailEncoding)
+                          TextEncoding streamEncoding, FileEncoding fileEncoding,
+                          TextEncoding fallback)
 {
     if (initial)
         emit parsingStarted(logFile);
@@ -151,19 +151,73 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         emit parsingFailed(logFile);
         return;
     }
-    if (startOffset > 0 && !file.seek(startOffset)) {
+    // Транспорт байтов (F-1, docs/design/F-1.md, «Резидентный путь»):
+    //   • UTF-16/32 (BOM в начале файла; у дозаписи — streamEncoding) —
+    //     QTextStream в этой кодировке, как до F-1;
+    //   • всё остальное — QTextStream с Latin1: строка приходит байтами один к
+    //     одному (символ U+00xx = байт), разрез строк и снятие '\r' — те же,
+    //     pos() — сырое смещение. Строку с символами ≥ U+0080 декодирует
+    //     декодер файла (UTF-8: toLatin1 + fromUtf8, как индексатор строку;
+    //     однобайтная: remapLatin1 на месте), ASCII-строка берётся как есть.
+    // BOM разбирает TextEncodings::detectBom — тот же разбор, что у
+    // индексатора: UTF-8 BOM пропускается и решает кодировку (Source::Bom).
+    bool byteMode = true;
+    bool detectUnicodeBom = false;
+    qint64 linesBegin = startOffset; // где начинается первая строка (за BOM)
+    if (startOffset == 0) {
+        const QByteArray head = file.peek(4);
+        if (const auto bom = TextEncodings::detectBom(head)) {
+            linesBegin = bom->length; // у UTF-16/32 — ровно одна кодовая единица
+            if (bom->encoding == TextEncoding::Utf8) {
+                if (fileEncoding.source != FileEncoding::Source::User) {
+                    fileEncoding = FileEncoding{TextDecoder(TextEncoding::Utf8),
+                                                FileEncoding::Source::Bom};
+                    emit encodingDecided(logFile, fileEncoding);
+                }
+            } else {
+                // UTF-16/32: QTextStream сам узнаёт BOM и снимает его.
+                byteMode = false;
+                detectUnicodeBom = true;
+            }
+        }
+    } else if (!TextEncodings::isDecodable(streamEncoding)) {
+        // Дозапись UTF-16/32: BOM есть только в начале файла — кодировка из
+        // tailState, иначе хвост декодировался бы как UTF-8.
+        byteMode = false;
+    }
+    QTextStream in(&file);
+    // Начало чтения — seek САМОГО потока, а не устройства до его создания:
+    // иначе QTextStream::pos() посреди потока считает от нуля (его опорная
+    // позиция буфера — 0, пока буфер не прочитан целиком; tests/textencoding).
+    // У UTF-16/32 поток стоит в нуле и снимает BOM сам.
+    const qint64 readFrom = detectUnicodeBom ? 0 : linesBegin;
+    if (readFrom > 0 && !in.seek(readFrom)) {
         emit parsingFinished(0, logFile);
         return;
     }
-
-    QTextStream in(&file);
-    // Первая загрузка узнаёт UTF-16/32 по BOM (автоопределение QTextStream).
-    // У дозаписи BOM нет — она читается в кодировке, в которой файл уже
-    // прочитан; иначе хвост UTF-16 декодировался бы как UTF-8.
-    if (!initial && tailEncoding != QStringConverter::Utf8) {
-        in.setAutoDetectUnicode(false);
-        in.setEncoding(tailEncoding);
-    }
+    in.setAutoDetectUnicode(detectUnicodeBom);
+    if (byteMode)
+        in.setEncoding(QStringConverter::Latin1);
+    else if (!detectUnicodeBom)
+        in.setEncoding(TextEncodings::toQt(streamEncoding).value_or(QStringConverter::Utf8));
+    // Сырые байты строки и её начало в файле — только для решения о
+    // кодировке, то есть только для не-ASCII строк, пока файл «не решён».
+    QFile rawLine(logFile->filePath);
+    const auto lineStartOf = [&](const QString& text) -> qint64 {
+        const qint64 after = in.pos();
+        if (after < 0)
+            return -1;
+        qint64 eol = 0;
+        if (rawLine.isOpen() || rawLine.open(QIODevice::ReadOnly)) {
+            const qint64 from = qMax<qint64>(0, after - 2);
+            if (rawLine.seek(from)) {
+                const QByteArray tail = rawLine.read(after - from);
+                if (tail.endsWith('\n'))
+                    eol = tail.endsWith("\r\n") ? 2 : 1;
+            }
+        }
+        return after - eol - text.size();
+    };
     QVector<std::shared_ptr<LogEntry>> batchEntries;
     const int BATCH_SIZE = 5000;
     batchEntries.reserve(BATCH_SIZE);
@@ -203,6 +257,23 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         if (line.isEmpty() && in.atEnd() && startOffset == 0 && totalParsedEntries == 0
             && isOnlyByteOrderMark(logFile->filePath))
             break;
+        if (byteMode && !QtPrivate::isAscii(line)) {
+            // Первая не-ASCII строка «не решённого» файла решает кодировку —
+            // правилом индексатора, по окну от её первого байта ≥ 0x80
+            // (EncodingDetector::advance). Строки до неё — ASCII: их текст от
+            // решения не зависит.
+            if (!fileEncoding.decided()) {
+                const qint64 start = lineStartOf(line);
+                if (start >= 0
+                    && EncodingDetector::advance(fileEncoding, line.toLatin1(), start,
+                                                 logFile->filePath, fallback))
+                    emit encodingDecided(logFile, fileEncoding);
+            }
+            if (fileEncoding.decoder.isUtf8())
+                line = QString::fromUtf8(std::move(line).toLatin1());
+            else
+                fileEncoding.decoder.remapLatin1(line);
+        }
         bytesRead += line.length() + 1; // Приблизительный подсчет, +1 для \n
         fileLineNumber++;
 
@@ -267,6 +338,9 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // (единицы выровнены от начала файла: BOM — ровно одна единица).
     const QStringConverter::Encoding encoding = in.encoding();
     const CodeUnit unit = codeUnitOf(encoding);
+    const TextEncoding reported = byteMode
+        ? fileEncoding.decoder.encoding()
+        : TextEncodings::fromQt(encoding).value_or(TextEncoding::Utf8);
     qint64 endOffset = in.pos();
     if (endOffset < 0)
         endOffset = file.size();
@@ -275,7 +349,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     qint64 lastLineStart = -1;
     // Строки начинаются после BOM: перечитывание с нуля отдало бы его
     // декодеру без автоопределения.
-    const qint64 firstLineStart = (startOffset == 0 && unit.width > 1) ? unit.width : startOffset;
+    const qint64 firstLineStart = linesBegin;
     if (totalParsedEntries > 0 && endOffset > firstLineStart) {
         QFile raw(logFile->filePath);
         if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - unit.width)
@@ -296,7 +370,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             }
         }
     }
-    emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, int(encoding));
+    emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, reported);
     emit parsingFinished(totalParsedEntries, logFile);
 }
 

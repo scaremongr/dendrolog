@@ -1508,6 +1508,34 @@ static int runBench(const QString& path, const QString& patternString)
     return 0;
 }
 
+// Бенчмарк резидентного пути: lineindex_smoke --bench-resident <файл> —
+// чистая скорость LogParser (разбор в записи, без модели): время до
+// parsingFinished. Замер цены транспорта байтов F-1 (шаг 3).
+static int runBenchResident(const QString& path)
+{
+    auto lf = std::make_shared<LogFile>(path);
+    LogParser parser;
+    std::atomic_bool done{false};
+    std::atomic<qint64> entries{0};
+    QObject::connect(&parser, &LogParser::entriesParsed, &parser,
+                     [&](const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr&) {
+                         entries += batch.size();
+                     },
+                     Qt::DirectConnection);
+    QObject::connect(&parser, &LogParser::parsingFinished, &parser,
+                     [&](int, const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+    QObject::connect(&parser, &LogParser::parsingFailed, &parser,
+                     [&](const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+    QElapsedTimer t;
+    t.start();
+    parser.startParsing(lf);
+    while (!done)
+        QThread::msleep(5);
+    std::fprintf(stderr, "bench-resident: %lld lines, %.3f s\n", (long long)entries.load(),
+                 t.elapsed() / 1000.0);
+    return 0;
+}
+
 // Ступенчатая атрибуция стоимости индексации: 0 — чтение+разрез по \n,
 // 1 — +декодирование UTF-8, 2 — +detectTimestamp (с toMSecsSinceEpoch),
 // 3 — +detectLogLevel. Дельты между ступенями = цена каждого шага.
@@ -2054,6 +2082,8 @@ int main(int argc, char** argv)
     if (argc >= 3 && qstrcmp(argv[1], "--bench") == 0)
         return runBench(QString::fromLocal8Bit(argv[2]),
                         argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
+    if (argc >= 3 && qstrcmp(argv[1], "--bench-resident") == 0)
+        return runBenchResident(QString::fromLocal8Bit(argv[2]));
     if (argc >= 3 && qstrcmp(argv[1], "--bench-stages") == 0)
         return runBenchStages(QString::fromLocal8Bit(argv[2]),
                               argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());

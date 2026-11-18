@@ -4,6 +4,7 @@
 #include "logentry.h"
 #include "logpattern.h"
 #include "lineclassifier.h"
+#include "textencoding.h"
 #include <QVector>
 #include <QString>
 #include <QStringConverter>
@@ -88,28 +89,48 @@ public:
         int nextLineNumber = 1;             // 1-based line number in the file
     };
 
+    // Кодировка файлов не в UTF-8, на которую автоопределение отступает
+    // (F-1; как LogIndexer::setFallbackEncoding — вкладка задаёт обоим одну).
+    // Применяется к проходам, начатым после вызова.
+    void setFallbackEncoding(TextEncoding encoding) { m_fallbackEncoding = encoding; }
+    TextEncoding fallbackEncoding() const { return m_fallbackEncoding; }
+
 public slots:
-    void startParsing(const LogFilePtr& logFile);
+    // Полный разбор файла. encoding — состояние кодировки файла на старте
+    // (F-1): по умолчанию «не решено»; выбор пользователя (Source::User)
+    // переживает перечитывание и автоматикой не меняется.
+    void startParsing(const LogFilePtr& logFile, FileEncoding encoding = {});
     // Incremental parse: read only bytes starting at startOffset (a line
     // boundary), continuing the numbering and the current record of context.
-    // encoding is the one the file was first read in (tailState reports it):
-    // there is no BOM in the middle of a file, so a tail cannot detect it.
+    // streamEncoding — то, что сообщил tailState: у дозаписи нет BOM, поэтому
+    // UTF-16/32 продолжают читаться своей кодировкой (QTextStream). Для
+    // остальных (UTF-8 и однобайтные) строки — байты, декодируемые по
+    // encoding — состоянию файла; «не решено» переживает дозапись, и
+    // решение примет первая не-ASCII строка хвоста.
     void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                           const ResumeContext& context,
-                          QStringConverter::Encoding encoding = QStringConverter::Utf8);
+                          TextEncoding streamEncoding = TextEncoding::Utf8,
+                          FileEncoding encoding = {});
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
+    // Автоопределение решило кодировку файла (F-1) — тем же правилом, что
+    // LogIndexer (EncodingDetector::advance), и так же: до порции с первой
+    // не-ASCII строкой. BOM UTF-8 — решение Source::Bom. Вкладка хранит
+    // состояние и передаёт его следующему проходу (дозапись, перечитывание,
+    // переход порога в индексный бэкенд).
+    void encodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
     void entriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& logFile);
     // Right before parsingFinished of a successful parse: the exact byte
     // offset reading stopped at (the next incremental parse starts there), and
     // whether the last line had no newline yet — then lastLineStart is its
     // byte offset, to read it again once the writer completes it. Both offsets
     // fall on a code unit boundary (UTF-16: even, UTF-32: multiple of four).
-    // encoding (a QStringConverter::Encoding) is what the bytes were decoded
-    // as — pass it to startParsingFrom for the tail.
+    // encoding — как читались байты: UTF-16/32 по BOM либо кодировка
+    // декодера файла (UTF-8, пока «не решено»). Передаётся в startParsingFrom
+    // как streamEncoding.
     void tailState(const LogFilePtr& logFile, qint64 endOffset, bool lastLinePartial,
-                   qint64 lastLineStart, int encoding);
+                   qint64 lastLineStart, TextEncoding encoding);
     void parsingFinished(int totalEntries, const LogFilePtr& logFile);
     void parsingFailed(const LogFilePtr& logFile);
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
@@ -119,19 +140,20 @@ private:
     // extraction flag taken on the GUI thread at launch time. They never read
     // the mutable m_pattern / m_extractionEnabled members, so reconfiguring
     // the parser (setPattern) while a parse is in flight is race-free.
-    void doParse(const LogFilePtr& logFile, const LogPattern& pattern, bool extraction);
     // The one parse loop for both the initial load (initial: progress and
     // parsingStarted/Failed) and an incremental read.
     void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                    const ResumeContext& context, const LogPattern& pattern,
                    bool extraction, bool initial,
-                   QStringConverter::Encoding encoding);
+                   TextEncoding streamEncoding, FileEncoding encoding,
+                   TextEncoding fallback);
 
     // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
     // безопасно читается воркерами пула (см. LineClassifier).
     const LineClassifier m_classifier;
     LogPattern m_pattern; // Optional block schema for structured field extraction
     bool m_extractionEnabled = false; // Only extract fields when filter is active
+    TextEncoding m_fallbackEncoding = TextEncodings::systemFallback();
 
     // Parse tasks run on this private pool, joined in the destructor so a
     // worker can never outlive the parser (and its members) it reads from.

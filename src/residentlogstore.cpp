@@ -184,6 +184,37 @@ void ResidentLogStore::removeEntriesForFile(const QString& filePath)
     emit m_model.modelFiltered(int(m_filteredEntries.size()));
 }
 
+void ResidentLogStore::replaceEntriesForFile(
+    const QString& filePath, const QVector<std::shared_ptr<LogEntry>>& sortedEntries)
+{
+    // Как removeEntriesForFile: синхронная перестройка даёт консистентный
+    // список сама, фоновый джоб не должен примениться.
+    cancelPendingFilter(false);
+    const auto ofFile = [&filePath](const std::shared_ptr<LogEntry>& e) {
+        return e && e->sourceFile() && e->sourceFile()->filePath == filePath;
+    };
+    // Отметки «новых» строк — указатели на записи: у этого файла они уходят.
+    for (const auto& e : std::as_const(m_allEntries))
+        if (ofFile(e))
+            m_newEntries.remove(e.get());
+    for (const auto& entry : sortedEntries)
+        if (entry && entry->sourceFile())
+            m_model.ensureFileColor(entry->sourceFile()->filePath);
+
+    m_model.beginResetModel();
+    m_allEntries.erase(std::remove_if(m_allEntries.begin(), m_allEntries.end(), ofFile),
+                       m_allEntries.end());
+    const qsizetype kept = m_allEntries.size();
+    m_allEntries.append(sortedEntries);
+    std::inplace_merge(m_allEntries.begin(), m_allEntries.begin() + kept,
+                       m_allEntries.end(), logEntryPtrLess);
+    m_cachedUniqueSourceFileCount = -1;
+    rebuildFilteredEntries();
+    m_model.endResetModel();
+    m_filteredListStale = false; // перестроено по текущим настройкам
+    emit m_model.modelFiltered(int(m_filteredEntries.size()));
+}
+
 void ResidentLogStore::removeEntry(const std::shared_ptr<LogEntry>& entry)
 {
     if (!entry)

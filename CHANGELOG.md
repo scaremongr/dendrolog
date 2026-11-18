@@ -21,15 +21,18 @@ All notable changes to DendroLog are documented here. The format follows
   panel with its text and note, marked "line not found", instead of moving to
   another line. Bookmarks live until the tab is closed; keeping them between
   runs comes later.
-- **Logs not in UTF-8 are readable (part 1 of 2).** A file above the
-  large-file threshold in Windows-1251, IBM866 (cp866), KOI8-R or
-  Windows-1252 is now shown with its real text instead of `�`, and Cyrillic in
-  it is found by quick find, Text Filters and the Search panel, case-insensitive
-  too. The encoding is detected by the file itself at its first non-ASCII line,
-  wherever that is, also when it arrives as an appended tail. Every file of a
-  tab with several files keeps its own encoding. Files below the threshold
-  still read only UTF-8 — that comes in the next step, together with choosing
-  the encoding by hand.
+- **Logs not in UTF-8 are readable (part 1 of 2).** A log in Windows-1251,
+  IBM866 (cp866), KOI8-R or Windows-1252 is now shown with its real text
+  instead of `�`, and Cyrillic in it is found by quick find, Text Filters and
+  the Search panel, case-insensitive too. This works the same for small files
+  and for files above the large-file threshold: one file shows the same text
+  on both sides of the threshold, and a growing log keeps its encoding when it
+  crosses the threshold. The encoding is detected by the file itself at its
+  first non-ASCII line, wherever that is, also when it arrives as an appended
+  tail; the tail of a growing log is read in the file's encoding. Every file
+  of a tab with several files keeps its own encoding. **Save View As** writes
+  the text as shown, in UTF-8. Choosing the encoding by hand when detection
+  guesses wrong comes in the next step (part 2).
 
 ### Changed
 - **Show/Hide Directory Scanner panel** moved from `Ctrl+F2` to `Ctrl+F10`:

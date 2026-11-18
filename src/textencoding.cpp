@@ -1,5 +1,6 @@
 #include "textencoding.h"
 
+#include <QFile>
 #include <QLocale>
 #include <QSysInfo>
 
@@ -478,6 +479,36 @@ std::optional<TextEncoding> decide(QByteArrayView window, TextEncoding fallback)
     if (!TextEncodings::isSingleByte(fallback))
         return TextEncoding::Windows1252;
     return fallback;
+}
+
+bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
+             const QString& filePath, TextEncoding fallback)
+{
+    if (state.decided())
+        return false;
+    const qsizetype high = firstHighByte(data);
+    if (high < 0)
+        return false;
+    const qint64 windowStart = dataFileOffset + high;
+    QByteArray windowBytes;
+    QByteArrayView window;
+    if (data.size() - high >= kWindowBytes) {
+        window = data.sliced(high, kWindowBytes);
+    } else {
+        // Окно выходит за порцию: дочитываем вторым дескриптором — позиция
+        // основного чтения вызывающего не трогается.
+        QFile windowFile(filePath);
+        if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
+            windowBytes = windowFile.read(kWindowBytes);
+        if (windowBytes.size() < data.size() - high) // файл укоротили — что есть в порции
+            windowBytes = data.sliced(high).toByteArray();
+        window = QByteArrayView(windowBytes);
+    }
+    const std::optional<TextEncoding> decided = decide(window, fallback);
+    if (!decided)
+        return false; // единственная последовательность оборвана концом файла
+    state = FileEncoding{TextDecoder(*decided), FileEncoding::Source::Auto};
+    return true;
 }
 
 } // namespace EncodingDetector

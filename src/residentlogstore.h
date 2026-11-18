@@ -60,6 +60,12 @@ public:
     void appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries);
     void mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
     void removeEntriesForFile(const QString& filePath);
+    // Записи файла заменяются перечитанными (смена кодировки, F-1) под ОДНИМ
+    // reset: view возвращается к якорю-записи (id записи + файл — у
+    // перечитанных те же), а не теряет позицию между удалением и вставкой.
+    // sortedEntries отсортированы logEntryPtrLess.
+    void replaceEntriesForFile(const QString& filePath,
+                               const QVector<std::shared_ptr<LogEntry>>& sortedEntries);
     // Убрать одну запись (предварительную строку хвоста перед её
     // перечитыванием) без reset: видимая строка удаляется rowsRemoved.
     void removeEntry(const std::shared_ptr<LogEntry>& entry);

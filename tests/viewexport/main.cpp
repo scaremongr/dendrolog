@@ -194,6 +194,33 @@ static void testBackgroundExport(const QDir& dir)
     }
 }
 
+// Файл не в UTF-8 (F-1, шаг 3): Save View As пишет UTF-8 ровно тот текст,
+// что показан, — на резидентной вкладке так же, как на индексной; и это
+// исходный текст, а не байты cp1251, прочитанные как UTF-8.
+static void testEncodedExport(const QDir& dir)
+{
+    const QString schema = testdocs::buildSchema();
+    const QString text = testdocs::cyrillicLogText(5);
+    const QString path = testdocs::writeFile(
+        dir, "export-cp1251.log", testdocs::encodeText(text, TextEncoding::Windows1251));
+    auto resident = testdocs::buildResident({path}, schema);
+    auto indexed = testdocs::buildIndexed({path}, schema);
+    QStringList want = text.split(QLatin1Char('\n'));
+    want.removeLast();
+    struct { const char* name; LogModel* model; } models[] = {
+        {"resident", resident.model.get()}, {"indexed", indexed.model.get()}};
+    for (const auto& m : models) {
+        const QString target = dir.filePath(QStringLiteral("export-cp1251-%1.log").arg(m.name));
+        const auto result = runJob(*m.model, target, {path});
+        CHECK(result.ok(), qPrintable(QStringLiteral("%1 cp1251: export succeeds").arg(m.name)));
+        const QStringList written = exportedLines(target);
+        CHECK(written == displayedLines(*m.model),
+              qPrintable(QStringLiteral("%1 cp1251: file equals the displayed text").arg(m.name)));
+        CHECK(written == want,
+              qPrintable(QStringLiteral("%1 cp1251: the exported text is the original text").arg(m.name)));
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -323,6 +350,7 @@ int main(int argc, char** argv)
     CHECK(!commitFailure.detail.isEmpty(), "commit error detail retained");
 
     testBackgroundExport(dir);
+    testEncodedExport(dir);
 
     std::fprintf(stdout, "View export: %d failure(s)\n", failures);
     return failures ? 1 : 0;

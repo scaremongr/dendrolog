@@ -85,6 +85,13 @@ void LogModel::removeEntriesForFile(const QString& filePath)
         r->removeEntriesForFile(filePath);
 }
 
+void LogModel::replaceEntriesForFile(const QString& filePath,
+                                     const QVector<std::shared_ptr<LogEntry>>& sortedEntries)
+{
+    if (auto* r = residentOrNull())
+        r->replaceEntriesForFile(filePath, sortedEntries);
+}
+
 void LogModel::removeEntry(const std::shared_ptr<LogEntry>& entry)
 {
     if (auto* r = residentOrNull())

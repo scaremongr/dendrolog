@@ -606,6 +606,31 @@ int main(int argc, char** argv)
         CHECK(merged.model->rowCount() == 2 * int(want.size()) && replacement == 0,
               "cyrillic merged UTF-8 + Windows-1251: every file read with its own decoder");
         checkFlags(QStringLiteral("cyrillic indexed merged UTF-8 + Windows-1251"), *merged.model);
+
+        // Резидентный путь (F-1, шаг 3): те же файлы ниже порога — тот же
+        // текст (эталон — резидентная вкладка на UTF-8-файле) и те же находки.
+        auto refResident = testdocs::buildResident({ref}, schema);
+        QStringList wantResident;
+        for (int row = 0; row < refResident.model->rowCount(); ++row)
+            wantResident << refResident.model->messageAt(row);
+        for (const TextEncoding enc : {TextEncoding::Windows1251, TextEncoding::Ibm866,
+                                       TextEncoding::Koi8R}) {
+            const QString name = QStringLiteral("cyrillic resident %1").arg(TextEncodings::displayName(enc));
+            auto doc = testdocs::buildResident(
+                {dir.filePath(QStringLiteral("cyr-%1.log").arg(int(enc)))}, schema);
+            QStringList got;
+            for (int row = 0; row < doc.model->rowCount(); ++row)
+                got << doc.model->messageAt(row);
+            CHECK(!got.isEmpty() && got == wantResident, name + ": text equals the UTF-8 file's");
+            checkFlags(name, *doc.model);
+        }
+        auto mergedResident = testdocs::buildResident({ref, cp1251Path}, schema);
+        replacement = 0;
+        for (int row = 0; row < mergedResident.model->rowCount(); ++row)
+            replacement += mergedResident.model->messageAt(row).contains(QChar::ReplacementCharacter);
+        CHECK(mergedResident.model->rowCount() == 2 * int(want.size()) && replacement == 0,
+              "cyrillic resident merged UTF-8 + Windows-1251: every file read with its own decoder");
+        checkFlags(QStringLiteral("cyrillic resident merged UTF-8 + Windows-1251"), *mergedResident.model);
     }
 
     // --- Пересчёт номера через вставки ---------------------------------------

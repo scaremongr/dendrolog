@@ -16,6 +16,10 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QString>
+#include <QStringDecoder>
+#include <QStringEncoder>
+#include <QTemporaryFile>
+#include <QTextStream>
 
 #include <array>
 #include <cstdio>
@@ -703,6 +707,169 @@ static void testClassifierIsAsciiOnly()
     CHECK(asciiOnly == QStringLiteral("20-"), "fromUtf8 keeps ASCII after broken sequences: " + hex(decoded));
 }
 
+// ---------------------------------------------------------------------------
+// Риск шага 3 (docs/design/F-1.md, «Риски»): резидентный путь читает файл
+// QTextStream с кодировкой Latin1 и автоопределением BOM — как транспорт
+// байтов. Закрепляем то, на что он опирается: без BOM строка — байты один к
+// одному (все 254 значения, кроме '\n' и '\r'), с BOM поток переходит на
+// UTF-8/16/32 и снимает BOM, разрез строк и снятие '\r' — как в режиме UTF-8,
+// pos() — точное байтовое смещение, а при чтении с середины без
+// автоопределения байты EF BB BF — обычные символы, не BOM.
+// ---------------------------------------------------------------------------
+
+static QStringList readAllLines(const QByteArray& data, bool latin1, qint64 seekTo = 0,
+                                bool autoDetect = true,
+                                QStringConverter::Encoding* finalEncoding = nullptr,
+                                qint64* finalPos = nullptr)
+{
+    QTemporaryFile file;
+    file.open();
+    file.write(data);
+    file.flush();
+    file.seek(seekTo);
+    QTextStream in(&file);
+    if (latin1)
+        in.setEncoding(QStringConverter::Latin1);
+    in.setAutoDetectUnicode(autoDetect);
+    QStringList lines;
+    while (!in.atEnd())
+        lines << in.readLine();
+    if (finalEncoding)
+        *finalEncoding = in.encoding();
+    if (finalPos)
+        *finalPos = in.pos();
+    return lines;
+}
+
+static void testTextStreamLatin1Transport()
+{
+    // 1. Без BOM: каждый байт — символ с тем же номером; кодировка остаётся Latin1.
+    QByteArray allBytes;
+    for (int b = 1; b < 256; ++b)
+        if (b != '\n' && b != '\r')
+            allBytes.append(char(b));
+    QByteArray data;
+    // Больше буфера QTextStream (16 КБ): строки режутся на границах буфера.
+    for (int i = 0; i < 200; ++i)
+        data += allBytes + "\n";
+    data += allBytes; // последняя строка без '\n'
+    QStringConverter::Encoding enc = QStringConverter::Utf8;
+    qint64 pos = -1;
+    const QStringList lines = readAllLines(data, true, 0, true, &enc, &pos);
+    CHECK(lines.size() == 201, QStringLiteral("latin1: line count %1").arg(lines.size()));
+    bool oneToOne = true;
+    for (const QString& line : lines) {
+        if (line.size() != allBytes.size()) { oneToOne = false; break; }
+        for (qsizetype i = 0; i < line.size(); ++i)
+            if (line[i].unicode() != uchar(allBytes[i])) { oneToOne = false; break; }
+    }
+    CHECK(oneToOne, "latin1: every byte is the character with the same number");
+    CHECK(enc == QStringConverter::Latin1, "latin1: no BOM keeps Latin1");
+    CHECK(pos == data.size(), QStringLiteral("latin1: pos() is the byte offset (%1 vs %2)").arg(pos).arg(data.size()));
+
+    // pos() посреди файла: после каждой строки — точное смещение начала следующей.
+    {
+        QTemporaryFile file;
+        file.open();
+        const QByteArray mixed = QByteArray("ab\xE0\xE1\r\n") + "\xFF\n" + "\r\n" + "x\ry\n" + "end";
+        file.write(mixed);
+        file.flush();
+        file.seek(0);
+        QTextStream in(&file);
+        in.setEncoding(QStringConverter::Latin1);
+        in.setAutoDetectUnicode(true);
+        const qint64 expected[] = {6, 8, 10, 14, 17};
+        int i = 0;
+        while (!in.atEnd() && i < 5) {
+            in.readLine();
+            CHECK(in.pos() == expected[i], QStringLiteral("latin1: pos after line %1 = %2").arg(i).arg(in.pos()));
+            ++i;
+        }
+        CHECK(i == 5, "latin1: five lines");
+    }
+
+    // 2. Разрез строк и снятие '\r' — как у потока UTF-8 (семантика резидентного
+    // пути не меняется): "\r\n" снимается, одиночный '\r' внутри и в конце —
+    // по тем же правилам; пустые строки и строка без '\n' в конце.
+    const QByteArray ascii("a\r\nb\rc\n\n\r\nd\r\r\ne\r\n\nlast\r");
+    CHECK(readAllLines(ascii, true) == readAllLines(ascii, false),
+          "latin1: same line split and '\\r' handling as UTF-8: "
+              + readAllLines(ascii, true).join(u'|') + " vs " + readAllLines(ascii, false).join(u'|'));
+    const QByteArray asciiNoTail("one\ntwo\n");
+    CHECK(readAllLines(asciiNoTail, true) == readAllLines(asciiNoTail, false),
+          "latin1: no phantom line after the final '\\n', same as UTF-8");
+
+    // 3. BOM: поток переходит на кодировку BOM и снимает его.
+    const QString text = QStringLiteral("Привет, мир\nвторая строка");
+    struct BomCase {
+        QStringConverter::Encoding encoding;
+        const char* name;
+    };
+    const BomCase cases[] = {
+        {QStringConverter::Utf8, "UTF-8"},
+        {QStringConverter::Utf16LE, "UTF-16LE"},
+        {QStringConverter::Utf16BE, "UTF-16BE"},
+        {QStringConverter::Utf32LE, "UTF-32LE"},
+        {QStringConverter::Utf32BE, "UTF-32BE"},
+    };
+    for (const BomCase& c : cases) {
+        QStringEncoder encoder(c.encoding, QStringConverter::Flag::WriteBom);
+        const QByteArray encoded = encoder.encode(text);
+        QStringConverter::Encoding detected = QStringConverter::Latin1;
+        qint64 endPos = -1;
+        const QStringList got = readAllLines(encoded, true, 0, true, &detected, &endPos);
+        const bool sameFamily = detected == c.encoding
+            || (c.encoding == QStringConverter::Utf16LE && detected == QStringConverter::Utf16 && QSysInfo::ByteOrder == QSysInfo::LittleEndian)
+            || (c.encoding == QStringConverter::Utf32LE && detected == QStringConverter::Utf32 && QSysInfo::ByteOrder == QSysInfo::LittleEndian);
+        const auto detectedName = QStringConverter::nameForEncoding(detected);
+        CHECK(sameFamily || TextEncodings::fromQt(detected) == TextEncodings::fromQt(c.encoding),
+              QString::fromLatin1(c.name) + ": BOM switches the stream, got "
+                  + QString::fromLatin1(detectedName ? detectedName : "?"));
+        CHECK(got == text.split(u'\n'),
+              QString::fromLatin1(c.name) + ": BOM stripped, text decoded: " + got.join(u'|'));
+        CHECK(endPos == encoded.size(),
+              QString::fromLatin1(c.name) + QStringLiteral(": pos() at the end = %1 of %2").arg(endPos).arg(encoded.size()));
+    }
+
+    // pos() посреди потока, начатого с середины файла: поток сдвигается
+    // своим seek — тогда pos() точен. (Устройство, сдвинутое до создания
+    // потока, даёт pos() от нуля, пока буфер не прочитан целиком: опорная
+    // позиция буфера QTextStream — 0. Поэтому парсер двигает поток.)
+    {
+        QTemporaryFile file;
+        file.open();
+        const QByteArray prefix("0123456789\n");
+        const QByteArray body = QByteArray("ab\xE0\r\n") + "\xFF\xFE\n" + "tail";
+        file.write(prefix + body);
+        file.flush();
+        QTextStream in(&file);
+        in.setEncoding(QStringConverter::Latin1);
+        in.setAutoDetectUnicode(false);
+        CHECK(in.seek(prefix.size()), "latin1: stream seek");
+        const qint64 expected[] = {prefix.size() + 5, prefix.size() + 8, prefix.size() + 12};
+        int i = 0;
+        while (!in.atEnd() && i < 3) {
+            in.readLine();
+            CHECK(in.pos() == expected[i],
+                  QStringLiteral("latin1 from the middle: pos after line %1 = %2, want %3")
+                      .arg(i).arg(in.pos()).arg(expected[i]));
+            ++i;
+        }
+        CHECK(i == 3, "latin1 from the middle: three lines");
+    }
+
+    // 4. Дозапись: чтение с середины без автоопределения — байты EF BB BF и
+    // FF FE там обычные символы, не BOM.
+    const QByteArray head("head\n");
+    const QByteArray tail = QByteArray("\xEF\xBB\xBFx\n\xFF\xFEy\n");
+    QStringConverter::Encoding tailEnc = QStringConverter::Utf8;
+    const QStringList tailLines = readAllLines(head + tail, true, head.size(), false, &tailEnc);
+    CHECK(tailLines.size() == 2 && tailLines.value(0) == QString::fromLatin1("\xEF\xBB\xBFx")
+              && tailLines.value(1) == QString::fromLatin1("\xFF\xFEy"),
+          "latin1 tail: BOM-like bytes in the middle are plain characters: " + tailLines.join(u'|'));
+    CHECK(tailEnc == QStringConverter::Latin1, "latin1 tail: encoding stays Latin1");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -714,6 +881,7 @@ int main(int argc, char** argv)
     testDecideFixed();
     testDecideFuzz();
     testClassifierIsAsciiOnly();
+    testTextStreamLatin1Transport();
     if (failures) {
         std::fprintf(stderr, "textencoding: %d failure(s)\n", failures);
         return 1;
