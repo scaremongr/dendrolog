@@ -4,6 +4,7 @@
 #include "appsettings.h"
 #include "highlightpalette.h"
 #include "lineclassifier.h"
+#include "newlinesindicator.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -56,8 +57,14 @@ LogListView::LogListView(QWidget *parent)
         if (m_resizeDebounceTimer && m_resizeDebounceTimer->isActive())
             captureResizeAnchor();
         viewport()->update();
+        // Строки, попавшие на экран, просмотрены; у низа плашка уходит.
+        markNewLinesSeen();
     });
 
+    // Плашка «↓ N new lines» — дочерний виджет самого view, а не вьюпорта:
+    // прокрутка вьюпорта её не двигает. Место — в placeNewLinesIndicator.
+    m_newLinesIndicator = new NewLinesIndicator(this);
+    connect(m_newLinesIndicator, &QAbstractButton::clicked, this, &LogListView::goToNewLines);
     // Пользователь сам крутит ползунок (drag, стрелки, клик по жёлобу) —
     // позиция после перехода больше не удерживается (см. goToRow).
     connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this]() {
@@ -88,6 +95,10 @@ LogListView::LogListView(QWidget *parent)
         updateScrollbar();
         if (atBottom)
             bar->setValue(bar->maximum());
+        // Resize, перенос строк, зум шрифта: на экран могли попасть новые
+        // строки (или низ) без смены значения скроллбара.
+        markNewLinesSeen();
+        placeNewLinesIndicator();
         viewport()->update();
     });
 
@@ -113,6 +124,8 @@ LogListView::LogListView(QWidget *parent)
         m_anchorRow = -1;
         m_anchorOffsetInViewport = 0;
 
+        // Окно стало выше — новые строки (или низ) могли оказаться на экране.
+        markNewLinesSeen();
         viewport()->update();
     });
 
@@ -178,6 +191,7 @@ void LogListView::setModel(QAbstractItemModel *model) {
     m_modelConnections.clear();
 
     QListView::setModel(model);
+    clearNewLines();
     m_persistentSelection.clear();
     m_resetViewportAnchor.clear();
     m_resetViewportOffset = 0;
@@ -209,6 +223,9 @@ void LogListView::setModel(QAbstractItemModel *model) {
 
         m_modelConnections << connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
+            // Набор строк другой (фильтр, перезагрузка, конверсия бэкенда):
+            // прежний счёт новых строк к нему не относится.
+            clearNewLines();
             // Якорь resize — номер строки, после reset он указывает на чужую
             // строку. Позицию ниже восстанавливает сам reset; якорь снимается
             // заново, когда она установлена.
@@ -460,6 +477,8 @@ void LogListView::shiftRowKeyedState(int first, int count)
         m_bracketMatch.row += count;
     if (m_anchorRow >= first)
         m_anchorRow += count;
+    if (m_newLinesCount > 0 && m_firstNewLineRow >= first)
+        m_firstNewLineRow += count;
 }
 
 // Симметрично shiftRowKeyedState: после удаления count строк начиная с first
@@ -516,6 +535,18 @@ void LogListView::removeRowKeyedState(int first, int count)
 
     if (m_anchorRow >= first)
         m_anchorRow = shiftRow(m_anchorRow);
+
+    // Новые строки: удалённые из непросмотренного диапазона уходят из счёта
+    // (резидентный путь удаляет предварительную последнюю строку перед тем,
+    // как перечитать её с дозаписью — иначе она посчиталась бы дважды).
+    if (m_newLinesCount > 0) {
+        if (lastRemoved < m_firstNewLineRow) {
+            m_firstNewLineRow -= count;
+        } else {
+            const int removedNew = lastRemoved - qMax(first, m_firstNewLineRow) + 1;
+            setNewLines(m_newLinesCount - removedNew, qMin(m_firstNewLineRow, first));
+        }
+    }
 }
 
 // Вставка строк в модель. Частый случай — дозагрузка в конец (tail-follow):
@@ -548,6 +579,7 @@ void LogListView::handleRowsInserted(int first, int last)
         updateScrollbar();
         if (followScrollAfterAppend)
             scrollToBottomFollow();
+        countNewRows(first, last, followScrollAfterAppend);
         viewport()->update();
         return;
     }
@@ -592,6 +624,7 @@ void LogListView::handleRowsInserted(int first, int last)
     updateScrollbar();
     if (followScrollAfterAppend)
         scrollToBottomFollow();
+    countNewRows(first, last, followScrollAfterAppend);
     viewport()->update();
 }
 
@@ -2013,6 +2046,7 @@ void LogListView::paintEvent(QPaintEvent *event) {
 
 void LogListView::resizeEvent(QResizeEvent *event) {
     QListView::resizeEvent(event);
+    placeNewLinesIndicator();
     
     if (m_anchorRow < 0)
         captureResizeAnchor();
@@ -2415,8 +2449,10 @@ void LogListView::setFollowTail(bool enabled)
     if (enabled)
         m_holdAfterGoTo = false;
     emit followTailChanged(enabled);
-    if (enabled)
+    if (enabled) {
         scrollToBottomFollow();
+        clearNewLines(); // хвост на экране — новое видно и так
+    }
 }
 
 void LogListView::scrollToBottomFollow()
@@ -2431,6 +2467,107 @@ bool LogListView::isScrolledToBottom() const
     if (maximum <= 0)
         return false; // контент влезает целиком — прокручивать было нечего
     return sb->value() >= maximum - qMax(1, sb->singleStep());
+}
+
+// ---------------------------------------------------------------------------
+// Новые строки ниже экрана: «↓ N new lines».
+// ---------------------------------------------------------------------------
+
+int LogListView::lastVisibleRow() const
+{
+    const int rows = model() ? model()->rowCount() : 0;
+    if (rows <= 0)
+        return -1;
+    const qint64 bottomY = scrollContentY() + qMax(1, viewport()->height()) - 1;
+    if (bottomY >= rowYOffset(rows - 1))
+        return rows - 1;
+    return qBound(0, rowAtY(bottomY), rows - 1);
+}
+
+// O(1) на батч: диапазон вставки и одна проверка IsNewRole. Все строки одной
+// вставки — строки одного батча модели: дозапись помечена «новой» целиком
+// (стор ставит пометку ДО вставки), начальная загрузка и слияние файлов —
+// не помечены вовсе.
+void LogListView::countNewRows(int first, int last, bool viewFollowed)
+{
+    if (viewFollowed || m_followTail) {
+        markNewLinesSeen(); // вид у хвоста — новое на экране
+        return;
+    }
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || first < 0 || last < first
+        || !logModel->data(logModel->index(first, 0), LogModel::IsNewRole).toBool())
+        return;
+    // Строки, вставшие на экран или выше него, видны сразу или уже позади.
+    const int from = qMax(first, lastVisibleRow() + 1);
+    if (from > last)
+        return;
+    const int firstRow = m_newLinesCount > 0 ? qMin(m_firstNewLineRow, from) : from;
+    setNewLines(m_newLinesCount + (last - from + 1), firstRow);
+}
+
+void LogListView::markNewLinesSeen()
+{
+    if (m_newLinesCount <= 0 || !model())
+        return;
+    const int rows = model()->rowCount();
+    if (m_followTail || isScrolledToBottom() || m_firstNewLineRow >= rows) {
+        clearNewLines();
+        return;
+    }
+    const int lastRow = lastVisibleRow();
+    if (lastRow >= rows - 1) {
+        clearNewLines();
+        return;
+    }
+    if (lastRow < m_firstNewLineRow)
+        return;
+    setNewLines(m_newLinesCount - (lastRow - m_firstNewLineRow + 1), lastRow + 1);
+}
+
+void LogListView::clearNewLines()
+{
+    setNewLines(0, -1);
+}
+
+void LogListView::setNewLines(qint64 count, int firstRow)
+{
+    if (count <= 0) {
+        count = 0;
+        firstRow = -1;
+    }
+    m_newLinesCount = count;
+    m_firstNewLineRow = firstRow;
+    if (!m_newLinesIndicator)
+        return;
+    const QSize before = m_newLinesIndicator->size();
+    m_newLinesIndicator->setCount(count);
+    if (count > 0 && (m_newLinesIndicator->isHidden() || m_newLinesIndicator->size() != before)) {
+        placeNewLinesIndicator();
+        m_newLinesIndicator->raise();
+    }
+    m_newLinesIndicator->setVisible(count > 0);
+}
+
+void LogListView::placeNewLinesIndicator()
+{
+    if (!m_newLinesIndicator)
+        return;
+    const QSize size = m_newLinesIndicator->sizeHint();
+    const QRect area = viewport()->geometry();
+    const int gap = qMax(4, size.height() / 3);
+    m_newLinesIndicator->setGeometry(area.left() + (area.width() - size.width()) / 2,
+                                     area.bottom() + 1 - size.height() - gap,
+                                     size.width(), size.height());
+}
+
+void LogListView::goToNewLines()
+{
+    const int row = firstNewLineRow();
+    if (row < 0 || !model() || row >= model()->rowCount())
+        return;
+    goToRow(row);
+    markNewLinesSeen();
 }
 
 bool LogListView::hasPendingLayout() const
@@ -2872,6 +3009,11 @@ bool LogListView::viewportEvent(QEvent *event)
         case QEvent::HoverMove:
         case QEvent::ToolTip:
             return true;
+        case QEvent::Resize:
+            // Вьюпорт меняет размер и без resize самого view (появился или
+            // исчез горизонтальный скроллбар) — плашка держится у его низа.
+            placeNewLinesIndicator();
+            break;
         default:
             break;
     }

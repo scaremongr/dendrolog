@@ -35,6 +35,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("prevError"),   tr("Previous error"),            QKeySequence(Qt::SHIFT | Qt::Key_F8) },
         { QStringLiteral("nextWarning"), tr("Next warning"),              QKeySequence(Qt::Key_F7) },
         { QStringLiteral("prevWarning"), tr("Previous warning"),          QKeySequence(Qt::SHIFT | Qt::Key_F7) },
+        { QStringLiteral("goToNewLines"), tr("Go to new lines (below the screen)"), QKeySequence(Qt::ALT | Qt::Key_End) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },

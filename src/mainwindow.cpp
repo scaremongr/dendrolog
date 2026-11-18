@@ -447,6 +447,19 @@ MainWindow::MainWindow(QWidget *parent)
         ui->menuView->insertSeparator(ui->actionWordWrap);
     }
 
+    // Переход к строкам, дописанным ниже экрана («↓ N new lines» — та же
+    // команда, что щелчок по плашке вкладки).
+    {
+        QAction* action = new QAction(tr("Go to New Lines"), this);
+        connect(action, &QAction::triggered, this, [this]() {
+            if (m_activeLogView)
+                m_activeLogView->view()->goToNewLines();
+        });
+        ui->menuView->insertAction(ui->actionWordWrap, action);
+        ui->menuView->insertSeparator(ui->actionWordWrap);
+        m_shortcutActions.insert(QStringLiteral("goToNewLines"), action);
+    }
+
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {

@@ -10,6 +10,8 @@
 //     тёмную (запасной путь без QStyleHints::setColorScheme);
 //   • открытый LogListView перекрашивается: в кэше отрисовки строк не
 //     остаётся текста цветом прежней темы;
+//   • плашка «↓ N new lines» рисуется цветами текущей палитры и
+//     перекрашивается вместе с темой.
 //   • тёмная палитра задаёт все роли сама и не зависит от прежней палитры
 //     приложения; её вид при обычном старте закреплён значениями;
 //   • открытые панели (Text Filters, Search, Row Highlighters, Entry Details,
@@ -22,6 +24,7 @@
 #include "apptheme.h"
 #include "cardframe.h"
 #include "colorschemecontroller.h"
+#include "newlinesindicator.h"
 #include "directoryscannerpanel.h"
 #include "entrydetailspanel.h"
 #include "filterpanelwidget.h"
@@ -247,6 +250,54 @@ static void checkOpenView(const QDir& dir)
     testdocs::pump(50);
     const QImage again = view.viewport()->grab().toImage().convertToFormat(QImage::Format_RGB32);
     CHECK(blackPixels(again) > 20, "and back to light");
+
+    // Плашка новых строк: фон — Highlight палитры, текст — HighlightedText.
+    auto* indicator = view.findChild<NewLinesIndicator*>(QStringLiteral("newLinesIndicator"));
+    CHECK(indicator, "the view has a new-lines indicator");
+    if (indicator) {
+        indicator->setCount(12345);
+        indicator->resize(indicator->sizeHint());
+        indicator->show();
+        CHECK(indicator->text().contains(QStringLiteral("12,345 new lines")), "indicator text");
+        CHECK(NewLinesIndicator::label(1) == QStringLiteral("\u2193 1 new line")
+                  && NewLinesIndicator::label(99999).contains(QStringLiteral("99,999 "))
+                  && NewLinesIndicator::label(120500).contains(QStringLiteral(" 120K "))
+                  && NewLinesIndicator::label(3456789).contains(QStringLiteral(" 3.4M "))
+                  && NewLinesIndicator::label(25000000).contains(QStringLiteral(" 25M ")),
+              "large counts are shortened");
+        const auto fillAndText = [&](const char* theme) {
+            const QImage image = indicator->grab().toImage().convertToFormat(QImage::Format_RGB32);
+            const QPalette& pal = indicator->palette();
+            // Точка у левого скругления: внутри плашки, левее текста.
+            const QColor fill = image.pixelColor(image.height() / 2 + 2, image.height() / 2);
+            const QColor expected = pal.color(QPalette::Highlight);
+            const auto near = [](const QColor& a, const QColor& b) {
+                return qAbs(a.red() - b.red()) < 12 && qAbs(a.green() - b.green()) < 12
+                    && qAbs(a.blue() - b.blue()) < 12;
+            };
+            CHECK(near(fill, expected),
+                  QStringLiteral("%1: indicator fill is the palette highlight (%2 vs %3)")
+                      .arg(theme, fill.name(), expected.name()));
+            const QColor ink = pal.color(QPalette::HighlightedText);
+            int inked = 0;
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x)
+                    if (near(image.pixelColor(x, y), ink))
+                        ++inked;
+            CHECK(inked > 10, QStringLiteral("%1: indicator text uses the highlighted-text colour").arg(theme));
+            return fill;
+        };
+        const QColor lightFill = fillAndText("light");
+        s.setThemeMode(ThemeMode::Dark);
+        testdocs::pump(50);
+        const QColor darkFill = fillAndText("dark");
+        CHECK(isDark(indicator->palette()), "the indicator follows the theme change");
+        Q_UNUSED(lightFill);
+        Q_UNUSED(darkFill);
+        s.setThemeMode(ThemeMode::Light);
+        testdocs::pump(50);
+        fillAndText("light again");
+    }
 
     s.setThemeMode(ThemeMode::System);
 }

@@ -116,6 +116,8 @@ set(DENDROLOG_CORE_SOURCES
 set(DENDROLOG_WIDGETS_SOURCES
     src/LogListView.h
     src/LogListView.cpp
+    src/newlinesindicator.h
+    src/newlinesindicator.cpp
     src/logviewwidget.h
     src/logviewwidget.cpp
     src/gotodialog.h

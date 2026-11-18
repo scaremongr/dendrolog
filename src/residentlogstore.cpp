@@ -14,16 +14,19 @@ void ResidentLogStore::appendEntries(const QVector<std::shared_ptr<LogEntry>>& e
     if (entries.isEmpty())
         return;
 
-    QVector<std::shared_ptr<LogEntry>> sortedBatch = entries;
-    std::sort(sortedBatch.begin(), sortedBatch.end(), logEntryPtrLess);
-    mergeSortedBatch(sortedBatch);
-
     // Подсветка «новых» строк переходит на этот батч: строки предыдущего
-    // батча теряют зелёный маркер — перерисовываем гаттер.
+    // батча теряют зелёный маркер — перерисовываем гаттер. Пометка ставится
+    // ДО вставки: view на rowsInserted уже видит строки новыми (по ним
+    // считается «↓ N new lines»).
     const bool hadPrevious = !m_newEntries.isEmpty();
     m_newEntries.clear();
     for (const auto& e : entries)
         if (e) m_newEntries.insert(e.get());
+
+    QVector<std::shared_ptr<LogEntry>> sortedBatch = entries;
+    std::sort(sortedBatch.begin(), sortedBatch.end(), logEntryPtrLess);
+    mergeSortedBatch(sortedBatch);
+
     if (hadPrevious && visibleCount() > 0)
         emit m_model.dataChanged(m_model.index(0, 0),
                                  m_model.index(visibleCount() - 1, 0),
