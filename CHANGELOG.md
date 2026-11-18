@@ -70,6 +70,19 @@ All notable changes to DendroLog are documented here. The format follows
   compressed rotations (`app.log.gz`) stay out.
 
 ### Changed
+- **A line that opens with a timestamp starts a new entry, even without a
+  level word.** Access logs (nginx / Apache), syslog and plain
+  “timestamp message” logs used to become one huge entry without a field
+  schema: every line after the first was glued to it as a continuation, so
+  lines had no time of their own, the timeline was empty, the time filter and
+  the merge by time did not work, and the directory scanner showed one entry.
+  Now an entry starts at a line whose timestamp stands at the very start, right
+  after a `[` at the start (`[2026-11-18 13:55:36] …`), or — for access logs —
+  in brackets after the client address. A timestamp in the middle of a line or
+  in an indented line (a JSON or SQL body, the text of an exception) still
+  keeps the line inside its entry, and lines with a timestamp and a level word
+  start an entry as before. The open tab (both for small and huge files) and
+  the directory scanner split entries the same way.
 - **More level words are recognised.** `CRITICAL`, `CRIT`, `SEVERE`, `EMERG`
   and `FTL` count as Fatal; `ERR` as Error; `WRN` as Warn;
   `INF` and `NOTICE` as Info; `DBG` as Debug; `VERBOSE` and `VRB` as Trace.

@@ -49,24 +49,36 @@ public:
     // локальное время машины; с явной зоной (Z, ±hh:mm, UTC…) — точный
     // момент. Дробная часть усекается до миллисекунд. Формы и где в строке
     // они ищутся — в начале lineclassifier.cpp.
+    // leading (если задан) — метка ВЕДУЩАЯ, см. isPrimaryLine.
     bool detectTimestamp(const QString& line, QDateTime& ts,
-                         const YearReference& year = YearReference()) const;
+                         const YearReference& year = YearReference(),
+                         bool* leading = nullptr) const;
     // Как detectTimestamp, но сразу мс epoch БЕЗ построения QDateTime —
     // горячий путь индексатора. Конверсия локаль→epoch кэшируется по минуте:
     // на Windows каждая конверсия стоит микросекунды, и именно она (а не
     // поиск формы) доминировала в стоимости индексации. Метка с зоной
     // считается арифметикой и в кэш не ходит.
     bool detectTimestampMs(const QString& line, qint64& msecs,
-                           const YearReference& year = YearReference()) const;
+                           const YearReference& year = YearReference(),
+                           bool* leading = nullptr) const;
     // Распознать уровень логирования (словом). true — level заполнен.
     bool detectLogLevel(const QString& line, LogLevel& level) const;
 
-    // Правило первичной строки логической записи. Строка первична, если её
-    // распознала схема ИЛИ у неё есть и таймстамп, и уровень; остальные
-    // строки — continuation текущей записи.
-    static bool isPrimaryLine(bool schemaMatched, bool hasTimestamp, bool hasLevel)
+    // Правило первичной строки логической записи (F-12, docs/design/F-12.md).
+    // Строка первична, если её распознала схема, ИЛИ у неё есть метка и
+    // слово уровня, ИЛИ метка ВЕДУЩАЯ — открывает строку:
+    //   • стоит с позиции 0 (любая форма; syslog и фолбэк-формы только так);
+    //   • стоит с позиции 1 сразу за «[» («[2026-11-18 10:00:00] …»);
+    //   • это форма access-лога сразу за «[» в строке без ведущего пробела
+    //     («10.0.0.1 - frank [18/Nov/2026:13:55:36 +0000] "GET …"»).
+    // Остальные строки — continuation текущей записи: стек-трейсы и тело
+    // сообщения (JSON, SQL, XML) с меткой в середине или с отступом.
+    // Правило построчное, без состояния: одно у LogParser, LogIndexer и
+    // сканера каталога (analyzeFileForStats).
+    static bool isPrimaryLine(bool schemaMatched, bool hasTimestamp,
+                              bool leadingTimestamp, bool hasLevel)
     {
-        return schemaMatched || (hasTimestamp && hasLevel);
+        return schemaMatched || (hasTimestamp && (leadingTimestamp || hasLevel));
     }
 
 private:

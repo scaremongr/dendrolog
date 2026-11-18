@@ -1210,6 +1210,45 @@ static void testAttachWithActiveFilter(const QString& unsortedPath, const QStrin
     compareVisibleRows(*res.model, *idx.model);
 }
 
+// F-12. Лог без слов уровня: запись начинает ведущая метка (позиция 0,
+// «[» на позиции 0, access за «[»), тело с метками в середине и под отступом
+// — продолжение. Метки неубывающие, чтобы одно-файловая вкладка сравнивалась
+// строго. form выбирает вид первичной строки по номеру записи: 0 — по кругу
+// все виды, 1 — только access-лог. Преамбула без метки — только для слитой
+// вкладки: одно-файловая индексная не сортирует (testSingleFileOrdering).
+static QByteArray makeNoLevelBytes(int records, int form, const QDateTime& base,
+                                   bool withPreamble)
+{
+    static const char* kMonths[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    QByteArray b;
+    if (withPreamble)
+        b += "service banner without a timestamp\n";
+    for (int i = 0; i < records; ++i) {
+        const QDateTime t = base.addSecs(i * 7);
+        const QByteArray iso = t.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")).toUtf8();
+        const QByteArray access = (t.toString(QStringLiteral("dd/")) + kMonths[t.date().month() - 1]
+                                   + t.toString(QStringLiteral("/yyyy:HH:mm:ss"))).toUtf8();
+        const QByteArray syslog = (QByteArray(kMonths[t.date().month() - 1]) + ' '
+                                   + t.toString(QStringLiteral("dd HH:mm:ss")).toUtf8());
+        const int kind = form == 1 ? 2 : i % 4;
+        switch (kind) {
+        case 0: b += iso + " job " + QByteArray::number(i) + " started\n"; break;
+        case 1: b += "[" + iso + "] cache step " + QByteArray::number(i) + "\n"; break;
+        case 2: b += "10.0.0." + QByteArray::number(i % 250) + " - - [" + access
+                     + " +0000] \"GET /item/" + QByteArray::number(i) + " HTTP/1.1\" 200 512\n"; break;
+        default: b += syslog + " web01 cron[" + QByteArray::number(i) + "]: tick\n"; break;
+        }
+        if (i % 5 == 0) {
+            b += "{\n";
+            b += "  \"ts\": \"" + iso + "\",\n";
+            b += "Response: {\"at\":\"" + iso + "\"}\n";
+            b += "}\n";
+        }
+    }
+    return b;
+}
+
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv)
@@ -1266,7 +1305,14 @@ int main(int argc, char** argv)
         makeLogBytes(240, 4u, "\r\n", baseB, /*withPreamble*/ true,
                      /*trailingNewline*/ false, /*monotonic*/ false));
 
-    for (const QString& path : { fileA, fileB, fileC, fileD }) {
+    // F-12: логи без слов уровня (смешанные формы с телом JSON и чистый
+    // access-лог, перекрывающийся по времени с первым).
+    const QString fileE = writeFile(dir, QStringLiteral("nolevel-mixed.log"),
+                                    makeNoLevelBytes(240, 0, baseA, false));
+    const QString fileF = writeFile(dir, QStringLiteral("nolevel-access.log"),
+                                    makeNoLevelBytes(200, 1, baseA.addSecs(30), true));
+
+    for (const QString& path : { fileA, fileB, fileC, fileD, fileE, fileF }) {
         if (path.isEmpty()) {
             std::fprintf(stderr, "не удалось записать фикстуру\n");
             return 2;
@@ -1286,6 +1332,11 @@ int main(int argc, char** argv)
                        + describe(mode),
                    { fileC, fileD }, schema, fieldNames, mode);
     }
+
+    runFixture(QStringLiteral("без слов уровня, один файл"), { fileE }, schema, fieldNames);
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        runFixture(QStringLiteral("без слов уровня, два файла, ") + describe(mode),
+                   { fileE, fileF }, schema, fieldNames, mode);
 
     testSingleFileOrdering(fileA, fileC, schema, fieldNames);
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);

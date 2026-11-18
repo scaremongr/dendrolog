@@ -24,7 +24,7 @@ filtering, highlighting and live reload.
 ## Reading the view
 
 - **Tabs** — each tab is an independent view; filters/markers are per-tab.
-- **Gutter marker `›`** — start of a logical entry; painted green for lines added by the last auto-reload.
+- **Gutter marker `›`** — start of a logical entry (without a schema: a line that opens with a timestamp, or a line with a timestamp and a level word); painted green for lines added by the last auto-reload.
 - **Badges on the right:**
   - File badge — colour-coded source file (only when a tab holds several files).
   - `+N` / `−` — the line is longer than the visible width; click to expand/collapse it.
@@ -62,7 +62,7 @@ filtering, highlighting and live reload.
 
 ### Which word means which level
 
-The level of an entry comes from the **leftmost** word of the table below in the line the entry starts with. The word must stand on its own (`[ERROR]`, `ERROR:`, `level=error` count; `ERRORS`, `error_code` do not); case does not matter. Continuation lines (a stack trace) take the level of their entry. Without a field schema an entry starts at a line that has both a timestamp and such a word.
+The level of an entry comes from the **leftmost** word of the table below in the line the entry starts with. The word must stand on its own (`[ERROR]`, `ERROR:`, `level=error` count; `ERRORS`, `error_code` do not); case does not matter. Continuation lines (a stack trace) take the level of their entry. Without a field schema an entry starts at a line that opens with a timestamp: one at the very start of the line (`2026-11-18 13:55:36 …`, `Nov 18 13:55:36 …`), right after a `[` at the start (`[2026-11-18 13:55:36] …`), or an access-log timestamp in brackets after the client address (`10.0.0.1 - - [18/Nov/2026:13:55:36 +0000] …`). No level word is needed for that, so access logs, syslog and plain "timestamp message" logs split into entries without a schema. A line that has both a timestamp (anywhere) and such a word starts an entry too. A line whose timestamp is in the middle or indented — a JSON or SQL body, the text of an exception — stays a continuation: it takes the moment and level of its entry, not its own.
 
 | Level | Words |
 |---|---|
@@ -73,7 +73,7 @@ The level of an entry comes from the **leftmost** word of the table below in the
 | **Debug** | `DEBUG`, `DBG` |
 | **Trace** | `TRACE`, `VERBOSE`, `VRB` |
 
-The level buttons, the line colour, the `F7` / `F8` jumps and the counters in Statistics all use this level; the directory scanner counts Fatal, Error and Warn over the lines that have a timestamp and such a word; the **Level** block of a field schema accepts the same words. Only a word written in capitals is coloured inside the text. `ALERT`, `PANIC`, `FAIL`, `FINE`, `FINER`, `FINEST`, `CONFIG` and one-letter levels (`E`, `W` in logcat) are not treated as levels: they are ordinary message words, and the leftmost word of the table decides. For the same reason a component name that equals a table word and stands before the level (`[notice-worker] ERROR …`) gives the level of that word.
+The level buttons, the line colour, the `F7` / `F8` jumps and the counters in Statistics all use this level; the directory scanner counts Fatal, Error and Warn over the entries of that level; the **Level** block of a field schema accepts the same words. Only a word written in capitals is coloured inside the text. `ALERT`, `PANIC`, `FAIL`, `FINE`, `FINER`, `FINEST`, `CONFIG` and one-letter levels (`E`, `W` in logcat) are not treated as levels: they are ordinary message words, and the leftmost word of the table decides. For the same reason a component name that equals a table word and stands before the level (`[notice-worker] ERROR …`) gives the level of that word.
 
 ## Text Filters and Search
 
@@ -195,7 +195,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 
 - The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.
 - **Rotated logs are listed too**: besides `app.log`, the tree shows `app.log.1`, `app.log.10`, `app.log-20260101`, `app.log.2026-01-01` and `app-2026-01-01.log` — a configured extension followed by nothing but a rotation number or date (digits joined by `.`, `-` or `_`). Backups and editor files (`app.log.bak`, `app.log.swp`, `app.log~`) and compressed rotations (`app.log.gz`, `app.log.1.gz`) are not listed. Rotated files sort right after the main one, by number: `app.log`, `app.log.1`, `app.log.2`, `app.log.10`. The **Open** dialog's “Log files” filter lists plain extensions only; pick “All files” there to open a rotated file, or open it from the scanner.
-- **Entries are counted the way an opened tab counts them**: an entry starts at a line with a timestamp and a level, and the lines after it (a stack trace, a multi-line message) belong to it. The W/E/F counters count such entries, the From / To span comes from their timestamps. A field schema does not change the count: the scanner counts the way a tab does without field extraction. A file in UTF-16 is recognised by its byte-order mark, and a growing log whose last line was still being written is counted again correctly once the line is finished.
+- **Entries are counted the way an opened tab counts them**: an entry starts the same way as in a tab without a schema (see "Which word means which level"), and the lines after it (a stack trace, a multi-line message) belong to it. The W/E/F counters count such entries, the From / To span comes from their timestamps. A field schema does not change the count: the scanner counts the way a tab does without field extraction. A file in UTF-16 is recognised by its byte-order mark, and a growing log whose last line was still being written is counted again correctly once the line is finished.
 - Names sort **case-insensitively** and naturally: `log2` comes before `log10`. Clicking a column header re-sorts (name ascending, numeric columns largest-first).
 - **The ⟳ button refreshes.** It re-reads the directory but not the files: only new and modified ones are analysed again, and a log that merely grew is read from where the previous scan stopped (unless it was rewritten). Deleted files leave the tree.
 - **Right-click ⟳** to pick the refresh mode:

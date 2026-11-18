@@ -513,6 +513,48 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
     }
 }
 
+// F-12. Без включённого извлечения полей (по умолчанию) границы записей
+// решает классификатор: у форматов, где у каждой записи есть метка с датой,
+// они обязаны совпасть с границами по схеме, а момент — быть у каждой записи.
+// Прежде access-лог и syslog без слов уровня становились одной записью.
+// Пустая схема = схема не участвует, как при выключенном Filter blocks.
+void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
+{
+    for (const Sample& s : sc.samples)
+        if (!s.continuation && !expectsTime(sc, s))
+            return;   // запись без метки отличает только схема (F-11)
+
+    QByteArray bytes;
+    for (const Sample& s : sc.samples)
+        bytes += s.line.toUtf8() + '\n';
+    const QString path = testdocs::writeFile(tmp, sc.file + QStringLiteral(".noschema.log"), bytes);
+    testdocs::Document resident = testdocs::buildResident({path}, QString());
+    testdocs::Document indexed = testdocs::buildIndexed({path}, QString());
+    check(resident.errors.isEmpty() && indexed.errors.isEmpty(),
+          QStringLiteral("%1 без схемы: загрузка без ошибок").arg(sc.file));
+    const LogPattern none;
+    const QMap<int, RowInfo> res = rowsByLine(resident, none);
+    const QMap<int, RowInfo> idx = rowsByLine(indexed, none);
+    if (res.size() != sc.samples.size() || idx.size() != sc.samples.size()) {
+        check(false, QStringLiteral("%1 без схемы: число строк").arg(sc.file));
+        return;
+    }
+    const QList<int> lines = res.keys();
+    for (int i = 0; i < lines.size(); ++i) {
+        const Sample& s = sc.samples[i];
+        const RowInfo& r = res[lines[i]];
+        const RowInfo& x = idx[lines[i]];
+        const bool resStarts = i == 0 || r.recordId != res[lines[i - 1]].recordId;
+        const bool idxStarts = i == 0 || x.recordId != idx[lines[i - 1]].recordId;
+        check(resStarts == !s.continuation && idxStarts == !s.continuation,
+              QStringLiteral("%1 без схемы: начало записи на строке %2 (резидентный %3, индексный %4): %5")
+                  .arg(sc.file).arg(i + 1).arg(resStarts).arg(idxStarts).arg(s.line));
+        check(r.ms == x.ms && (s.continuation || r.ms >= 0),
+              QStringLiteral("%1 без схемы: момент строки %2: %3 | %4")
+                  .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms));
+    }
+}
+
 // Момент записи распознаёт LineClassifier (F-10): ISO, nginx error
 // (dddd/dd/dd), access (dd/Mmm/dddd:…), syslog без года. Время без даты
 // (Serilog console, Logback HH:mm:ss.SSS) — нет, это F-11; Python
@@ -792,6 +834,7 @@ int main(int argc, char** argv)
         printAutodetect(sc);
         testSamples(sc);
         testBackends(sc, QDir(tmpDir.path()));
+        testBackendsWithoutExtraction(sc, QDir(tmpDir.path()));
         testClassifierTime(sc);
     }
     testInstall();

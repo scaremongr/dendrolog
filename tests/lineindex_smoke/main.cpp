@@ -330,6 +330,111 @@ static void testNewTimestampFormsBackends(const QDir& dir)
           "forms_grow.log: appended line after New Year gets the new year");
 }
 
+// F-12. Границы записей без слова уровня на обоих путях загрузки: запись
+// начинает строка с ведущей меткой (позиция 0, «[» на позиции 0, access за
+// «[»), а метка в середине строки или под отступом — продолжение. Оба пути
+// дают одни и те же записи и моменты, и они равны заданным; дозапись,
+// начатая продолжением с меткой в теле, остаётся в своей записи.
+struct BoundaryLine {
+    const char* text;
+    bool starts;   // начинает запись
+};
+
+static const BoundaryLine kBoundaryCorpus[] = {
+    { "=== service banner ===", true },                                     // преамбула: своя запись
+    { "built 2026-11-18 10:00:00 from main", false },                       // метка в середине
+    { "192.168.1.10 - - [18/Nov/2026:13:55:36 +0000] \"GET / HTTP/1.1\" 200 512", true },
+    { "2001:db8::1 - alice@example.com [18/Nov/2026:13:55:37 +0000] \"POST /api HTTP/2\" 201 0", true },
+    { "Nov 18 13:55:38 web01 sshd[1234]: Accepted publickey for deploy", true },
+    { "2026-11-18 13:55:39 Starting backup job", true },                    // «метка сообщение»
+    { "[2026-11-18 13:55:40] cache warmed", true },
+    { "2026-11-18 13:55:41 query:", true },
+    { "SELECT * FROM t WHERE created_at > '2026-11-18 10:00:00'", false },
+    { "    AND updated_at < '2026-11-18 11:00:00'", false },
+    { "2026-11-18 13:55:42 payload:", true },
+    { "{", false },
+    { "  \"ts\": \"2026-11-18T10:00:00Z\",", false },
+    { "\"created\": \"2026-11-18 10:00:00\",", false },
+    { "Response: {\"ts\":\"2026-11-18T10:00:00Z\"}", false },
+    { "<timestamp>2026-11-18T10:00:00</timestamp>", false },
+    { "\t2026-11-18 10:00:00 tab-indented stamp", false },
+    { "}", false },
+    { "2026-11-18 13:55:43.731 [pool-3] ERROR c.e.Billing - Failed", true },
+    { "java.lang.IllegalStateException: SMTP did not respond at 2026-11-18 13:55:39", false },
+    { "\tat com.example.MailGateway.send(MailGateway.java:88)", false },
+    { "Traceback (most recent call last):", false },
+    { "  File \"/srv/app.py\", line 12, in <module>", false },
+    { "ValueError: bad date 2026-11-18 13:55:40", false },
+    { "   at Foo.Bar() in C:\\src\\Foo.cs:line 10", false },
+    { "prefix 2026-11-18 13:55:44 WARN level with a stamp in the middle", true }, // как раньше
+};
+
+static QByteArray boundaryCorpusBytes()
+{
+    QByteArray b;
+    for (const BoundaryLine& l : kBoundaryCorpus)
+        b += QByteArray(l.text) + '\n';
+    return b;
+}
+
+static void checkBoundaries(const QString& tag, const LineIndex& index)
+{
+    const qint64 n = qint64(std::size(kBoundaryCorpus));
+    CHECK(index.lineCount() == n, qPrintable(tag + ": line count"));
+    for (qint64 i = 0; i < qMin(n, index.lineCount()); ++i) {
+        const bool starts = i == 0 || index.logicalId(i) != index.logicalId(i - 1);
+        if (starts != kBoundaryCorpus[i].starts) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s: line %lld %s a record: %s\n", qPrintable(tag),
+                         (long long)i, kBoundaryCorpus[i].starts ? "must start" : "must not start",
+                         kBoundaryCorpus[i].text);
+        }
+    }
+}
+
+static void testRecordBoundariesBackends(const QDir& dir)
+{
+    const QString path = writeFile(dir, QStringLiteral("boundaries.log"), boundaryCorpusBytes());
+    auto lf = std::make_shared<LogFile>(path);
+    const auto entries = parseFile(lf);
+    const auto index = indexFile(lf);
+    compareParserVsIndex(QStringLiteral("boundaries.log"), path, lf, entries, *index);
+    checkBoundaries(QStringLiteral("boundaries.log"), *index);
+
+    // Моменты записей без уровня — свои, а продолжения — моменты записи.
+    const auto utc = [](int h, int mi, int s) {
+        return QDateTime(QDate(2026, 11, 18), QTime(h, mi, s), QTimeZone::UTC).toMSecsSinceEpoch();
+    };
+    const auto local = [](int h, int mi, int s) {
+        return QDateTime(QDate(2026, 11, 18), QTime(h, mi, s)).toMSecsSinceEpoch();
+    };
+    if (index->lineCount() == qint64(std::size(kBoundaryCorpus))) {
+        CHECK(index->timestampMs(index->logicalId(1)) == -1, "boundaries.log: banner has no moment");
+        CHECK(index->timestampMs(index->logicalId(2)) == utc(13, 55, 36), "boundaries.log: access moment");
+        CHECK(index->timestampMs(index->logicalId(3)) == utc(13, 55, 37), "boundaries.log: IPv6 access moment");
+        CHECK(index->timestampMs(index->logicalId(5)) == local(13, 55, 39), "boundaries.log: stamp-message moment");
+        CHECK(index->timestampMs(index->logicalId(6)) == local(13, 55, 40), "boundaries.log: bracketed moment");
+        CHECK(index->timestampMs(index->logicalId(12)) == local(13, 55, 42),
+              "boundaries.log: JSON body inherits the record's moment, not its own");
+        CHECK(index->logicalEntryCount() == 10, "boundaries.log: ten records");
+    }
+
+    // Дозапись: голова кончается записью, порция начинается продолжением с
+    // меткой в теле. Итог — как у свежей индексации всего файла.
+    const QByteArray all = boundaryCorpusBytes();
+    const int split = all.indexOf("{\n");
+    const QString grow = writeFile(dir, QStringLiteral("boundaries_grow.log"), all.left(split));
+    auto growLf = std::make_shared<LogFile>(grow);
+    const auto growIndex = indexFile(growLf);
+    appendToFile(grow, all.mid(split));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, growLf, growIndex, false);
+    }
+    checkBoundaries(QStringLiteral("boundaries_grow.log"), *growIndex);
+    compareIndexes(QStringLiteral("boundaries_grow.log"), *growIndex, *index);
+}
+
 // Слова словаря уровней на обоих путях загрузки: запись с таким словом после
 // метки времени — первичная, её уровень одинаков у LogParser и LogIndexer и
 // равен заданному; строка-продолжение наследует его.
@@ -602,8 +707,15 @@ static int refResolveYear(int month, int day, const LineClassifier::YearReferenc
 // маскировались бы. Порядок: форма с полной датой (ISO, dddd/dd/dd, access)
 // на позиции 0; формы позиции 0 (фолбэк, syslog), только валидные; самая
 // левая форма с полной датой; невалидная — не метка.
-static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, QDateTime& ts)
+// leading — эталон «ведущей» метки (F-12, LineClassifier::isPrimaryLine):
+// формы позиции 0; форма с полной датой с позиции 0, с позиции 1 за «[» или
+// access за «[» в строке, которая не начинается с пробела или табуляции.
+static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, QDateTime& ts,
+                               bool* leading = nullptr)
 {
+    bool leadingDummy = false;
+    bool& lead = leading ? *leading : leadingDummy;
+    lead = false;
     const auto isoMatch = re.iso.match(line);
     const auto accessMatch = re.access.match(line);
     // Ведущая форма с полной датой: самая левая из двух.
@@ -644,8 +756,10 @@ static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, Q
         return false;
     };
 
-    if (mid && mid->capturedStart(0) == 0)
-        return fromMid(*mid);
+    if (mid && mid->capturedStart(0) == 0) {
+        lead = fromMid(*mid);
+        return lead;
+    }
 
     const QStringView lineRef{line};
     const QStringList timeFormats = {
@@ -702,6 +816,7 @@ static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, Q
             const auto suffix = re.suffix.match(line, 19, QRegularExpression::NormalMatch,
                                                QRegularExpression::AnchorAtOffsetMatchOption);
             ts = refMoment(year, month, day, hour, minute, second, refParseSuffix(suffix, 1));
+            lead = true;
             return true;
         }
     }
@@ -719,12 +834,22 @@ static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, Q
         if (year != 0 && QDate::isValid(year, month, day)
             && QTime::isValid(hour, minute, second, suffix.millis)) {
             ts = refMoment(year, month, day, hour, minute, second, suffix);
+            lead = true;
             return true;
         }
     }
 
-    if (mid)
-        return fromMid(*mid);
+    if (mid) {
+        if (!fromMid(*mid))
+            return false;
+        const qsizetype at = mid->capturedStart(0);
+        const bool afterBracket = line.at(at - 1) == QLatin1Char('[');
+        lead = afterBracket
+            && (at == 1
+                || (mid == &accessMatch && line.at(0) != QLatin1Char(' ')
+                    && line.at(0) != QLatin1Char('\t')));
+        return true;
+    }
     ts = QDateTime();
     return false;
 }
@@ -746,21 +871,23 @@ static void checkClassifierLine(const LineClassifier& classifier,
                                 const QString& line)
 {
     QDateTime tsNew, tsRef;
-    const bool hasNew = classifier.detectTimestamp(line, tsNew, tsRe.year);
-    const bool hasRef = refDetectTimestamp(tsRe, line, tsRef);
-    if (hasNew != hasRef || (hasNew && tsNew != tsRef)) {
+    bool leadNew = false, leadRef = false, leadMsNew = false;
+    const bool hasNew = classifier.detectTimestamp(line, tsNew, tsRe.year, &leadNew);
+    const bool hasRef = refDetectTimestamp(tsRe, line, tsRef, &leadRef);
+    if (hasNew != hasRef || (hasNew && tsNew != tsRef) || leadNew != leadRef) {
         ++g_failures;
         std::fprintf(stderr,
-                     "FAIL classifier ts mismatch on '%s': new=%d '%s' ref=%d '%s'\n",
+                     "FAIL classifier ts mismatch on '%s': new=%d '%s' leading=%d ref=%d '%s' leading=%d\n",
                      qPrintable(line), int(hasNew),
-                     qPrintable(tsNew.toString(Qt::ISODateWithMs)), int(hasRef),
-                     qPrintable(tsRef.toString(Qt::ISODateWithMs)));
+                     qPrintable(tsNew.toString(Qt::ISODateWithMs)), int(leadNew), int(hasRef),
+                     qPrintable(tsRef.toString(Qt::ISODateWithMs)), int(leadRef));
     }
 
     // Быстрый вариант индексатора обязан давать те же мс epoch.
     qint64 msNew = -2;
-    const bool hasMsNew = classifier.detectTimestampMs(line, msNew, tsRe.year);
-    if (hasMsNew != hasRef || (hasMsNew && msNew != tsRef.toMSecsSinceEpoch())) {
+    const bool hasMsNew = classifier.detectTimestampMs(line, msNew, tsRe.year, &leadMsNew);
+    if (hasMsNew != hasRef || (hasMsNew && msNew != tsRef.toMSecsSinceEpoch())
+        || leadMsNew != leadRef) {
         ++g_failures;
         std::fprintf(stderr,
                      "FAIL classifier tsMs mismatch on '%s': new=%d %lld ref=%d %lld\n",
@@ -959,6 +1086,24 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("99/99/2026 10:22:33 then 2026-07-11 10:22:33 later"),
         QStringLiteral("Nov 18 13:55:36 then 2026-13-40 00:00:00 invalid later"),
         QStringLiteral("x 2026-13-40 00:00:00 invalid first then 2026-07-11 10:22:33"),
+        // F-12: ведущая метка — с позиции 0, с позиции 1 за «[», access за «[».
+        QStringLiteral("[2026-07-11 10:22:33] bracketed"),
+        QStringLiteral("[2026/07/11 10:22:33] bracketed slashed"),
+        QStringLiteral("[[2026-07-11 10:22:33]] two brackets"),
+        QStringLiteral(" [2026-07-11 10:22:33] space then bracket"),
+        QStringLiteral("x [2026-07-11 10:22:33] iso after a word and bracket"),
+        QStringLiteral("2001:db8::1 - alice@example.com [18/Nov/2026:13:55:37 +0000] \"POST /api HTTP/2\" 201 0"),
+        QStringLiteral(" 10.0.0.1 - - [18/Nov/2026:13:55:36 +0000] indented access"),
+        QStringLiteral("\t10.0.0.1 - - [18/Nov/2026:13:55:36 +0000] tab-indented access"),
+        QStringLiteral("10.0.0.1 - - 18/Nov/2026:13:55:36 access without bracket"),
+        QStringLiteral("\"time\": \"[18/Nov/2026:13:55:36 +0000]\" quoted access"),
+        QStringLiteral("  \"ts\": \"2026-11-18T10:00:00Z\","),
+        QStringLiteral("\"created\": \"2026-11-18 10:00:00\","),
+        QStringLiteral("Response: {\"ts\":\"2026-11-18T10:00:00Z\"}"),
+        QStringLiteral("<timestamp>2026-11-18T10:00:00</timestamp>"),
+        QStringLiteral("\t2026-11-18 10:00:00 tab then iso"),
+        QStringLiteral("[2026-13-40 00:00:00] bracketed invalid"),
+        QStringLiteral("["),
     };
     for (const QString& line : corpus)
         check(line);
@@ -1369,7 +1514,7 @@ static int runBenchStages(const QString& path)
     // Стадии 0–3 накопительные: I/O → декод → timestamp → level. Стадия 4 —
     // декод + level без timestamp: цена классификации уровня отдельно, без
     // шума самой дорогой стадии. Стадия 5 — декод + detectTimestampMs с
-    // опорной датой файла: горячий путь индексатора, без QDateTime (у
+    // опорной датой файла и флагом ведущей метки: горячий путь индексатора, без QDateTime (у
     // стадии 2 её цену определяет построение QDateTime на строку).
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(path);
     for (int stage = 0; stage <= 5; ++stage) {
@@ -1418,10 +1563,12 @@ static int runBenchStages(const QString& path)
                     text = QString::fromUtf8(data, int(len));
                     sink += text.size();
                     if (stage == 5) {
+                        // С флагом ведущей метки — как у LogIndexer (F-12).
                         qint64 ms = 0;
-                        if (classifier.detectTimestampMs(text, ms, yearRef)) {
+                        bool leading = false;
+                        if (classifier.detectTimestampMs(text, ms, yearRef, &leading)) {
                             ++tsCount;
-                            sink += ms & 1;
+                            sink += (ms & 1) + leading;
                         }
                     }
                     if (stage == 2 || stage == 3) {
@@ -1578,6 +1725,7 @@ int main(int argc, char** argv)
     testTimestampGolden();
     testGolden(dir);
     testNewTimestampFormsBackends(dir);
+    testRecordBoundariesBackends(dir);
     testLevelVocabularyBackends(dir);
     testBom(dir);
     testBlockBoundaries(dir);

@@ -178,7 +178,8 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         QDateTime lineTs;
         LogLevel lineLevel = LogLevel::Unknown;
 
-        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef);
+        bool leadingTimestamp = false;
+        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef, &leadingTimestamp);
         bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
         const bool schemaMatched = (extraction && pattern.isValid())
@@ -186,7 +187,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             : false;
 
         std::shared_ptr<LogEntry> currentEntry;
-        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, hasLevel)) {
+        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, leadingTimestamp, hasLevel)) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
@@ -319,11 +320,12 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
             line.chop(1);
         QDateTime ts;
         LogLevel level = LogLevel::Unknown;
-        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef);
+        bool leadingTimestamp = false;
+        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef, &leadingTimestamp);
         const bool hasLevel = m_classifier.detectLogLevel(line, level);
         // Схема полей здесь не участвует: вкладка решает по ней, только когда
         // включено извлечение полей, а по умолчанию — по метке и уровню.
-        if (LineClassifier::isPrimaryLine(false, hasTimestamp, hasLevel)) {
+        if (LineClassifier::isPrimaryLine(false, hasTimestamp, leadingTimestamp, hasLevel)) {
             recordLevel = level;
             if (!stats.firstEntryTimestamp.isValid())
                 stats.firstEntryTimestamp = ts;

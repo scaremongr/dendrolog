@@ -21,6 +21,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QTimeZone>
 #include <QToolButton>
 #include <QSet>
 #include <QStringEncoder>
@@ -283,7 +284,8 @@ static const QByteArray kMultilineLog =
     "    at com.example.Main.run(Main.java:42)\n"
     "    at com.example.Main.main(Main.java:7)\n"
     "\n"
-    "2026-03-01 10:00:02 no level on this line\n"           // продолжение: уровня нет
+    "2026-03-01 10:00:02 no level on this line\n"           // запись: ведущая метка (F-12)
+    "  \"at\": \"2026-03-01 10:00:02\"\n"                     // продолжение: метка под отступом
     "2026-03-01 10:00:03 WARN  slow response\n"
     "    warning: retry 1\n"
     "2026-03-01 10:00:04 FATAL giving up\n";
@@ -294,6 +296,32 @@ static void testRecordCounts(const QString& dir)
 
     writeFile(path, kMultilineLog);
     checkAgainstTab(path, "multi-line records");
+    {
+        LogParser parser;
+        const LogParser::FileStats stats = parser.analyzeFileForStats(path).stats;
+        CHECK(stats.totalEntries == 6,
+              "banner + five records: a stamp at the line start without a level starts one");
+    }
+
+    // F-12: access-лог и syslog без слов уровня — запись на строку, со своим
+    // моментом; метка в теле сообщения записи не начинает.
+    writeFile(path,
+              "10.0.0.1 - - [01/Mar/2026:10:00:00 +0000] \"GET / HTTP/1.1\" 200 1\n"
+              "2001:db8::1 - bob [01/Mar/2026:10:00:01 +0000] \"GET /a HTTP/1.1\" 404 0\n"
+              "Mar  1 10:00:02 web01 sshd[7]: Accepted publickey\n"
+              "Response: {\"ts\":\"2026-03-01T10:00:03Z\"}\n"
+              "[2026-03-01 10:00:04] cache warmed\n");
+    checkAgainstTab(path, "records without level words");
+    {
+        LogParser parser;
+        const LogParser::FileStats stats = parser.analyzeFileForStats(path).stats;
+        CHECK(stats.totalEntries == 4, "access, IPv6 access, syslog, bracketed: four records");
+        CHECK(stats.firstEntryTimestamp
+                  == QDateTime(QDate(2026, 3, 1), QTime(10, 0), QTimeZone::UTC),
+              "From: the access-log stamp");
+        CHECK(stats.lastEntryTimestamp == QDateTime(QDate(2026, 3, 1), QTime(10, 0, 4)),
+              "To: the bracketed stamp");
+    }
 
     QByteArray crlf = kMultilineLog;
     crlf.replace("\n", "\r\n");

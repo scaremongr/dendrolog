@@ -171,13 +171,17 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         qint64 tsMs = -1;
         LogLevel lvl = LogLevel::Unknown;
         // detectTimestampMs: мс epoch без построения QDateTime на строку.
-        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef);
+        bool leadingTs = false;
+        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef, &leadingTs);
         const bool hasLvl = m_classifier.detectLogLevel(text, lvl);
         // extractFields здесь нужен ТОЛЬКО для решения primary/continuation
-        // (спаны выбрасываются). Строка с таймстампом и уровнем первична и
-        // без схемы — регекс схемы (самая дорогая часть, минуты на десятках
-        // миллионов строк) гоняем только там, где он реально решает.
-        const bool schemaMatched = (!(hasTs && hasLvl) && extraction && pattern.isValid())
+        // (спаны выбрасываются). Строка, первичная и без схемы (метка с
+        // уровнем или ведущая метка), схему не спрашивает — регекс схемы
+        // (самая дорогая часть, минуты на десятках миллионов строк) гоняем
+        // только там, где он реально решает.
+        const bool primaryWithoutSchema =
+            LineClassifier::isPrimaryLine(false, hasTs, leadingTs, hasLvl);
+        const bool schemaMatched = (!primaryWithoutSchema && extraction && pattern.isValid())
             ? !pattern.extractFields(text).isEmpty()
             : false;
 
@@ -186,7 +190,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         rec.eolBytes = eol;
         rec.hasOwnTimestamp = hasTs;
 
-        if (LineClassifier::isPrimaryLine(schemaMatched, hasTs, hasLvl)) {
+        if (primaryWithoutSchema || schemaMatched) {
             currentId = nextId++;
             currentLevel = lvl;
             currentTsMs = hasTs ? tsMs : -1;

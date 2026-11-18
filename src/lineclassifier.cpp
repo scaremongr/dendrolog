@@ -326,6 +326,20 @@ void parseMidForm(const QChar* d, qsizetype n, MidForm form, qsizetype at,
     }
 }
 
+// Ведущая ли найденная форма с полной датой (правило — у
+// LineClassifier::isPrimaryLine): с позиции 0, с позиции 1 за «[» или форма
+// access-лога за «[» в строке без ведущего пробельного отступа.
+bool isLeadingMidForm(const QChar* d, MidForm form, qsizetype at)
+{
+    if (at == 0)
+        return true;
+    if (d[at - 1] != QLatin1Char('['))
+        return false;
+    if (at == 1)
+        return true;
+    return form == MidForm::Access && d[0] != QLatin1Char(' ') && d[0] != QLatin1Char('\t');
+}
+
 bool isValidComponents(const TsComponents& c)
 {
     return QDate::isValid(c.year, c.month, c.day)
@@ -494,12 +508,12 @@ LineClassifier::YearReference LineClassifier::yearReferenceForFile(const QString
 }
 
 bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
-                                     const YearReference& year) const
+                                     const YearReference& year, bool* leading) const
 {
     // QDateTime строится ИЗ мс epoch (одна конверсия, и та из кэша по минуте)
     // вместо прежних setDate+setTime (две конверсии локаль→epoch на строку).
     qint64 msecs = 0;
-    if (detectTimestampMs(line, msecs, year)) {
+    if (detectTimestampMs(line, msecs, year, leading)) {
         ts = QDateTime::fromMSecsSinceEpoch(msecs);
         return true;
     }
@@ -508,8 +522,10 @@ bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
 }
 
 bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
-                                       const YearReference& year) const
+                                       const YearReference& year, bool* leading) const
 {
+    if (leading)
+        *leading = false;
     // Без построения QDateTime вовсе — горячий путь индексатора, которому
     // нужны только мс epoch. Порядок форм — в начале файла.
     const QChar* d = line.constData();
@@ -520,12 +536,10 @@ bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
     // d[2] — цифра, у access d[5] — буква), поэтому порядок проверок не
     // меняет результат «позиция 0 главнее», а строке syslog не нужен проход
     // по всей строке.
-    if (scanFallbackFormats(line, m_timeFormats, c)) {
+    if (scanFallbackFormats(line, m_timeFormats, c) || scanSyslogTimestamp(d, n, year, c)) {
         msecs = epochMs(c);
-        return true;
-    }
-    if (scanSyslogTimestamp(d, n, year, c)) {
-        msecs = epochMs(c);
+        if (leading)
+            *leading = true;   // формы позиции 0 — ведущие по определению
         return true;
     }
     qsizetype at = -1;
@@ -536,6 +550,8 @@ bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
     if (!isValidComponents(c))
         return false; // невалидная дата/время, несмотря на совпадение формы
     msecs = epochMs(c);
+    if (leading)
+        *leading = isLeadingMidForm(d, mid, at);
     return true;
 }
 
