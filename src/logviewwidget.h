@@ -2,12 +2,15 @@
 #ifndef LOGVIEWWIDGET_H
 #define LOGVIEWWIDGET_H
 
+#include "textquery.h"
 #include <QWidget>
 #include <QVBoxLayout>
 #include "logmodel.h"
 #include "logparser.h"
 #include "logindexer.h"
 #include <QVector>
+#include <QSet>
+#include <QStringConverter>
 #include "logfile.h"
 #include "LogListView.h"
 #include "filechangedetector.h"
@@ -55,9 +58,12 @@ public:
 
     // Быстрый поиск (F3 / Shift+F3) — в фоне (QuickSearch): найденная строка
     // становится текущей, когда скан закончится. Новый поиск отменяет прежний.
-    void searchTextNext(const QString& term, bool caseSensitive);
-    void searchTextPrevious(const QString& term, bool caseSensitive);
+    // Невалидный запрос (TextQuery::isValid) не запускается — проверяет вызывающий.
+    void searchTextNext(const TextQuery& query);
+    void searchTextPrevious(const TextQuery& query);
     void cancelQuickSearch();
+    // Запрос последнего быстрого поиска вкладки.
+    const TextQuery& quickSearchQuery() const { return m_quickSearchQuery; }
     bool isQuickSearchRunning() const;
 
     // Переход к записи (из Search Results, из статистики) как выбор
@@ -166,8 +172,7 @@ private:
     // посреди скана.
     void startQuickSearch();
     QuickSearch* m_quickSearch = nullptr;
-    QString m_quickSearchTerm;
-    bool m_quickSearchCaseSensitive = false;
+    TextQuery m_quickSearchQuery;
     bool m_quickSearchForward = true;
 
     void finishLevelJump(int row, int startRow);
@@ -206,6 +211,9 @@ private:
         qint64 endOffset = -1;
         bool   lastLinePartial = false;
         qint64 lastLineStart = -1;
+        // Кодировка, в которой файл прочитан: дозапись читается в ней же
+        // (BOM есть только в начале файла).
+        QStringConverter::Encoding encoding = QStringConverter::Utf8;
         // Две последние строки файла: контекст дочитывания (продолжение в
         // начале дозаписи принадлежит последней записи) и предварительная
         // строка, которую надо убрать перед перечитыванием.
@@ -216,7 +224,12 @@ private:
     static void rememberLastLines(FileReloadState& state,
                                   const QVector<std::shared_ptr<LogEntry>>& batch);
     void handleTailState(const LogFilePtr& logFile, qint64 endOffset,
-                         bool lastLinePartial, qint64 lastLineStart);
+                         bool lastLinePartial, qint64 lastLineStart, int encoding);
+    // Файлы, которые индексный путь вернул в резидентный (UTF-16/32): по
+    // порогу размера вкладка с таким файлом не конвертируется — индексатор
+    // откатил бы её снова, и файл перечитывался бы целиком на каждый тик.
+    // Отметка относится к содержимому: переписанный файл её теряет.
+    QSet<QString> m_residentOnlyFiles;
 
     // Parser used exclusively for incremental reads (so it doesn't interfere with
     // the initial parse that uses m_logParser).

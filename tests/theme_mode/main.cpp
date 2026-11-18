@@ -12,22 +12,39 @@
 //     остаётся текста цветом прежней темы;
 //   • плашка «↓ N new lines» рисуется цветами текущей палитры и
 //     перекрашивается вместе с темой.
+//   • тёмная палитра задаёт все роли сама и не зависит от прежней палитры
+//     приложения; её вид при обычном старте закреплён значениями;
+//   • открытые панели (Text Filters, Search, Row Highlighters, Entry Details,
+//     Statistics, сканер каталога, стартовый экран) после смены темы выглядят так же, как
+//     созданные сразу в новой теме, — сравнением картинок.
 // ============================================================================
 
 #include "LogListView.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include "cardframe.h"
 #include "colorschemecontroller.h"
 #include "newlinesindicator.h"
+#include "directoryscannerpanel.h"
+#include "entrydetailspanel.h"
+#include "filterpanelwidget.h"
+#include "markerpanelwidget.h"
+#include "statisticspanel.h"
+#include "welcomewidget.h"
 #include "testdocuments.h"
 
 #include <QApplication>
 #include <QImage>
+#include <QLabel>
+#include <QLineEdit>
+#include <QToolButton>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyleFactory>
 #include <QTemporaryDir>
 #include <cstdio>
+#include <functional>
+#include <memory>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -285,6 +302,262 @@ static void checkOpenView(const QDir& dir)
     s.setThemeMode(ThemeMode::System);
 }
 
+// ---------------------------------------------------------------------------
+// Тёмная палитра задаёт все роли сама: какая палитра была у приложения до
+// неё — неважно. Раньше незаданные роли (Light, Mid, Dark, Shadow…)
+// наследовались от текущей палитры приложения.
+// ---------------------------------------------------------------------------
+static QString describeDifference(const QPalette& a, const QPalette& b)
+{
+    for (int g = 0; g < QPalette::NColorGroups; ++g) {
+        for (int r = 0; r < QPalette::NColorRoles; ++r) {
+            const QBrush x = a.brush(QPalette::ColorGroup(g), QPalette::ColorRole(r));
+            const QBrush y = b.brush(QPalette::ColorGroup(g), QPalette::ColorRole(r));
+            if (x != y)
+                return QStringLiteral("group %1 role %2: %3 vs %4")
+                    .arg(g).arg(r).arg(x.color().name(QColor::HexArgb), y.color().name(QColor::HexArgb));
+        }
+    }
+    return QString();
+}
+
+static void checkDarkPaletteIsSelfContained()
+{
+    const QPalette before = QApplication::palette();
+
+    QApplication::setPalette(ColorSchemeController::lightPalette());
+    const QPalette afterLight = ColorSchemeController::darkPalette();
+
+    // «Чистый старт» под тёмной ОС: стиль отдаёт тёмную палитру.
+    QApplication::setPalette(afterLight);
+    const QPalette afterDark = ColorSchemeController::darkPalette();
+
+    // И заведомо чужая палитра — каждая роль своего цвета.
+    QPalette garish;
+    for (int g = 0; g < QPalette::NColorGroups; ++g)
+        for (int r = 0; r < QPalette::NColorRoles; ++r)
+            garish.setColor(QPalette::ColorGroup(g), QPalette::ColorRole(r),
+                            QColor(200, 10 * g, 10 * r));
+    QApplication::setPalette(garish);
+    const QPalette afterGarish = ColorSchemeController::darkPalette();
+
+    CHECK(describeDifference(afterLight, afterDark).isEmpty(),
+          QStringLiteral("dark after light == dark after dark: ") + describeDifference(afterLight, afterDark));
+    CHECK(describeDifference(afterLight, afterGarish).isEmpty(),
+          QStringLiteral("dark does not inherit from the previous palette: ")
+              + describeDifference(afterLight, afterGarish));
+    CHECK(afterLight == afterDark && afterLight == afterGarish, "palettes compare equal");
+
+    // Вид тёмной темы при обычном старте (под светлой темой) закреплён:
+    // роли, которые раньше доставались от светлой палитры Fusion.
+    struct Pin { QPalette::ColorGroup group; QPalette::ColorRole role; QColor color; const char* name; };
+    const Pin pins[] = {
+        {QPalette::Active,   QPalette::Window,     QColor(0x2d, 0x2d, 0x2d), "Window"},
+        {QPalette::Active,   QPalette::Base,       QColor(0x1e, 0x1e, 0x1e), "Base"},
+        {QPalette::Active,   QPalette::Text,       QColor(0xdd, 0xdd, 0xdd), "Text"},
+        {QPalette::Active,   QPalette::Highlight,  QColor(0x2a, 0x7a, 0xda), "Highlight"},
+        {QPalette::Active,   QPalette::Light,      QColor(255, 255, 255),    "Light"},
+        {QPalette::Active,   QPalette::Midlight,   QColor(202, 202, 202),    "Midlight"},
+        {QPalette::Active,   QPalette::Mid,        QColor(184, 184, 184),    "Mid"},
+        {QPalette::Active,   QPalette::Dark,       QColor(159, 159, 159),    "Dark"},
+        {QPalette::Active,   QPalette::Shadow,     QColor(118, 118, 118),    "Shadow"},
+        {QPalette::Active,   QPalette::LinkVisited, QColor(255, 0, 255),     "LinkVisited"},
+        {QPalette::Active,   QPalette::BrightText, QColor(255, 0, 0),        "BrightText"},
+        {QPalette::Active,   QPalette::AlternateBase, QColor(0x2a, 0x2a, 0x2a), "AlternateBase"},
+        {QPalette::Active,   QPalette::Button,     QColor(0x35, 0x35, 0x35), "Button"},
+        {QPalette::Active,   QPalette::ToolTipBase, QColor(0x2d, 0x2d, 0x2d), "ToolTipBase"},
+        {QPalette::Active,   QPalette::PlaceholderText, QColor(0x7f, 0x7f, 0x7f), "PlaceholderText"},
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        {QPalette::Active,   QPalette::Accent,     QColor(48, 140, 198),     "Accent"},
+        {QPalette::Disabled, QPalette::Accent,     QColor(145, 145, 145),    "Disabled Accent"},
+#endif
+        {QPalette::Disabled, QPalette::Highlight,  QColor(0x45, 0x45, 0x45), "Disabled Highlight"},
+        {QPalette::Inactive, QPalette::Mid,        QColor(184, 184, 184),    "Inactive Mid"},
+        {QPalette::Disabled, QPalette::Dark,       QColor(190, 190, 190),    "Disabled Dark"},
+        {QPalette::Disabled, QPalette::Shadow,     QColor(177, 177, 177),    "Disabled Shadow"},
+        {QPalette::Disabled, QPalette::Base,       QColor(0x1e, 0x1e, 0x1e), "Disabled Base"},
+        {QPalette::Disabled, QPalette::Text,       QColor(0x7f, 0x7f, 0x7f), "Disabled Text"},
+    };
+    for (const Pin& pin : pins) {
+        const QColor got = afterLight.color(pin.group, pin.role);
+        CHECK(got.rgba() == pin.color.rgba(), QStringLiteral("dark palette %1: %2, expected %3")
+                                    .arg(QLatin1String(pin.name), got.name(), pin.color.name()));
+    }
+
+    QApplication::setPalette(before);
+}
+
+// ---------------------------------------------------------------------------
+// Открытые панели перекрашиваются при смене темы. Проверка общая, а не по
+// одному свойству на виджет: панель, созданная в одной теме и пережившая
+// смену, обязана выглядеть ровно как панель, созданная сразу в новой теме.
+// Всё, что посчитано из палитры один раз (стиль, HTML, иконка), даёт
+// отличающиеся пиксели.
+// ---------------------------------------------------------------------------
+static QImage grabOf(QWidget& w)
+{
+    // Рамка фокуса зависит от того, какое окно активно, а не от темы.
+    if (QWidget* focused = QApplication::focusWidget())
+        focused->clearFocus();
+    return w.grab().toImage().convertToFormat(QImage::Format_RGB32);
+}
+
+// Число отличающихся пикселей и описание первого из них.
+static int differingPixels(const QImage& a, const QImage& b, QString* where)
+{
+    if (a.size() != b.size()) {
+        *where = QStringLiteral("sizes differ: %1x%2 vs %3x%4")
+                     .arg(a.width()).arg(a.height()).arg(b.width()).arg(b.height());
+        return -1;
+    }
+    int n = 0;
+    QRect box;
+    for (int y = 0; y < a.height(); ++y) {
+        for (int x = 0; x < a.width(); ++x) {
+            if (a.pixel(x, y) == b.pixel(x, y))
+                continue;
+            if (n == 0)
+                *where = QStringLiteral("first at (%1,%2): %3, a fresh widget has %4")
+                             .arg(x).arg(y).arg(a.pixelColor(x, y).name(), b.pixelColor(x, y).name());
+            box |= QRect(x, y, 1, 1);
+            ++n;
+        }
+    }
+    if (n)
+        *where += QStringLiteral("; box %1,%2 %3x%4").arg(box.x()).arg(box.y()).arg(box.width()).arg(box.height());
+    return n;
+}
+
+using WidgetFactory = std::function<std::unique_ptr<QWidget>()>;
+
+static std::unique_ptr<QWidget> shown(const WidgetFactory& make)
+{
+    std::unique_ptr<QWidget> w = make();
+    w->setAttribute(Qt::WA_ShowWithoutActivating);
+    w->resize(520, 360);
+    w->move(300, 300); // не под указателем: наведение — тоже не тема
+    w->show();
+    testdocs::pump(80);
+    return w;
+}
+
+static void checkRepaintsOnThemeChange(const char* name, const WidgetFactory& make)
+{
+    AppSettings& s = AppSettings::instance();
+    const struct { ThemeMode from; ThemeMode to; const char* name; } directions[] = {
+        {ThemeMode::Light, ThemeMode::Dark, "light -> dark"},
+        {ThemeMode::Dark, ThemeMode::Light, "dark -> light"},
+    };
+    for (const auto& d : directions) {
+        s.setThemeMode(d.from);
+        testdocs::pump(20);
+        std::unique_ptr<QWidget> survivor = shown(make);
+        const QImage before = grabOf(*survivor);
+
+        s.setThemeMode(d.to);
+        testdocs::pump(80);
+        const QImage switched = grabOf(*survivor);
+        std::unique_ptr<QWidget> fresh = shown(make);
+        const QImage reference = grabOf(*fresh);
+
+        QString where;
+        CHECK(differingPixels(before, reference, &where) != 0,
+              QStringLiteral("%1, %2: the themes look different at all").arg(QLatin1String(name), QLatin1String(d.name)));
+        const int n = differingPixels(switched, reference, &where);
+        CHECK(n == 0, QStringLiteral("%1, %2: %3 px keep the previous theme (%4)")
+                          .arg(QLatin1String(name), QLatin1String(d.name)).arg(n).arg(where));
+    }
+    s.setThemeMode(ThemeMode::System);
+}
+
+static void checkOpenPanels()
+{
+    ColorSchemeController controller;
+
+    // Цвета правил и маркеров — данные пользователя, от темы не зависят;
+    // задаём их явно, чтобы сравнивать только «хром» панели.
+    const auto filterPanel = [](FilterPanelWidget::Mode mode) {
+        return [mode]() -> std::unique_ptr<QWidget> {
+            auto panel = std::make_unique<FilterPanelWidget>(mode);
+            FilterRuleSet set;
+            FilterRule shown;
+            shown.text = QStringLiteral("timeout");
+            shown.highlightColor = QColor(0x33, 0x99, 0x66);
+            FilterRule hollow = shown;
+            hollow.text = QStringLiteral("retry");
+            hollow.highlightEnabled = false;
+            FilterRule broken = shown;
+            broken.text = QStringLiteral("(unclosed");
+            broken.isRegex = true;
+            set.rules = {shown, hollow, broken};
+            panel->setRuleSet(set);
+            return panel;
+        };
+    };
+    checkRepaintsOnThemeChange("Text Filters", filterPanel(FilterPanelWidget::Mode::Filter));
+    checkRepaintsOnThemeChange("Search query", filterPanel(FilterPanelWidget::Mode::Search));
+    // Пустая панель Text Filters не сравнивается: в ней заготовка правила, а
+    // её цвет подсветки — данные правила, выбранные по теме в момент создания.
+
+    checkRepaintsOnThemeChange("Row Highlighters", []() -> std::unique_ptr<QWidget> {
+        auto panel = std::make_unique<MarkerPanelWidget>();
+        HighlightPattern marker;
+        marker.text = QStringLiteral("ERROR");
+        marker.color = QColor(0x99, 0x33, 0x66);
+        panel->setMarkers({marker});
+        return panel;
+    });
+    checkRepaintsOnThemeChange("Row Highlighters, empty", []() -> std::unique_ptr<QWidget> {
+        return std::make_unique<MarkerPanelWidget>();
+    });
+
+    checkRepaintsOnThemeChange("Entry Details", []() -> std::unique_ptr<QWidget> {
+        return std::make_unique<EntryDetailsPanel>();
+    });
+    checkRepaintsOnThemeChange("Entry Details, a section off", []() -> std::unique_ptr<QWidget> {
+        auto panel = std::make_unique<EntryDetailsPanel>();
+        const auto toggles = panel->findChildren<QToolButton*>();
+        if (!toggles.isEmpty())
+            toggles.first()->setChecked(false);
+        return panel;
+    });
+
+    checkRepaintsOnThemeChange("Statistics placeholder", []() -> std::unique_ptr<QWidget> {
+        return std::make_unique<StatisticsPanel>();
+    });
+
+    checkRepaintsOnThemeChange("Directory scanner", []() -> std::unique_ptr<QWidget> {
+        return std::make_unique<DirectoryScannerPanel>();
+    });
+
+    checkRepaintsOnThemeChange("Welcome screen", []() -> std::unique_ptr<QWidget> {
+        auto welcome = std::make_unique<WelcomeWidget>();
+        welcome->setRecentFiles({QStringLiteral("/var/log/app/server.log"),
+                                 QStringLiteral("/var/log/app/worker.log")});
+        return welcome;
+    });
+
+    checkRepaintsOnThemeChange("Empty card list", []() -> std::unique_ptr<QWidget> {
+        auto list = std::make_unique<CardListArea>();
+        list->setEmptyText(QStringLiteral("Nothing here yet"));
+        list->cardsChanged();
+        return list;
+    });
+}
+
+// Фон поля быстрого поиска «не найдено» считается из палитры на момент
+// вызова — MainWindow пересчитывает его на PaletteChange.
+static void checkNotFoundColour()
+{
+    const QColor error = AppTheme::instance().logError;
+    const QColor onLight = AppTheme::searchNotFoundBackground(ColorSchemeController::lightPalette());
+    const QColor onDark = AppTheme::searchNotFoundBackground(ColorSchemeController::darkPalette());
+    CHECK(onLight.lightness() > 128, "not-found tint on the light theme is light");
+    CHECK(onDark.lightness() < 128, "not-found tint on the dark theme is dark");
+    CHECK(onLight == CardFrame::mixedColor(error, QColor(Qt::white), 0.72), "light value unchanged");
+    CHECK(onDark == CardFrame::mixedColor(error, QColor(0x1e, 0x1e, 0x1e), 0.72), "dark value unchanged");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -293,6 +566,7 @@ int main(int argc, char** argv)
     QApplication::setOrganizationName(QStringLiteral("DendroLogTest"));
     QApplication::setApplicationName(QStringLiteral("theme_mode"));
     QApplication::setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
+    QApplication::setCursorFlashTime(0); // мигающий курсор — шум для сравнения картинок
     QFile::remove(AppSettings::iniFilePath());
 
     QTemporaryDir temporary;
@@ -302,8 +576,11 @@ int main(int argc, char** argv)
     checkRule();
     checkPersistence();
     checkPalettes();
+    checkDarkPaletteIsSelfContained();
+    checkNotFoundColour();
     checkController();
     checkOpenView(QDir(temporary.path()));
+    checkOpenPanels();
 
     QFile::remove(AppSettings::iniFilePath());
     if (failures) {

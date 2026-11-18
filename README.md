@@ -29,7 +29,9 @@
   per-file entry counts, time ranges, warn/error/fatal counts and sizes;
   narrow it down by content or date range and open files right from the results.
 - **Field schemas** — split entries into structured fields (timestamp, level,
-  thread, message…); auto-detect from a sample line or import a **Grok** expression.
+  thread, message…); ready-made schemas for Logback / Log4j, Spring Boot,
+  nginx / Apache, syslog / journalctl, Serilog and Python logging, auto-detect
+  from a sample line or import a **Grok** expression.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
   to show only, hide, highlight or find lines with it.

@@ -1,6 +1,8 @@
 #include "colorschemecontroller.h"
 
 #include <QApplication>
+#include <QPointer>
+#include <QWidget>
 #include <QStyle>
 #include <QStyleHints>
 
@@ -28,7 +30,6 @@ static bool looksDark(const QPalette& p)
 // ---------------------------------------------------------------------------
 QPalette ColorSchemeController::darkPalette()
 {
-    QPalette p;
     const QColor window(0x2d, 0x2d, 0x2d);
     const QColor base(0x1e, 0x1e, 0x1e);
     const QColor alternateBase(0x2a, 0x2a, 0x2a);
@@ -37,26 +38,44 @@ QPalette ColorSchemeController::darkPalette()
     const QColor highlight(0x2a, 0x7a, 0xda);
     const QColor disabled(0x7f, 0x7f, 0x7f);
 
-    p.setColor(QPalette::Window, window);
-    p.setColor(QPalette::WindowText, text);
-    p.setColor(QPalette::Base, base);
+    // Каждая роль задана здесь: палитра не зависит от того, какая была у
+    // приложения до неё. Роли рельефа, посещённой ссылки и акцента раньше не
+    // задавались и доставались от прежней палитры; значения ниже — те, что
+    // получались при обычном старте (тёмная тема поверх светлой палитры
+    // Fusion), чтобы вид тёмной темы не изменился. Закреплены в theme_mode.
+    const QColor light(255, 255, 255);
+    const QColor midlight(202, 202, 202);
+    const QColor mid(184, 184, 184);
+    const QColor dark(159, 159, 159);
+    const QColor shadow(118, 118, 118);
+
+    // Конструктор начинает с пустой палитры, а не с палитры приложения.
+    QPalette p(text, button, light, dark, mid, text, QColor(Qt::red), base, window);
+    p.setColor(QPalette::Midlight, midlight);
+    p.setColor(QPalette::Shadow, shadow);
     p.setColor(QPalette::AlternateBase, alternateBase);
     p.setColor(QPalette::ToolTipBase, window);
     p.setColor(QPalette::ToolTipText, text);
-    p.setColor(QPalette::Text, text);
-    p.setColor(QPalette::Button, button);
     p.setColor(QPalette::ButtonText, text);
-    p.setColor(QPalette::BrightText, Qt::red);
     p.setColor(QPalette::Link, highlight);
+    p.setColor(QPalette::LinkVisited, QColor(255, 0, 255));
     p.setColor(QPalette::Highlight, highlight);
     p.setColor(QPalette::HighlightedText, Qt::white);
     p.setColor(QPalette::PlaceholderText, disabled);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    p.setColor(QPalette::Accent, QColor(48, 140, 198));
+#endif
 
     p.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
     p.setColor(QPalette::Disabled, QPalette::Text, disabled);
     p.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
+    p.setColor(QPalette::Disabled, QPalette::Dark, QColor(190, 190, 190));
+    p.setColor(QPalette::Disabled, QPalette::Shadow, QColor(177, 177, 177));
     p.setColor(QPalette::Disabled, QPalette::Highlight, QColor(0x45, 0x45, 0x45));
     p.setColor(QPalette::Disabled, QPalette::HighlightedText, disabled);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    p.setColor(QPalette::Disabled, QPalette::Accent, QColor(145, 145, 145));
+#endif
     return p;
 }
 
@@ -108,6 +127,41 @@ QPalette ColorSchemeController::paletteFor(Qt::ColorScheme effective)
         return darkPalette();
     const QStyle* style = QApplication::style();
     return style ? lightPaletteFrom(style->standardPalette()) : lightPalette();
+}
+
+// ---------------------------------------------------------------------------
+// Qt не доводит смену палитры до виджетов со своим style sheet и до их
+// детей: QWidgetPrivate::propagatePaletteChange пропускает WA_StyleSheet, и
+// такой виджет остаётся с палитрой, с которой был создан, не получив даже
+// PaletteChange. У нас это каждая CardFrame со всем содержимым, подписи
+// приглушённого цвета, образцы цвета. Переполировка стилем снимает с виджета
+// палитру, сохранённую таблицей стилей (он берёт новую у родителя и получает
+// PaletteChange), и применяет таблицу заново — заодно пересчитываются
+// ссылки palette(...) внутри неё. Порядок — от родителей к детям: палитра
+// ребёнка берётся у родителя.
+// ---------------------------------------------------------------------------
+void ColorSchemeController::repolishStyledWidgets()
+{
+    QList<QPointer<QWidget>> widgets;
+    const auto topLevels = QApplication::topLevelWidgets();
+    for (QWidget* top : topLevels)
+        widgets.append(top);
+    for (int i = 0; i < widgets.size(); ++i) {
+        const QObjectList children = widgets.at(i)->children();
+        for (QObject* child : children) {
+            if (child->isWidgetType())
+                widgets.append(static_cast<QWidget*>(child));
+        }
+    }
+    // Обработчик PaletteChange вправе пересобрать своих детей — отсюда QPointer.
+    for (const QPointer<QWidget>& widget : std::as_const(widgets)) {
+        if (!widget || !widget->testAttribute(Qt::WA_StyleSheet))
+            continue;
+        QStyle* style = widget->style();
+        style->unpolish(widget);
+        if (widget)
+            style->polish(widget);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,8 +221,10 @@ void ColorSchemeController::refresh()
         // Стандартная палитра стиля могла смениться вместе с темой ОС, даже
         // если действующая схема та же, — сравниваем саму палитру.
         const QPalette palette = paletteFor(effective);
-        if (palette != QApplication::palette())
+        if (palette != QApplication::palette()) {
             QApplication::setPalette(palette);
+            repolishStyledWidgets();
+        }
 
         if (effective != m_effective) {
             m_effective = effective;

@@ -1,6 +1,7 @@
 #ifndef FILTERPANELWIDGET_H
 #define FILTERPANELWIDGET_H
 
+#include "textquery.h"
 #include "cardframe.h"
 #include "filterruleset.h"
 
@@ -125,7 +126,10 @@ public:
     void focusFirstRule();
     // Запрос из одного правила «Contains text» вместо всех карточек —
     // «Find All» из тулбара и контекстного меню.
-    void setSingleRule(const QString& text, bool caseSensitive);
+    // Одно правило Contains из запроса быстрого поиска (Find All): регистр
+    // переносится, регекс и «слово целиком» — правилом-регексом
+    // (TextQuery::patternText, слово — с границами).
+    void setSingleRule(const TextQuery& query);
 
     // ---- Профили фильтрации -------------------------------------------------
     // Именованные конфигурации правил. Сериализуются целиком (все профили +

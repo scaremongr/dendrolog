@@ -3,6 +3,7 @@
 
 #include "logentry.h"
 #include "logscan.h"
+#include "textquery.h"
 #include <QDateTime>
 #include <QPair>
 #include <QStringList>
@@ -80,11 +81,17 @@ public:
     // видно ни одной строки. Индексный бэкенд — двоичный поиск.
     virtual int nearestVisibleRowForLine(qint64 lineNumber,
                                          const LogFile* sourceFile) const = 0;
-    // Синхронный поиск подстроки в видимых строках; -1 — не найдено.
-    virtual int findNextOccurrence(const QString& text, int startRow,
-                                   Qt::CaseSensitivity cs, bool wrapAround) const = 0;
-    virtual int findPreviousOccurrence(const QString& text, int startRow,
-                                       Qt::CaseSensitivity cs, bool wrapAround) const = 0;
+    // Синхронный поиск текста (быстрый поиск: подстрока, слово целиком,
+    // регекс) в видимых строках; -1 — не найдено. Одна реализация на оба
+    // бэкенда — LogScanSnapshot::findRowWithText, та же, что у фонового
+    // QuickSearch. Индексный бэкенд читает диск (своими ридерами скана, кэш
+    // вьюпорта не вымывается): на огромной вкладке — только из фона.
+    int findOccurrence(const TextQuery& query, int startRow, bool forward,
+                       bool wrapAround) const
+    {
+        return int(scanSnapshot(/*filteredOnly=*/true)
+                       .findRowWithText(query, startRow, forward, wrapAround));
+    }
 
     // Ближайшая видимая строка, с которой начинается запись уровня из levels
     // (F8 / Shift+F8), -1 — нет. Семантика и цена — LogScanSnapshot::

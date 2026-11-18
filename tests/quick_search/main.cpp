@@ -6,15 +6,23 @@
 //   • найденная строка пересчитывается через вставки, случившиеся за время
 //     скана; reset/удаление строк — invalidated() вместо устаревшего номера;
 //   • отменённый поиск ничего не присылает;
+//   • запрос с флагами (регистр, слово целиком, регекс) — синхронный поиск,
+//     фоновый скан и подсветка найденного против независимого перебора на
+//     обоих бэкендах; невалидный регекс — ошибка с позицией и -1 у поиска;
+//   • история запросов: свежий первым, без дублей, с пределом длины;
 //   • строка старта (startRowFor): выбранная строка, а если её скрыл фильтр —
 //     её место среди видимых строк, сверенное с перебором и с синхронным
 //     поиском по полной модели.
 // ============================================================================
 
 #include "quicksearch.h"
+#include "quicksearchhistory.h"
+#include "filterruleset.h"
 #include "testdocuments.h"
 
+#include <QElapsedTimer>
 #include <QHash>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <cstdio>
 
@@ -60,9 +68,9 @@ static void compareWithModel(const QString& name, LogModel& model)
             for (const bool wrap : {true, false}) {
                 for (const int start : starts) {
                     const QModelIndex next = model.findNextOccurrence(text, start, cs, wrap);
-                    const qint64 scanNext = QuickSearch::scan(snapshot, text, cs, true, start, wrap);
+                    const qint64 scanNext = QuickSearch::scan(snapshot, TextQuery(text, cs), true, start, wrap);
                     const QModelIndex prev = model.findPreviousOccurrence(text, start, cs, wrap);
-                    const qint64 scanPrev = QuickSearch::scan(snapshot, text, cs, false, start, wrap);
+                    const qint64 scanPrev = QuickSearch::scan(snapshot, TextQuery(text, cs), false, start, wrap);
                     if (scanNext != (next.isValid() ? next.row() : -1)
                         || scanPrev != (prev.isValid() ? prev.row() : -1)) {
                         if (++mismatches <= 5)
@@ -141,8 +149,8 @@ static void checkStartRows(const QString& name, LogModel& model,
         // (Каждая 17-я скрытая строка и все за последней видимой: скан читает
         // текст, а под санитайзером это дорого.)
         if (row < 0 && (p == n || hiddenChecked % 17 == 0)) {
-            const qint64 next = QuickSearch::scan(snapshot, needle, Qt::CaseSensitive, true, forward, true);
-            const qint64 previous = QuickSearch::scan(snapshot, needle, Qt::CaseSensitive, false, backward, true);
+            const qint64 next = QuickSearch::scan(snapshot, TextQuery(needle, Qt::CaseSensitive), true, forward, true);
+            const qint64 previous = QuickSearch::scan(snapshot, TextQuery(needle, Qt::CaseSensitive), false, backward, true);
             if (next != expected(i, 1) || previous != expected(i, -1))
                 ++searchMismatches;
         }
@@ -168,9 +176,326 @@ static void checkStartRows(const QString& name, LogModel& model,
           name + ": a record that is gone is not a selection");
 }
 
+// ---------------------------------------------------------------------------
+// Запрос с флагами. Эталон написан независимо от TextQuery: подстрока —
+// перебор indexOf с проверкой соседей вручную, регекс — QRegularExpression
+// по тексту запроса с тем же перебором соседей.
+
+static QByteArray flagsFixture()
+{
+    // Строки, на которых «слово целиком», регистр и регекс расходятся.
+    static const char* texts[] = {
+        "plain error here", "errors 7 counted", "[error] bracketed", "my_error underscore",
+        "ERROR-1 upper dash", "xerror glued", "Ошибка error cyrillic", "ошибкаerror glued",
+        "value a.b.c dotted", "call x(y) parens", "abc code 123", "code123 glued",
+        "456 leading", "Error capital", "nothing here", "tab\terror\tsep", "érror accent",
+        "errorй cyr after",
+    };
+    QByteArray out;
+    const int kinds = int(sizeof(texts) / sizeof(texts[0]));
+    for (int i = 0; i < 400; ++i)
+        out += line(i / 4, i % 2 ? "INFO" : "ERROR",
+                    QByteArray(texts[(i * 7) % kinds]) + " #" + QByteArray::number(i));
+    return out;
+}
+
+static bool isWordChar(QChar c) { return c.isLetterOrNumber() || c.isMark() || c == u'_'; }
+
+static bool boundaryOk(const QString& text, qsizetype start, qsizetype length)
+{
+    const bool before = start > 0 && isWordChar(text.at(start - 1));
+    const bool after = start + length < text.size() && isWordChar(text.at(start + length));
+    return !before && !after;
+}
+
+static bool referenceMatches(const TextQuery& q, const QString& text)
+{
+    const Qt::CaseSensitivity cs = q.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    if (!q.regex) {
+        for (qsizetype from = 0;;) {
+            const qsizetype pos = text.indexOf(q.text, from, cs);
+            if (pos < 0)
+                return false;
+            if (!q.wholeWord || boundaryOk(text, pos, q.text.size()))
+                return true;
+            from = pos + 1;
+        }
+    }
+    const QRegularExpression re(q.text, q.caseSensitive ? QRegularExpression::NoPatternOption
+                                                        : QRegularExpression::CaseInsensitiveOption);
+    if (!q.wholeWord) {
+        // Пустое совпадение не находка (показать нечего).
+        for (auto it = re.globalMatch(text); it.hasNext();)
+            if (it.next().capturedLength() > 0)
+                return true;
+        return false;
+    }
+    // Слово целиком: годится любое совпадение (с любой позиции) с чистыми
+    // соседями — перебор стартов, якорь на старте через AnchorAtOffset.
+    for (qsizetype start = 0; start <= text.size(); ++start) {
+        const QRegularExpressionMatch m = re.match(text, start, QRegularExpression::NormalMatch,
+                                                   QRegularExpression::AnchorAtOffsetMatchOption);
+        if (m.hasMatch() && m.capturedLength() > 0 && boundaryOk(text, start, m.capturedLength()))
+            return true;
+    }
+    return false;
+}
+
+// Ближайшая подходящая строка по правилам обхода (scanRowsFrom), перебором.
+static int referenceFind(const QVector<bool>& hit, int start, bool forward, bool wrap)
+{
+    const int n = hit.size();
+    if (forward) {
+        for (int i = qBound(0, start + 1, n); i < n; ++i)
+            if (hit[i]) return i;
+        if (wrap)
+            for (int i = 0; i <= start && i < n; ++i)
+                if (hit[i]) return i;
+    } else {
+        const bool inside = start >= 0 && start < n;
+        for (int i = inside ? start - 1 : n - 1; i >= 0; --i)
+            if (hit[i]) return i;
+        if (wrap && inside)
+            for (int i = n - 1; i >= start; --i)
+                if (hit[i]) return i;
+    }
+    return -1;
+}
+
+static QVector<TextQuery> flagQueries()
+{
+    QVector<TextQuery> out;
+    const auto add = [&](const char* text, bool cs, bool word, bool regex) {
+        TextQuery q;
+        q.text = QString::fromUtf8(text);
+        q.caseSensitive = cs;
+        q.wholeWord = word;
+        q.regex = regex;
+        out.append(q);
+    };
+    for (const bool cs : {false, true}) {
+        for (const bool word : {false, true}) {
+            add("error", cs, word, false);
+            add("[error]", cs, word, false);   // литерал со скобками: не класс символов
+            add("a.b", cs, word, false);       // точка — литерал
+            add("x(y)", cs, word, false);
+            add("err.r", cs, word, true);
+            add("^(plain|456)", cs, word, true);
+            add("\\d{3}", cs, word, true);
+            add("ERROR-\\d", cs, word, true);
+            add("absent", cs, word, false);
+        }
+    }
+    return out;
+}
+
+static void checkFlags(const QString& name, LogModel& model)
+{
+    const LogScanSnapshot snapshot = model.scanSnapshot(true);
+    const int n = model.rowCount();
+    const QVector<int> starts = {-1, 0, 1, n / 3, n - 1, n};
+    const QColor color(Qt::yellow);
+    int mismatches = 0, highlightMismatches = 0, matchedQueries = 0;
+    for (const TextQuery& q : flagQueries()) {
+        CHECK(q.isValid(), name + ": query is valid: " + q.text);
+        const TextMatcher matcher(q);
+        TextMatchHighlighter highlighter;
+        highlighter.setPatterns({q.highlightPattern(color)});
+        // Find All: правило панели Search из запроса находит те же строки.
+        FilterRuleSet rules;
+        FilterRule rule;
+        rule.text = q.patternText();
+        rule.isRegex = q.needsRegex();
+        rule.caseSensitive = q.caseSensitive;
+        rules.rules.append(rule);
+        rules.bindFields({}, false);
+        QVector<bool> hit(n);
+        int hits = 0;
+        for (int row = 0; row < n; ++row) {
+            const QString text = model.messageAt(row);
+            hit[row] = referenceMatches(q, text);
+            hits += hit[row];
+            if (matcher.matches(text) != hit[row] && ++mismatches <= 5)
+                std::fprintf(stderr, "  %s matcher '%s' cs=%d word=%d re=%d on '%s'\n", qPrintable(name),
+                             qPrintable(q.text), q.caseSensitive, q.wholeWord, q.regex, qPrintable(text));
+            if (rules.matchesLine(text, LogEntryFields()) != hit[row] && ++mismatches <= 5)
+                std::fprintf(stderr, "  %s Find All rule '%s' word=%d re=%d on '%s'\n", qPrintable(name),
+                             qPrintable(q.text), q.wholeWord, q.regex, qPrintable(text));
+            // Подсветка: что-то залито ровно на найденных строках, и залитое —
+            // само совпадение с чистыми соседями.
+            const QVector<HighlightSpan> spans = highlighter.computeSpans(text);
+            bool spansOk = spans.isEmpty() != hit[row];
+            for (const HighlightSpan& span : spans) {
+                if (q.wholeWord && !boundaryOk(text, span.start, span.length))
+                    spansOk = false;
+                if (!q.regex && text.mid(span.start, span.length).compare(q.text, q.caseSensitivity()) != 0)
+                    spansOk = false;
+            }
+            if (!spansOk && ++highlightMismatches <= 5)
+                std::fprintf(stderr, "  %s highlight '%s' word=%d re=%d on '%s'\n", qPrintable(name),
+                             qPrintable(q.text), q.wholeWord, q.regex, qPrintable(text));
+        }
+        matchedQueries += hits > 0 && hits < n;
+        for (const bool wrap : {true, false}) {
+            for (const int start : starts) {
+                for (const bool forward : {true, false}) {
+                    const int want = referenceFind(hit, start, forward, wrap);
+                    const QModelIndex sync = model.findOccurrence(q, start, forward, wrap);
+                    const qint64 scanned = QuickSearch::scan(snapshot, q, forward, start, wrap);
+                    if ((sync.isValid() ? sync.row() : -1) != want || scanned != want) {
+                        if (++mismatches <= 5)
+                            std::fprintf(stderr, "  %s '%s' cs=%d word=%d re=%d start=%d fwd=%d wrap=%d: "
+                                         "sync %d scan %lld want %d\n", qPrintable(name), qPrintable(q.text),
+                                         q.caseSensitive, q.wholeWord, q.regex, start, forward, wrap,
+                                         sync.isValid() ? sync.row() : -1, (long long)scanned, want);
+                    }
+                }
+            }
+        }
+    }
+    CHECK(mismatches == 0, name + ": flagged queries match the brute-force reference");
+    CHECK(highlightMismatches == 0, name + ": highlight marks exactly what was found");
+    CHECK(matchedQueries >= 16, name + QStringLiteral(": fixture discriminates the queries (%1)").arg(matchedQueries));
+}
+
+static void checkQueryValidity()
+{
+    TextQuery q;
+    q.text = QStringLiteral("a(b");
+    CHECK(q.isValid(), "unbalanced parenthesis is a literal without regex");
+    q.wholeWord = true;
+    CHECK(q.isValid(), "... and with whole word (escaped)");
+    q.regex = true;
+    QString error;
+    int offset = -2;
+    CHECK(!q.isValid(&error, &offset), "invalid regex is reported");
+    const QRegularExpression direct(q.text);
+    CHECK(offset == direct.patternErrorOffset() && offset >= 0 && !error.isEmpty(),
+          "error offset is in the user's text");
+    q.wholeWord = false;
+    CHECK(!q.isValid(), "invalid regex without whole word too");
+    CHECK(!TextMatcher(q).isUsable() && !TextMatcher(q).matches(QStringLiteral("a(b")),
+          "invalid regex matches nothing");
+    q.text = QStringLiteral("\\Qabc");    // годен сам, а обёртку «слово целиком» съедает \Q
+    CHECK(q.isValid(), "\\Q alone is valid");
+    q.wholeWord = true;
+    error.clear();
+    const bool wrappedValid = q.isValid(&error, &offset);
+    CHECK(wrappedValid || (!error.isEmpty() && offset == -1), "wrapped failure has no position");
+    CHECK(TextQuery().isValid() && !TextMatcher(TextQuery()).isUsable(), "empty query finds nothing");
+
+    // Пустое совпадение регекса — не находка: подсветить было бы нечего.
+    TextQuery empty;
+    empty.text = QStringLiteral("x*");
+    empty.regex = true;
+    const TextMatcher emptyMatcher(empty);
+    CHECK(!emptyMatcher.matches(QStringLiteral("abc")) && emptyMatcher.matches(QStringLiteral("abxc")),
+          "an empty regex match is not a hit, a later non-empty one is");
+    empty.text = QStringLiteral("^");
+    CHECK(!TextMatcher(empty).matches(QStringLiteral("abc")), "an anchor alone finds nothing");
+    TextQuery digits;
+    digits.text = QStringLiteral("\\d*");
+    digits.regex = true;
+    digits.wholeWord = true;
+    CHECK(!TextMatcher(digits).matches(QStringLiteral("[error]"))
+              && TextMatcher(digits).matches(QStringLiteral("code 42 here")),
+          "whole word with an empty-capable regex needs a real word");
+
+    TextQuery word(QStringLiteral("error"), Qt::CaseInsensitive);
+    word.wholeWord = true;
+    CHECK(word.needsRegex() && word.patternText().contains(QLatin1String("error")),
+          "whole word becomes a regex around the text");
+    TextQuery plain(QStringLiteral("a.b"), Qt::CaseSensitive);
+    CHECK(!plain.needsRegex() && plain.patternText() == QLatin1String("a.b"), "plain query stays a substring");
+}
+
+static void checkHistory()
+{
+    QuickSearchHistory h;
+    CHECK(!h.add(QString()), "empty query is not remembered");
+    CHECK(h.add("one") && h.add("two") && h.add("three"), "queries are added");
+    CHECK(h.entries() == QStringList({"three", "two", "one"}), "newest first");
+    CHECK(!h.add("three"), "repeating the newest changes nothing");
+    CHECK(h.add("one") && h.entries() == QStringList({"one", "three", "two"}),
+          "a repeated query moves to the top without a duplicate");
+    CHECK(h.add("One") && h.entries().size() == 4, "case makes a different query");
+    CHECK(!h.add(QString(QuickSearchHistory::kMaxEntryLength + 1, u'x')), "an overlong query is not remembered");
+    CHECK(h.add(QString(QuickSearchHistory::kMaxEntryLength, u'x')), "a query at the limit is remembered");
+    for (int i = 0; i < 50; ++i)
+        h.add(QStringLiteral("q%1").arg(i));
+    CHECK(h.entries().size() == QuickSearchHistory::kMaxEntries, "the list is capped");
+    CHECK(h.entries().first() == QLatin1String("q49") && !h.entries().contains("one"),
+          "the oldest queries go first");
+    const QuickSearchHistory loaded(QStringList{"a", "", "b", "a", QString(5000, u'y'), "c"});
+    CHECK(loaded.entries() == QStringList({"a", "b", "c"}), "loading drops empties, duplicates, overlong");
+    QStringList many;
+    for (int i = 0; i < 40; ++i)
+        many << QStringLiteral("m%1").arg(i);
+    CHECK(QuickSearchHistory(many).entries().size() == QuickSearchHistory::kMaxEntries,
+          "loading keeps the cap");
+    h.clear();
+    CHECK(h.isEmpty(), "clear empties the history");
+}
+
+// Замер: подстрока против регекса на индексном бэкенде (текст с диска в
+// воркере). quick_search --bench <file> [запрос]
+static int bench(const QString& path, const QString& needle)
+{
+    const QString schema = testdocs::buildSchema();
+    QElapsedTimer t;
+    t.start();
+    auto doc = testdocs::buildIndexed({path}, schema);
+    std::printf("indexed %lld rows in %lld ms\n", (long long)doc.model->rowCount(), (long long)t.elapsed());
+    const LogScanSnapshot snapshot = doc.model->scanSnapshot(true);
+    struct Case { const char* name; bool cs, word, regex; QString text; };
+    const QString escaped = QRegularExpression::escape(needle);
+    const Case cases[] = {
+        {"substring, ignore case", false, false, false, needle},
+        {"substring, match case", true, false, false, needle},
+        {"whole word", false, true, false, needle},
+        {"regex (same literal)", false, false, true, escaped},
+        {"regex \\d{4}-x\\w+", false, false, true, QStringLiteral("\\d{4}-x\\w+")},
+        {"regex error.*timeout", false, false, true, QStringLiteral("error.*timeout_absent")},
+    };
+    for (const Case& c : cases) {
+        TextQuery q;
+        q.text = c.text; q.caseSensitive = c.cs; q.wholeWord = c.word; q.regex = c.regex;
+        qint64 best = -1;
+        qint64 found = 0;
+        for (int run = 0; run < 3; ++run) {
+            t.restart();
+            found = QuickSearch::scan(snapshot, q, true, -1, false);
+            const qint64 ms = t.elapsed();
+            best = best < 0 ? ms : qMin(best, ms);
+        }
+        std::printf("%-28s found %lld  best of 3: %lld ms\n", c.name, (long long)found, (long long)best);
+    }
+    // Прежний путь скана (до S-8): forEachLine + contains — для сравнения
+    // цены курсора scanRowsFrom.
+    qint64 best = -1;
+    for (int run = 0; run < 3; ++run) {
+        t.restart();
+        qint64 hit = -1;
+        snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta&, QStringView text) {
+            if (text.contains(needle, Qt::CaseInsensitive)) {
+                hit = row;
+                return false;
+            }
+            return true;
+        });
+        const qint64 ms = t.elapsed();
+        best = best < 0 ? ms : qMin(best, ms);
+    }
+    std::printf("%-28s best of 3: %lld ms\n", "forEachLine, ignore case", (long long)best);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
+    if (argc >= 3 && QByteArray(argv[1]) == "--bench")
+        return bench(QString::fromLocal8Bit(argv[2]),
+                     argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QStringLiteral("absent_needle_text"));
     QTemporaryDir temporary;
     if (!temporary.isValid())
         return 1;
@@ -211,6 +536,30 @@ int main(int argc, char** argv)
         }
     }
 
+    // --- Флаги запроса: слово целиком, регекс, регистр -----------------------
+    checkQueryValidity();
+    checkHistory();
+    {
+        const QString c = testdocs::writeFile(dir, "c.log", flagsFixture());
+        const QString d = testdocs::writeFile(dir, "d.log", flagsFixture());
+        auto resident = testdocs::buildResident({c}, schema);
+        auto indexed = testdocs::buildIndexed({c}, schema);
+        auto residentMerged = testdocs::buildResident({c, d}, schema);
+        auto indexedMerged = testdocs::buildIndexed({c, d}, schema, testdocs::IndexedLoad::Concurrent);
+        struct { const char* name; LogModel* model; } models[] = {
+            {"flags resident", resident.model.get()},
+            {"flags indexed", indexed.model.get()},
+            {"flags resident merged", residentMerged.model.get()},
+            {"flags indexed merged", indexedMerged.model.get()},
+        };
+        for (const auto& m : models) {
+            checkFlags(QString::fromLatin1(m.name), *m.model);
+            m.model->setLogLevelFilter({LogLevel::Error});
+            CHECK(testdocs::settle(*m.model), "flags filter settles");
+            checkFlags(QString::fromLatin1(m.name) + " filtered", *m.model);
+        }
+    }
+
     // --- Пересчёт номера через вставки ---------------------------------------
     {
         using I = QuickSearch::Insertion;
@@ -231,7 +580,7 @@ int main(int argc, char** argv)
         QObject::connect(&search, &QuickSearch::finished, [&](int row) { found = row; });
         QObject::connect(&search, &QuickSearch::invalidated, [&] { ++invalidated; });
 
-        search.start(&model, "NEEDLE", Qt::CaseSensitive, true, 100);
+        search.start(&model, TextQuery("NEEDLE", Qt::CaseSensitive), true, 100);
         CHECK(search.isRunning(), "search runs");
         CHECK(testdocs::waitFor([&] { return found != -2; }), "search finishes");
         CHECK(found == 713, "forward from row 100 finds row 713");
@@ -248,7 +597,7 @@ int main(int argc, char** argv)
         }
         std::sort(batch.begin(), batch.end(), logEntryPtrLess);
         found = -2;
-        search.start(&model, "NEEDLE 1413", Qt::CaseSensitive, true, 0);
+        search.start(&model, TextQuery("NEEDLE 1413", Qt::CaseSensitive), true, 0);
         const int before = model.rowCount();
         model.mergeEntries(batch);
         const int inserted = model.rowCount() - before;
@@ -260,21 +609,21 @@ int main(int argc, char** argv)
 
         // Перестройка модели посреди скана — invalidated, а не номер.
         found = -2;
-        search.start(&model, "NEEDLE", Qt::CaseSensitive, false, -1);
+        search.start(&model, TextQuery("NEEDLE", Qt::CaseSensitive), false, -1);
         model.setLogLevelFilter({LogLevel::Error}); // < 100k записей — синхронный reset
         CHECK(testdocs::waitFor([&] { return invalidated == 1; }), "reset invalidates the search");
         testdocs::pump(50);
         CHECK(found == -2, "invalidated search reports no row");
 
         // Отмена: ни результата, ни invalidated.
-        search.start(&model, "NEEDLE", Qt::CaseSensitive, true, -1);
+        search.start(&model, TextQuery("NEEDLE", Qt::CaseSensitive), true, -1);
         search.cancel();
         CHECK(!search.isRunning(), "cancelled search is not running");
         testdocs::pump(200);
         CHECK(found == -2 && invalidated == 1, "cancelled search stays silent");
 
         // Не найдено.
-        search.start(&model, "absent text", Qt::CaseSensitive, true, -1);
+        search.start(&model, TextQuery("absent text", Qt::CaseSensitive), true, -1);
         CHECK(testdocs::waitFor([&] { return found != -2; }), "search without matches finishes");
         CHECK(found == -1, "no match reports -1");
     }

@@ -10,10 +10,11 @@ filtering, highlighting and live reload.
 ## Opening logs
 
 - **Open log file(s)** — `File → Open` (`Ctrl+O`) or the folder button on the toolbar. Multiple files open into one tab and are merged by timestamp; such a tab is named after the first file, e.g. `app.log +2`.
-- **Drop files** anywhere in the window to open them.
+- **Drop files** anywhere in the window to open them. **Drop a folder** to open it in the Directory Scanner: the panel comes up and the scan starts. Files and folders dropped together: the files open, the folder is scanned. The scanner shows one folder at a time, so of several folders the first one is scanned.
+- **Command line** — `DendroLog app.log other.log` opens the files, `DendroLog C:\logs` scans the folder; the same rules as for a drop. `program | DendroLog -` reads the program's output as a growing log.
 - **Start screen** — while no tab is open, the window shows buttons to open files or scan a folder and the recent files as links.
 - **Directory Scanner** panel — scan a folder for log files by extension and open one or many at once (`File → Scan Directory…`).
-- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list.
+- **Recent Files** — `File → Recent Files` keeps the last 10 files; **Clear Recent Files** empties the list. A piped stream (`program | DendroLog -`) is not remembered: it does not exist after the window closes.
 - **Close Tab** — `Ctrl+W`, the tab's cross or the middle mouse button.
 - **Save View As** — `File → Save View As…` (`Ctrl+Shift+S`). Writes exactly what the view currently shows (active filters **and** the Log Fields selection) to a **new** file. Open files are never overwritten.
 - The view is saved in the background: the window stays usable, the status bar shows the progress, and **Cancel Save** next to it stops the export. The rows are taken as they were when saving started, so filtering or scrolling meanwhile does not change the file. A cancelled export leaves an existing destination file as it was.
@@ -140,12 +141,31 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 ## Field schemas (Log Fields)
 
 - *Log Fields* panel — define a **schema** (ordered blocks: timestamp, level, integer, text, regex, remainder…) via **Manage…** or `Tools → Field Schemas…` (auto-detect from a sample line or import a Grok expression).
+- **Built-in schemas** for common formats are in the list from the first start; pick one in the combo box of the *Log Fields* panel (nothing is selected by default):
+
+| Schema | A line it reads |
+| --- | --- |
+| Logback / Log4j | `2026-11-18 13:55:36.123 [main] INFO  com.example.App - Started` |
+| Spring Boot | `2026-11-18T13:55:36.130Z  INFO 34786 --- [main] o.s.b.App : Started` |
+| nginx / Apache access (combined) | `203.0.113.42 - - [18/Nov/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 64 "-" "curl/8.5.0"` (the common format too) |
+| nginx error | `2026/11/18 13:55:36 [error] 1234#1234: *99 open() failed` |
+| Syslog (RFC 3164) | `Nov 18 13:55:36 web01 sshd[2231]: Accepted publickey` |
+| Syslog / journalctl (ISO timestamp) | `2026-11-18T13:55:38+0100 web01 systemd[1]: Starting nginx` |
+| Serilog (console) | `[13:55:36 INF] Starting web host` |
+| Serilog (file, with date) | `2026-11-18 13:55:36.123 +01:00 [INF] Starting web host` |
+| Python logging | `2026-11-18 13:55:36,123 - myapp.db - INFO - Connected` |
+| Python logging (basicConfig) | `WARNING:root:Watch out!` |
+
+  Stack traces and Python tracebacks stay inside their entry. Built-in schemas are ordinary files in the `patterns` folder next to your settings and can be edited, renamed or deleted like your own: an edited one is never overwritten, a deleted one does not come back, and a schema of yours with the same file name or name is left as it is. A new version of DendroLog updates only built-in schemas you have not changed. To get deleted built-in schemas back, delete the `.builtin-schemas` file in that folder and restart.
+- Timestamps that the time filter, the timeline and the merge of several files understand are dates in ISO form (`2026-11-18 13:55:36`, also with `T`, a fraction and a zone). The time of syslog (`Nov 18 13:55:36`), of access logs (`18/Nov/2026:13:55:36 +0000`), of nginx error (`2026/11/18 …`) and a time without a date (Serilog console) is shown in the field but does not position the entry in time yet.
 - Tick **Filter blocks** to show only selected blocks; the selection is reflected in **Save View As** and in field-bound text filters.
 
 ## Quick find (toolbar)
 
-- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). **Aa** makes the search case-sensitive. The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
-- To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). The Search panel also takes several rules at once.
+- The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it; `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). Three toggles next to the box refine it (see below). The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
+- The toggles: **Aa** (`Alt+C`) — match case; **ab** underlined (`Alt+W`) — whole word: the match may not touch a letter, digit or `_` on either side, so `error` skips `errors` and `my_error` but finds `[error]`; **.\*** (`Alt+R`) — regular expression, the same syntax as in Text Filters (see *Regular expressions* above: found anywhere in the line). Whole word works with a regex too: `\d+` then finds a number that is not glued to letters. An **invalid expression** gives the box a red border, its tooltip and the status bar say what is wrong and at which position, and nothing is searched until it is fixed. The toggles are remembered between runs.
+- **Recent searches:** the down arrow in the box (or the arrow button at its right edge) lists the last 20 searches, newest first; picking one runs it again. A query is remembered when it is actually searched (`Enter`, `F3`, `Shift+F3`, the arrow buttons, **All**), not while typing; only the text is kept, the toggles stay as they are. **Clear search history** at the bottom of the list forgets them.
+- To see every line with the term at once, press **All** next to the box (`Ctrl+Shift+F`): the **Search** panel lists them without hiding anything (see above). Match case, whole word and regex carry over: the panel gets one rule with the same case setting, and a regex or whole-word query becomes a **Regular expression** rule (whole word — the text wrapped in word-boundary checks). The Search panel also takes several rules at once.
 
 ## Go to line or time
 
@@ -174,6 +194,8 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 ## Directory Scanner
 
 - The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.
+- **Rotated logs are listed too**: besides `app.log`, the tree shows `app.log.1`, `app.log.10`, `app.log-20260101`, `app.log.2026-01-01` and `app-2026-01-01.log` — a configured extension followed by nothing but a rotation number or date (digits joined by `.`, `-` or `_`). Backups and editor files (`app.log.bak`, `app.log.swp`, `app.log~`) and compressed rotations (`app.log.gz`, `app.log.1.gz`) are not listed. Rotated files sort right after the main one, by number: `app.log`, `app.log.1`, `app.log.2`, `app.log.10`. The **Open** dialog's “Log files” filter lists plain extensions only; pick “All files” there to open a rotated file, or open it from the scanner.
+- **Entries are counted the way an opened tab counts them**: an entry starts at a line with a timestamp and a level, and the lines after it (a stack trace, a multi-line message) belong to it. The W/E/F counters count such entries, the From / To span comes from their timestamps. A field schema does not change the count: the scanner counts the way a tab does without field extraction. A file in UTF-16 is recognised by its byte-order mark, and a growing log whose last line was still being written is counted again correctly once the line is finished.
 - Names sort **case-insensitively** and naturally: `log2` comes before `log10`. Clicking a column header re-sorts (name ascending, numeric columns largest-first).
 - **The ⟳ button refreshes.** It re-reads the directory but not the files: only new and modified ones are analysed again, and a log that merely grew is read from where the previous scan stopped (unless it was rewritten). Deleted files leave the tree.
 - **Right-click ⟳** to pick the refresh mode:
@@ -214,6 +236,7 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 | Focus search field | `Ctrl+F` |
 | Search next / previous | `F3` / `Shift+F3` |
 | Find all (Search panel) | `Ctrl+Shift+F` |
+| Quick find: match case / whole word / regex | `Alt+C` / `Alt+W` / `Alt+R` |
 | Go to line or time | `Ctrl+G` |
 | Next / previous error (Error, Fatal) | `F8` / `Shift+F8` |
 | Next / previous warning | `F7` / `Shift+F7` |

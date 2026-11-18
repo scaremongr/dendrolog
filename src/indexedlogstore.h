@@ -87,10 +87,6 @@ public:
     int placeAmongVisible(int logicalEntryId, const LogFile* sourceFile,
                           bool* visible = nullptr) const override;
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const override;
-    int findNextOccurrence(const QString& text, int startRow,
-                           Qt::CaseSensitivity cs, bool wrapAround) const override;
-    int findPreviousOccurrence(const QString& text, int startRow,
-                               Qt::CaseSensitivity cs, bool wrapAround) const override;
     LogScanSnapshot scanSnapshot(bool filteredOnly) const override;
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
@@ -130,9 +126,6 @@ private:
     // убывает — двоичный поиск); -1, если записи в файле нет.
     static qint64 firstLineOfRecord(const LineIndex& index, quint32 id);
     QStringList filePaths() const;
-    // Текст видимой строки для синхронного скана (быстрый поиск): через
-    // ридеры скана, чтобы не вымывать кэш вьюпорта.
-    const QString& scanTextAt(SequentialLineReaders& readers, int visibleRow) const;
     bool hasActiveFilterSettings() const;
     // Проверка одной строки текущими настройками (GUI, точечно: хвост).
     bool refPassesFiltersNow(RowRef ref) const;

@@ -52,6 +52,16 @@ namespace ScanRole {
 // stable and never depends on how the file system happens to spell a name.
 int scannerCompareNames(QStringView a, QStringView b);
 
+// Does a file name belong in the scanner tree? `extensions` are lower-case and
+// without the dot ("log", "txt"); empty — every file. The name matches when one
+// of them is a dot-separated component followed by nothing or by a rotation
+// tail only: a separator ('.', '-' or '_') and digit groups joined by the same
+// separators. So app.log, app.log.1, app.log.10, app.log-20260101,
+// app.log.2026-01-01 and app-2026-01-01.log match; app.log.bak, app.log.swp,
+// app.log.gz, app.log.1.gz, app.log~ and app.logs.1 do not (compressed
+// rotations are F-2). Case-insensitive.
+bool scannerNameMatches(QStringView fileName, const QStringList& extensions);
+
 // ─── Tree item with numeric / composite sort support ────────────────────────
 //
 //  Stores a qint64 SortKey in each column so that numeric columns
@@ -99,7 +109,7 @@ public:
 //
 //  MainWindow only needs to:
 //    1. Create the object and pass the tree widget pointer.
-//    2. Call setFileExtensions() / setConversionPattern() as needed.
+//    2. Call setFileExtensions() as needed.
 //    3. Call scan(rootPath) to start a scan.
 //    4. Connect fileActivated / filesActivated to open tabs.
 //
@@ -121,7 +131,6 @@ public:
 
     // Call before scan() to pick up the latest settings.
     void setFileExtensions(const QStringList& extensions);
-    void setConversionPattern(const QString& pattern);
 
     // Clears the tree and starts a fresh scan of rootPath.
     // Running workers finish gracefully; stale results are silently discarded.
@@ -207,7 +216,6 @@ private:
         bool    isFile = false;
         qint64  size = 0;
         qint64  mtimeMs = 0;
-        QString suffix;
     };
 
     // One directory's contents, tagged with the directory it came from so the
@@ -219,22 +227,27 @@ private:
         bool               readable = true;
     };
 
-    // What the last completed analysis of a file left behind. `resumeOffset` is
-    // the byte offset the stats cover, and is only set when that offset is a
-    // line boundary — otherwise a tail read would mis-count the split line.
+    using StatsResume = LogParser::StatsResume;
+
+    // What the last completed analysis of a file left behind. `stats` is what
+    // the tree shows (a last line without '\n' included); `complete` covers
+    // only the whole lines, up to `resume.offset` — the raw byte offset right
+    // after the last '\n', where the next append-only read continues and the
+    // torn line, if any, is read again from its start.
     struct ScanState {
-        FileStats stats;
-        qint64    resumeOffset = 0;
-        quint64   fingerprint  = 0;   // boundary hash of the bytes ending there
+        FileStats   stats;
+        FileStats   complete;
+        StatsResume resume;
+        quint64     fingerprint = 0;  // boundary hash of the bytes ending there
     };
 
-    // A queued file analysis. `resumeOffset` > 0 means the previous stats are
+    // A queued file analysis. `resume.offset` > 0 means the previous stats are
     // still valid up to that byte and only the tail has to be read.
     struct ScanRequest {
-        QString   path;
-        qint64    resumeOffset = 0;
-        quint64   fingerprint  = 0;   // boundary hash captured at resumeOffset
-        FileStats base;               // stats covering [0, resumeOffset)
+        QString     path;
+        StatsResume resume;
+        quint64     fingerprint = 0;  // boundary hash captured at resume.offset
+        FileStats   base;             // stats covering [0, resume.offset)
     };
 
     // What a worker hands back: the stats plus a fresh resume anchor for the
@@ -278,6 +291,9 @@ private:
         Qt::CaseSensitivity cs = Qt::CaseInsensitive;
         QRegularExpression  re;   // precompiled when isRegex
         std::shared_ptr<SearchProgress> progress;
+        // Keeps the sequence mapped() iterates over alive for as long as the
+        // kernel (which owns a copy of this functor) exists.
+        std::shared_ptr<const QList<SearchItem>> items;
 
         bool operator()(const SearchItem& item) const;
     };
@@ -322,14 +338,13 @@ private:
     void scheduleFilterRefresh();
 
     // ---- Utilities ----
-    bool    matchesExtension(const QString& lowerSuffix) const;
+    bool    matchesExtension(const QString& fileName) const;
     static QString formatAlerts(int fatals, int errors, int warns);
     static QString buildTooltip(const FileStats& stats, const QString& filePath);
 
     // ---- State ----
     QTreeWidget*                    m_tree;
     QStringList                     m_extensions;
-    QString                         m_pattern;
     QString                         m_rootPath;
     QList<ScanRequest>              m_pending;           // Files waiting to be analysed
     QMap<QString, QTreeWidgetItem*> m_itemMap;           // filePath → tree item (files only)
@@ -370,7 +385,10 @@ private:
     bool                            m_contentCaseSensitive = false;
     bool                            m_contentFilterActive = false;   // results valid
     QSet<QString>                   m_contentMatches;                // matching paths
-    QList<SearchItem>               m_contentTodo;   // files being searched, in result order
+    // Files being searched, in result order. Immutable once handed to the
+    // workers and shared with them: a new search builds a new list instead of
+    // rewriting this one (see startContentSearch). Null when nothing is searched.
+    std::shared_ptr<const QList<SearchItem>> m_contentTodo;
     int                             m_contentCandidates = 0;         // incl. cache hits
     qint64                          m_contentTotalBytes = 0;
     QFutureWatcher<bool>*           m_contentWatcher = nullptr;      // running search

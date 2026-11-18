@@ -874,68 +874,6 @@ int IndexedLogStore::nearestVisibleRowForLine(qint64 lineNumber,
     return qMin(int(it - list.constBegin()), int(list.size()) - 1);
 }
 
-int IndexedLogStore::findNextOccurrence(const QString& text, int startRow,
-                                        Qt::CaseSensitivity cs, bool wrapAround) const
-{
-    // ВНИМАНИЕ: синхронный дисковый скан. Обычно совпадение близко и чтение
-    // последовательное; на гигантских файлах без совпадений возможна пауза —
-    // открытая задача (CLAUDE.md, «Состояние и известные слабые места»).
-    const int numRows = visibleCount();
-    if (text.isEmpty() || numRows == 0)
-        return -1;
-
-    SequentialLineReaders readers(filePaths());
-    const int firstRow = qBound(0, startRow + 1, numRows);
-    for (int i = firstRow; i < numRows; ++i) {
-        if (scanTextAt(readers, i).contains(text, cs))
-            return i;
-    }
-    if (wrapAround) {
-        for (int i = 0; i <= startRow && i < numRows; ++i) {
-            if (scanTextAt(readers, i).contains(text, cs))
-                return i;
-        }
-    }
-    return -1;
-}
-
-int IndexedLogStore::findPreviousOccurrence(const QString& text, int startRow,
-                                            Qt::CaseSensitivity cs, bool wrapAround) const
-{
-    const int numRows = visibleCount();
-    if (text.isEmpty() || numRows == 0)
-        return -1;
-
-    SequentialLineReaders readers(filePaths());
-    int currentRow = startRow - 1;
-    if (startRow < 0 || startRow >= numRows)
-        currentRow = numRows - 1;
-    for (int i = currentRow; i >= 0; --i) {
-        if (scanTextAt(readers, i).contains(text, cs))
-            return i;
-    }
-    if (wrapAround) {
-        for (int i = numRows - 1; i >= startRow && i >= 0; --i) {
-            if (scanTextAt(readers, i).contains(text, cs))
-                return i;
-        }
-    }
-    return -1;
-}
-
-const QString& IndexedLogStore::scanTextAt(SequentialLineReaders& readers, int visibleRow) const
-{
-    const RowRef ref = rowToRef(visibleRow);
-    const LineIndex& index = *m_files[refFile(ref)].index;
-    const qint64 line = refLine(ref);
-    return readers.lineAt(refFile(ref), index.lineStartOffset(line),
-                          index.lineByteLength(line));
-}
-
-// ---------------------------------------------------------------------------
-// Сканы
-// ---------------------------------------------------------------------------
-
 namespace {
 
 // Снапшот индексного хранилища для воркеров: самодостаточный (свои ридеры).
@@ -1046,6 +984,34 @@ public:
         const FileSnap& f = files[fileId];
         return reader.lineAt(f.index.lineStartOffset(line),
                              f.index.lineByteLength(line));
+    }
+
+    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor() const override
+    {
+        // Свои ридеры на курсор: SequentialLineReader ставит окно по
+        // направлению скана, обход назад не перечитывает окно на строку.
+        class Cursor final : public LogScanSnapshot::LineCursor {
+        public:
+            Cursor(const IndexedScanSnapshotImpl& snapshot, QStringList paths)
+                : m_snapshot(snapshot), m_readers(std::move(paths)) {}
+            QStringView lineAt(qint64 row) override
+            {
+                if (row < 0 || row >= m_snapshot.rowCount())
+                    return {};
+                int fileId; qint64 line;
+                m_snapshot.resolve(row, fileId, line);
+                const FileSnap& f = m_snapshot.files[fileId];
+                return QStringView(m_readers.lineAt(fileId, f.index.lineStartOffset(line),
+                                                    f.index.lineByteLength(line)));
+            }
+        private:
+            const IndexedScanSnapshotImpl& m_snapshot;
+            SequentialLineReaders m_readers;
+        };
+        QStringList paths;
+        for (const FileSnap& f : files)
+            paths.append(f.path);
+        return std::make_unique<Cursor>(*this, std::move(paths));
     }
 
     LogFilePtr sourceFilePtrAt(qint64 row) const override

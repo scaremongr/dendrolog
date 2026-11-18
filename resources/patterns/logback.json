@@ -1,0 +1,50 @@
+{
+    "name": "Logback / Log4j",
+    "description": "Java: %d [%thread] %-5level %logger - %msg (Logback, Log4j 1/2 PatternLayout). Date may be omitted (%d{HH:mm:ss.SSS}). Stack traces stay in their record.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "timestamp",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Thread",
+            "kind": "text",
+            "leadingText": "[",
+            "closingText": "]",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Level",
+            "kind": "level",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Logger",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "--?",
+            "customRegex": "\\S+",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

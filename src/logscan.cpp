@@ -1,4 +1,5 @@
 #include "logscan.h"
+#include "textquery.h"
 
 LogEntryMeta LogScanSnapshot::metaFor(const LogEntry& entry)
 {
@@ -84,6 +85,25 @@ public:
         return m_entries.at(row)->message();
     }
 
+    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor() const override
+    {
+        // Текст уже в памяти — курсор только смотрит в записи.
+        class Cursor final : public LogScanSnapshot::LineCursor {
+        public:
+            explicit Cursor(const QVector<std::shared_ptr<LogEntry>>& entries)
+                : m_entries(entries) {}
+            QStringView lineAt(qint64 row) override
+            {
+                if (row < 0 || row >= m_entries.size() || !m_entries.at(row))
+                    return {};
+                return QStringView(m_entries.at(row)->message());
+            }
+        private:
+            const QVector<std::shared_ptr<LogEntry>>& m_entries;
+        };
+        return std::make_unique<Cursor>(m_entries);
+    }
+
     LogFilePtr sourceFilePtrAt(qint64 row) const override
     {
         if (row < 0 || row >= m_entries.size() || !m_entries.at(row))
@@ -143,6 +163,38 @@ qint64 LogScanSnapshot::findRowWithLevel(LogLevelMask levels, qint64 startRow, b
                 return RowScanStep::Continue;
         }
         return RowScanStep::Found;
+    });
+    if (progress)
+        progress->store(100, std::memory_order_relaxed);
+    return cancelled ? -1 : found;
+}
+
+qint64 LogScanSnapshot::findRowWithText(const TextQuery& query, qint64 startRow,
+                                        bool forward, bool wrapAround,
+                                        const std::atomic_bool* cancel,
+                                        std::atomic<int>* progress) const
+{
+    const qint64 n = rowCount();
+    const TextMatcher matcher(query);
+    if (!m_impl || n == 0 || !matcher.isUsable())
+        return -1;
+    const std::unique_ptr<LineCursor> cursor = m_impl->lineCursor();
+    qint64 scanned = 0;
+    bool cancelled = false;
+    // Прогресс — доля просмотренных строк от всех: второй проход при
+    // заворачивании продолжает первый.
+    const qint64 found = scanRowsFrom(n, startRow, forward, wrapAround, [&](qint64 row) {
+        if ((++scanned & 0xFFF) == 0) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) {
+                cancelled = true;
+                return RowScanStep::Stop;
+            }
+            if (progress)
+                progress->store(int(qMin<qint64>(99, scanned * 100 / n)),
+                                std::memory_order_relaxed);
+        }
+        return matcher.matches(cursor->lineAt(row)) ? RowScanStep::Found
+                                                    : RowScanStep::Continue;
     });
     if (progress)
         progress->store(100, std::memory_order_relaxed);

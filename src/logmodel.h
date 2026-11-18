@@ -182,7 +182,11 @@ public:
     int findRowWithLevel(LogLevelMask levels, int startRow, bool forward,
                          bool wrapAround = true) const;
 
-    // Search methods
+    // Быстрый поиск (эталон фонового QuickSearch): ближайшая видимая строка,
+    // подходящая под запрос (LogStore::findOccurrence). Next/Previous —
+    // простой подстрокой.
+    QModelIndex findOccurrence(const TextQuery& query, int startRow, bool forward,
+                               bool wrapAround = true) const;
     QModelIndex findNextOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;
     QModelIndex findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;
 

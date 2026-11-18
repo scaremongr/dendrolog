@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 
 #include <cstdio>
 
@@ -33,11 +34,38 @@ StdinSpooler::~StdinSpooler()
         QFile::remove(m_path);
 }
 
+QString StdinSpooler::spoolFilePathFor(qint64 pid)
+{
+    return QDir::temp().filePath(QStringLiteral("DendroLog-stdin-%1.log").arg(pid));
+}
+
+bool StdinSpooler::isSpoolFilePath(const QString& path)
+{
+    const QFileInfo info(QDir::fromNativeSeparators(path));
+    const QString name = info.fileName();
+    const QLatin1String prefix("DendroLog-stdin-");
+    const QLatin1String suffix(".log");
+    if (!name.startsWith(prefix) || !name.endsWith(suffix))
+        return false;
+    const QStringView pid = QStringView(name).mid(prefix.size(),
+                                                  name.size() - prefix.size() - suffix.size());
+    if (pid.isEmpty())
+        return false;
+    for (const QChar ch : pid)
+        if (ch < QLatin1Char('0') || ch > QLatin1Char('9'))
+            return false;
+#ifdef Q_OS_WIN
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    return QDir::cleanPath(info.absolutePath())
+               .compare(QDir::cleanPath(QDir::temp().absolutePath()), cs) == 0;
+}
+
 bool StdinSpooler::startSpooling()
 {
-    const QString path = QDir::temp().filePath(
-        QStringLiteral("DendroLog-stdin-%1.log")
-            .arg(QCoreApplication::applicationPid()));
+    const QString path = spoolFilePathFor(QCoreApplication::applicationPid());
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
