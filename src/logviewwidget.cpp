@@ -1484,6 +1484,8 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
 {
     StateApplyReport report;
     const ViewState& view = state.view;
+    if (!m_memoryApplying) // память файла — не снимок: вкладка с её файлом и так не пуста
+        m_fromState = true;
 
     // Закладки — до файлов: строки ищутся по ходу загрузки (RecordLocator).
     // Переписанный источник — отказ (Missing: серая, с фрагментом и

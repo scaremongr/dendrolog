@@ -315,9 +315,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->actionExit, &QAction::triggered, this, &QWidget::close);
     // Сессии (R-5): файл *.dlsession — вкладки целиком, схема и колонки.
     m_sessionController = new SessionController(this);
-    QAction* openSession = new QAction(tr("Open Session..."), this);
-    openSession->setToolTip(tr("Open the tabs of a saved session next to the open ones"));
-    connect(openSession, &QAction::triggered, this, [this]() {
+    QAction* openSessionAction = new QAction(tr("Open Session..."), this);
+    openSessionAction->setToolTip(tr("Open the tabs of a saved session next to the open ones"));
+    connect(openSessionAction, &QAction::triggered, this, [this]() {
         const QString path = QFileDialog::getOpenFileName(this, tr("Open Session"), m_lastOpenDir,
             tr("DendroLog sessions (*.dlsession);;All files (*)"));
         if (!path.isEmpty())
@@ -326,11 +326,42 @@ MainWindow::MainWindow(QWidget *parent)
     QAction* saveSession = new QAction(tr("Save Session As..."), this);
     saveSession->setToolTip(tr("Save all tabs with their filters, bookmarks and positions to a file"));
     connect(saveSession, &QAction::triggered, this, &MainWindow::saveSessionAs);
-    ui->menuFile->insertActions(ui->actionCloseTab, { openSession, saveSession });
+    ui->menuFile->insertActions(ui->actionCloseTab, { openSessionAction, saveSession });
     ui->menuFile->insertSeparator(ui->actionCloseTab);
     connect(m_sessionController, &SessionController::reportChanged, this, [this]() {
         if (m_sessionReportLink && m_sessionController->report().isEmpty())
             m_sessionReportLink->hide(); // вкладки с проблемами закрыты
+    });
+    // Сессия окна для контроллера: вкладки по порядку ряда, схема и колонки.
+    m_sessionController->setWindow({
+        [this]() { return logViews(); },
+        [this]() { return qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()); },
+        [this]() {
+            SessionController::WindowSettings w;
+            w.schema = m_conversionPattern;
+            w.schemaName = SessionController::schemaNameFor(m_patternList,
+                m_conversionPatternCombo ? m_conversionPatternCombo->currentIndex() : -1, m_conversionPattern);
+            w.fieldExtraction = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+            w.visibleFields = selectedVisibleFieldNames();
+            return w;
+        } });
+    // Ctrl+Shift+T — вернуть закрытую вкладку; прошлый сеанс — ссылкой на
+    // стартовом экране (последняя сессия читается в startUp).
+    QAction* reopenTab = new QAction(tr("Reopen Closed Tab"), this);
+    reopenTab->setEnabled(false);
+    connect(reopenTab, &QAction::triggered, this, &MainWindow::reopenClosedTab);
+    connect(m_sessionController, &SessionController::closedTabsChanged, reopenTab,
+            [reopenTab](int count) { reopenTab->setEnabled(count > 0); });
+    ui->menuFile->insertAction(ui->actionCloseTab, reopenTab);
+    m_shortcutActions.insert(QStringLiteral("reopenTab"), reopenTab);
+    connect(m_sessionController, &SessionController::lastSessionAvailabilityChanged,
+            m_welcome, &WelcomeWidget::setRestoreSessionAvailable);
+    connect(m_welcome, &WelcomeWidget::restoreSessionRequested, this, [this]() {
+        QString error;
+        if (const std::optional<SessionState> session = m_sessionController->takeLastSession(&error))
+            openSession(*session, m_sessionController->lastSessionFile(), SessionController::Origin::LastSession);
+        else
+            statusBar()->showMessage(tr("Could not restore the previous session: %1").arg(error), 10000);
     });
     connect(ui->actionZoomIn,  &QAction::triggered, this, [this]() { changeFontSize(+1); });
     connect(ui->actionZoomOut, &QAction::triggered, this, [this]() { changeFontSize(-1); });
@@ -577,7 +608,7 @@ MainWindow::MainWindow(QWidget *parent)
         // Крестик вкладки и средняя кнопка мыши (LogTabBar эмитит тот же сигнал)
         // идут через общий closeTab().
         connect(ui->tabWidget, &QTabWidget::tabCloseRequested,
-                this, &MainWindow::closeTab);
+                this, [this](int index) { closeTab(index); });
         connect(ui->tabWidget, &QTabWidget::currentChanged,
                 this, &MainWindow::onCurrentTabChanged);
         // Правый клик по заголовку — контекстное меню; бросок вкладки на вкладку
@@ -821,10 +852,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     // workers reference) are torn down.
     cancelFieldExtraction();
     saveSettings();
+    // Последняя сессия (R-5) — только при штатном выходе и только первичным
+    // окном; пустое окно прошлую не затирает (SessionController).
+    m_sessionController->saveLastSession();
     // Память файлов открытых вкладок (R-4) — на диск до выхода.
-    for (int i = 0; i < ui->tabWidget->count(); ++i)
-        if (auto* logView = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
-            logView->saveFileMemory();
+    for (LogViewWidget* logView : logViews())
+        logView->saveFileMemory();
     m_fileMemory->waitForWrites();
     QMainWindow::closeEvent(event);
 }
@@ -2564,12 +2597,14 @@ void MainWindow::onCurrentTabChanged(int index)
 // Управление вкладками: закрытие, объединение, контекстное меню
 // =============================================================================
 
-void MainWindow::closeTab(int index)
+void MainWindow::closeTab(int index, bool remember)
 {
     QWidget* page = ui->tabWidget->widget(index);
     if (!page)
         return;
     if (auto* logView = qobject_cast<LogViewWidget*>(page)) {
+        if (remember) // слитая в другую вкладка не закрыта — её файлы живы там
+            m_sessionController->rememberClosedTab(logView, index); // Ctrl+Shift+T (R-5)
         logView->saveFileMemory(); // память файла (R-4)
         disconnectFromLogView(logView);
     }
@@ -2666,7 +2701,7 @@ void MainWindow::mergeTabs(int fromIndex, int toIndex)
     updateTabLabel(dst);
 
     // addLogFile вкладок не двигает — индекс источника ещё валиден.
-    closeTab(fromIndex);
+    closeTab(fromIndex, /*remember=*/false);
 
     // Индекс приёмника мог сдвинуться после закрытия источника.
     const int dstIdx = ui->tabWidget->indexOf(dst);
@@ -2688,7 +2723,7 @@ void MainWindow::mergeAllTabsInto(int keepIndex)
 
     for (int i = ui->tabWidget->count() - 1; i >= 0; --i)
         if (ui->tabWidget->widget(i) != dst)
-            closeTab(i);
+            closeTab(i, /*remember=*/false);
 
     const int dstIdx = ui->tabWidget->indexOf(dst);
     if (dstIdx >= 0)
@@ -2793,36 +2828,9 @@ void MainWindow::on_actionOpen_triggered()
     for (const QString& f : files)
         addToRecentFiles(f);
 
-    LogViewWidget *view = nullptr;
-    int tabIndex = -1;
-    if (ui->tabWidget->count() == 0 ||
-        ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
-    {
-        view = createLogViewWidget();
-        tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-        ui->tabWidget->setCurrentIndex(tabIndex);
-    }
-    else
-    {
-        view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
-        if (!view)
-        {
-            view = createLogViewWidget();
-            tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-            ui->tabWidget->setCurrentIndex(tabIndex);
-        }
-        else
-        {
-            if (m_activeLogView != view)
-                connectToLogView(view);
-        }
-    }
-
+    LogViewWidget* view = tabForOpening();
     for (const QString &f : files)
-    {
-        if (view)
-            view->addLogFile(f);
-    }
+        view->addLogFile(f);
 
     updateTabLabel(view);
 }
@@ -3194,11 +3202,8 @@ void MainWindow::on_actionTrace_toggled(bool checked)
 
 void MainWindow::on_actionWordWrap_toggled(bool checked)
 {
-    for (int i = 0; i < ui->tabWidget->count(); ++i) {
-        auto *v = qobject_cast<LogViewWidget *>(ui->tabWidget->widget(i));
-        if (v)
-            v->view()->setWordWrap(checked);
-    }
+    for (LogViewWidget* v : logViews())
+        v->view()->setWordWrap(checked);
 }
 
 void MainWindow::updateLogLevelFilterButtons()
@@ -3723,35 +3728,7 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
     if (filePaths.isEmpty())
         return;
 
-    LogViewWidget *view = nullptr;
-    int tabIndex = -1;
-
-    if (ui->tabWidget->count() == 0 ||
-        ((view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
-    {
-        view = createLogViewWidget();
-        tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-        ui->tabWidget->setCurrentIndex(tabIndex);
-    }
-    else
-    {
-        view = qobject_cast<LogViewWidget *>(ui->tabWidget->currentWidget());
-        if (!view)
-        {
-            view = createLogViewWidget();
-            tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-            ui->tabWidget->setCurrentIndex(tabIndex);
-        }
-        else
-        {
-            if (m_activeLogView != view)
-                connectToLogView(view);
-        }
-    }
-
-    if (!view)
-        return;
-
+    LogViewWidget* view = tabForOpening();
     for (const QString &fPath : filePaths)
     {
         view->addLogFile(fPath);
@@ -3873,6 +3850,22 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEn
     }
 }
 
+void MainWindow::startUp(const OpenRouting::CommandLine& commandLine, bool primary)
+{
+    // Последняя сессия (R-5) — только у первичного окна; включена настройка —
+    // вкладки прошлого сеанса, затем файлы командной строки; выключена —
+    // ссылка на стартовом экране.
+    m_sessionController->setLastSessionFile(AppSettings::lastSessionFile(), primary);
+    QString error;
+    m_sessionController->startUp(AppSettings::instance().restoreSessionOnStartup(),
+        [this](const SessionState& session, const QString& path) {
+            openSession(session, path, SessionController::Origin::LastSession);
+        },
+        [this, &commandLine]() { openCommandLine(commandLine); }, &error);
+    if (!error.isEmpty())
+        statusBar()->showMessage(tr("Could not restore the previous session: %1").arg(error), 10000);
+}
+
 void MainWindow::openSessionFile(const QString& path)
 {
     const SessionFile::LoadResult loaded = SessionFile::load(path);
@@ -3885,19 +3878,43 @@ void MainWindow::openSessionFile(const QString& path)
         return;
     }
     m_lastOpenDir = QFileInfo(path).absolutePath();
+    openSession(*loaded.state, path, SessionController::Origin::SessionFile);
+}
+
+void MainWindow::openSession(const SessionState& session, const QString& path, SessionController::Origin origin)
+{
     // Схема — до вкладок: правила вкладок привязываются к схеме при применении.
-    applySessionSchema(*loaded.state);
+    applySessionSchema(session);
     const SessionController::OpenResult result =
-        m_sessionController->open(*loaded.state, path, [this]() {
+        m_sessionController->open(session, path, [this]() {
             LogViewWidget* view = createLogViewWidget();
             ui->tabWidget->addTab(view, tr("Logs"));
             return view;
         });
+    showSessionResult(result, origin);
+}
+
+void MainWindow::reopenClosedTab()
+{
+    const SessionController::OpenResult result =
+        m_sessionController->reopenClosedTab([this](int position) {
+            LogViewWidget* view = createLogViewWidget();
+            ui->tabWidget->insertTab(qMin(position, ui->tabWidget->count()), view, tr("Logs"));
+            return view;
+        });
+    showSessionResult(result, SessionController::Origin::ClosedTab);
+}
+
+void MainWindow::showSessionResult(const SessionController::OpenResult& result, SessionController::Origin origin)
+{
+    if (result.tabs.isEmpty() && origin == SessionController::Origin::ClosedTab)
+        return;
     for (LogViewWidget* view : result.tabs)
         updateTabLabel(view);
     if (result.active)
         ui->tabWidget->setCurrentWidget(result.active);
-    const QString summary = SessionController::summary(result);
+    // Модальных окон нет: проблемы — ссылкой на отчёт в строке состояния.
+    const QString summary = SessionController::summary(result, origin);
     if (result.hasProblems() || result.relocated) {
         m_sessionReportLink->setText(QStringLiteral("<a href=\"report\">%1</a>")
             .arg((summary + QLatin1Char(' ') + tr("Details…")).toHtmlEscaped()));
@@ -3909,26 +3926,12 @@ void MainWindow::openSessionFile(const QString& path)
 
 void MainWindow::saveSessionAs()
 {
-    QList<LogViewWidget*> tabs;
-    for (int i = 0; i < ui->tabWidget->count(); ++i)
-        if (auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
-            tabs << view;
-    SessionState session = m_sessionController->capture(
-        tabs, qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()));
+    const SessionState session = m_sessionController->captureWindow();
     if (session.tabs.isEmpty()) {
         QMessageBox::information(this, tr("Save Session As"),
             tr("There is nothing to save: no tab has files (standard input is not saved)."));
         return;
     }
-    // Схема и колонки глобальные (до F-5) — их даёт окно.
-    if (!m_conversionPattern.isEmpty()) {
-        session.schema = m_conversionPattern;
-        const int index = m_conversionPatternCombo ? m_conversionPatternCombo->currentIndex() : -1;
-        if (index >= 0 && index < m_patternList.size() && m_patternList[index].schema == m_conversionPattern)
-            session.schemaName = m_patternList[index].name;
-    }
-    session.fieldExtraction = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-    session.visibleFields = selectedVisibleFieldNames();
 
     // defaultSuffix — до проверки «файл уже есть, заменить?» внутри диалога.
     QFileDialog dialog(this, tr("Save Session As"), m_lastOpenDir,
@@ -4029,6 +4032,30 @@ void MainWindow::openStdinStream(const FileEncoding& initial)
             [lv](qint64) { lv->reloadChangedFiles(); });
 }
 
+QList<LogViewWidget*> MainWindow::logViews() const
+{
+    QList<LogViewWidget*> views;
+    for (int i = 0; i < ui->tabWidget->count(); ++i)
+        if (auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
+            views << view;
+    return views;
+}
+
+LogViewWidget* MainWindow::tabForOpening()
+{
+    // Текущая пустая вкладка занимается; вкладка из снимка (сессия,
+    // Ctrl+Shift+T), даже без файлов, — нет: у неё свои фильтры и закладки.
+    auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
+    if (view && view->isBlank()) {
+        if (m_activeLogView != view)
+            connectToLogView(view);
+        return view;
+    }
+    view = createLogViewWidget();
+    ui->tabWidget->setCurrentIndex(ui->tabWidget->addTab(view, tr("Logs")));
+    return view;
+}
+
 void MainWindow::openRecentFile(const QString& filePath, const FileEncoding& initial)
 {
     if (!QFileInfo::exists(filePath)) {
@@ -4039,29 +4066,7 @@ void MainWindow::openRecentFile(const QString& filePath, const FileEncoding& ini
         return;
     }
 
-    LogViewWidget* view = nullptr;
-    if (ui->tabWidget->count() == 0 ||
-        ((view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) && view && view->fileCount() > 0))
-    {
-        view = createLogViewWidget();
-        int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-        ui->tabWidget->setCurrentIndex(tabIndex);
-    }
-    else
-    {
-        view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
-        if (!view) {
-            view = createLogViewWidget();
-            int tabIndex = ui->tabWidget->addTab(view, tr("Logs"));
-            ui->tabWidget->setCurrentIndex(tabIndex);
-        } else if (m_activeLogView != view) {
-            connectToLogView(view);
-        }
-    }
-
-    if (!view)
-        return;
-
+    LogViewWidget* view = tabForOpening();
     view->addLogFile(filePath, initial);
     updateTabLabel(view);
 
@@ -4322,11 +4327,9 @@ void MainWindow::onReloadFileTriggered()
 void MainWindow::onAutoReloadTimerTick()
 {
     // Reload every tab that has per-tab auto-reload enabled.
-    for (int i = 0; i < ui->tabWidget->count(); ++i) {
-        auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
-        if (lvw && lvw->autoReload())
+    for (LogViewWidget* lvw : logViews())
+        if (lvw->autoReload())
             lvw->reloadChangedFiles();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4339,15 +4342,8 @@ void MainWindow::onToggleTabAutoReload()
 // ---------------------------------------------------------------------------
 void MainWindow::updateAutoReloadTimer()
 {
-    bool anyActive = false;
-    for (int i = 0; i < ui->tabWidget->count(); ++i) {
-        auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
-        if (lvw && lvw->autoReload()) {
-            anyActive = true;
-            break;
-        }
-    }
-    if (anyActive)
+    const QList<LogViewWidget*> views = logViews();
+    if (std::any_of(views.cbegin(), views.cend(), [](LogViewWidget* v) { return v->autoReload(); }))
         m_autoReloadTimer->start();
     else
         m_autoReloadTimer->stop();

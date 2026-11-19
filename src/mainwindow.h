@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "sessioncontroller.h"
 #include <QMainWindow>
 #include <QPointer>
 #include <QPair>
@@ -53,9 +54,7 @@ class LogModel;
 class LogListView;
 class LogPattern;
 class SearchResultsController;
-class SessionController;
 class SessionReportDialog;
-struct SessionState;
 class SearchResultsNavigator;
 class FieldReextraction;
 class QModelIndex;
@@ -91,6 +90,11 @@ public:
     // ставится до них; о пропавших и изменённых файлах — ссылка в строке
     // состояния на отчёт. Логика — SessionController.
     void openSessionFile(const QString& path);
+    // Запуск окна (main): primary — окно владеет последней сессией
+    // (OpenRouting::ownsLastSession). Включена настройка — вкладки прошлого
+    // сеанса, затем командная строка; файлы второго экземпляра идут мимо — в
+    // openCommandLine.
+    void startUp(const OpenRouting::CommandLine& commandLine, bool primary);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -308,6 +312,12 @@ private:
     QLabel* m_sessionReportLink = nullptr;
     void saveSessionAs();
     void applySessionSchema(const SessionState& session);
+    void openSession(const SessionState& session, const QString& path, SessionController::Origin origin);
+    void showSessionResult(const SessionController::OpenResult& result, SessionController::Origin origin);
+    void reopenClosedTab(); // Ctrl+Shift+T
+    // Вкладка для обычного открытия файла: текущая пустая (isBlank) или новая.
+    LogViewWidget* tabForOpening();
+    QList<LogViewWidget*> logViews() const; // вкладки по порядку ряда
 
     // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
     // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной
@@ -443,7 +453,7 @@ private:
     // Закрыть одну вкладку: отсоединить её view, снять со стека, удалить и
     // обновить таймер авто-перезагрузки / статусбар. Общий путь для крестика,
     // средней кнопки мыши и пунктов контекстного меню.
-    void closeTab(int index);
+    void closeTab(int index, bool remember = true); // remember — в стек Ctrl+Shift+T
     void closeOtherTabs(int keepIndex);   // закрыть все, кроме keepIndex
     void closeTabsToRight(int index);     // закрыть вкладки правее index
     void closeAllTabs();

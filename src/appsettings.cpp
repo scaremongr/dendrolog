@@ -78,6 +78,7 @@ void AppSettings::load()
     m_fallbackEncoding       = fallbackEncodingFromString(
         s.value(QStringLiteral("fallbackEncoding")).toString());
     m_rememberFileState      = s.value(QStringLiteral("rememberFileState"), true).toBool();
+    m_restoreSessionOnStartup = s.value(QStringLiteral("restoreSessionOnStartup"), false).toBool();
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -143,6 +144,7 @@ void AppSettings::save()
     s.setValue(QStringLiteral("theme"),                  themeModeToString(m_themeMode));
     s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
     s.setValue(QStringLiteral("rememberFileState"),      m_rememberFileState);
+    s.setValue(QStringLiteral("restoreSessionOnStartup"), m_restoreSessionOnStartup);
     s.endGroup();
 
     writeQuickSearch(s);
@@ -340,6 +342,19 @@ void AppSettings::setRememberFileState(bool enabled)
 QString AppSettings::fileMemoryDir()
 {
     return configDir() + QStringLiteral("/memory");
+}
+
+void AppSettings::setRestoreSessionOnStartup(bool enabled)
+{
+    if (m_restoreSessionOnStartup == enabled)
+        return;
+    m_restoreSessionOnStartup = enabled;
+    emit settingsChanged();
+}
+
+QString AppSettings::lastSessionFile()
+{
+    return configDir() + QStringLiteral("/last-session.json");
 }
 
 int AppSettings::textCacheBudgetMB() const

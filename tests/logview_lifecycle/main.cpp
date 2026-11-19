@@ -22,11 +22,19 @@
 //   • память файла (R-4): ротация app.log → app.log.1 (память находит
 //     переименованный файл по содержимому, новый app.log открывается чистым —
 //     в обоих порядках открытия) и перенос файла в другую папку; оба бэкенда.
+//   • закрыть вкладку и вернуть её (Ctrl+Shift+T, R-5; SessionController на
+//     ряду QTabWidget): файлы (и слитая вкладка), фильтры, маркеры, закладки,
+//     текущая строка и её место на экране, выбор кодировки, место в ряду;
+//     стек из 10; файл за время закрытия дописан, переписан, удалён; вкладка
+//     stdin и пустая в стек не идут; вкладка из снимка без файлов не пустая
+//     для обычного открытия (isBlank); оба бэкенда.
 // ============================================================================
 
 #include "appsettings.h"
 #include "filememorystore.h"
 #include "logviewwidget.h"
+#include "sessioncontroller.h"
+#include "stdinspooler.h"
 #include "testdocuments.h"
 
 #include "LogListView.h"
@@ -42,6 +50,7 @@
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QStringEncoder>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QWheelEvent>
 #include <cstdio>
@@ -1757,6 +1766,314 @@ static void checkFileMemoryRotation(const QDir& dir, const QString& name, const 
           label + QStringLiteral(": память переехала"));
 }
 
+// ---- Закрыть вкладку и вернуть (Ctrl+Shift+T, R-5) ------------------------------
+
+static int rowOfPathLine(const LogModel& model, const QString& path, qint64 line)
+{
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const RecordKey key = model.keyAt(row);
+        if (key.line == line && key.file && LogViewWidget::samePath(key.file->filePath, path))
+            return row;
+    }
+    return -1;
+}
+
+static bool tabSettled(LogViewWidget& tab)
+{
+    const bool ok = testdocs::waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); }, 60000)
+        && testdocs::settle(*tab.model());
+    testdocs::waitFor([&] { return !tab.view()->hasPendingLayout(); }, 5000);
+    testdocs::pump(30);
+    return ok;
+}
+
+// Ряд вкладок окна: QTabWidget, контроллер, создание вкладки на месте.
+struct TabRow {
+    QString schema;
+    QTabWidget widget;
+    SessionController controller;
+
+    explicit TabRow(const QString& s) : schema(s)
+    {
+        widget.resize(900, 400);
+        widget.show();
+    }
+    LogViewWidget* make(int position = -1)
+    {
+        auto* tab = new LogViewWidget();
+        tab->setParserPattern(schema);
+        const int at = position < 0 ? widget.count() : qMin(position, widget.count());
+        widget.setCurrentIndex(widget.insertTab(at, tab, QStringLiteral("Logs")));
+        return tab;
+    }
+    LogViewWidget* open(const QStringList& paths)
+    {
+        LogViewWidget* tab = make();
+        for (const QString& path : paths)
+            tab->addLogFile(path);
+        CHECK(tabSettled(*tab), QStringLiteral("reopen: load %1").arg(paths.join(QLatin1Char(','))));
+        return tab;
+    }
+    LogViewWidget* at(int index) const { return qobject_cast<LogViewWidget*>(widget.widget(index)); }
+    // Как MainWindow::closeTab: снимок в стек ДО удаления страницы.
+    bool close(int index)
+    {
+        LogViewWidget* tab = at(index);
+        const bool remembered = controller.rememberClosedTab(tab, index);
+        widget.removeTab(index);
+        delete tab;
+        return remembered;
+    }
+    SessionController::OpenResult reopen()
+    {
+        const auto result = controller.reopenClosedTab([this](int position) { return make(position); });
+        if (result.active)
+            widget.setCurrentWidget(result.active);
+        return result;
+    }
+};
+
+static QStringList fileNames(const LogViewWidget& tab)
+{
+    QStringList names;
+    for (const LogFilePtr& f : tab.loadedFiles())
+        names << QFileInfo(f->filePath).fileName();
+    names.sort();
+    return names;
+}
+
+static void checkReopenClosedTab(const QDir& dir, const QString& name, const QString& schema)
+{
+    const QString prefix = QStringLiteral("reopen %1: ").arg(name);
+    const QString a = testdocs::writeFile(dir, name + "-reopen-a.log", memoryLog("alpha", 400));
+    const QString b1 = testdocs::writeFile(dir, name + "-reopen-b1.log", memoryLog("bee", 120));
+    const QString b2 = testdocs::writeFile(dir, name + "-reopen-b2.log", memoryLog("bumble", 120));
+    const QString c = testdocs::writeFile(dir, name + "-reopen-c.log", memoryLog("sea", 60));
+
+    TabRow row(schema);
+    LogViewWidget* ta = row.open({ a });
+    LogViewWidget* tb = row.open({ b1, b2 });
+    row.open({ c });
+
+    // ---- Вкладка A: закладки, маркер, фильтры, кодировка, выбранная строка ----
+    row.widget.setCurrentWidget(ta);
+    LogModel& ma = *ta->model();
+    ta->bookmarks().add(rowOfPathLine(ma, a, 10), QStringLiteral("ten"));
+    ta->bookmarks().add(rowOfPathLine(ma, a, 200), QStringLiteral("two hundred"));
+    HighlightPattern marker;
+    marker.text = QStringLiteral("alpha 1");
+    marker.color = QColor(Qt::yellow);
+    ma.setRowMarkers({ marker });
+    FilterRule rule;
+    rule.action = FilterRule::Action::Exclude;
+    rule.text = QStringLiteral("alpha 13");
+    FilterRuleSet rules;
+    rules.rules = { rule };
+    rules.bindFields(ta->parserFieldNames(), false);
+    ma.setFilters({ LogLevel::Info }, QDateTime(), QDateTime(), rules);
+    ta->setFileEncoding(ta->loadedFiles().first(), TextEncoding::Windows1251);
+    CHECK(tabSettled(*ta), prefix + "A: filters");
+    const int currentRow = rowOfPathLine(ma, a, 150);
+    CHECK(currentRow >= 0, prefix + "A: line 150 visible");
+    ta->view()->goToRow(currentRow);
+    testdocs::pump(20);
+    QScrollBar* bar = ta->view()->verticalScrollBar();
+    bar->setValue(bar->value() + bar->singleStep() * 3);
+    testdocs::pump(20);
+    const int savedTop = ta->view()->visualRect(ma.index(rowOfPathLine(ma, a, 150), 0)).top();
+    const int rowsA = ma.rowCount();
+
+    // Слитая B: закладка в каждом файле.
+    LogModel& mb = *tb->model();
+    tb->bookmarks().add(rowOfPathLine(mb, b1, 5), QStringLiteral("b1-5"));
+    tb->bookmarks().add(rowOfPathLine(mb, b2, 7), QStringLiteral("b2-7"));
+
+    // ---- Закрыть A (место 0) и вернуть ----------------------------------------
+    CHECK(row.close(0) && row.controller.closedTabCount() == 1, prefix + "A remembered");
+    auto result = row.reopen();
+    CHECK(result.tabs.size() == 1 && !result.hasProblems() && row.controller.report().isEmpty(),
+          prefix + "A reopened without problems");
+    CHECK(row.controller.closedTabCount() == 0, prefix + "stack empty after reopen");
+    LogViewWidget* ra = row.at(0);
+    CHECK(ra && result.tabs.value(0) == ra && row.widget.currentWidget() == ra, prefix + "A back at its place 0 and current");
+    if (ra) {
+        CHECK(tabSettled(*ra), prefix + "A: load");
+        LogModel& m = *ra->model();
+        CHECK(fileNames(*ra) == QStringList{ QFileInfo(a).fileName() } && m.rowCount() == rowsA,
+              prefix + QStringLiteral("A: file and visible rows (%1 vs %2)").arg(m.rowCount()).arg(rowsA));
+        QStringList marks;
+        for (const Bookmark& bm : ra->bookmarks().bookmarks())
+            if (ra->bookmarks().visibleRow(bm.id) == rowOfPathLine(m, a, bm.line))
+                marks << QStringLiteral("%1:%2").arg(bm.line).arg(bm.note);
+        marks.sort();
+        CHECK(marks == (QStringList{ QStringLiteral("10:ten"), QStringLiteral("200:two hundred") }),
+              prefix + "A: bookmarks with notes on their lines: " + marks.join(", "));
+        CHECK(highlightPatternsToJson(m.rowMarkers()) == highlightPatternsToJson({ marker }), prefix + "A: markers");
+        CHECK(m.logLevelFilter() == QSet<LogLevel>{ LogLevel::Info } && m.filterRules().toJson() == rules.toJson(),
+              prefix + "A: filters");
+        const int r = rowOfPathLine(m, a, 150);
+        CHECK(r >= 0 && ra->view()->userSelectedRow() == r, prefix + "A: current line selected");
+        if (r >= 0)
+            CHECK(ra->view()->visualRect(m.index(r, 0)).top() == savedTop,
+                  prefix + QStringLiteral("A: place on screen %1, was %2")
+                               .arg(ra->view()->visualRect(m.index(r, 0)).top()).arg(savedTop));
+        const FileEncoding enc = ra->fileEncoding(ra->loadedFiles().value(0));
+        CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Windows1251,
+              prefix + "A: encoding choice");
+        CHECK(m.isIndexedBackend() == (name == QLatin1String("indexed")), prefix + "A: backend");
+        CHECK(!ra->isBlank(), prefix + "A: not blank");
+    }
+
+    // ---- Слитая B (место 1) ---------------------------------------------------------
+    CHECK(row.close(1), prefix + "B remembered");
+    result = row.reopen();
+    LogViewWidget* rb = row.at(1);
+    CHECK(rb && result.tabs.value(0) == rb, prefix + "B back at its place 1");
+    if (rb) {
+        CHECK(tabSettled(*rb), prefix + "B: load");
+        CHECK(fileNames(*rb).size() == 2, prefix + "B: both files");
+        int found = 0;
+        for (const Bookmark& bm : rb->bookmarks().bookmarks()) {
+            const QString path = bm.note == QLatin1String("b1-5") ? b1 : b2;
+            if (rb->bookmarks().visibleRow(bm.id) == rowOfPathLine(*rb->model(), path, bm.line))
+                ++found;
+        }
+        CHECK(found == 2, prefix + "B: bookmarks of both files on their lines");
+    }
+
+    // ---- Места в ряду больше нет: в конец --------------------------------------------
+    CHECK(row.widget.count() == 3, prefix + "three tabs");
+    CHECK(row.close(2), prefix + "C remembered");
+    row.close(1);
+    row.close(0); // стек: C(2), B(1), A(0)
+    CHECK(row.controller.closedTabCount() == 3, prefix + "three closed");
+    result = row.reopen(); // A — на место 0
+    result = row.reopen(); // B — на место 1
+    result = row.reopen(); // C — на место 2
+    CHECK(row.widget.count() == 3 && fileNames(*row.at(0)) == QStringList{ QFileInfo(a).fileName() }
+              && fileNames(*row.at(2)) == QStringList{ QFileInfo(c).fileName() },
+          prefix + "order restored A, B, C");
+    CHECK(row.close(2), prefix + "C closed again at place 2");
+    while (row.widget.count() > 0) { // остальные — мимо стека
+        QWidget* page = row.widget.widget(0);
+        row.widget.removeTab(0);
+        delete page;
+    }
+    row.open({ b1 });
+    CHECK(row.controller.closedTabCount() == 1, prefix + "one closed");
+    result = row.reopen(); // C на место 2: в ряду одна вкладка — в конец
+    CHECK(row.widget.count() == 2 && fileNames(*row.at(1)) == QStringList{ QFileInfo(c).fileName() },
+          prefix + "place gone — appended at the end");
+    while (row.widget.count() > 0)
+        row.close(0);
+
+    // ---- Стек из 10 -------------------------------------------------------------
+    {
+        TabRow many(schema);
+        QStringList paths;
+        for (int i = 0; i < 12; ++i)
+            paths << testdocs::writeFile(dir, name + QStringLiteral("-many-%1.log").arg(i), memoryLog("m", 5));
+        for (const QString& path : paths)
+            many.open({ path });
+        for (int i = 0; i < 12; ++i)
+            many.close(0);
+        CHECK(many.controller.closedTabCount() == SessionController::kClosedTabsLimit,
+              prefix + QStringLiteral("stack keeps the last 10 (%1)").arg(many.controller.closedTabCount()));
+        QStringList back;
+        while (many.controller.closedTabCount() > 0) {
+            const auto r = many.reopen();
+            back << (r.tabs.isEmpty() ? QString() : fileNames(*r.tabs[0]).value(0));
+        }
+        QStringList expected;
+        for (int i = 11; i >= 2; --i)
+            expected << QFileInfo(paths[i]).fileName();
+        CHECK(back == expected, prefix + "last closed first, the two oldest dropped: " + back.join(", "));
+        CHECK(many.reopen().tabs.isEmpty(), prefix + "empty stack — nothing reopened");
+    }
+
+    // ---- Файл за время закрытия дописан ----------------------------------------------
+    {
+        TabRow r(schema);
+        const QString path = testdocs::writeFile(dir, name + "-reopen-grow.log", memoryLog("grow", 100));
+        LogViewWidget* t = r.open({ path });
+        t->bookmarks().add(rowOfPathLine(*t->model(), path, 20), QStringLiteral("twenty"));
+        r.close(0);
+        CHECK(testdocs::appendToFile(path, memoryLog("more", 30)), prefix + "append while closed");
+        const auto res = r.reopen();
+        CHECK(!res.hasProblems() && r.controller.report().isEmpty(), prefix + "appended: no problems");
+        LogViewWidget* back = r.at(0);
+        CHECK(back && tabSettled(*back) && back->model()->rowCount() == 130, prefix + "appended: all lines");
+        if (back) {
+            const QVector<Bookmark> list = back->bookmarks().bookmarks();
+            CHECK(list.size() == 1 && back->bookmarks().visibleRow(list[0].id)
+                                          == rowOfPathLine(*back->model(), path, 20),
+                  prefix + "appended: bookmark on its line");
+        }
+    }
+
+    // ---- Переписан -------------------------------------------------------------------
+    {
+        TabRow r(schema);
+        const QString path = testdocs::writeFile(dir, name + "-reopen-rewrite.log", memoryLog("old", 100));
+        LogViewWidget* t = r.open({ path });
+        t->bookmarks().add(rowOfPathLine(*t->model(), path, 20), QStringLiteral("old twenty"));
+        r.close(0);
+        testdocs::writeFile(dir, name + "-reopen-rewrite.log", memoryLog("new content", 50));
+        const auto res = r.reopen();
+        CHECK(res.changed == 1 && res.missing == 0, prefix + "rewritten: reported as changed");
+        const auto report = r.controller.report();
+        CHECK(report.size() == 1 && report[0].kind == SessionController::ReportEntry::Kind::Changed,
+              prefix + "rewritten: report entry");
+        CHECK(!SessionController::summary(res, SessionController::Origin::ClosedTab).isEmpty(),
+              prefix + "rewritten: summary");
+        LogViewWidget* back = r.at(0);
+        CHECK(back && tabSettled(*back) && back->fileCount() == 1 && back->model()->rowCount() == 50,
+              prefix + "rewritten: opened from scratch");
+        if (back) {
+            const QVector<Bookmark> list = back->bookmarks().bookmarks();
+            CHECK(list.size() == 1 && back->bookmarks().status(list[0].id) == BookmarkStore::Status::Missing,
+                  prefix + "rewritten: bookmark grey");
+        }
+    }
+
+    // ---- Удалён ----------------------------------------------------------------------
+    {
+        TabRow r(schema);
+        const QString path = testdocs::writeFile(dir, name + "-reopen-gone.log", memoryLog("gone", 100));
+        LogViewWidget* t = r.open({ path });
+        t->bookmarks().add(rowOfPathLine(*t->model(), path, 20), QStringLiteral("gone twenty"));
+        r.close(0);
+        CHECK(QFile::remove(path), prefix + "delete while closed");
+        const auto res = r.reopen();
+        CHECK(res.missing == 1 && res.tabs.size() == 1, prefix + "deleted: reported as missing, tab created");
+        const auto report = r.controller.report();
+        CHECK(report.size() == 1 && report[0].kind == SessionController::ReportEntry::Kind::Missing,
+              prefix + "deleted: report entry");
+        LogViewWidget* back = r.at(0);
+        CHECK(back && back->fileCount() == 0 && back->bookmarks().bookmarks().size() == 1,
+              prefix + "deleted: no file, bookmark waits for it");
+        // Вкладка из снимка без файлов — не «пустая»: обычное открытие её не займёт.
+        CHECK(back && !back->isBlank(), prefix + "deleted: snapshot tab is not reused for the next file");
+        // Закрыть снова — в стек (закладки ждут файл), отчёт по закрытой вкладке ушёл.
+        CHECK(r.close(0) && r.controller.report().isEmpty(), prefix + "deleted: closed again, report cleared");
+    }
+
+    // ---- stdin и пустая вкладка в стек не идут ------------------------------------
+    {
+        TabRow r(schema);
+        LogViewWidget* blank = r.make();
+        CHECK(blank->isBlank(), prefix + "new tab is blank");
+        CHECK(!r.close(0), prefix + "empty tab is not remembered");
+        const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+        CHECK(testdocs::writeFile(QDir(QFileInfo(spool).absolutePath()), QFileInfo(spool).fileName(),
+                                  memoryLog("piped", 20)) == spool,
+              prefix + "spool written");
+        r.open({ spool });
+        CHECK(!r.close(0) && r.controller.closedTabCount() == 0, prefix + "stdin tab is not remembered");
+        QFile::remove(spool);
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1802,6 +2119,10 @@ int main(int argc, char** argv)
     checkFileMemoryRotation(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkFileMemoryRotation(dir, QStringLiteral("indexed"), schema);
+    settings.setIndexedThresholdMB(512);
+    checkReopenClosedTab(dir, QStringLiteral("resident"), schema);
+    settings.setIndexedThresholdMB(0);
+    checkReopenClosedTab(dir, QStringLiteral("indexed"), schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

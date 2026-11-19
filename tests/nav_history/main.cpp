@@ -792,6 +792,8 @@ static void checkShortcuts()
           QStringLiteral("Alt+← — назад"));
     CHECK(sm.sequence(QStringLiteral("navigateForward")) == QKeySequence(Qt::ALT | Qt::Key_Right),
           QStringLiteral("Alt+→ — вперёд"));
+    CHECK(sm.sequence(QStringLiteral("reopenTab")) == QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T),
+          QStringLiteral("Ctrl+Shift+T — вернуть закрытую вкладку (R-5)"));
     QSet<QString> seen;
     for (const ShortcutManager::Command& c : sm.commands()) {
         if (c.defaultSeq.isEmpty())

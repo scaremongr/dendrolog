@@ -100,5 +100,6 @@ private:
     // TextEncoding, -1 — по локали системы.
     QComboBox* m_fallbackEncodingCombo = nullptr;
     class QCheckBox* m_rememberFileStateCheckBox = nullptr;
+    class QCheckBox* m_restoreSessionCheckBox = nullptr;
     class FileMemoryStore* m_fileMemory = nullptr;
 };

@@ -133,6 +133,11 @@ public:
     
     // Возвращает количество загруженных файлов
     int fileCount() const { return m_loadedFiles.size(); }
+    // Пустая вкладка, которую обычное открытие файла может занять: без файлов
+    // и не созданная из снимка (applyState). Вкладка сессии, у которой пропали
+    // все файлы, и возвращённая Ctrl+Shift+T держат фильтры и закладки снимка —
+    // чужой файл в неё не ложится (R-5, шаг 2).
+    bool isBlank() const { return m_loadedFiles.isEmpty() && !m_fromState; }
 
     // Проверяет, изменились ли файлы на диске, и дочитывает новые данные.
     // Возвращает true если хотя бы один файл был обновлён.
@@ -525,6 +530,7 @@ private:
     QString m_bookmarkSignature;
     bool m_memoryApplying = false; // applyState памяти, перенос вкладки — без памяти
     bool m_applyingState = false;  // файлы applyState: из памяти — только закладки
+    bool m_fromState = false;      // вкладка получила снимок (isBlank)
     // Плашка «вернуть фильтры прошлого раза»; закрыта — до закрытия вкладки.
     QFrame* m_filtersOfferBar = nullptr;
     QLabel* m_filtersOfferText = nullptr;

@@ -232,6 +232,13 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 - **Restore report.** Opening asks nothing. A file found at neither path is skipped (its bookmarks wait for it); a file that changed since the session was saved (rotation, overwrite) opens clean, its bookmarks are greyed out in the panel (**line not found**) and the position is not restored. A link in the status bar says so — and also lists files found next to the session — and opens the **Session Report** window: tab, file, what happened. For a missing file **Locate File…** lets you point at where it is now: only the same file is accepted (its beginning and saved part match), and its bookmarks move to it. A missing file that was not located stays in the session when you save it again.
 - A session saved by a newer version of DendroLog is not opened, and the file is left untouched.
 
+### The previous session and closed tabs
+
+- **Previous session.** On exit DendroLog remembers the window's tabs just like **Save Session As…** does (the file `last-session.json` in the settings folder). A window closed without tabs leaves the previous session as it is; a window closed with tabs replaces it, even if it was never restored. The session is remembered only on a normal exit (closing the window, `Ctrl+Q`); after a crash the one before stays.
+- **Restore on startup** — the **Settings → General → Sessions → Restore the tabs of the previous session on startup** check box, off by default. On: the previous session's tabs open at startup, then the files from the command line. Off: the start screen shows a **Restore previous session** link until the session is restored. Restoring asks nothing: a status-bar link to the same **Session Report** tells about files that are missing or changed.
+- **Several windows.** The previous session belongs to the main window. A window opened with `--new-instance` or reading a stream (`program | DendroLog -`) neither restores nor overwrites it. Files passed to an open window (a second launch, a double-click on a file) open as new tabs and do not trigger a restore.
+- **Reopen a closed tab** — `Ctrl+Shift+T` (**File → Reopen Closed Tab**): the tab comes back to its place in the tab row with its files, filters, markers, bookmarks, selected line and encoding choice. The last 10 closed tabs are remembered until DendroLog exits. A stdin tab, an empty tab and a tab merged into another one are not remembered. If a file was rewritten or deleted meanwhile, the status bar says so, as when a session is opened.
+
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.
@@ -287,6 +294,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 | Open log file(s) | `Ctrl+O` |
 | Save View As | `Ctrl+Shift+S` |
 | Close tab | `Ctrl+W` |
+| Reopen closed tab | `Ctrl+Shift+T` |
 | Exit | `Ctrl+Q` |
 | Reload file | `F5` |
 | Auto-reload this tab | `Ctrl+Shift+F5` |
