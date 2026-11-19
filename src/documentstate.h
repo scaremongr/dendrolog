@@ -131,6 +131,10 @@ struct TabState {
 // логами в другую папку или на другую машину, находит их по нему
 // (SessionFile::rebind). Относительный не пишется, если его не построить
 // (другой диск на Windows); разделитель в нём — '/' на всех платформах.
+// Файл с другой ОС (R-8): абсолютный путь — по правилу SavedPath (путь
+// Windows читается на Linux и наоборот), источник по чужому пути — только по
+// относительному; у чужого пути относительный при записи не строится заново
+// от него самого (см. relativeTargets).
 // Нет схемы — нет ключа schema; visibleFields пусто — все колонки.
 //
 // Чтение — с явным отказом: чужой format, версия не 1, битые поля и вложенные
@@ -153,13 +157,23 @@ struct SessionState {
     // Прочитанное из таблицы files: абсолютный путь (как сохранён) →
     // относительный к каталогу файла сессии. toJson его не читает — строит
     // заново от sessionFilePath.
+    // Путь — SavedPath::normalized, как у SourceIdentity.
     QHash<QString, QString> relativePaths;
+    // Для пересохранения (заполняет SessionController::capture): путь
+    // пропавшего источника → локальный абсолютный путь, куда указывал
+    // относительный путь прежнего файла сессии. toJson строит относительный
+    // от него, а не от сохранённого пути: у пути другой ОС (R-8) иначе
+    // относительного не было бы, и пересохранённая на Linux сессия с Windows
+    // потеряла бы запасной путь. В файл не пишется.
+    QHash<QString, QString> relativeTargets;
 
     bool hasSchema() const { return !schema.isEmpty(); }
-    // Регистр пути — как у файловой системы платформы (как у SourceIdentity).
+    // Сравнение сохранённых путей — SavedPath::same (путь Windows без учёта
+    // регистра на любой ОС, как у SourceIdentity).
     static bool samePath(const QString& a, const QString& b);
     // Относительный путь из таблицы files для абсолютного; пусто — нет.
     QString relativePathOf(const QString& path) const;
+    QString relativeTargetOf(const QString& path) const;
     // Все абсолютные пути вкладок (без повторов): файлы, источники закладок и
     // текущей строки.
     QStringList paths() const;

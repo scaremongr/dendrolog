@@ -2296,6 +2296,380 @@ static void checkLastSession(const QDir& dir, const QString& schema)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Сессия с другой ОС (R-8)
+// ---------------------------------------------------------------------------
+//
+// Эталоны session-windows.json и session-posix.json — сессия, сохранённая на
+// Windows и на Linux: две вкладки (одна слитая), закладки с заметками,
+// фильтры, маркер, кодировка, позиция. Абсолютные пути в них — чужие для
+// одной из платформ CI, относительные ведут из «sessions/» в «../логи и
+// данные/». Логи сценария детерминированы (logBytes): эталоны хранят их
+// отпечатки. Поменялись логи или формат — эталоны пересобрать:
+//   DOCUMENT_STATE_WRITE_CROSS_OS=<каталог> document_state
+// (пишет оба файла в каталог и выходит).
+
+static const QString kCrossLogs = QStringLiteral("логи и данные");
+static const QString kCrossSession = QStringLiteral("инцидент 1.dlsession");
+
+struct CrossLogs {
+    QString one, ma, mb;
+};
+
+static CrossLogs writeCrossLogs(const QString& base, bool withOne)
+{
+    const QDir logs(base + QLatin1Char('/') + kCrossLogs);
+    QDir().mkpath(logs.path());
+    CrossLogs out;
+    out.one = logs.filePath(QStringLiteral("one.log"));
+    if (withOne)
+        writeFile(logs, QStringLiteral("one.log"), logBytes(400));
+    out.ma = writeFile(logs, QStringLiteral("merged-a.log"), logBytes(200));
+    out.mb = writeFile(logs, QStringLiteral("merged-b.log"), logBytes(200, 1, "bee"));
+    return out;
+}
+
+// Путь лога сценария на «той» машине: в источниках вкладок и таблице files
+// (sourceForm) — как его записала бы Windows-версия с разными написаниями, в
+// закладках и текущей строке — с прямыми слэшами (нормализуются в одно).
+// Сервер UNC — адрес, а не имя: на Windows CI путь родной и проверяется с
+// диска, разрешение имени по сети заняло бы секунды.
+static QString foreignPath(const QString& style, const QString& fileName, bool sourceForm)
+{
+    if (style == QLatin1String("posix"))
+        return QStringLiteral("/home/anna/Инцидент/логи и данные/") + fileName;
+    QString path;
+    if (fileName == QLatin1String("merged-b.log"))
+        path = QStringLiteral("//127.0.0.1/incident share/Инцидент/логи и данные/") + fileName;
+    else
+        path = QStringLiteral("C:/Users/Анна/Инцидент/логи и данные/") + fileName;
+    if (!sourceForm)
+        return path;
+    path.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    if (fileName == QLatin1String("merged-a.log"))
+        path.prepend(QStringLiteral("\\\\?\\"));
+    return path;
+}
+
+static QJsonObject withForeignPaths(QJsonObject session, const QString& style)
+{
+    const auto mapped = [&style](const QString& local, bool sourceForm) {
+        return foreignPath(style, QFileInfo(local).fileName(), sourceForm);
+    };
+    const auto mapSource = [&](QJsonObject holder, bool sourceForm) {
+        QJsonObject source = holder.value("source").toObject();
+        source.insert("path", mapped(source.value("path").toString(), sourceForm));
+        holder.insert("source", source);
+        return holder;
+    };
+    QJsonArray files = session.value("files").toArray();
+    for (int i = 0; i < files.size(); ++i) {
+        QJsonObject f = files[i].toObject();
+        f.insert("path", mapped(f.value("path").toString(), true));
+        files.replace(i, f);
+    }
+    session.insert("files", files);
+    QJsonArray tabs = session.value("tabs").toArray();
+    for (int t = 0; t < tabs.size(); ++t) {
+        QJsonObject tab = tabs[t].toObject();
+        QJsonArray sources = tab.value("sources").toArray();
+        for (int i = 0; i < sources.size(); ++i)
+            sources.replace(i, mapSource(sources[i].toObject(), true));
+        tab.insert("sources", sources);
+        QJsonArray marks = tab.value("bookmarks").toArray();
+        for (int i = 0; i < marks.size(); ++i)
+            marks.replace(i, mapSource(marks[i].toObject(), false));
+        tab.insert("bookmarks", marks);
+        QJsonObject view = tab.value("view").toObject();
+        if (view.contains("current"))
+            view.insert("current", mapSource(view.value("current").toObject(), false));
+        tab.insert("view", view);
+        tabs.replace(t, tab);
+    }
+    session.insert("tabs", tabs);
+    return session;
+}
+
+static int writeCrossOsGoldens(const QString& outDir, const QDir& dir, const QString& schema)
+{
+    const QString base = dir.filePath(QStringLiteral("cross-os-golden"));
+    const CrossLogs logs = writeCrossLogs(base, true);
+    QDir().mkpath(base + QStringLiteral("/sessions"));
+    const QString sessionPath = base + QStringLiteral("/sessions/") + kCrossSession;
+    const Saved saved = prepareSource(logs.one, schema, true);
+    auto tab1 = makeTab(schema);
+    tab1->applyState(saved.state);
+    auto tab2 = makeTab(schema);
+    tab2->addLogFile(logs.ma);
+    tab2->addLogFile(logs.mb);
+    if (!settled(*tab1) || !settled(*tab2))
+        return 2;
+    LogModel& m2 = *tab2->model();
+    tab2->bookmarks().add(rowOfLine(m2, logs.ma, 10), QStringLiteral("a10"));
+    tab2->bookmarks().add(rowOfLine(m2, logs.mb, 20), QStringLiteral("b20"));
+    tab2->view()->goToRow(rowOfLine(m2, logs.mb, 100));
+    pump(20);
+    SessionController controller;
+    SessionState session = controller.capture({ tab1.get(), tab2.get() }, tab2.get());
+    session.schemaName = QStringLiteral("test schema");
+    session.schema = schema;
+    if (!SessionFile::save(sessionPath, session))
+        return 2;
+    const QJsonObject local = bytesToObject(readBytes(sessionPath));
+    for (const QString& style : { QStringLiteral("windows"), QStringLiteral("posix") }) {
+        QFile out(outDir + QStringLiteral("/session-") + style + QStringLiteral(".json"));
+        if (!out.open(QIODevice::WriteOnly))
+            return 2;
+        out.write(objectToBytes(withForeignPaths(local, style)));
+    }
+    std::fprintf(stdout, "эталоны R-8 записаны в %s\n", U8(outDir));
+    return 0;
+}
+
+static void checkCrossOsSession(const QDir& dir, const QString& name, const QString& schema,
+                                const QString& style)
+{
+    g_context = name + QStringLiteral(" / сессия с другой ОС (") + style + QStringLiteral("): логи рядом");
+    const QByteArray golden = readBytes(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/session-") + style
+                                        + QStringLiteral(".json"));
+    CHECK(!golden.isEmpty(), QStringLiteral("эталон есть"));
+
+    // ---- Логи лежат рядом с сессией по относительному пути ------------------
+    {
+        const QString base = dir.filePath(name + QStringLiteral("-cross-") + style);
+        const CrossLogs logs = writeCrossLogs(base, true);
+        QDir().mkpath(base + QStringLiteral("/sessions"));
+        const QString sessionPath = base + QStringLiteral("/sessions/") + kCrossSession;
+        CHECK(writeBytes(sessionPath, golden), QStringLiteral("файл сессии"));
+        const SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+        CHECK(loaded.state.has_value(), QStringLiteral("читается: ") + loaded.error);
+        if (!loaded.state)
+            return;
+        TabPool pool{ schema, {} };
+        SessionController controller;
+        const auto result = controller.open(*loaded.state, sessionPath, [&pool]() { return pool.make(); });
+        CHECK(result.tabs.size() == 2 && !result.hasProblems() && result.relocated == 3,
+              QStringLiteral("две вкладки, три файла найдены по относительному пути (%1 / %2)")
+                  .arg(result.relocated).arg(result.missing));
+        CHECK(result.active == result.tabs.value(1), QStringLiteral("активная вкладка — вторая"));
+        const auto report = controller.report();
+        CHECK(report.size() == 3, QStringLiteral("отчёт: три записи"));
+        for (const auto& e : report)
+            CHECK(e.kind == SessionController::ReportEntry::Kind::Relocated
+                      && SavedPath::isAbsolute(e.savedPath)
+                      && e.savedPath == SavedPath::normalized(foreignPath(style, QFileInfo(e.path).fileName(), true)),
+                  QStringLiteral("отчёт: «%1» найден рядом с сессией").arg(e.savedPath));
+        if (result.tabs.size() != 2)
+            return;
+
+        LogViewWidget& t1 = *result.tabs[0];
+        CHECK(settled(t1), QStringLiteral("вкладка 1: загрузка"));
+        CHECK(t1.fileCount() == 1 && t1.loadedFiles().first()->filePath == logs.one,
+              QStringLiteral("вкладка 1: файл рядом с сессией"));
+        Saved expected;
+        expected.path = logs.one;
+        expected.currentLine = 170;
+        expected.currentTop = loaded.state->tabs[0].view.viewportOffset;
+        for (const qint64 line : { qint64(2), qint64(40), qint64(120), qint64(200) })
+            expected.notes.insert(line, QStringLiteral("заметка к %1").arg(line));
+        checkBookmarksOnLines(t1, expected, QStringLiteral("вкладка 1: закладки с заметками"));
+        LogModel& m1 = *t1.model();
+        const ViewState& v1 = loaded.state->tabs[0].view;
+        CHECK(m1.logLevelFilter() == v1.levels && v1.textRules.isActive()
+                  && m1.filterRules().toJson() == v1.textRules.toJson()
+                  && highlightPatternsToJson(m1.rowMarkers()) == highlightPatternsToJson(v1.markers)
+                  && !v1.markers.isEmpty(),
+              QStringLiteral("вкладка 1: фильтры и маркер"));
+        checkPositionRestored(t1, expected, QStringLiteral("вкладка 1: строка и место на экране"));
+        const FileEncoding enc = t1.fileEncoding(t1.loadedFiles().first());
+        CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Windows1251,
+              QStringLiteral("вкладка 1: выбор кодировки"));
+        CHECK(m1.isIndexedBackend() == (name == QLatin1String("indexed")), QStringLiteral("бэкенд"));
+
+        LogViewWidget& t2 = *result.tabs[1];
+        CHECK(settled(t2), QStringLiteral("вкладка 2: загрузка"));
+        LogModel& m2 = *t2.model();
+        CHECK(t2.fileCount() == 2, QStringLiteral("вкладка 2: оба файла (с \\\\?\\ и UNC)"));
+        int found = 0;
+        for (const Bookmark& b : t2.bookmarks().bookmarks()) {
+            const QString path = b.note == QStringLiteral("a10") ? logs.ma : logs.mb;
+            CHECK(b.filePath == path && t2.bookmarks().status(b.id) == BookmarkStore::Status::Visible
+                      && t2.bookmarks().idAtRow(rowOfLine(m2, path, b.line)) == b.id,
+                  QStringLiteral("вкладка 2: закладка «%1» на своей строке").arg(b.note));
+            ++found;
+        }
+        CHECK(found == 2, QStringLiteral("вкладка 2: обе закладки"));
+        const int row = rowOfLine(m2, logs.mb, 100);
+        CHECK(row >= 0 && t2.view()->userSelectedRow() == row,
+              QStringLiteral("вкладка 2: текущая строка %1").arg(currentLine(t2)));
+    }
+
+    // ---- Одного лога рядом нет ---------------------------------------------
+    g_context = name + QStringLiteral(" / сессия с другой ОС (") + style + QStringLiteral("): лога нет");
+    const QString base = dir.filePath(name + QStringLiteral("-cross-missing-") + style);
+    const CrossLogs logs = writeCrossLogs(base, false);
+    QDir().mkpath(base + QStringLiteral("/sessions"));
+    const QString sessionPath = base + QStringLiteral("/sessions/") + kCrossSession;
+    CHECK(writeBytes(sessionPath, golden), QStringLiteral("файл сессии"));
+    const SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+    CHECK(loaded.state.has_value(), QStringLiteral("читается: ") + loaded.error);
+    if (!loaded.state)
+        return;
+    TabPool pool{ schema, {} };
+    SessionController controller;
+    const auto result = controller.open(*loaded.state, sessionPath, [&pool]() { return pool.make(); });
+    CHECK(result.tabs.size() == 2 && result.missing == 1 && result.changed == 0 && result.relocated == 2,
+          QStringLiteral("пропал один, два найдены (%1 / %2)").arg(result.missing).arg(result.relocated));
+    const QString savedOne = SavedPath::normalized(foreignPath(style, QStringLiteral("one.log"), true));
+    int missingIndex = -1;
+    const auto report = controller.report();
+    for (int i = 0; i < report.size(); ++i)
+        if (report[i].kind == SessionController::ReportEntry::Kind::Missing)
+            missingIndex = i;
+    CHECK(missingIndex >= 0 && report[missingIndex].savedPath == savedOne
+              && report[missingIndex].path == savedOne
+              && report[missingIndex].tabTitle.contains(QStringLiteral("one.log")),
+          QStringLiteral("отчёт называет пропавший файл исходным путём"));
+    if (result.tabs.size() != 2 || missingIndex < 0)
+        return;
+    LogViewWidget& t1 = *result.tabs[0];
+    LogViewWidget& t2 = *result.tabs[1];
+    CHECK(settled(t1) && t1.fileCount() == 0 && t1.bookmarks().count() == 4,
+          QStringLiteral("вкладка пропавшего — пустая, закладки ждут"));
+    for (const Bookmark& b : t1.bookmarks().bookmarks())
+        CHECK(t1.bookmarks().status(b.id) == BookmarkStore::Status::Pending,
+              QStringLiteral("закладка %1 ждёт файл").arg(b.line));
+    CHECK(settled(t2) && t2.fileCount() == 2 && t2.bookmarks().count() == 2,
+          QStringLiteral("остальная вкладка открыта"));
+
+    // Пересохранение — в другой каталог: пропавший не теряется, чужой путь не
+    // испорчен, относительный ведёт туда же, куда вёл прежний файл сессии.
+    const QString resavedPath = base + QStringLiteral("/elsewhere/deeper/resaved.dlsession");
+    QDir().mkpath(QFileInfo(resavedPath).absolutePath());
+    QString error;
+    CHECK(SessionFile::save(resavedPath, controller.capture({ &t1, &t2 }, &t2), &error),
+          QStringLiteral("пересохранение: ") + error);
+    const QJsonObject resaved = bytesToObject(readBytes(resavedPath));
+    const QJsonArray resavedTabs = resaved.value("tabs").toArray();
+    const QJsonArray sources1 = resavedTabs.at(0).toObject().value("sources").toArray();
+    CHECK(sources1.size() == 1
+              && sources1.at(0).toObject().value("source").toObject().value("path").toString() == savedOne,
+          QStringLiteral("пропавший источник с исходным путём"));
+    CHECK(resavedTabs.at(0).toObject().value("bookmarks").toArray().size() == 4,
+          QStringLiteral("закладки пропавшего на месте"));
+    QString relative;
+    for (const QJsonValue& f : resaved.value("files").toArray())
+        if (f.toObject().value("path").toString() == savedOne)
+            relative = f.toObject().value("relative").toString();
+    CHECK(relative == QStringLiteral("../../") + kCrossLogs + QStringLiteral("/one.log"),
+          QStringLiteral("относительный путь пропавшего: «%1»").arg(relative));
+
+    // Закрыта и возвращена (Ctrl+Shift+T) — пересохранение так же ведёт
+    // относительный путь туда, куда вёл файл сессии.
+    {
+        CHECK(controller.rememberClosedTab(&t1, 0), QStringLiteral("вкладка запомнена"));
+        TabPool closedPool{ schema, {} };
+        const auto reopened = controller.reopenClosedTab([&closedPool](int) { return closedPool.make(); });
+        CHECK(reopened.tabs.size() == 1 && reopened.missing == 1, QStringLiteral("вкладка возвращена, файл пропал"));
+        if (reopened.tabs.size() == 1) {
+            const QString closedPath = base + QStringLiteral("/closed/reopened.dlsession");
+            QDir().mkpath(QFileInfo(closedPath).absolutePath());
+            CHECK(SessionFile::save(closedPath, controller.capture({ reopened.tabs[0] }, reopened.tabs[0]), &error),
+                  QStringLiteral("запись: ") + error);
+            QString rel;
+            for (const QJsonValue& f : bytesToObject(readBytes(closedPath)).value("files").toArray())
+                if (f.toObject().value("path").toString() == savedOne)
+                    rel = f.toObject().value("relative").toString();
+            CHECK(rel == QStringLiteral("../") + kCrossLogs + QStringLiteral("/one.log"),
+                  QStringLiteral("возвращённая вкладка: относительный путь «%1»").arg(rel));
+        }
+    }
+
+    // Лог появился — пересохранённая сессия его находит.
+    writeCrossLogs(base, true);
+    const SessionFile::LoadResult again = SessionFile::load(resavedPath);
+    CHECK(again.state.has_value(), QStringLiteral("пересохранённая читается: ") + again.error);
+    if (again.state) {
+        TabPool pool2{ schema, {} };
+        SessionController c2;
+        const auto r2 = c2.open(*again.state, resavedPath, [&pool2]() { return pool2.make(); });
+        CHECK(r2.tabs.size() == 2 && r2.missing == 0 && !r2.hasProblems(),
+              QStringLiteral("пересохранённая: все файлы найдены (%1)").arg(r2.missing));
+        if (r2.tabs.size() == 2) {
+            CHECK(settled(*r2.tabs[0]) && r2.tabs[0]->fileCount() == 1
+                      && r2.tabs[0]->loadedFiles().first()->filePath == logs.one,
+                  QStringLiteral("пересохранённая: лог найден"));
+        }
+    }
+
+    // «Указать файл» для пропавшего работает.
+    const QString copy = base + QStringLiteral("/копия one.log");
+    CHECK(QFile::copy(logs.one, copy), QStringLiteral("копия лога"));
+    CHECK(controller.locate(missingIndex, copy, &error), QStringLiteral("указать файл: ") + error);
+    CHECK(settled(t1) && t1.fileCount() == 1 && t1.bookmarks().count() == 4,
+          QStringLiteral("указанный файл открыт, закладки на нём"));
+    for (const Bookmark& b : t1.bookmarks().bookmarks())
+        CHECK(t1.bookmarks().status(b.id) == BookmarkStore::Status::Visible
+                  || t1.bookmarks().status(b.id) == BookmarkStore::Status::Hidden,
+              QStringLiteral("закладка %1 найдена").arg(b.line));
+
+    // Окно отчёта показывает путь так, как он записан на той ОС.
+    SessionReportDialog dialog(&controller);
+    auto* list = dialog.findChild<QTreeWidget*>(QStringLiteral("sessionReportList"));
+    bool shown = false;
+    for (int i = 0; list && i < list->topLevelItemCount(); ++i)
+        shown = shown || list->topLevelItem(i)->text(1) == SavedPath::toDisplay(savedOne);
+    CHECK(shown, QStringLiteral("окно отчёта: «%1»").arg(SavedPath::toDisplay(savedOne)));
+}
+
+// Память файла с другой машины (R-8): чужой путь — «не этот файл». Читается,
+// не удаляется как битая, по пути не находится, по содержимому — да.
+static void checkForeignMemory(const QDir& dir)
+{
+    g_context = QStringLiteral("память файла с другой ОС");
+    const QString memDir = dir.filePath(QStringLiteral("memory-foreign"));
+    QDir().mkpath(memDir);
+#ifdef Q_OS_WIN
+    const QString foreign = QStringLiteral("/home/anna/logs/app.log");
+    const QString foreignOther = QStringLiteral("/home/anna/logs/other.log");
+#else
+    const QString foreign = QStringLiteral("C:/Users/Анна/logs/app.log");
+    const QString foreignOther = QStringLiteral("C:/Users/Анна/logs/other.log");
+#endif
+    const QString local = writeFile(dir, QStringLiteral("foreign-memory.log"), logBytes(100));
+    const QString otherLocal = writeFile(dir, QStringLiteral("foreign-memory-other.log"), logBytes(100, 3, "zz"));
+    FileMemory same = memoryOf(local, { 5, 9 });
+    same.relocate(foreign);
+    FileMemory other = memoryOf(otherLocal, { 7 });
+    other.relocate(foreignOther);
+    const QString sameFile = memoryFileOf(memDir, foreign);
+    const QString otherFile = memoryFileOf(memDir, foreignOther);
+    CHECK(FileMemoryStore::writeFileAtomically(sameFile, QJsonDocument(same.toJson()).toJson())
+              && FileMemoryStore::writeFileAtomically(otherFile, QJsonDocument(other.toJson()).toJson()),
+          QStringLiteral("память записана"));
+    CHECK(FileMemory::fromJson(bytesToObject(readBytes(sameFile))).has_value(),
+          QStringLiteral("память с чужим путём читается"));
+    CHECK(FileMemoryStore::normalizedKeyPath(foreign) != FileMemoryStore::normalizedKeyPath(
+              QDir::current().absoluteFilePath(foreign)),
+          QStringLiteral("чужой путь не совпадает с локальным «<текущий каталог>/<путь>»"));
+
+    {
+        FileMemoryStore store(memDir);
+        const auto lookup = store.open(local);
+        CHECK(lookup.found == FileMemoryStore::Found::ByContent && lookup.memory
+                  && linesOf(lookup.memory) == QVector<qint64>({ 5, 9 }) && pathsAre(*lookup.memory, local)
+                  && lookup.previousPath == foreign,
+              QStringLiteral("то же содержимое — найдена по содержимому, переехала на локальный путь"));
+        store.waitForWrites();
+        CHECK(QFileInfo::exists(otherFile), QStringLiteral("память другого файла не удалена"));
+        const auto none = store.open(writeFile(dir, QStringLiteral("foreign-memory-third.log"), logBytes(50, 9, "q")));
+        CHECK(none.found == FileMemoryStore::Found::None, QStringLiteral("чужой файл — не найдена"));
+        store.waitForWrites();
+    }
+    CHECK(QFileInfo::exists(otherFile) && FileMemory::fromJson(bytesToObject(readBytes(otherFile))).has_value(),
+          QStringLiteral("память с чужим путём на месте и цела"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2314,6 +2688,9 @@ int main(int argc, char** argv)
     }
     const QDir dir(tmp.path());
     const QString schema = buildSchema();
+    const QByteArray goldenOut = qgetenv("DOCUMENT_STATE_WRITE_CROSS_OS");
+    if (!goldenOut.isEmpty())
+        return writeCrossOsGoldens(QString::fromLocal8Bit(goldenOut), dir, schema);
     AppSettings& settings = AppSettings::instance();
     for (const bool indexed : { false, true }) {
         const QString name = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
@@ -2323,6 +2700,8 @@ int main(int argc, char** argv)
         checkMerged(dir, name, schema);
         checkTabMemory(dir, name, schema);
         checkSessionOpen(dir, name, schema);
+        checkCrossOsSession(dir, name, schema, QStringLiteral("windows"));
+        checkCrossOsSession(dir, name, schema, QStringLiteral("posix"));
     }
     settings.setIndexedThresholdMB(512);
     checkStdin(dir, schema);
@@ -2330,6 +2709,7 @@ int main(int argc, char** argv)
     checkFileMemoryStore(dir);
     checkSessionFile(dir);
     checkSessionRebind(dir);
+    checkForeignMemory(dir);
     checkSessionProblems(dir, schema);
     checkSessionStdin(dir, schema);
     checkLastSession(dir, schema);

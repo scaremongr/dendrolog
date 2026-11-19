@@ -281,16 +281,20 @@ std::optional<TabState> TabState::fromJson(const QJsonObject& json, QString* err
 
 bool SessionState::samePath(const QString& a, const QString& b)
 {
-#ifdef Q_OS_WIN
-    return a.compare(b, Qt::CaseInsensitive) == 0;
-#else
-    return a == b;
-#endif
+    return SavedPath::same(a, b);
 }
 
 QString SessionState::relativePathOf(const QString& path) const
 {
     for (auto it = relativePaths.cbegin(); it != relativePaths.cend(); ++it)
+        if (samePath(it.key(), path))
+            return it.value();
+    return QString();
+}
+
+QString SessionState::relativeTargetOf(const QString& path) const
+{
+    for (auto it = relativeTargets.cbegin(); it != relativeTargets.cend(); ++it)
         if (samePath(it.key(), path))
             return it.value();
     return QString();
@@ -342,8 +346,14 @@ QJsonObject SessionState::toJson(const QString& sessionFilePath) const
     for (const QString& path : paths()) {
         QJsonObject f;
         f.insert(QStringLiteral("path"), path);
-        if (!baseDir.isEmpty()) {
-            const QString rel = QDir(baseDir).relativeFilePath(path);
+        // Пропавший источник — относительный путь туда, куда указывал прежний
+        // файл сессии (у пути другой ОС иначе его не построить вовсе).
+        const QString hinted = relativeTargetOf(path);
+        const QString target = hinted.isEmpty() ? path : hinted;
+        // Путь другой ОС QDir понял бы как относительный: «C:/a.log» на Linux
+        // дал бы относительный «../C:/a.log».
+        if (!baseDir.isEmpty() && SavedPath::isNative(SavedPath::style(target))) {
+            const QString rel = QDir(baseDir).relativeFilePath(target);
             // Другой диск на Windows — относительного нет.
             if (!rel.isEmpty() && QDir::isRelativePath(rel))
                 f.insert(QStringLiteral("relative"), QDir::fromNativeSeparators(rel));
@@ -443,8 +453,20 @@ std::optional<SessionState> SessionState::fromJson(const QJsonObject& json, QStr
             const QJsonValue rel = f.value(QLatin1String("relative"));
             if (!v.isObject() || !path.isString() || (!rel.isUndefined() && !rel.isString()))
                 return fail(error, QStringLiteral("bad files"));
-            if (rel.isString() && !rel.toString().isEmpty())
-                s.relativePaths.insert(path.toString(), rel.toString());
+            // Путь — как у SourceIdentity::fromJson (с любой ОС); абсолютный
+            // «относительный» не используется: он увёл бы мимо каталога сессии.
+            // Относительный пишется с «/» на обеих ОС; «\» в нём не
+            // разделитель — на Linux это часть имени файла.
+            // Так же отброшен «/x», «\x» и «X:x»: на Windows QDir понял бы их
+            // как путь от корня или от текущего каталога диска. Повтор пути
+            // (с другим регистром у пути Windows) — первая запись.
+            const QString r = rel.toString();
+            const bool rooted = !r.isEmpty()
+                && (r.startsWith(QLatin1Char('/')) || r.startsWith(QLatin1Char('\\'))
+                    || (r.size() >= 2 && r.at(1) == QLatin1Char(':')));
+            const QString key = SavedPath::normalized(path.toString());
+            if (!r.isEmpty() && !rooted && SavedPath::isAbsolute(key) && s.relativePathOf(key).isEmpty())
+                s.relativePaths.insert(key, r);
         }
     }
     return s;

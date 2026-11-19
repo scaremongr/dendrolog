@@ -11,7 +11,11 @@
 //     с отпечатком сырых байтов строки, не меняется от кодировки, которой
 //     прочитан файл (setFileEncoding на индексном, выбор пользователя на
 //     резидентном), различает строки с разным ASCII-текстом;
-//   • JSON: круговой проход, отказ на чужой версии, алгоритме и битых данных.
+//   • JSON: круговой проход, отказ на чужой версии, алгоритме и битых данных;
+//   • сохранённые пути (R-8, SavedPath): разбор одинаков на любой ОС — путь
+//     Windows с диском, UNC, «\\?\», POSIX абсолютны; нормализация,
+//     сравнение, показ; SourceIdentity с путём другой ОС читается и не
+//     совпадает с локальным файлом «<текущий каталог>/C:/…».
 // ============================================================================
 
 #include "recordid.h"
@@ -23,6 +27,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMap>
@@ -1178,6 +1183,137 @@ static int runBench(TimingApp& app, const QString& path, int k, bool resident)
     return resolved == lines.size() ? 0 : 1;
 }
 
+// R-8: путь в сохранённом файле — по правилу SavedPath, одинаково на любой
+// ОС. Разбор не смотрит на платформу; от неё зависят только isNative /
+// isForeign и регистр POSIX-путей в same.
+static void testSavedPaths(const QDir& dir)
+{
+    using SavedPath::Style;
+    struct Case { const char16_t* path; Style style; const char16_t* normalized; };
+    const Case cases[] = {
+        { u"C:/logs/app.log",                   Style::WindowsDrive, u"C:/logs/app.log" },
+        { u"C:\\logs\\app.log",                 Style::WindowsDrive, u"C:/logs/app.log" },
+        { u"c:\\Logs/mixed\\app.log",           Style::WindowsDrive, u"c:/Logs/mixed/app.log" },
+        { u"D:\\",                              Style::WindowsDrive, u"D:/" },
+        { u"//server/share/app.log",            Style::WindowsUnc,   u"//server/share/app.log" },
+        { u"\\\\server\\share\\логи и данные\\app.log", Style::WindowsUnc, u"//server/share/логи и данные/app.log" },
+        { u"\\\\?\\C:\\very\\long\\app.log",    Style::WindowsDrive, u"C:/very/long/app.log" },
+        { u"\\\\?\\UNC\\server\\share\\app.log", Style::WindowsUnc,  u"//server/share/app.log" },
+        { u"\\\\?\\unc\\server\\share\\a.log",  Style::WindowsUnc,   u"//server/share/a.log" },
+        { u"/var/log/app.log",                  Style::Posix,        u"/var/log/app.log" },
+        { u"/home/anna/back\\slash.log",        Style::Posix,        u"/home/anna/back\\slash.log" },
+        { u"/",                                 Style::Posix,        u"/" },
+        { u"/home/anna/dir/",                   Style::Posix,        u"/home/anna/dir/" },
+        { u"logs/app.log",                      Style::None,         u"logs/app.log" },
+        { u"../logs/app.log",                   Style::None,         u"../logs/app.log" },
+        { u"C:logs\\app.log",                   Style::None,         u"C:logs\\app.log" },
+        { u"\\logs\\app.log",                   Style::None,         u"\\logs\\app.log" },
+        { u"\\\\?\\",                           Style::None,         u"\\\\?\\" },
+        { u"\\\\?\\UNC\\",                      Style::None,         u"\\\\?\\UNC\\" },
+        { u"1:/x.log",                          Style::None,         u"1:/x.log" },
+        { u"",                                  Style::None,         u"" },
+    };
+    for (const Case& c : cases) {
+        const QString path = QString::fromUtf16(c.path);
+        CHECK(SavedPath::style(path) == c.style,
+              QStringLiteral("стиль пути «%1»: %2").arg(path).arg(int(SavedPath::style(path))));
+        CHECK(SavedPath::isAbsolute(path) == (c.style != Style::None),
+              QStringLiteral("абсолютный «%1»").arg(path));
+        CHECK(SavedPath::normalized(path) == QString::fromUtf16(c.normalized),
+              QStringLiteral("нормализация «%1» → «%2»").arg(path, SavedPath::normalized(path)));
+#ifdef Q_OS_WIN
+        const bool foreign = c.style == Style::Posix;
+#else
+        const bool foreign = SavedPath::isWindows(c.style);
+#endif
+        CHECK(SavedPath::isForeign(path) == foreign, QStringLiteral("чужой ОС «%1»").arg(path));
+    }
+    CHECK(SavedPath::same(QStringLiteral("C:/Logs/App.log"), QStringLiteral("c:/logs/app.log"))
+              && SavedPath::same(QStringLiteral("//Server/Share/a.log"), QStringLiteral("//server/share/A.LOG"))
+              && SavedPath::same(QStringLiteral("C:/Логи/a.log"), QStringLiteral("c:/логи/a.log")),
+          "путь Windows сравнивается без учёта регистра на любой ОС");
+    CHECK(!SavedPath::same(QStringLiteral("C:/logs/a.log"), QStringLiteral("C:/logs/b.log"))
+              && !SavedPath::same(QStringLiteral("/logs/a.log"), QStringLiteral("C:/logs/a.log")),
+          "разные пути различаются");
+#ifdef Q_OS_WIN
+    CHECK(SavedPath::same(QStringLiteral("/var/Log/a.log"), QStringLiteral("/var/log/a.log")),
+          "POSIX на Windows — без учёта регистра, как файловая система");
+#else
+    CHECK(!SavedPath::same(QStringLiteral("/var/Log/a.log"), QStringLiteral("/var/log/a.log")),
+          "POSIX — с учётом регистра");
+#endif
+    CHECK(SavedPath::toDisplay(QStringLiteral("C:/logs/app.log")) == QStringLiteral("C:\\logs\\app.log")
+              && SavedPath::toDisplay(QStringLiteral("//server/share/a.log")) == QStringLiteral("\\\\server\\share\\a.log")
+              && SavedPath::toDisplay(QStringLiteral("/var/log/a.log")) == QStringLiteral("/var/log/a.log"),
+          "показ пути");
+    // Локальный абсолютный путь (QFileInfo::absoluteFilePath) — родной.
+    const QString local = QFileInfo(dir.filePath(QStringLiteral("x.log"))).absoluteFilePath();
+    CHECK(SavedPath::isAbsolute(local) && !SavedPath::isForeign(local),
+          QStringLiteral("локальный путь «%1» — родной").arg(local));
+
+    // SourceIdentity из файла с другой ОС: читается, путь нормализован,
+    // круговой проход держит его как есть.
+    const QString realPath = writeFile(dir, QStringLiteral("saved paths.log"), filler(5000, 's'));
+    const std::optional<SourceIdentity> real = SourceIdentity::capture(realPath);
+    CHECK(real.has_value(), "снятие для сохранённых путей");
+    if (!real)
+        return;
+    for (const QString& path : { QStringLiteral("C:\\logs\\app.log"), QStringLiteral("//127.0.0.1/share/app.log"),
+                                 QStringLiteral("\\\\?\\C:\\logs\\app.log"), QStringLiteral("/var/log/app.log") }) {
+        QJsonObject json = real->toJson();
+        json.insert("path", path);
+        QString error;
+        const std::optional<SourceIdentity> read = SourceIdentity::fromJson(json, &error);
+        CHECK(read.has_value(), QStringLiteral("путь «%1» читается на любой ОС: %2").arg(path, error));
+        if (!read)
+            continue;
+        CHECK(read->path == SavedPath::normalized(path), QStringLiteral("путь «%1» нормализован").arg(path));
+        const std::optional<SourceIdentity> again = SourceIdentity::fromJson(read->toJson());
+        CHECK(again && *again == *read, QStringLiteral("круговой проход «%1»").arg(path));
+        if (SavedPath::isForeign(path))
+            expectState(*read, State::Missing, QStringLiteral("путь другой ОС «%1» — Missing").arg(path));
+        else
+            expectState(*read, State::Missing, QStringLiteral("файла «%1» нет").arg(path));
+        // Содержимое по родному пути проверяется как обычно.
+        CHECK(read->checkAt(realPath) == State::Valid, QStringLiteral("по родному пути — Valid (%1)").arg(path));
+    }
+
+#ifndef Q_OS_WIN
+    // Ловушка: «C:/logs/app.log» на Linux для QFileInfo — относительный путь.
+    // Файл с тем же содержимым по «<текущий каталог>/C:/logs/app.log» не
+    // должен за него сойти.
+    const QString cwd = QDir::currentPath();
+    QDir().mkpath(dir.filePath(QStringLiteral("C:/logs")));
+    QFile::copy(realPath, dir.filePath(QStringLiteral("C:/logs/app.log")));
+    QDir::setCurrent(dir.path());
+    CHECK(QFileInfo(QStringLiteral("C:/logs/app.log")).isFile(), "ловушка: относительный файл есть");
+    SourceIdentity trap = *real;
+    trap.path = QStringLiteral("C:/logs/app.log");
+    CHECK(trap.check() == State::Missing, "путь Windows на Linux не читается как относительный");
+    QDir::setCurrent(cwd);
+#else
+    // Ловушка: «/var/log/app.log» на Windows для QFileInfo — путь на текущем
+    // диске.
+    const QString cwd = QDir::currentPath();
+    const QString drive = QDir(dir).absolutePath().left(2); // «C:»
+    QDir::setCurrent(dir.path());
+    const QString trapDir = QStringLiteral("/dendrolog-r8-trap-%1").arg(QCoreApplication::applicationPid());
+    SourceIdentity trap = *real;
+    trap.path = trapDir + QStringLiteral("/app.log");
+    // Корень диска может быть закрыт на запись — тогда ловушку не поставить.
+    if (QDir().mkpath(drive + trapDir) && QFile::copy(realPath, drive + trapDir + QStringLiteral("/app.log"))) {
+        CHECK(QFileInfo(trap.path).isFile(), "ловушка: файл на текущем диске есть");
+        CHECK(trap.check() == State::Missing, "путь POSIX на Windows не читается с текущего диска");
+    } else {
+        std::fprintf(stdout, "record_identity: корень %s закрыт на запись, ловушка POSIX-пути пропущена\n",
+                     qPrintable(drive));
+    }
+    QFile::remove(drive + trapDir + QStringLiteral("/app.log"));
+    QDir().rmdir(drive + trapDir);
+    QDir::setCurrent(cwd);
+#endif
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1200,6 +1336,7 @@ int main(int argc, char** argv)
     testSmallFiles(dir);
     testEphemeral(dir);
     testJson(dir);
+    testSavedPaths(dir);
     testLineFingerprints(dir, schema);
     testLocatorRoundTrip(dir, schema);
     testLocatorRefusals(dir, schema);

@@ -60,7 +60,8 @@ SessionReportDialog::SessionReportDialog(SessionController* controller, QWidget*
 
     m_chooser = [](QWidget* parentWidget, const QString& savedPath) {
         return QFileDialog::getOpenFileName(parentWidget, tr("Locate %1").arg(QFileInfo(savedPath).fileName()),
-                                            QFileInfo(savedPath).absolutePath());
+                                            SavedPath::isForeign(savedPath)
+                                                ? QString() : QFileInfo(savedPath).absolutePath());
     };
     refresh();
 }
@@ -76,8 +77,8 @@ void SessionReportDialog::refresh()
     for (const SessionController::ReportEntry& e : m_controller->report()) {
         auto* item = new QTreeWidgetItem(m_list);
         item->setText(0, e.tabTitle);
-        item->setText(1, QDir::toNativeSeparators(e.savedPath));
-        item->setToolTip(1, QDir::toNativeSeparators(e.savedPath));
+        item->setText(1, SavedPath::toDisplay(e.savedPath));
+        item->setToolTip(1, SavedPath::toDisplay(e.savedPath));
         item->setText(2, SessionController::describe(e));
         item->setToolTip(2, SessionController::describe(e));
         item->setData(0, Qt::UserRole, int(e.kind));
