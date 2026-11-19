@@ -6,30 +6,6 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- **A file rewritten with the same length is reloaded.** When a log file was
-  overwritten in place so that its size stayed the same (or grew) and its last
-  bytes matched, but its beginning was different, the tab kept showing the old
-  text — or appended the new tail to the old beginning. The tail update now
-  also checks the start of the file and reloads such a file from scratch, on
-  both the normal and the large-file mode, in merged tabs too. Bookmarks on
-  rewritten lines show as "not found", the others stay on their lines. The
-  check of an untouched file costs the same as before; the start is read only
-  when the file's size or modification time has changed, or the file was
-  modified in the last few seconds. An edit only in the
-  middle of a file with the same length, start and end is still not noticed.
-- **A removed bookmark no longer comes back after merging tabs.** Saving a
-  file's remembered state could run two writes of the same file at once when
-  another file was opened right after a tab was closed or merged, and the
-  older write could land last — a bookmark removed in the merged tab
-  reappeared on the next open. Writes of the file memory now always run one
-  after another, in order.
-- **Status bar messages are no longer wiped by an unrelated timer.** Three
-  seconds after a file finished loading, the status bar was reset to "Ready"
-  whatever it showed then, so the result of **Save View As** (and other
-  messages shown in those seconds) could disappear at once. Only the
-  "Finished parsing" message itself is now cleared.
-
 ## [0.6.0] — 2026-11-19
 
 **An investigation can be put aside and picked up again.** Bookmarks with
@@ -215,6 +191,22 @@ by default.
 - An unfinished last line that ends with a carriage return (half of a
   `\r\n` not yet written) no longer shows the stray `\r` in large-file tabs:
   both modes show it the same way.
+- **A file rewritten with the same length is reloaded.** When a log file was
+  overwritten in place so that its size stayed the same (or grew) and its last
+  bytes matched, but its beginning was different, the tab kept showing the old
+  text — or appended the new tail to the old beginning. The tail update now
+  also checks the start of the file and reloads such a file from scratch, on
+  both the normal and the large-file mode, in merged tabs too. Bookmarks on
+  rewritten lines show as "not found", the others stay on their lines. The
+  check of an untouched file costs the same as before; the start is read only
+  when the file's size or modification time has changed, or the file was
+  modified in the last few seconds. An edit only in the
+  middle of a file with the same length, start and end is still not noticed.
+- **Status bar messages are no longer wiped by an unrelated timer.** Three
+  seconds after a file finished loading, the status bar was reset to "Ready"
+  whatever it showed then, so the result of **Save View As** (and other
+  messages shown in those seconds) could disappear at once. Only the
+  "Finished parsing" message itself is now cleared.
 
 ## [0.5.0] — 2026-11-18
 
