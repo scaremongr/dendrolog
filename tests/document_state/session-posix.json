@@ -1,0 +1,306 @@
+{
+    "activeTab": 1,
+    "fieldExtraction": false,
+    "files": [
+        {
+            "path": "/home/anna/Инцидент/логи и данные/one.log",
+            "relative": "../логи и данные/one.log"
+        },
+        {
+            "path": "/home/anna/Инцидент/логи и данные/merged-a.log",
+            "relative": "../логи и данные/merged-a.log"
+        },
+        {
+            "path": "/home/anna/Инцидент/логи и данные/merged-b.log",
+            "relative": "../логи и данные/merged-b.log"
+        }
+    ],
+    "format": "dendrolog-session",
+    "schema": {
+        "definition": {
+            "blocks": [
+                {
+                    "closingText": "",
+                    "customRegex": "",
+                    "kind": "timestamp",
+                    "leadingText": "",
+                    "name": "Timestamp",
+                    "separator": ""
+                },
+                {
+                    "closingText": "]",
+                    "customRegex": "",
+                    "kind": "text",
+                    "leadingText": "[",
+                    "name": "Thread",
+                    "separator": ""
+                },
+                {
+                    "closingText": "",
+                    "customRegex": "",
+                    "kind": "level",
+                    "leadingText": "",
+                    "name": "Level",
+                    "separator": "-"
+                },
+                {
+                    "closingText": "",
+                    "customRegex": "",
+                    "kind": "remainder",
+                    "leadingText": "",
+                    "name": "Message",
+                    "separator": ""
+                }
+            ],
+            "linePrefix": "",
+            "type": "dynamic-block-schema",
+            "version": 3
+        },
+        "name": "test schema"
+    },
+    "tabs": [
+        {
+            "bookmarks": [
+                {
+                    "created": "2026-11-19T05:53:50.363Z",
+                    "note": "заметка к 2",
+                    "preview": "2026-03-05 10:00:01.000 [w] WARN - line 1",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 2,
+                        "text": "e1d147e60df132ab",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    },
+                    "version": 1
+                },
+                {
+                    "created": "2026-11-19T05:53:50.363Z",
+                    "note": "заметка к 40",
+                    "preview": "    at continuation of 35",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 40,
+                        "text": "40dbb6caa2835c35",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    },
+                    "version": 1
+                },
+                {
+                    "created": "2026-11-19T05:53:50.363Z",
+                    "note": "заметка к 120",
+                    "preview": "2026-03-05 10:01:48.000 [w] ERROR - line 108",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 120,
+                        "text": "6aee4032f45222c9",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    },
+                    "version": 1
+                },
+                {
+                    "created": "2026-11-19T05:53:50.363Z",
+                    "note": "заметка к 200",
+                    "preview": "2026-03-05 10:03:01.000 [w] WARN - line 181",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 200,
+                        "text": "c2b9591e73d3ae67",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    },
+                    "version": 1
+                }
+            ],
+            "format": "dendrolog-tab-state",
+            "sources": [
+                {
+                    "encoding": "Windows-1251",
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    }
+                }
+            ],
+            "version": 1,
+            "view": {
+                "autoReload": true,
+                "current": {
+                    "offset": 136,
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 170,
+                        "text": "32972e15ac1bb7e1",
+                        "version": 1
+                    },
+                    "selected": true,
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/one.log",
+                        "size": 18616,
+                        "tail": "16286884a2fb2658",
+                        "version": 1
+                    }
+                },
+                "followTail": false,
+                "levels": [
+                    "unknown",
+                    "info",
+                    "warn"
+                ],
+                "markers": [
+                    {
+                        "caseSensitive": false,
+                        "color": "#ffffff00",
+                        "enabled": true,
+                        "regex": false,
+                        "text": "line 1"
+                    }
+                ],
+                "textRules": {
+                    "rules": [
+                        {
+                            "action": "exclude",
+                            "caseSensitive": false,
+                            "color": "",
+                            "connector": "and",
+                            "enabled": true,
+                            "field": "",
+                            "highlight": true,
+                            "regex": false,
+                            "text": "line 13"
+                        }
+                    ]
+                },
+                "version": 1
+            }
+        },
+        {
+            "bookmarks": [
+                {
+                    "created": "2026-11-19T05:53:50.816Z",
+                    "note": "a10",
+                    "preview": "2026-03-05 10:00:08.000 [w] INFO - line 8",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 10,
+                        "text": "287a2ecdb4743f9b",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/merged-a.log",
+                        "size": 9248,
+                        "tail": "b9ba830374f55e8b",
+                        "version": 1
+                    },
+                    "version": 1
+                },
+                {
+                    "created": "2026-11-19T05:53:50.816Z",
+                    "note": "b20",
+                    "preview": "2026-03-05 10:00:18.000 [w] ERROR - bee 17",
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 20,
+                        "text": "fcb0abf062c5558e",
+                        "version": 1
+                    },
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "c7e0acffcbaedd83",
+                        "path": "/home/anna/Инцидент/логи и данные/merged-b.log",
+                        "size": 9048,
+                        "tail": "f0e1ba481317f3c4",
+                        "version": 1
+                    },
+                    "version": 1
+                }
+            ],
+            "format": "dendrolog-tab-state",
+            "sources": [
+                {
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "9a863d6b3cf52dbc",
+                        "path": "/home/anna/Инцидент/логи и данные/merged-a.log",
+                        "size": 9248,
+                        "tail": "b9ba830374f55e8b",
+                        "version": 1
+                    }
+                },
+                {
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "c7e0acffcbaedd83",
+                        "path": "/home/anna/Инцидент/логи и данные/merged-b.log",
+                        "size": 9048,
+                        "tail": "f0e1ba481317f3c4",
+                        "version": 1
+                    }
+                }
+            ],
+            "version": 1,
+            "view": {
+                "autoReload": false,
+                "current": {
+                    "offset": 190,
+                    "record": {
+                        "hash": "sha1-64-ascii",
+                        "line": 100,
+                        "text": "f24eabe39ecdb9f3",
+                        "version": 1
+                    },
+                    "selected": true,
+                    "source": {
+                        "hash": "sha1-64",
+                        "head": "c7e0acffcbaedd83",
+                        "path": "/home/anna/Инцидент/логи и данные/merged-b.log",
+                        "size": 9048,
+                        "tail": "f0e1ba481317f3c4",
+                        "version": 1
+                    }
+                },
+                "followTail": false,
+                "version": 1
+            }
+        }
+    ],
+    "version": 1
+}

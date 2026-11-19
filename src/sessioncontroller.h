@@ -23,7 +23,9 @@ class LogViewWidget;
 //     сессию не попадает (captureState не снимает спул; вкладка, у которой не
 //     осталось ни файлов, ни закладок, пропускается), слитая «stdin + файл»
 //     сохраняет файл. Источник, пропавший при открытии сессии и так и не
-//     указанный, снимается снова: пересохранённая сессия его не теряет.
+//     указанный, снимается снова: пересохранённая сессия его не теряет, и
+//     его относительный путь ведёт туда же, куда вёл прежний файл сессии
+//     (SessionState::relativeTargets) — в том числе у пути другой ОС (R-8).
 //     Схему и выбор колонок ставит окно (они глобальные до F-5).
 //   • open — открыть: перепривязка путей (SessionFile::rebind: абсолютный,
 //     затем относительный к файлу сессии), затем вкладки в порядке файла
@@ -77,6 +79,7 @@ public:
         QString tabTitle;       // «2: app.log, db.log» — номер вкладки в сессии и её файлы
         QString savedPath;      // путь в файле сессии
         QString path;           // где источник теперь (Missing — сохранённый)
+        QString relativeTarget; // куда указывал относительный путь сессии (для пересохранения)
         TabSource source;       // для «указать файл» и пересохранения
     };
 
@@ -165,6 +168,8 @@ signals:
 private:
     void prune();
     TabState captureTab(LogViewWidget* tab) const;
+    // Пропавшие источники вкладки → куда указывал относительный путь сессии.
+    QHash<QString, QString> relativeTargetsOf(LogViewWidget* tab) const;
     OpenResult openTabs(SessionState state, const QString& sessionFilePath,
                         const std::function<LogViewWidget*()>& newTab, bool numbered);
     void setLastSessionAvailable(bool available);
@@ -178,6 +183,8 @@ private:
     struct ClosedTab {
         TabState state;
         int position = 0;
+        QHash<QString, QString> relativeTargets; // SessionState::relativeTargets вкладки
+
     };
     QVector<ClosedTab> m_closedTabs; // последняя закрытая — в конце
 };

@@ -118,6 +118,14 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- **A session saved on Windows opens on Linux, and the other way round.**
+  An absolute path of the other OS (`C:\…`, `\\server\share\…`, `/home/…`)
+  no longer makes the whole session file “broken”: the file is looked for next
+  to the session by its relative path; if it is not there, it is skipped and
+  named in the Session Report by its original path, **Locate File…** works,
+  and saving the session again keeps it with its path and relative path. The
+  same rule applies to the previous session and to file memory brought from
+  another machine.
 - Timestamps before 1970 behave the same in large files as in small ones.
   Above the large-file threshold (and in tabs that crossed it) a record dated
   before 1 January 1970 — or one whose time zone puts it just before that

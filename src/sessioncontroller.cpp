@@ -24,7 +24,7 @@ TabState SessionController::captureTab(LogViewWidget* tab) const
         if (e.tab != tab || e.kind != ReportEntry::Kind::Missing)
             continue;
         const bool present = std::any_of(state.sources.cbegin(), state.sources.cend(),
-            [&e](const TabSource& s) { return LogViewWidget::samePath(s.source.path, e.path); });
+            [&e](const TabSource& s) { return SessionState::samePath(s.source.path, e.path); });
         if (!present)
             state.sources.append(e.source);
     }
@@ -50,8 +50,18 @@ SessionState SessionController::capture(const QList<LogViewWidget*>& tabs, LogVi
         if (tab == active)
             session.activeTab = int(session.tabs.size());
         session.tabs.append(state);
+        session.relativeTargets.insert(relativeTargetsOf(tab));
     }
     return session;
+}
+
+QHash<QString, QString> SessionController::relativeTargetsOf(LogViewWidget* tab) const
+{
+    QHash<QString, QString> out;
+    for (const ReportEntry& e : m_entries)
+        if (e.tab == tab && e.kind == ReportEntry::Kind::Missing && !e.relativeTarget.isEmpty())
+            out.insert(e.path, e.relativeTarget);
+    return out;
 }
 
 SessionController::OpenResult SessionController::open(SessionState state, const QString& sessionFilePath,
@@ -111,6 +121,10 @@ SessionController::OpenResult SessionController::openTabs(SessionState state, co
             e.tabTitle = title;
             e.savedPath = r ? r->savedPath : path;
             e.path = path;
+            // Вкладка из стека закрытых — без файла сессии: прежняя цель
+            // относительного пути едет в самом снимке.
+            e.relativeTarget = r && !r->relativeTarget.isEmpty() ? r->relativeTarget
+                                                                 : state.relativeTargetOf(path);
             e.source = s;
             if (applied.missingSources.contains(path)) {
                 e.kind = ReportEntry::Kind::Missing;
@@ -379,6 +393,7 @@ bool SessionController::rememberClosedTab(LogViewWidget* tab, int position)
     ClosedTab closed;
     closed.state = captureTab(tab);
     closed.position = qMax(0, position);
+    closed.relativeTargets = relativeTargetsOf(tab);
     if (isEmptyState(closed.state))
         return false;
     m_closedTabs.append(std::move(closed));
@@ -398,6 +413,7 @@ SessionController::OpenResult SessionController::reopenClosedTab(
     SessionState session;
     session.tabs = { closed.state };
     session.activeTab = 0;
+    session.relativeTargets = closed.relativeTargets;
     // Без файла сессии: rebind проверяет только абсолютные пути.
     return openTabs(std::move(session), QString(),
                     [&newTabAt, &closed]() { return newTabAt ? newTabAt(closed.position) : nullptr; },

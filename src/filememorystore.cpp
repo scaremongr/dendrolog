@@ -204,6 +204,14 @@ QString FileMemoryStore::normalizedKeyPath(const QString& path)
 {
     if (path.isEmpty())
         return path;
+    // Путь другой ОС (каталог памяти приехал с другой машины, R-8) не
+    // достраивается от текущего каталога: «C:/logs/app.log» на Linux иначе
+    // совпал бы с локальным «<cwd>/C:/logs/app.log». Ключ — сам путь, он не
+    // равен ни одному локальному абсолютному: память просто «не этого файла».
+    if (SavedPath::isForeign(path)) {
+        const QString foreign = SavedPath::normalized(path);
+        return SavedPath::isWindows(SavedPath::style(foreign)) ? foreign.toLower() : foreign;
+    }
     QString normalized = QDir::cleanPath(QFileInfo(QDir::fromNativeSeparators(path)).absoluteFilePath());
 #ifdef Q_OS_WIN
     normalized = normalized.toLower(); // файловая система без учёта регистра

@@ -99,6 +99,7 @@ QVector<Resolution> rebind(SessionState& state, const QString& sessionFilePath)
         const QString rel = state.relativePathOf(saved);
         if (!rel.isEmpty())
             candidate = QDir::cleanPath(baseDir.absoluteFilePath(rel));
+        r.relativeTarget = candidate;
         const bool distinct = !candidate.isEmpty() && !SessionState::samePath(candidate, saved);
         const SourceIdentity::State atRelative = (identity && distinct)
             ? identity->checkAt(candidate) : SourceIdentity::State::Missing;

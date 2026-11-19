@@ -3,7 +3,6 @@
 #include "stdinspooler.h"
 
 #include <QCryptographicHash>
-#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonValue>
@@ -227,6 +226,105 @@ std::optional<RecordId> RecordId::fromJson(const QJsonObject& json, QString* err
 }
 
 // ---------------------------------------------------------------------------
+// SavedPath
+// ---------------------------------------------------------------------------
+
+namespace SavedPath {
+
+namespace {
+
+bool isSeparator(QChar c)
+{
+    return c == QLatin1Char('/') || c == QLatin1Char('\\');
+}
+
+bool isDriveRoot(QStringView p)
+{
+    const char16_t letter = p.size() >= 3 ? p[0].unicode() : 0;
+    return ((letter >= u'A' && letter <= u'Z') || (letter >= u'a' && letter <= u'z'))
+        && p[1] == QLatin1Char(':') && isSeparator(p[2]);
+}
+
+// Длина префикса «\\?\» / «\\.\» (и «\\?\UNC\»); 0 — префикса нет.
+// *unc — после префикса идёт «server\share».
+qsizetype longPrefix(QStringView p, bool* unc)
+{
+    *unc = false;
+    if (p.size() < 4 || !isSeparator(p[0]) || !isSeparator(p[1])
+        || (p[2] != QLatin1Char('?') && p[2] != QLatin1Char('.')) || !isSeparator(p[3]))
+        return 0;
+    const QStringView rest = p.mid(4);
+    if (rest.size() >= 4 && rest.first(3).compare(QLatin1String("UNC"), Qt::CaseInsensitive) == 0
+        && isSeparator(rest[3])) {
+        *unc = true;
+        return 8;
+    }
+    return 4;
+}
+
+} // namespace
+
+Style style(QStringView p)
+{
+    bool unc = false;
+    if (const qsizetype prefix = longPrefix(p, &unc)) {
+        const QStringView rest = p.mid(prefix);
+        if (unc)
+            return !rest.isEmpty() && !isSeparator(rest[0]) ? Style::WindowsUnc : Style::None;
+        return isDriveRoot(rest) ? Style::WindowsDrive : Style::None;
+    }
+    if (isDriveRoot(p))
+        return Style::WindowsDrive;
+    if (p.size() >= 3 && isSeparator(p[0]) && isSeparator(p[1]) && !isSeparator(p[2]))
+        return Style::WindowsUnc;
+    if (!p.isEmpty() && p[0] == QLatin1Char('/'))
+        return Style::Posix;
+    return Style::None;
+}
+
+bool isNative(Style s)
+{
+#ifdef Q_OS_WIN
+    return isWindows(s);
+#else
+    return s == Style::Posix;
+#endif
+}
+
+QString normalized(const QString& path)
+{
+    if (!isWindows(style(path)))
+        return path;
+    bool unc = false;
+    const qsizetype prefix = longPrefix(path, &unc);
+    QString out = unc ? QStringLiteral("//") + path.mid(prefix) : path.mid(prefix);
+    out.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return out;
+}
+
+QString toDisplay(const QString& path)
+{
+    if (!isWindows(style(path)))
+        return path;
+    QString out = path;
+    out.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    return out;
+}
+
+bool same(const QString& a, const QString& b)
+{
+#ifdef Q_OS_WIN
+    constexpr bool windowsHost = true;
+#else
+    constexpr bool windowsHost = false;
+#endif
+    const bool insensitive = windowsHost || isWindows(style(a)) || isWindows(style(b));
+    return a.compare(b, insensitive ? Qt::CaseInsensitive : Qt::CaseSensitive) == 0;
+}
+
+} // namespace SavedPath
+
+// ---------------------------------------------------------------------------
 // SourceIdentity
 // ---------------------------------------------------------------------------
 
@@ -267,7 +365,9 @@ SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
 {
     if (ephemeral)
         return State::Ephemeral;
-    if (filePath.isEmpty() || !QFileInfo(filePath).isFile())
+    // Путь чужой ОС не читается с диска: QFileInfo понял бы его как
+    // относительный (или как путь на текущем диске Windows).
+    if (filePath.isEmpty() || SavedPath::isForeign(filePath) || !QFileInfo(filePath).isFile())
         return State::Missing;
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly))
@@ -304,11 +404,13 @@ std::optional<SourceIdentity> SourceIdentity::fromJson(const QJsonObject& json, 
         return std::nullopt;
     SourceIdentity id;
     const QJsonValue path = json.value(QLatin1String("path"));
-    if (!path.isString() || !QDir::isAbsolutePath(path.toString())) {
+    // Абсолютный — по правилу SavedPath, а не этой платформы: файл мог
+    // приехать с другой ОС (R-8).
+    if (!path.isString() || !SavedPath::isAbsolute(path.toString())) {
         setError(error, QStringLiteral("bad path (must be absolute)"));
         return std::nullopt;
     }
-    id.path = path.toString();
+    id.path = SavedPath::normalized(path.toString());
     const std::optional<qint64> size = integerField(json, "size", 0);
     if (!size) {
         setError(error, QStringLiteral("bad size"));

@@ -618,11 +618,9 @@ QString LogViewWidget::normalizedPath(const QString& path)
 
 bool LogViewWidget::samePath(const QString& a, const QString& b)
 {
-#ifdef Q_OS_WIN
-    return a.compare(b, Qt::CaseInsensitive) == 0;
-#else
-    return a == b;
-#endif
+    // Как у сохранённых путей (R-8): путь Windows из сессии с другой ОС — без
+    // учёта регистра и на Linux; локальные пути — как раньше.
+    return SavedPath::same(a, b);
 }
 
 void LogViewWidget::locatorFileLoaded(const LogFilePtr& logFile)

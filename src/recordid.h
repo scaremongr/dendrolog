@@ -142,6 +142,59 @@ struct RecordId {
     friend bool operator!=(const RecordId& a, const RecordId& b) { return !(a == b); }
 };
 
+// ============================================================================
+// SavedPath — что считать абсолютным путём в СОХРАНЁННОМ файле (R-8): сессия,
+// последняя сессия, память файла, закладки, снимок вкладки. Файл мог быть
+// записан на другой ОС, поэтому правило не зависит от QDir::isAbsolutePath
+// текущей платформы и одинаково везде:
+//   • Windows с диском — «X:/…» или «X:\…» (буква любого регистра);
+//   • Windows UNC — «//server/share/…» или «\\server\share\…»;
+//     «\\?\X:\…» и «\\?\UNC\server\share\…» (длинные пути) — то же без
+//     префикса;
+//   • POSIX — «/…» (не «//» перед именем — это UNC).
+// Остальное (относительный путь, «X:foo», «\foo», пусто) — не абсолютный.
+//
+// normalized — единственная правка пути при чтении: у путей Windows обратные
+// слэши становятся прямыми (как пишет Qt) и снимается префикс «\\?\»; путь
+// POSIX не трогается — «\» в нём законная часть имени файла. Регистр и «..»
+// не меняются.
+//
+// isForeign — абсолютный путь ЧУЖОЙ платформы: на Linux — путь Windows, на
+// Windows — путь POSIX. Такой путь не открывается и не читается с диска
+// (QFileInfo понял бы «C:/logs/app.log» на Linux как относительный к
+// текущему каталогу, а «/var/log/app.log» на Windows — как путь на текущем
+// диске): источник по нему — Missing, найти его можно только по
+// относительному пути сессии или «указать файл».
+//
+// same — сравнение сохранённых путей: путь Windows — без учёта регистра на
+// любой платформе, POSIX — с учётом (на Windows — без, как файловая система).
+// ============================================================================
+namespace SavedPath {
+
+enum class Style {
+    None,          // не абсолютный
+    Posix,         // /…
+    WindowsDrive,  // X:/…
+    WindowsUnc,    // //server/share/…
+};
+
+Style style(QStringView path);
+inline bool isAbsolute(QStringView path) { return style(path) != Style::None; }
+inline bool isWindows(Style s) { return s == Style::WindowsDrive || s == Style::WindowsUnc; }
+// Стиль путей этой платформы.
+bool isNative(Style s);
+inline bool isForeign(QStringView path)
+{
+    const Style s = style(path);
+    return s != Style::None && !isNative(s);
+}
+QString normalized(const QString& path);
+// Для показа человеку: путь Windows — с «\» на любой ОС, POSIX — как есть.
+QString toDisplay(const QString& path);
+bool same(const QString& a, const QString& b);
+
+} // namespace SavedPath
+
 // Идентичность источника: путь, размер на момент сохранения (конец
 // прочитанного префикса), отпечаток начала файла (min(4 КБ, размер) байтов) и
 // 4 КБ перед сохранённым концом. Снятие и проверка — два чтения по 4 КБ, без
@@ -157,7 +210,8 @@ struct SourceIdentity {
         Ephemeral, // спул stdin: не сохраняется, ключи живут до конца процесса
     };
 
-    QString path;          // абсолютный (fromJson относительный не примет)
+    QString path;          // абсолютный по SavedPath (fromJson относительный не примет);
+                           // из файла с другой ОС — чужой (SavedPath::isForeign)
     qint64  size = -1;
     quint64 head = 0;
     quint64 tail = 0;
@@ -173,7 +227,8 @@ struct SourceIdentity {
     // Проверка по сохранённому пути.
     State check() const { return checkAt(path); }
     // Проверка содержимого по ДРУГОМУ пути (переименованный, перенесённый
-    // файл): те же правила, путь не сравнивается.
+    // файл): те же правила, путь не сравнивается. Путь чужой ОС
+    // (SavedPath::isForeign) — Missing без обращения к диску.
     State checkAt(const QString& filePath) const;
     // Те же байты префикса, путь не учитывается (две снятые идентичности).
     bool sameContent(const SourceIdentity& other) const
@@ -185,17 +240,13 @@ struct SourceIdentity {
     // {"version":1,"hash":"sha1-64","path":…,"size":…,"head":…,"tail":…};
     // у Ephemeral — пустой объект: спул на диск не пишется.
     QJsonObject toJson() const;
+    // Путь — абсолютный по SavedPath (с любой ОС), читается normalized.
     static std::optional<SourceIdentity> fromJson(const QJsonObject& json, QString* error = nullptr);
 
     friend bool operator==(const SourceIdentity& a, const SourceIdentity& b)
     {
-        // Регистр пути — как у файловой системы платформы.
-#ifdef Q_OS_WIN
-        constexpr Qt::CaseSensitivity cs = Qt::CaseInsensitive;
-#else
-        constexpr Qt::CaseSensitivity cs = Qt::CaseSensitive;
-#endif
-        return a.path.compare(b.path, cs) == 0 && a.ephemeral == b.ephemeral
+        // Регистр пути — SavedPath::same.
+        return SavedPath::same(a.path, b.path) && a.ephemeral == b.ephemeral
             && (a.ephemeral || a.sameContent(b));
     }
     friend bool operator!=(const SourceIdentity& a, const SourceIdentity& b) { return !(a == b); }
