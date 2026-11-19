@@ -3024,7 +3024,8 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
 {
     if (!logFile)
         return;
-    m_statusLabel->setText(tr("Finished parsing: %1 (%2 entries)").arg(logFile->shortName()).arg(totalEntries));
+    const QString finishedText = tr("Finished parsing: %1 (%2 entries)").arg(logFile->shortName()).arg(totalEntries);
+    m_statusLabel->setText(finishedText);
     m_progressBar->hide();
 
     // Основная обработка файла закончена — пнуть сбор статистики. Страхует
@@ -3047,9 +3048,11 @@ void MainWindow::handleFileParsingFinished(const LogFilePtr &logFile, int totalE
         }
     }
 
-    QTimer::singleShot(3000, this, [this]()
+    // Через 3 с — убрать СВОЁ сообщение. Строку статуса за это время мог
+    // занять кто-то другой (итог Save View As, сессии, перехода): его не трогать.
+    QTimer::singleShot(3000, this, [this, finishedText]()
                        {
-        if (m_progressBar->isHidden()) {
+        if (m_progressBar->isHidden() && m_statusLabel->text() == finishedText) {
             updateStatusBarDefaultText();
         } });
 
@@ -3163,11 +3166,13 @@ void MainWindow::handleFileParsingFailed(const LogFilePtr &logFile)
     if (!logFile)
         return;
     const auto* view = qobject_cast<LogViewWidget*>(sender()); // причина — у вкладки (UTF-16 и др.)
-    m_statusLabel->setText(view ? view->loadFailureMessage(logFile) : tr("Failed to parse: %1").arg(logFile->shortName()));
+    const QString failedText = view ? view->loadFailureMessage(logFile)
+                                    : tr("Failed to parse: %1").arg(logFile->shortName());
+    m_statusLabel->setText(failedText);
     m_progressBar->hide();
-    QTimer::singleShot(3000, this, [this]()
+    QTimer::singleShot(3000, this, [this, failedText]()
                        {
-        if (m_progressBar->isHidden()) {
+        if (m_progressBar->isHidden() && m_statusLabel->text() == failedText) {
             updateStatusBarDefaultText();
         } });
 }

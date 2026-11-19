@@ -13,6 +13,11 @@ All notable changes to DendroLog are documented here. The format follows
   older write could land last — a bookmark removed in the merged tab
   reappeared on the next open. Writes of the file memory now always run one
   after another, in order.
+- **Status bar messages are no longer wiped by an unrelated timer.** Three
+  seconds after a file finished loading, the status bar was reset to "Ready"
+  whatever it showed then, so the result of **Save View As** (and other
+  messages shown in those seconds) could disappear at once. Only the
+  "Finished parsing" message itself is now cleared.
 
 ## [0.6.0] — 2026-11-19
 

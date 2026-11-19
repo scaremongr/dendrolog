@@ -29,6 +29,7 @@
 #include "logtabwidget.h"
 #include "logviewwidget.h"
 #include "mainwindow.h"
+#include "viewexport.h"
 #include "openrouting.h"
 #include "schemastore.h"
 #include "sessionreportdialog.h"
@@ -1042,11 +1043,41 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         else
             DialogDriver::close(w);
     });
+    // Ждём состояние — конец задания экспорта (его сигнал), а не строку
+    // статуса: строка — следствие, и при падении нужна причина (P-10, CI на
+    // Windows под ctest -j: файл записан, а «Saved» за 30 с не увиден).
+    auto* exportJob = win.findChild<ViewExportJob*>();
+    check(exportJob != nullptr, QStringLiteral("the window owns a ViewExportJob"));
+    bool exportDone = false;
+    ViewExport::Result exportResult;
+    QMetaObject::Connection exportConn;
+    if (exportJob)
+        exportConn = QObject::connect(exportJob, &ViewExportJob::finished, &win,
+                                      [&](const ViewExport::Result& r) { exportDone = true; exportResult = r; });
+    // Конец разбора файла прямо перед экспортом: его сообщение через 3 с
+    // убирается, но только своё — итог экспорта оставаться обязан (под
+    // ctest -j конец разбора и конец экспорта сошлись, и «Saved» стирался).
+    emit a->fileParsingFinished(a->loadedFiles().value(0), allRows);
+    check(statusText(win).contains(QStringLiteral("Finished parsing")),
+          QStringLiteral("a finished parse is reported: %1").arg(statusText(win)));
     pressCommand(win, QStringLiteral("saveAs"));
     check(waitFor([&]() { return asked; }, 5000), QStringLiteral("Ctrl+Shift+S asks for a file"));
-    check(waitFor([&]() { return statusText(win).contains(QStringLiteral("exported.txt"))
-                                 && !statusText(win).contains(QStringLiteral("Saving")); }, 30000),
-          QStringLiteral("Save View As reports the result: %1").arg(statusText(win)));
+    const bool finished = waitFor([&]() { return exportDone; }, 60000);
+    QObject::disconnect(exportConn);
+    const QString statusAfter = statusText(win); // после ожидания, не в аргументах check
+    check(finished && exportResult.ok(),
+          QStringLiteral("Save View As finishes without error (finished %1, error %2 \"%3\", job running %4)")
+              .arg(finished).arg(int(exportResult.error)).arg(exportResult.detail)
+              .arg(exportJob && exportJob->isRunning()));
+    // Слот окна подключён к сигналу раньше (в конструкторе) и уже отработал.
+    check(statusAfter.contains(QStringLiteral("Saved")) && statusAfter.contains(QStringLiteral("exported.txt")),
+          QStringLiteral("Save View As reports the result: %1").arg(statusAfter));
+    // Таймер сообщения о разборе (3 с) истёк — итог экспорта на месте. Здесь
+    // проверяется именно таймер, поэтому ждём время, а не состояние.
+    testdocs::pump(3500);
+    const QString statusLater = statusText(win);
+    check(statusLater.contains(QStringLiteral("Saved")) && statusLater.contains(QStringLiteral("exported.txt")),
+          QStringLiteral("the parse message timer leaves the export result alone: %1").arg(statusLater));
     QFile out(exported);
     QByteArray bytes;
     if (out.open(QIODevice::ReadOnly))
