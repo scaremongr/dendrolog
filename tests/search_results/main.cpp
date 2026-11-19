@@ -5,8 +5,19 @@
 #include <cstdio>
 
 static int failures = 0;
+// Метка — строковый литерал либо QString (tag + "…"): QString в "%s" нельзя,
+// это неопределённое поведение ровно в тот момент, когда проверка упала.
+static void reportFailure(const char* label, int line)
+{
+    ++failures;
+    std::fprintf(stderr, "FAIL: %s (line %d)\n", label, line);
+}
+static void reportFailure(const QString& label, int line)
+{
+    reportFailure(label.toUtf8().constData(), line);
+}
 #define CHECK(condition, label) do { \
-    if (!(condition)) { ++failures; std::fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } \
+    if (!(condition)) reportFailure(label, __LINE__); \
 } while (0)
 
 static FilterRuleSet query(const QString& text, const QString& field = {}, bool regex = false)
