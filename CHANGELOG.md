@@ -6,7 +6,79 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A removed bookmark no longer comes back after merging tabs.** Saving a
+  file's remembered state could run two writes of the same file at once when
+  another file was opened right after a tab was closed or merged, and the
+  older write could land last — a bookmark removed in the merged tab
+  reappeared on the next open. Writes of the file memory now always run one
+  after another, in order.
+
+## [0.6.0] — 2026-11-19
+
+**An investigation can be put aside and picked up again.** Bookmarks with
+notes, a memory of every opened file, session files and the previous session
+bring back where you were; Show in Full Log, the navigation history and marks
+on the scrollbar make it quicker to move around a log. Logs in Windows-1251,
+IBM866, KOI8-R and Windows-1252 are now shown with their real text. Before
+updating, see *Changed*: `Ctrl+F2` now adds a bookmark, and file memory is on
+by default.
+
 ### Added
+- **Bookmarks with notes.** `Ctrl+F2` bookmarks the selected line (or use
+  **Add Bookmark** in a line's context menu); a ribbon in the left margin marks
+  it. `F2` / `Shift+F2` jump to the next / previous bookmark among the shown
+  lines, continuing from the other end of the tab. The **Bookmarks** panel
+  (`Ctrl+F11`, `View` menu) lists the bookmarks of the current tab with file,
+  line, the start of the line's text and a note you can edit in place; click a
+  bookmark to go to it, remove one with ✕ or all with **Clear All** (it asks
+  first: bookmarks are kept between runs, see *File memory*). Bookmarks stay
+  through filters (a bookmark on a hidden line is marked "hidden by filter"
+  and leads to the nearest shown line), tail updates, a full reload of the
+  file, the switch of a growing file to the large-file mode, an encoding
+  change and merging tabs. If the file is rewritten and the line is gone, the
+  bookmark stays in the panel with its text and note, marked "line not found",
+  instead of moving to another line.
+- **File memory.** A file opened again gets back its bookmarks with notes, row
+  highlighters and position (the selected line at the same place on screen, or
+  following the tail), auto-reload and an encoding chosen by hand — however it
+  is opened: command line, drag and drop, Recent Files, Directory Scanner. Its
+  filters are not applied by themselves: a bar above the log offers
+  **Restore Filters** for one click. A file added to a tab as the second one
+  gets only its bookmarks. A rotated, moved or unpacked-elsewhere file
+  (`app.log` → `app.log.1`) finds its memory by its content; a rewritten file
+  opens clean, its old bookmarks greyed out in the Bookmarks panel. The memory
+  is written when a tab closes, on exit and 2 seconds after a bookmark edit,
+  keeps up to 200 files (files with bookmarks are never dropped) and can be
+  turned off or cleared in **Settings → General → File memory**. Two windows
+  on the same file merge their bookmarks instead of wiping each other's.
+- **Sessions.** **File → Save Session As…** writes the whole window to a
+  `*.dlsession` file: every tab with its files (a merged tab keeps all of
+  them), filters, row highlighters, bookmarks with notes, the selected line
+  and its place on screen, auto-reload and a hand-picked encoding, plus the
+  active tab, the field schema and the column selection. **File → Open
+  Session…** (or a `.dlsession` passed on the command line, sent to the open
+  window or dropped into it) adds the session's tabs next to the open ones.
+  A session moved together with its logs to another folder or machine finds
+  them by their path relative to the session file — also between Windows and
+  Linux. Opening asks nothing: a missing file is skipped, a changed one opens
+  clean with its bookmarks greyed out, and a status-bar link opens the
+  **Session Report**, where **Locate File…** points a missing file at its new
+  place (only the same file is accepted); saving the session again keeps a
+  missing file with its path. The session's schema is selected if the schema
+  folder has it, otherwise added as “(from session)”. Standard input is not
+  saved.
+- **Previous session and closed tabs.** On a normal exit the main window
+  remembers its tabs (`last-session.json` in the settings folder; a window
+  closed without tabs keeps the previous one). **Settings → General → Sessions
+  → Restore the tabs of the previous session on startup** (off by default)
+  reopens them at startup before the command-line files; when it is off, the
+  start screen offers **Restore previous session**. Windows opened with
+  `--new-instance` or reading stdin neither restore nor overwrite it.
+  **`Ctrl+Shift+T`** (**File → Reopen Closed Tab**) brings back the last closed
+  tabs (up to 10) at their place with files, filters, highlighters,
+  bookmarks, position and encoding choice; missing or rewritten files are
+  reported in the status bar.
 - **Show in Full Log.** On a filtered tab, **View → Show in Full Log**, the
   line's context menu or **`Ctrl+Shift+L`** pauses the tab's level, time and
   text filters (row highlighters stay) and keeps the selected line selected at
@@ -20,47 +92,6 @@ All notable changes to DendroLog are documented here. The format follows
   closed tabs and file memory save the paused filters, not empty ones. After
   jumping to a bookmark hidden by the filters, Show in Full Log selects the
   bookmark itself.
-- **Previous session and closed tabs.** On a normal exit the main window
-  remembers its tabs (`last-session.json` in the settings folder; a window
-  closed without tabs keeps the previous one). **Settings → General → Sessions
-  → Restore the tabs of the previous session on startup** (off by default)
-  reopens them at startup before the command-line files; when it is off, the
-  start screen offers **Restore previous session**. Windows opened with
-  `--new-instance` or reading stdin neither restore nor overwrite it.
-  **`Ctrl+Shift+T`** (**File → Reopen Closed Tab**) brings back the last closed
-  tabs (up to 10) at their place with files, filters, highlighters,
-  bookmarks, position and encoding choice; missing or rewritten files are
-  reported in the status bar. A tab opened from a session whose files are all
-  missing is no longer taken over by the next file opened.
-- **Sessions.** **File → Save Session As…** writes the whole window to a
-  `*.dlsession` file: every tab with its files (a merged tab keeps all of
-  them), filters, row highlighters, bookmarks with notes, the selected line
-  and its place on screen, auto-reload and a hand-picked encoding, plus the
-  active tab, the field schema and the column selection. **File → Open
-  Session…** (or a `.dlsession` passed on the command line, sent to the open
-  window or dropped into it) adds the session's tabs next to the open ones.
-  A session moved together with its logs to another folder or machine finds
-  them by their path relative to the session file. Opening asks nothing: a
-  missing file is skipped, a changed one opens clean with its bookmarks
-  greyed out, and a status-bar link opens the **Session Report**, where
-  **Locate File…** points a missing file at its new place (only the same file
-  is accepted). The session's schema is selected if the schema folder has it,
-  otherwise added as “(from session)”. Standard input is not saved.
-- **File memory.** A file opened again gets back its bookmarks with notes, row
-  highlighters and position (the selected line at the same place on screen, or
-  following the tail), auto-reload and an encoding chosen by hand — however it
-  is opened: command line, drag and drop, Recent Files, Directory Scanner. Its
-  filters are not applied by themselves: a bar above the log offers
-  **Restore Filters** for one click. A file added to a tab as the second one
-  gets only its bookmarks. A rotated, moved or unpacked-elsewhere file
-  (`app.log` → `app.log.1`) finds its memory by its content; a rewritten file
-  opens clean, its old bookmarks greyed out in the Bookmarks panel. The memory
-  is written when a tab closes, on exit and 2 seconds after a bookmark edit;
-  it lives in the `memory` folder of the settings folder (paths of the logs and
-  fragments of bookmarked lines are stored there), keeps up to 200 files
-  (files with bookmarks are never dropped) and can be turned off or cleared in
-  **Settings → General → File memory**. Two windows on the same file merge
-  their bookmarks instead of wiping each other's.
 - **Navigation history.** `Alt+←` (`View → Navigate Back`) returns to the
   place you jumped from — by Go to, the timeline, Statistics, a Search result,
   the quick search, next error, a bookmark or the "↓ N new lines" badge;
@@ -70,8 +101,6 @@ All notable changes to DendroLog are documented here. The format follows
   (a hidden place leads to the nearest shown line), tail updates, a reload of
   the same content and the switch to the large-file mode, skips places whose
   line is gone, and is dropped with the tab.
-- A newly added default shortcut no longer takes away a key you already
-  assigned to another command: the key stays with your command.
 - **Marks on the scrollbar.** The vertical scrollbar of a log shows where the
   shown lines with errors (Error and Fatal) and warnings are, where the
   bookmarks are and, on the tab the Search panel searches, where its matches
@@ -80,20 +109,6 @@ All notable changes to DendroLog are documented here. The format follows
   handle. Marks follow filters, tail updates, reloads, added files, window
   resizing and bookmark changes. They are computed in the background, so a
   huge or fast-growing log stays as responsive as before.
-- **Bookmarks with notes.** `Ctrl+F2` bookmarks the selected line (or use
-  **Add Bookmark** in a line's context menu); a ribbon in the left margin marks
-  it. `F2` / `Shift+F2` jump to the next / previous bookmark among the shown
-  lines, continuing from the other end of the tab. The **Bookmarks** panel
-  (`Ctrl+F11`, `View` menu) lists the bookmarks of the current tab with file,
-  line, the start of the line's text and a note you can edit in place; click a
-  bookmark to go to it, remove one with ✕ or all with **Clear All**. Bookmarks
-  stay through filters (a bookmark on a hidden line is marked "hidden by
-  filter" and leads to the nearest shown line), through tail updates, a full
-  reload of the file and the switch of a growing file to the large-file mode.
-  If the file is rewritten and the line is gone, the bookmark stays in the
-  panel with its text and note, marked "line not found", instead of moving to
-  another line. Bookmarks are kept between runs (see *File memory*), so
-  **Clear All** now asks for confirmation.
 - **Logs not in UTF-8 are readable, and the encoding can be chosen by hand.**
   A log in Windows-1251, IBM866 (cp866), KOI8-R or Windows-1252 is now shown
   with its real text instead of `�`, and Cyrillic in it is found by quick
@@ -105,46 +120,54 @@ All notable changes to DendroLog are documented here. The format follows
   non-ASCII text so far (a stray broken byte, a single word), the guess stays
   open: when more text further on or in the appended tail shows another
   encoding, the file is reread in it, keeping the selected line and its place
-  on screen — a UTF-8 log that starts with one broken byte is no longer shown
-  as garbage. Every file of a tab with several files keeps its own encoding.
+  on screen — a UTF-8 log that starts with one broken byte is not shown as
+  garbage. Every file of a tab with several files keeps its own encoding.
   The **status bar** shows the encoding of the current line's file and where
   it comes from (auto, provisional, byte-order mark, manual); click it to
   choose UTF-8, Windows-1251, IBM866, KOI8-R or Windows-1252, or **Detect
   automatically** to go back to the detected one. A large file is not
   re-indexed for that, and the selected line, its place on screen, bookmarks
-  and the navigation history stay. The choice lasts while the tab is open,
-  also through reloads and merging tabs. **Settings → General → Non-UTF-8
-  files** sets the fallback encoding (by default, by the system language).
-  `--encoding <name>` (`cp1251`, `cp866`, `koi8-r`, …) opens the files of the
-  command line or a piped stream in that encoding, also through an already
-  open window; an unknown name is reported instead of being read as UTF-8.
-  **Save View As** writes the text as shown, in UTF-8.
-  The **Directory Scanner** content filter reads each file in the same
-  encoding a tab would: Cyrillic in Windows-1251, IBM866, KOI8-R and any text
-  in UTF-16 is found now (before, files were searched as UTF-8 only), with the
-  same fallback encoding as tabs; changing it re-checks only the files that
-  depend on it. Searching a directory of UTF-8 logs is no slower.
+  and the navigation history stay. The choice is kept through reloads and
+  merging tabs and is remembered with the file (see *File memory*).
+  **Settings → General → Non-UTF-8 files** sets the fallback encoding (by
+  default, by the system language). `--encoding <name>` (`cp1251`, `cp866`,
+  `koi8-r`, …) opens the files of the command line or a piped stream in that
+  encoding, also through an already open window; an unknown name is reported
+  instead of being read as UTF-8. **Save View As** writes the text as shown,
+  in UTF-8. The **Directory Scanner** content filter reads each file in the
+  same encoding a tab would: Cyrillic in Windows-1251, IBM866, KOI8-R and any
+  text in UTF-16 is found now (before, files were searched as UTF-8 only),
+  with the same fallback encoding as tabs; changing it re-checks only the
+  files that depend on it. Searching a directory of UTF-8 logs is no slower.
 
 ### Changed
-- **Show/Hide Directory Scanner panel** moved from `Ctrl+F2` to `Ctrl+F10`:
-  `Ctrl+F2` now adds or removes a bookmark. A shortcut you set yourself in
-  Settings is kept.
+- **Shortcuts.** **Show/Hide Directory Scanner panel** moved from `Ctrl+F2`
+  to `Ctrl+F10`: `Ctrl+F2` now adds or removes a bookmark. New commands come
+  with keys of their own — `F2` / `Shift+F2` (next / previous bookmark),
+  `Ctrl+F11` (Bookmarks panel), `Ctrl+Shift+L` (Show in Full Log),
+  `Ctrl+Shift+T` (Reopen Closed Tab), `Alt+←` / `Alt+→` (navigation
+  history). A key you assigned yourself in Settings is never taken away: if
+  it is the new default of another command, it stays with your command, and
+  the new one has no key until you give it one in **Settings → Shortcuts**.
+- **File memory is on by default.** The settings folder gets a `memory`
+  folder with one small file per opened log: the log's path, its bookmarks
+  with notes and the start of each bookmarked line's text, highlighters,
+  filters and position. Turn it off or clear it in **Settings → General →
+  File memory**; when it is off, nothing is read or written there.
+- **Regular expressions understand letters and digits of any alphabet.**
+  `\w`, `\b`, `\s` and classes like `[[:alpha:]]` now work on Cyrillic and
+  other non-Latin text, whatever the file's encoding — `пользовател\w+` finds
+  "пользователя", `\bошибка\b` finds the word. This applies everywhere a
+  regex is typed: Text Filters, the Search panel, the toolbar find box and
+  Find All, Row Highlighters, match highlighting and the Directory Scanner
+  content filter, and they all agree. On plain English (ASCII) text queries
+  find exactly what they found before, but `\d` now also accepts non-Latin
+  digits (such as Arabic-Indic), accented Latin letters (`é`, `ü`) count as
+  letters, so `\bcaf\b` no longer matches inside "café", and `\W`, `\D` no
+  longer match non-Latin letters.
+- Files below the large-file threshold load 5–9% faster.
 
 ### Fixed
-- **A removed bookmark no longer comes back after merging tabs.** Saving a
-  file's remembered state could run two writes of the same file at once when
-  another file was opened right after a tab was closed or merged, and the
-  older write could land last — a bookmark removed in the merged tab
-  reappeared on the next open. Writes of the file memory now always run one
-  after another, in order.
-- **A session saved on Windows opens on Linux, and the other way round.**
-  An absolute path of the other OS (`C:\…`, `\\server\share\…`, `/home/…`)
-  no longer makes the whole session file “broken”: the file is looked for next
-  to the session by its relative path; if it is not there, it is skipped and
-  named in the Session Report by its original path, **Locate File…** works,
-  and saving the session again keeps it with its path and relative path. The
-  same rule applies to the previous session and to file memory brought from
-  another machine.
 - Timestamps before 1970 behave the same in large files as in small ones.
   Above the large-file threshold (and in tabs that crossed it) a record dated
   before 1 January 1970 — or one whose time zone puts it just before that
@@ -160,26 +183,12 @@ All notable changes to DendroLog are documented here. The format follows
   **Ctrl+F** does the same with the cursor in the search field.
 - Files opened from the **Directory Scanner** now appear in **Recent Files**,
   like files opened any other way.
-- Closing the window could touch already destroyed parts of it (and crash)
-  when tabs were open — in particular tabs from a session, the previous
-  session or **Reopen Closed Tab**.
-- Regular expressions understand letters and digits of any alphabet: `\w`,
-  `\b`, `\s` and classes like `[[:alpha:]]` now work on Cyrillic and other
-  non-Latin text, whatever the file's encoding — `пользовател\w+` finds
-  "пользователя", `\bошибка\b` finds the word. This applies everywhere a
-  regex is typed: Text Filters, the Search panel, the toolbar find box and
-  Find All, Row Highlighters, match highlighting and the Directory Scanner
-  content filter, and they all agree. `\d` now also accepts non-Latin digits
-  (such as Arabic-Indic). On plain English (ASCII) text queries find exactly
-  what they found before. Accented Latin letters (`é`, `ü`) now count as
-  letters too, so `\bcaf\b` no longer matches inside "café" and `\W`, `\D`
-  no longer match non-Latin letters.
-- Merging tabs (dragging one tab onto another, **Merge All Tabs**) no longer
-  loses the bookmarks of the merged tab: they move to the receiving tab with
-  their notes and find their lines as the files load.
 - When a growing log crosses the large-file threshold, the selected line and
   its place on screen (or, without a selection, the top of the view) are kept.
   Before, the selection was dropped and the view jumped to the top of the file.
+- A tab with level, time or text filters that switches to the large-file mode
+  (a growing file passing the threshold) keeps filtering the lines it reads
+  again; before, every line was shown until the filter was applied again.
 - A UTF-16 or UTF-32 file added to a tab with other files (or to a large-file
   tab) now says why it is not shown and what to do — open it in a tab of its
   own — instead of a bare "Failed to parse".
@@ -190,13 +199,6 @@ All notable changes to DendroLog are documented here. The format follows
 - An unfinished last line that ends with a carriage return (half of a
   `\r\n` not yet written) no longer shows the stray `\r` in large-file tabs:
   both modes show it the same way.
-- A bookmark or a navigation-history place whose line was hidden by a filter
-  when a rewritten file finished reloading, or when the file's encoding was
-  changed, is found again by its line number and text, instead of becoming
-  "line not found".
-- A tab with level, time or text filters that switches to the large-file mode
-  (a growing file passing the threshold) keeps filtering the lines it reads
-  again; before, every line was shown until the filter was applied again.
 
 ## [0.5.0] — 2026-11-18
 

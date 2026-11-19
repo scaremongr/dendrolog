@@ -30,7 +30,9 @@
 #include "logviewwidget.h"
 #include "mainwindow.h"
 #include "openrouting.h"
+#include "schemastore.h"
 #include "sessionreportdialog.h"
+#include "shortcutmanager.h"
 #include "singleinstance.h"
 #include "testdocuments.h"
 #include "updatechecker.h"
@@ -44,6 +46,8 @@
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QSettings>
 #include <QShortcut>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -1515,6 +1519,317 @@ void scenarioMenuSweep(MainWindow& win)
 }
 
 // ---------------------------------------------------------------------------
+// Таблица сочетаний в справке (обе версии) — против умолчаний ShortcutManager.
+// Строка таблицы привязана к командам по английской подписи; русская таблица
+// идёт строка в строку и обязана давать те же клавиши. Каждая команда —
+// ровно в одной строке. Строки без команд (Ctrl+C, Space, выделение) — клавиши
+// самого view, их сверяет только равенство двух языков.
+QStringList helpTableRows(const QString& resource, const QString& heading)
+{
+    QFile f(resource);
+    check(f.open(QIODevice::ReadOnly), QStringLiteral("help resource %1 opens").arg(resource));
+    const QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'));
+    QStringList rows;
+    bool in = false;
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (line.startsWith(QLatin1String("## ")))
+            in = line.startsWith(heading);
+        else if (in && line.startsWith(QLatin1Char('|')) && !line.startsWith(QLatin1String("|---"))
+                 && !line.startsWith(QStringLiteral("| Action")) && !line.startsWith(QStringLiteral("| Действие")))
+            rows << line;
+    }
+    check(!rows.isEmpty(), QStringLiteral("%1 has a shortcut table").arg(resource));
+    return rows;
+}
+
+QStringList helpCells(const QString& row)
+{
+    QStringList cells = row.split(QLatin1Char('|'));
+    for (QString& c : cells)
+        c = c.trimmed();
+    cells.removeAll(QString());
+    return cells;
+}
+
+// Клавиши ячейки — в виде PortableText: стрелки словами, «Пробел» — Space,
+// диапазоны («Alt+1 … Alt+6», «Ctrl+F3…F11») развёрнуты, одиночный
+// модификатор («Ctrl + колесо») — не клавиша.
+QSet<QString> helpKeys(const QString& cell)
+{
+    QStringList tokens;
+    static const QRegularExpression code(QStringLiteral("`([^`]+)`"));
+    for (auto it = code.globalMatch(cell); it.hasNext();)
+        tokens << it.next().captured(1);
+    QSet<QString> keys;
+    auto add = [&](QString t) {
+        t.replace(QChar(0x2190), QLatin1String("Left")).replace(QChar(0x2192), QLatin1String("Right"));
+        t.replace(QStringLiteral("Пробел"), QLatin1String("Space"));
+        static const QStringList modifiers = {QStringLiteral("Ctrl"), QStringLiteral("Alt"), QStringLiteral("Shift")};
+        if (!modifiers.contains(t))
+            keys.insert(t);
+    };
+    static const QRegularExpression fRange(QStringLiteral("^(.*\\+F)(\\d+)\\x{2026}F(\\d+)$"));
+    for (int i = 0; i < tokens.size(); ++i) {
+        const QString& t = tokens[i];
+        if (const auto m = fRange.match(t); m.hasMatch()) {
+            for (int n = m.captured(2).toInt(); n <= m.captured(3).toInt(); ++n)
+                add(m.captured(1) + QString::number(n));
+            continue;
+        }
+        // «`Alt+1` … `Alt+6`»: между двумя соседними токенами — многоточие.
+        if (i + 1 < tokens.size()
+            && cell.contains(QStringLiteral("`%1` … `%2`").arg(t, tokens[i + 1]))) {
+            const QString prefix = t.left(t.size() - 1);
+            for (int n = t.right(1).toInt(); n <= tokens[i + 1].right(1).toInt(); ++n)
+                add(prefix + QString::number(n));
+            ++i;
+            continue;
+        }
+        add(t);
+    }
+    return keys;
+}
+
+void checkHelpShortcutTable()
+{
+    section(QStringLiteral("help: shortcut table vs ShortcutManager defaults"));
+    const std::map<QString, QStringList> commandsOfRow = {
+        {QStringLiteral("Open log file(s)"), {QStringLiteral("open")}},
+        {QStringLiteral("Save View As"), {QStringLiteral("saveAs")}},
+        {QStringLiteral("Close tab"), {QStringLiteral("closeTab")}},
+        {QStringLiteral("Reopen closed tab"), {QStringLiteral("reopenTab")}},
+        {QStringLiteral("Exit"), {QStringLiteral("quit")}},
+        {QStringLiteral("Reload file"), {QStringLiteral("reload")}},
+        {QStringLiteral("Auto-reload this tab"), {QStringLiteral("autoReload")}},
+        {QStringLiteral("Follow tail"), {QStringLiteral("followTail")}},
+        {QStringLiteral("Settings"), {QStringLiteral("settings")}},
+        {QStringLiteral("Focus search field"), {QStringLiteral("focusSearch")}},
+        {QStringLiteral("Search next / previous"), {QStringLiteral("searchNext"), QStringLiteral("searchPrev")}},
+        {QStringLiteral("Find all (Search panel)"), {QStringLiteral("findAll")}},
+        {QStringLiteral("Quick find: match case / whole word / regex"),
+         {QStringLiteral("findMatchCase"), QStringLiteral("findWholeWord"), QStringLiteral("findRegex")}},
+        {QStringLiteral("Go to line or time"), {QStringLiteral("goTo")}},
+        {QStringLiteral("Navigate back / forward"), {QStringLiteral("navigateBack"), QStringLiteral("navigateForward")}},
+        {QStringLiteral("Next / previous error (Error, Fatal)"), {QStringLiteral("nextError"), QStringLiteral("prevError")}},
+        {QStringLiteral("Next / previous warning"), {QStringLiteral("nextWarning"), QStringLiteral("prevWarning")}},
+        {QStringLiteral("Add / remove bookmark"), {QStringLiteral("toggleBookmark")}},
+        {QStringLiteral("Next / previous bookmark"), {QStringLiteral("nextBookmark"), QStringLiteral("prevBookmark")}},
+        {QStringLiteral("Go to new lines (below the screen)"), {QStringLiteral("goToNewLines")}},
+        {QStringLiteral("Toggle word wrap"), {QStringLiteral("wordWrap")}},
+        {QStringLiteral("Larger / smaller / default font"),
+         {QStringLiteral("zoomIn"), QStringLiteral("zoomOut"), QStringLiteral("zoomReset")}},
+        {QStringLiteral("Show only Fatal … Trace (toggle)"),
+         {QStringLiteral("levelFatal"), QStringLiteral("levelError"), QStringLiteral("levelWarn"),
+          QStringLiteral("levelInfo"), QStringLiteral("levelDebug"), QStringLiteral("levelTrace")}},
+        {QStringLiteral("Show all levels"), {QStringLiteral("levelAll")}},
+        {QStringLiteral("Reset filters of this tab"), {QStringLiteral("resetFilters")}},
+        {QStringLiteral("Show in full log / return to filtered view"), {QStringLiteral("fullLog")}},
+        {QStringLiteral("Show/Hide panels"),
+         {QStringLiteral("panelTextFilters"), QStringLiteral("panelDirScanner"), QStringLiteral("panelTimeFilter"),
+          QStringLiteral("panelFields"), QStringLiteral("panelRowHighlighters"), QStringLiteral("panelTimeline"),
+          QStringLiteral("panelSearchResults"), QStringLiteral("panelEntryDetails"),
+          QStringLiteral("panelStatistics"), QStringLiteral("panelBookmarks")}},
+        // Клавиши самого view, не команды ShortcutManager.
+        {QStringLiteral("Copy selection"), {}},
+        {QStringLiteral("Expand/collapse current line"), {}},
+        {QStringLiteral("Extend selection by character"), {}},
+        {QStringLiteral("Extend selection by token"), {}},
+    };
+
+    const QStringList en = helpTableRows(QStringLiteral(":/help/help_en.md"), QStringLiteral("## Keyboard shortcuts"));
+    const QStringList ru = helpTableRows(QStringLiteral(":/help/help_ru.md"), QStringLiteral("## Горячие клавиши"));
+    check(en.size() == ru.size(), QStringLiteral("help tables have the same rows: en %1, ru %2").arg(en.size()).arg(ru.size()));
+
+    const ShortcutManager& sm = ShortcutManager::instance();
+    QMap<QString, int> covered;
+    for (int i = 0; i < en.size(); ++i) {
+        const QStringList e = helpCells(en[i]);
+        if (e.size() != 2) {
+            check(false, QStringLiteral("help_en row has two cells: %1").arg(en[i]));
+            continue;
+        }
+        if (i < ru.size()) {
+            const QStringList r = helpCells(ru[i]);
+            const QSet<QString> ek = helpKeys(e[1]);
+            const QSet<QString> rk = r.size() == 2 ? helpKeys(r[1]) : QSet<QString>();
+            check(ek == rk, QStringLiteral("help row %1 (%2): the same keys in both languages: en {%3}, ru {%4}")
+                                .arg(i + 1).arg(e[0], QStringList(ek.values()).join(QLatin1Char(' ')),
+                                                QStringList(rk.values()).join(QLatin1Char(' '))));
+        }
+        const auto row = commandsOfRow.find(e[0]);
+        check(row != commandsOfRow.end(), QStringLiteral("help_en row \"%1\" is known to the test").arg(e[0]));
+        if (row == commandsOfRow.end() || row->second.isEmpty())
+            continue;
+        QSet<QString> expected;
+        for (const QString& id : row->second) {
+            ++covered[id];
+            const QKeySequence seq = sm.defaultSequence(id);
+            check(!seq.isEmpty(), QStringLiteral("command %1 has a default shortcut").arg(id));
+            expected.insert(seq.toString(QKeySequence::PortableText));
+        }
+        const QSet<QString> shown = helpKeys(e[1]);
+        check(shown == expected, QStringLiteral("help row \"%1\": shows {%2}, defaults are {%3}")
+                                     .arg(e[0], QStringList(shown.values()).join(QLatin1Char(' ')),
+                                          QStringList(expected.values()).join(QLatin1Char(' '))));
+    }
+    for (const ShortcutManager::Command& c : sm.commands())
+        check(covered.value(c.id) == 1, QStringLiteral("command %1 (%2) is in the help table once (got %3)")
+                                            .arg(c.id, c.label).arg(covered.value(c.id)));
+}
+
+// ---------------------------------------------------------------------------
+// Обновление с 0.5.0: каталог настроек, каким его оставила 0.5.0 (ini со
+// своими сочетаниями и раскладкой доков без панели Bookmarks, свои схемы в
+// patterns/, недавние файлы; нет memory/ и last-session.json), открывается
+// без потерь и без сообщений. Переназначенные пользователем клавиши, которые
+// в 0.6 стали умолчаниями новых команд, остаются у его команд; новая команда
+// остаётся без клавиши, неоднозначностей нет.
+void scenarioUpgradeFrom050(const QDir& root)
+{
+    section(QStringLiteral("upgrade from 0.5.0"));
+    const QDir dir(root.filePath(QStringLiteral("upgrade")));
+    QDir().mkpath(dir.absolutePath());
+    const QString log = testdocs::writeFile(dir, QStringLiteral("old.log"),
+        testdocs::makeLogBytes(200, 77, "\n", testdocs::fixtureBaseTime(), false, true, true));
+
+    // Раскладка доков 0.5.0: та же, но без Bookmarks (её в 0.5.0 не было).
+    QByteArray geometry, state;
+    {
+        AppSettings::overrideConfigDirForTesting(dir.filePath(QStringLiteral("probe-config")));
+        AppSettings::instance().load();
+        MainWindow probe;
+        showWindow(probe);
+        if (auto* bookmarks = probe.findChild<QDockWidget*>(QStringLiteral("bookmarksDockWidget")))
+            probe.removeDockWidget(bookmarks);
+        if (auto* stats = probe.findChild<QDockWidget*>(QStringLiteral("statisticsDockWidget")))
+            stats->show(); // раскладка пользователя, а не умолчание
+        geometry = probe.saveGeometry();
+        state = probe.saveState();
+        probe.hide();
+    }
+
+    const QString config = dir.filePath(QStringLiteral("config"));
+    AppSettings::overrideConfigDirForTesting(config);
+    QDir().mkpath(QDir(config).filePath(QStringLiteral("patterns")));
+    // Своя схема пользователя — файл формата 0.5.0 (SchemaStore с тех пор не менялся).
+    {
+        QFile schema(QDir(config).filePath(QStringLiteral("patterns/my-python.json")));
+        check(schema.open(QIODevice::WriteOnly), QStringLiteral("0.5.0 schema file is written"));
+        schema.write(R"({"name":"My Python","version":3,"type":"dynamic-block-schema","linePrefix":"","blocks":[)"
+                     R"({"name":"Level","kind":"regex","leadingText":"","closingText":"","separator":":","customRegex":"CRITICAL|ERROR|WARNING|INFO|DEBUG"},)"
+                     R"({"name":"Logger","kind":"text","leadingText":"","closingText":"","separator":":","customRegex":""},)"
+                     R"({"name":"Message","kind":"remainder","leadingText":"","closingText":"","separator":"","customRegex":""}]})");
+    }
+    QString mySchema;
+    for (const SchemaStore::SchemaEntry& e : SchemaStore::loadAll())
+        if (e.name == QLatin1String("My Python"))
+            mySchema = e.schema;
+    check(!mySchema.isEmpty(), QStringLiteral("0.5.0 schema file loads"));
+    {
+        // Ключи, которые писала 0.5.0 (AppSettings::save, MainWindow::saveSettings).
+        QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("App"));
+        s.setValue(QStringLiteral("wordWrap"), false);
+        s.setValue(QStringLiteral("autoReload"), true);
+        s.setValue(QStringLiteral("autoReloadIntervalSecs"), 3);
+        s.setValue(QStringLiteral("fontSize"), 11);
+        s.setValue(QStringLiteral("indexedThresholdMB"), 512);
+        s.setValue(QStringLiteral("theme"), QStringLiteral("dark"));
+        s.endGroup();
+        s.beginGroup(QStringLiteral("Window"));
+        s.setValue(QStringLiteral("geometry"), geometry);
+        s.setValue(QStringLiteral("state"), state);
+        s.endGroup();
+        s.beginGroup(QStringLiteral("View"));
+        s.setValue(QStringLiteral("conversionPattern"), mySchema);
+        s.setValue(QStringLiteral("schemaOrder"), QStringList{QStringLiteral("My Python")});
+        s.endGroup();
+        s.beginGroup(QStringLiteral("RecentFiles"));
+        s.setValue(QStringLiteral("files"), QStringList{log});
+        s.endGroup();
+        // Клавиши, которые пользователь 0.5.0 отдал своим командам и которые
+        // в 0.6 стали умолчаниями новых: F2, Ctrl+Shift+T, Alt+←, Ctrl+Shift+L.
+        s.beginGroup(QStringLiteral("Shortcuts"));
+        s.setValue(QStringLiteral("goTo"), QStringLiteral("F2"));
+        s.setValue(QStringLiteral("wordWrap"), QStringLiteral("Ctrl+Shift+T"));
+        s.setValue(QStringLiteral("panelStatistics"), QStringLiteral("Alt+Left"));
+        s.setValue(QStringLiteral("followTail"), QStringLiteral("Ctrl+Shift+L"));
+        s.endGroup();
+    }
+    AppSettings::instance().load();
+    check(AppSettings::instance().rememberFileState(), QStringLiteral("file memory is on after the upgrade"));
+    check(!AppSettings::instance().restoreSessionOnStartup(), QStringLiteral("restore on startup is off after the upgrade"));
+    check(AppSettings::instance().themeMode() == ThemeMode::Dark, QStringLiteral("0.5.0 theme choice is kept"));
+
+    const int dialogsBefore = g_driver->closedByDefault().size();
+    {
+        MainWindow win;
+        showWindow(win);
+        win.startUp(OpenRouting::parseCommandLine({}), /*primary=*/true);
+        testdocs::pump(200);
+        check(g_driver->closedByDefault().size() == dialogsBefore,
+              QStringLiteral("0.5.0 settings open without a dialog: %1")
+                  .arg(g_driver->closedByDefault().mid(dialogsBefore).join(QStringLiteral("; "))));
+        check(!statusText(win).contains(QLatin1String("rror")),
+              QStringLiteral("no error in the status bar: %1").arg(statusText(win)));
+
+        const auto keyOf = [&](const char* id) {
+            QAction* a = command(win, QString::fromLatin1(id));
+            return a ? a->shortcut().toString(QKeySequence::PortableText) : QStringLiteral("<no action>");
+        };
+        const std::pair<const char*, const char*> expected[] = {
+            {"goTo", "F2"}, {"nextBookmark", ""}, {"prevBookmark", "Shift+F2"},
+            {"wordWrap", "Ctrl+Shift+T"}, {"reopenTab", ""},
+            {"panelStatistics", "Alt+Left"}, {"navigateBack", ""}, {"navigateForward", "Alt+Right"},
+            {"followTail", "Ctrl+Shift+L"}, {"fullLog", ""},
+            {"toggleBookmark", "Ctrl+F2"}, {"panelDirScanner", "Ctrl+F10"}, {"panelBookmarks", "Ctrl+F11"},
+        };
+        for (const auto& [id, key] : expected)
+            check(keyOf(id) == QLatin1String(key), QStringLiteral("after the upgrade %1 is \"%2\" (got \"%3\")")
+                                                     .arg(QLatin1String(id), QLatin1String(key), keyOf(id)));
+        checkShortcutAmbiguity(win, QStringLiteral("upgrade from 0.5.0"));
+
+        auto* bookmarksDock = win.findChild<QDockWidget*>(QStringLiteral("bookmarksDockWidget"));
+        check(bookmarksDock && !bookmarksDock->isVisible(), QStringLiteral("new Bookmarks panel starts hidden"));
+        auto* statsDock = win.findChild<QDockWidget*>(QStringLiteral("statisticsDockWidget"));
+        check(statsDock && statsDock->isVisible(), QStringLiteral("0.5.0 dock layout is restored"));
+        check(inRecentFiles(win, log), QStringLiteral("0.5.0 recent files are kept"));
+        bool schemaSelected = false;
+        for (QComboBox* combo : win.findChildren<QComboBox*>())
+            if (combo->findText(QStringLiteral("My Python")) >= 0)
+                schemaSelected = combo->currentText() == QLatin1String("My Python");
+        check(schemaSelected, QStringLiteral("0.5.0 schema is listed and still selected"));
+
+        win.openCommandLine(OpenRouting::parseCommandLine({log}));
+        check(waitFor([&]() { return tabs(win)->count() == 1; }), QStringLiteral("a log opens after the upgrade"));
+        check(waitAllLoaded(win), QStringLiteral("the log loads"));
+        tabAt(win, 0)->view()->goToRow(10);
+        pressCommand(win, QStringLiteral("toggleBookmark"));
+        check(waitFor([&]() { return tabAt(win, 0)->bookmarks().count() == 1; }, 5000),
+              QStringLiteral("Ctrl+F2 bookmarks a line after the upgrade"));
+        pressCommand(win, QStringLiteral("quit"));
+        check(waitFor([&]() { return !win.isVisible(); }, 10000), QStringLiteral("window closes"));
+    }
+    check(QFileInfo::exists(AppSettings::lastSessionFile()), QStringLiteral("exit writes last-session.json"));
+    check(!QDir(AppSettings::fileMemoryDir()).entryList({QStringLiteral("*.json")}, QDir::Files).isEmpty(),
+          QStringLiteral("file memory is written"));
+    QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+    check(s.value(QStringLiteral("Shortcuts/goTo")).toString() == QLatin1String("F2")
+              && s.value(QStringLiteral("Shortcuts/wordWrap")).toString() == QLatin1String("Ctrl+Shift+T")
+              && s.value(QStringLiteral("Shortcuts/panelStatistics")).toString() == QLatin1String("Alt+Left")
+              && s.value(QStringLiteral("Shortcuts/followTail")).toString() == QLatin1String("Ctrl+Shift+L")
+              && !s.contains(QStringLiteral("Shortcuts/nextBookmark")),
+          QStringLiteral("the user's shortcuts are saved back unchanged"));
+    check(s.value(QStringLiteral("App/theme")).toString() == QLatin1String("dark")
+              && s.value(QStringLiteral("App/autoReloadIntervalSecs")).toInt() == 3
+              && s.value(QStringLiteral("App/fontSize")).toInt() == 11,
+          QStringLiteral("0.5.0 [App] values are saved back unchanged"));
+    check(QFileInfo::exists(QDir(config).filePath(QStringLiteral("patterns/my-python.json"))),
+          QStringLiteral("0.5.0 schema file stays"));
+}
+
+// ---------------------------------------------------------------------------
 int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
 {
     const QString backend = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
@@ -1687,6 +2002,8 @@ int main(int argc, char** argv)
     DialogDriver driver;
     g_driver = &driver;
 
+    checkHelpShortcutTable();
+
     // Свой ключ одного экземпляра: не настоящий сокет DendroLog.
     const QString instanceKey = QStringLiteral("DendroLogSmoke-%1").arg(QCoreApplication::applicationPid());
     // Аргумент resident / indexed — один бэкенд (для отладки).
@@ -1694,6 +2011,8 @@ int main(int argc, char** argv)
     for (const bool indexed : {false, true})
         if (only.isEmpty() || only == (indexed ? QLatin1String("indexed") : QLatin1String("resident")))
             runBackend(QDir(root.path()), indexed, instanceKey);
+    if (only.isEmpty() || only == QLatin1String("upgrade"))
+        scenarioUpgradeFrom050(QDir(root.path()));
 
     std::fprintf(stderr, "dialogs closed by the driver: %s\n",
                  qPrintable(driver.closedByDefault().join(QStringLiteral("; "))));
