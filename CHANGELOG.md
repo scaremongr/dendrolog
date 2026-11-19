@@ -6,6 +6,15 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A window opened with `--new-instance` or reading stdin (`program |
+  DendroLog -`) no longer takes the place of the single instance. Before, if
+  such a window was the first one, plain launches handed their files to it,
+  and the previous session (`last-session.json`) was saved by no window. Now a
+  plain launch next to it opens the main window, which takes the files of
+  later launches and saves the session on exit. Two launches at the same moment
+  no longer both become the main window.
+
 ## [0.6.0] — 2026-11-19
 
 **An investigation can be put aside and picked up again.** Bookmarks with

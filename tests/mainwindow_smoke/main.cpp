@@ -70,6 +70,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 
 namespace {
 
@@ -631,13 +632,14 @@ void scenarioOpen(MainWindow& win, const Fixtures& fx, bool indexed, const QStri
 
     section(QStringLiteral("open: second instance"));
     {
-        SingleInstance primary(instanceKey);
-        check(!primary.isSecondary(), QStringLiteral("first SingleInstance is primary"));
+        SingleInstance primary(instanceKey, OpenRouting::parseCommandLine({}));
+        check(primary.isPrimary(), QStringLiteral("first SingleInstance is primary"));
         win.attachSingleInstance(&primary);
-        SingleInstance secondary(instanceKey);
-        check(secondary.isSecondary(), QStringLiteral("second SingleInstance is secondary"));
-        const QStringList forwarded = OpenRouting::forwardedArguments(
-            OpenRouting::parseCommandLine({fx.b}));
+        const OpenRouting::CommandLine second = OpenRouting::parseCommandLine({fx.b});
+        SingleInstance secondary(instanceKey, second);
+        check(secondary.role() == SingleInstance::Role::Forward,
+              QStringLiteral("second SingleInstance forwards"));
+        const QStringList forwarded = OpenRouting::forwardedArguments(second);
         // Отправка блокирует поток — в отдельном, пока GUI-поток крутит события.
         QFuture<bool> sent = QtConcurrent::run([&secondary, forwarded]() {
             return secondary.sendToPrimary(forwarded);
@@ -2011,6 +2013,84 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
     return 0;
 }
 
+
+// Q-20: окно --new-instance открыто первым и ключ одного экземпляра не
+// занимает. Обычный запуск рядом с ним — первичное окно: принимает файлы
+// третьего запуска и при выходе пишет last-session.json; отдельное окно
+// файлов не получает и последнюю сессию не пишет. Окна и SingleInstance —
+// как их собирает main.cpp.
+void scenarioSeparateWindowFirst(const QDir& root, const QString& instanceKey)
+{
+    section(QStringLiteral("separate window first (Q-20)"));
+    const QDir dir(root.filePath(QStringLiteral("separate-first")));
+    QDir().mkpath(dir.absolutePath());
+    const Fixtures fx = makeFixtures(dir);
+    AppSettings::overrideConfigDirForTesting(dir.filePath(QStringLiteral("config")));
+    AppSettings& settings = AppSettings::instance();
+    settings.load();
+    settings.setRestoreSessionOnStartup(false);
+    settings.setFallbackEncodingChoice(TextEncoding::Windows1251);
+    settings.save();
+    const QString lastSession = AppSettings::lastSessionFile();
+    QFile::remove(lastSession);
+    const QString key = instanceKey + QStringLiteral("-separate");
+
+    // Как main.cpp: роль решает SingleInstance, окно получает итог.
+    const auto startWindow = [&](MainWindow& win, SingleInstance& guard, const OpenRouting::CommandLine& cl) {
+        showWindow(win);
+        if (guard.isPrimary())
+            win.attachSingleInstance(&guard);
+        win.startUp(cl, guard.isPrimary());
+    };
+
+    const OpenRouting::CommandLine separateCl =
+        OpenRouting::parseCommandLine({QStringLiteral("--new-instance"), fx.a});
+    SingleInstance separateGuard(key, separateCl);
+    check(separateGuard.role() == SingleInstance::Role::Separate && !separateGuard.isPrimary(),
+          QStringLiteral("--new-instance window does not take the single-instance key"));
+    auto separate = std::make_unique<MainWindow>();
+    startWindow(*separate, separateGuard, separateCl);
+    check(waitFor([&]() { return tabIndexForFile(*separate, fx.a) >= 0; }),
+          QStringLiteral("separate window opens its file"));
+
+    const OpenRouting::CommandLine primaryCl = OpenRouting::parseCommandLine({fx.b});
+    SingleInstance primaryGuard(key, primaryCl);
+    check(primaryGuard.isPrimary(), QStringLiteral("plain launch next to it becomes the primary window"));
+    auto primary = std::make_unique<MainWindow>();
+    startWindow(*primary, primaryGuard, primaryCl);
+    check(waitFor([&]() { return tabIndexForFile(*primary, fx.b) >= 0; }),
+          QStringLiteral("primary window opens its file"));
+
+    const OpenRouting::CommandLine thirdCl = OpenRouting::parseCommandLine({fx.c});
+    SingleInstance third(key, thirdCl);
+    check(third.role() == SingleInstance::Role::Forward, QStringLiteral("third launch forwards"));
+    const QStringList forwarded = OpenRouting::forwardedArguments(thirdCl);
+    QFuture<bool> sent = QtConcurrent::run([&third, forwarded]() { return third.sendToPrimary(forwarded); });
+    check(waitFor([&]() { return sent.isFinished(); }), QStringLiteral("third launch send finishes"));
+    check(sent.result(), QStringLiteral("third launch delivers its files"));
+    check(waitFor([&]() { return tabIndexForFile(*primary, fx.c) >= 0; }),
+          QStringLiteral("file of the third launch opens in the primary window"));
+    check(tabIndexForFile(*separate, fx.c) < 0 && tabs(*separate)->count() == 1,
+          QStringLiteral("separate window gets no files of the third launch"));
+    check(waitAllLoaded(*primary) && waitAllLoaded(*separate), QStringLiteral("windows load"));
+
+    separate->close();
+    check(waitFor([&]() { return !separate->isVisible(); }), QStringLiteral("separate window closes"));
+    separate.reset();
+    check(!QFileInfo::exists(lastSession), QStringLiteral("separate window does not write last-session.json"));
+
+    primary->close();
+    check(waitFor([&]() { return !primary->isVisible(); }), QStringLiteral("primary window closes"));
+    primary.reset();
+    QFile f(lastSession);
+    const QByteArray written = f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    check(!written.isEmpty(), QStringLiteral("primary window writes last-session.json on exit"));
+    check(written.contains(QFileInfo(fx.b).fileName().toUtf8())
+              && written.contains(QFileInfo(fx.c).fileName().toUtf8())
+              && !written.contains(QFileInfo(fx.a).fileName().toUtf8()),
+          QStringLiteral("last session is the primary window's tabs"));
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -2037,13 +2117,16 @@ int main(int argc, char** argv)
 
     // Свой ключ одного экземпляра: не настоящий сокет DendroLog.
     const QString instanceKey = QStringLiteral("DendroLogSmoke-%1").arg(QCoreApplication::applicationPid());
-    // Аргумент resident / indexed — один бэкенд (для отладки).
+    // Аргумент resident / indexed — один бэкенд, upgrade / separate — один
+    // сценарий (для отладки).
     const QString only = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
     for (const bool indexed : {false, true})
         if (only.isEmpty() || only == (indexed ? QLatin1String("indexed") : QLatin1String("resident")))
             runBackend(QDir(root.path()), indexed, instanceKey);
     if (only.isEmpty() || only == QLatin1String("upgrade"))
         scenarioUpgradeFrom050(QDir(root.path()));
+    if (only.isEmpty() || only == QLatin1String("separate"))
+        scenarioSeparateWindowFirst(QDir(root.path()), instanceKey);
 
     std::fprintf(stderr, "dialogs closed by the driver: %s\n",
                  qPrintable(driver.closedByDefault().join(QStringLiteral("; "))));

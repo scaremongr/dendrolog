@@ -1,6 +1,8 @@
 #include "singleinstance.h"
 
+#include <QDir>
 #include <QLocalServer>
+#include <QLockFile>
 #include <QLocalSocket>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -25,30 +27,43 @@ QStringList decodeFiles(const QByteArray& line)
 
 } // namespace
 
-SingleInstance::SingleInstance(const QString& appKey, QObject* parent)
+bool SingleInstance::joinsSingleInstance(const OpenRouting::CommandLine& commandLine)
+{
+    return !commandLine.newInstance && !commandLine.readStdin;
+}
+
+SingleInstance::SingleInstance(const QString& appKey, const OpenRouting::CommandLine& commandLine,
+                               QObject* parent)
     : QObject(parent)
 {
     m_socketName = appKey + QLatin1Char('-') +
                    qEnvironmentVariable("USERNAME", qEnvironmentVariable("USER"));
 
-    // Пробуем подключиться к уже работающему первичному экземпляру.
-    QLocalSocket probe;
-    probe.connectToServer(m_socketName);
-    if (probe.waitForConnected(200)) {
-        m_secondary = true;
+    // Отдельное окно ключ не трогает: ни проб, ни сервера.
+    if (!joinsSingleInstance(commandLine))
+        return;
+
+    // Проба и захват ключа одновременных запусков идут по очереди: иначе оба
+    // не нашли бы сервер и оба стали бы первичными (на Unix listen() с
+    // UserAccessOption молча заменяет файл чужого живого сокета). Блокировку
+    // упавшего процесса QLockFile снимает сам; не дождались (держатель
+    // завис) — работаем без неё, как до Q-20.
+    QLockFile claimLock(QDir(QDir::tempPath()).filePath(m_socketName + QStringLiteral(".lock")));
+    claimLock.tryLock(3000);
+
+    // Первичный уже работает — передаём ему.
+    if (primaryAnswers()) {
+        m_role = Role::Forward;
         return;
     }
-
-    // Никто не слушает — становимся первичным. removeServer() подчищает
-    // сокет, оставшийся после аварийного завершения (актуально для Unix).
+    // Никто не отвечает — занимаем. removeServer() подчищает сокет,
+    // оставшийся после аварийного завершения (Unix).
     QLocalServer::removeServer(m_socketName);
     m_server = new QLocalServer(this);
     m_server->setSocketOptions(QLocalServer::UserAccessOption);
-    if (!m_server->listen(m_socketName)) {
-        // Не удалось занять имя (гонка запусков) — работаем как обычное
-        // независимое окно, это безопасный fallback.
-        return;
-    }
+    if (!m_server->listen(m_socketName))
+        return; // не удалось занять имя — работаем отдельным окном
+    m_role = Role::Primary;
 
     connect(m_server, &QLocalServer::newConnection, this, [this]() {
         while (QLocalSocket* client = m_server->nextPendingConnection()) {
@@ -64,13 +79,25 @@ SingleInstance::SingleInstance(const QString& appKey, QObject* parent)
     });
 }
 
-bool SingleInstance::sendToPrimary(const QStringList& files) const
+bool SingleInstance::primaryAnswers() const
 {
+    QLocalSocket probe;
+    probe.connectToServer(m_socketName);
+    if (!probe.waitForConnected(200))
+        return false;
+    probe.abort();
+    return true;
+}
+
+bool SingleInstance::sendToPrimary(const QStringList& arguments) const
+{
+    if (m_role != Role::Forward)
+        return false;
     QLocalSocket socket;
     socket.connectToServer(m_socketName);
     if (!socket.waitForConnected(500))
         return false;
-    socket.write(encodeFiles(files));
+    socket.write(encodeFiles(arguments));
     const bool ok = socket.waitForBytesWritten(1000);
     socket.disconnectFromServer();
     if (socket.state() != QLocalSocket::UnconnectedState)

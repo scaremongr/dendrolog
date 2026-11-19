@@ -91,10 +91,10 @@ public:
     // ставится до них; о пропавших и изменённых файлах — ссылка в строке
     // состояния на отчёт. Логика — SessionController.
     void openSessionFile(const QString& path);
-    // Запуск окна (main): primary — окно владеет последней сессией
-    // (OpenRouting::ownsLastSession). Включена настройка — вкладки прошлого
-    // сеанса, затем командная строка; файлы второго экземпляра идут мимо — в
-    // openCommandLine.
+    // Запуск окна (main): primary — окно владеет последней сессией (держит
+    // ключ одного экземпляра, SingleInstance::isPrimary). Включена
+    // настройка — вкладки прошлого сеанса, затем командная строка; файлы
+    // второго экземпляра идут мимо — в openCommandLine.
     void startUp(const OpenRouting::CommandLine& commandLine, bool primary);
     // Первичный экземпляр (main): файлы, присланные вторым запуском, —
     // openCommandLine с его аргументами, окно поднимается поверх остальных.
