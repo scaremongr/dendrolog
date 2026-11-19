@@ -49,6 +49,9 @@
 - **Bookmarks with notes** — `Ctrl+F2` marks a line, `F2` / `Shift+F2` jump
   between bookmarks, the Bookmarks panel lists them with a note each; they stay
   through filters, reloads and the switch to the large-file mode.
+- **File memory** — a file opened again gets back its bookmarks, row
+  highlighters and position, and its last filters with one click; a rotated or
+  moved file finds its memory by its content.
 - **Navigation history** — `Alt+←` / `Alt+→` go back to where a jump (search,
   Statistics, timeline, bookmark, Go to, `F8`) started and forward again.
 - **Marks on the scrollbar** — errors, warnings, bookmarks and Search panel
@@ -99,6 +102,9 @@ DendroLog stores settings in the user profile
 (`%LOCALAPPDATA%/DendroLog` on Windows, `~/.config/DendroLog` on Linux).
 If a file named `portable` (or an existing `DendroLog.ini`) sits next to the
 executable, settings are kept there instead.
+The file memory (bookmarks, markers, position and filters of each opened log)
+lives in the `memory` subfolder of the same folder, so it travels with a
+portable copy; it can be turned off or cleared in Settings.
 
 ## Feedback
 

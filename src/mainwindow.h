@@ -291,6 +291,8 @@ private:
 
     // Спулер потокового ввода (`DendroLog -`); nullptr, если stdin не читаем.
     class StdinSpooler* m_stdinSpooler = nullptr;
+    // Память файлов (R-4): общая на окно; читают и пишут вкладки сами.
+    std::unique_ptr<class FileMemoryStore> m_fileMemory;
 
     // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
     // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной

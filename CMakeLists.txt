@@ -72,6 +72,8 @@ set(DENDROLOG_CORE_SOURCES
     src/bookmarkstore.cpp
     src/documentstate.h
     src/documentstate.cpp
+    src/filememorystore.h
+    src/filememorystore.cpp
     src/navhistory.h
     src/navhistory.cpp
     src/residentlogstore.h

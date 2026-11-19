@@ -1,4 +1,5 @@
 ﻿#include "mainwindow.h"
+#include "filememorystore.h"
 #include "scrollbarmarks.h"
 #include "bookmarkpanelwidget.h"
 #include "quicksearchfield.h"
@@ -151,6 +152,7 @@ MainWindow::MainWindow(QWidget *parent)
     // setup methods (e.g. setupDirectoryScanner) can read correct values.
     AppSettings::instance().load();
     ShortcutManager::instance().load();
+    m_fileMemory = std::make_unique<FileMemoryStore>(AppSettings::fileMemoryDir());
 
     setupStatusBar();
     setupTimeFilterDockContents();
@@ -797,6 +799,11 @@ void MainWindow::closeEvent(QCloseEvent *event)
     // workers reference) are torn down.
     cancelFieldExtraction();
     saveSettings();
+    // Память файлов открытых вкладок (R-4) — на диск до выхода.
+    for (int i = 0; i < ui->tabWidget->count(); ++i)
+        if (auto* logView = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
+            logView->saveFileMemory();
+    m_fileMemory->waitForWrites();
     QMainWindow::closeEvent(event);
 }
 
@@ -1728,6 +1735,23 @@ LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
     view->setParserPattern(m_conversionPattern);
+    // Память файла (R-4): вкладка читает и пишет её сама; окну — сообщения
+    // и флаг авто-обновления, который могла поставить память.
+    view->setFileMemory(m_fileMemory.get());
+    connect(view, &LogViewWidget::statusMessage, this,
+            [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+    connect(view, &LogViewWidget::offeredFiltersChanged, this, [this, view](bool offered) {
+        if (!offered && view == m_activeLogView) { // «Restore Filters»: кнопки уровней и поля времени
+            updateLogLevelFilterButtons();
+            seedTimeFilterEditors();
+        }
+    });
+    connect(view, &LogViewWidget::autoReloadChanged, this, [this, view]() {
+        if (view == m_activeLogView)
+            syncReloadButton();
+        updateAutoReloadTimer();
+        updateTabLabel(view);
+    });
     // Отметки поиска на скроллбаре (R-6): view сам решает, источник ли он.
     view->view()->scrollbarMarks()->setSearch(m_searchController);
     const bool filterEnabled = m_fieldFilterEnabledCheckBox
@@ -2508,8 +2532,10 @@ void MainWindow::closeTab(int index)
     QWidget* page = ui->tabWidget->widget(index);
     if (!page)
         return;
-    if (auto* logView = qobject_cast<LogViewWidget*>(page))
+    if (auto* logView = qobject_cast<LogViewWidget*>(page)) {
+        logView->saveFileMemory(); // память файла (R-4)
         disconnectFromLogView(logView);
+    }
     ui->tabWidget->removeTab(index);
     delete page;
     // Закрытая вкладка могла держать авто-перезагрузку — обновить таймер.
@@ -3694,6 +3720,7 @@ void MainWindow::onConfigureScanExtensionsClicked()
     // Delegate to the full Settings dialog — opens on the General tab
     // where the user can add/remove file extensions properly.
     SettingsDialog dlg(this);
+    dlg.setFileMemory(m_fileMemory.get());
     dlg.exec();
     // If the user applied changes, AppSettings::settingsChanged() was already
     // emitted and the scanner will use the new extensions on the next scan.
@@ -3702,6 +3729,7 @@ void MainWindow::onConfigureScanExtensionsClicked()
 void MainWindow::onSettingsTriggered()
 {
     SettingsDialog dlg(this);
+    dlg.setFileMemory(m_fileMemory.get());
     dlg.exec();
 }
 
@@ -4159,12 +4187,9 @@ void MainWindow::updateAutoReloadTimer()
 // individually, so every caller stays in sync automatically.
 void MainWindow::setTabAutoReload(LogViewWidget* view, bool enabled)
 {
-    if (!view) return;
-    view->setAutoReload(enabled);
-    if (view == m_activeLogView)
-        syncReloadButton();
-    updateAutoReloadTimer();
-    updateTabLabel(view); // значок «живой» вкладки
+    if (view) // таймер и значок «живой» вкладки обновляет autoReloadChanged
+        view->setAutoReload(enabled);
+    syncReloadButton(); // и кнопку, даже если флаг не изменился
 }
 
 // ---------------------------------------------------------------------------

@@ -2,8 +2,10 @@
 #include "ui_settingsdialog.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include "filememorystore.h"
 #include "shortcutmanager.h"
 
+#include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QFormLayout>
@@ -36,6 +38,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     buildColorsTab();
     buildShortcutsTab();
     buildPerformanceControls();
+    buildFileMemoryControls();
     loadFromSettings();
 
     // Live font preview.
@@ -333,6 +336,52 @@ void SettingsDialog::buildPerformanceControls()
 }
 
 // ---------------------------------------------------------------------------
+void SettingsDialog::buildFileMemoryControls()
+{
+    QWidget* page = ui->autoReloadIntervalSpinBox
+        ? ui->autoReloadIntervalSpinBox->parentWidget() : nullptr;
+    if (!page || !page->layout())
+        return;
+
+    auto* group = new QGroupBox(tr("File memory"), page);
+    auto* groupLayout = new QVBoxLayout(group);
+    m_rememberFileStateCheckBox = new QCheckBox(
+        tr("Remember bookmarks, markers, position and filters of each file"), group);
+    m_rememberFileStateCheckBox->setObjectName(QStringLiteral("rememberFileStateCheckBox"));
+    m_rememberFileStateCheckBox->setToolTip(
+        tr("A file opened again gets its bookmarks, row highlighters and position back;\n"
+           "its filters are offered with one click. The state is kept in the settings\n"
+           "folder (memory/) and includes file paths and fragments of bookmarked lines."));
+    groupLayout->addWidget(m_rememberFileStateCheckBox);
+
+    auto* row = new QHBoxLayout();
+    auto* clearButton = new QPushButton(tr("Clear Memory..."), group);
+    clearButton->setObjectName(QStringLiteral("clearFileMemoryButton"));
+    clearButton->setToolTip(tr("Forget the saved state of all files, bookmarks included"));
+    auto* clearedLabel = new QLabel(group);
+    clearedLabel->setObjectName(QStringLiteral("clearFileMemoryLabel"));
+    row->addWidget(clearButton);
+    row->addWidget(clearedLabel, 1);
+    groupLayout->addLayout(row);
+    connect(clearButton, &QPushButton::clicked, this, [this, clearedLabel]() {
+        const auto answer = QMessageBox::question(this, tr("Clear Memory"),
+            tr("Forget the saved bookmarks, markers, positions and filters of all files?\n"
+               "Tabs that are open now save their state again when they are closed."),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes)
+            return;
+        const int removed = m_fileMemory ? m_fileMemory->clear()
+                                         : FileMemoryStore::clearDirectory(AppSettings::fileMemoryDir());
+        clearedLabel->setText(tr("Forgot the state of %n file(s).", nullptr, removed));
+    });
+
+    if (auto* form = qobject_cast<QFormLayout*>(page->layout()))
+        form->addRow(group);
+    else
+        page->layout()->addWidget(group);
+}
+
+// ---------------------------------------------------------------------------
 void SettingsDialog::resetShortcutsToDefaults()
 {
     const ShortcutManager& mgr = ShortcutManager::instance();
@@ -373,6 +422,8 @@ void SettingsDialog::loadFromSettings()
         m_indexedThresholdSpinBox->setValue(s.indexedThresholdMB());
     if (m_textCacheSpinBox)
         m_textCacheSpinBox->setValue(s.textCacheBudgetMB());
+    if (m_rememberFileStateCheckBox)
+        m_rememberFileStateCheckBox->setChecked(s.rememberFileState());
     if (m_fallbackEncodingCombo) {
         const auto choice = s.fallbackEncodingChoice();
         m_fallbackEncodingCombo->setCurrentIndex(
@@ -429,6 +480,8 @@ void SettingsDialog::applyToSettings()
         s.setIndexedThresholdMB(m_indexedThresholdSpinBox->value());
     if (m_textCacheSpinBox)
         s.setTextCacheBudgetMB(m_textCacheSpinBox->value());
+    if (m_rememberFileStateCheckBox)
+        s.setRememberFileState(m_rememberFileStateCheckBox->isChecked());
     if (m_fallbackEncodingCombo) {
         const int data = m_fallbackEncodingCombo->currentData().toInt();
         s.setFallbackEncodingChoice(data < 0 ? std::nullopt

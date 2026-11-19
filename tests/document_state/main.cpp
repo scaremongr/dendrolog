@@ -25,25 +25,50 @@
 //   • слитая вкладка, один из файлов пропал — второй с закладками и позицией;
 //   • спул stdin в снимок не попадает;
 //   • применение посреди загрузки; переход порога после применения.
+// Память файла на диске (R-4, шаг 2; FileMemoryStore с временным каталогом):
+//   • формат: круговой проход, эталон file-memory-v1.json, отказы (большая
+//     версия отличается от битых данных), лишние ключи;
+//   • хранилище: по пути (и дописанный), нормализация пути (., .., родные
+//     разделители, регистр на Windows), большая версия не применяется и не
+//     перезаписывается, битый файл, прерванная запись, переписанный файл
+//     (с закладками — отсоединение, без — удаление; прежнее содержимое под
+//     другим именем находит отсоединённую), перенос, копия, короткий (< 4 КБ)
+//     и пустой файл, лимит и вытеснение (память с закладками остаётся), два
+//     хранилища на один каталог (объединение закладок, снятая не воскресает);
+//   • вкладка на обоих бэкендах: открыть → закладки, маркер, фильтр, позиция
+//     → закрыть → открыть: всё на месте, фильтр предложен плашкой и
+//     возвращается щелчком; отложенная запись после правки закладки; отказ от
+//     предложения; второй файл вкладки — только закладки; выключенная
+//     настройка; дописан; переписан (закладки серые, не на чужих строках);
+//     Clear All спрашивает подтверждение.
 // Ждём состояние (загрузка, ответ локатора, отложенная раскладка), а не время.
 // ============================================================================
 
 #include "appsettings.h"
+#include "bookmarkpanelwidget.h"
 #include "documentstate.h"
+#include "filememorystore.h"
 #include "logviewwidget.h"
 #include "stdinspooler.h"
 #include "testdocuments.h"
 
 #include "LogListView.h"
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QFile>
+#include <QFrame>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QTimer>
+#include <QToolButton>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -757,6 +782,711 @@ static void checkMidLoadAndThreshold(const QDir& dir, const QString& schema)
     settings.setIndexedThresholdMB(512);
 }
 
+// ---------------------------------------------------------------------------
+// Память файла на диске (R-4, шаг 2): FileMemoryStore с временным каталогом
+// ---------------------------------------------------------------------------
+
+static QByteArray readBytes(const QString& path)
+{
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+static QString memoryFileOf(const QString& memDir, const QString& path)
+{
+    return memDir + QLatin1Char('/') + FileMemoryStore::fileNameForPath(path);
+}
+
+static QStringList memoryFiles(const QString& memDir)
+{
+    return QDir(memDir).entryList({ QStringLiteral("*.json") }, QDir::Files, QDir::Name);
+}
+
+static BookmarkState fakeBookmark(const SourceIdentity& source, qint64 line)
+{
+    BookmarkState b;
+    b.source = source;
+    b.record = RecordId::forLine(line, QStringLiteral("text of %1").arg(line));
+    b.note = QStringLiteral("note %1").arg(line);
+    b.preview = QStringLiteral("text of %1").arg(line);
+    b.created = QDateTime::fromString(QStringLiteral("2026-11-19T10:00:00.000Z"), Qt::ISODateWithMs);
+    return b;
+}
+
+static FileMemory memoryOf(const QString& path, const QVector<qint64>& lines, bool withView = true)
+{
+    FileMemory m;
+    const auto source = SourceIdentity::capture(path);
+    CHECK(source.has_value(), QStringLiteral("идентичность снимается: ") + path);
+    m.source.source = source.value_or(SourceIdentity());
+    for (const qint64 line : lines)
+        m.bookmarks.append(fakeBookmark(m.source.source, line));
+    if (withView) {
+        ViewState v;
+        HighlightPattern marker;
+        marker.text = QStringLiteral("line 1");
+        marker.color = QColor(Qt::yellow);
+        v.markers = { marker };
+        v.currentSource = m.source.source;
+        v.current = RecordId::forLine(3, QStringLiteral("text of 3"));
+        v.currentSelected = true;
+        m.view = v;
+    }
+    return m;
+}
+
+static QVector<qint64> linesOf(const std::optional<FileMemory>& m)
+{
+    QVector<qint64> lines;
+    if (m)
+        for (const BookmarkState& b : m->bookmarks)
+            lines.append(b.record.line);
+    std::sort(lines.begin(), lines.end());
+    return lines;
+}
+
+static bool pathsAre(const FileMemory& m, const QString& path)
+{
+    bool ok = m.source.source.path == path;
+    for (const BookmarkState& b : m.bookmarks)
+        ok = ok && b.source.path == path;
+    if (m.view && m.view->currentSource)
+        ok = ok && m.view->currentSource->path == path;
+    return ok;
+}
+
+static FileMemory goldenMemory()
+{
+    FileMemory m;
+    const TabState tab = goldenState();
+    m.source = tab.sources[0]; // app.log
+    m.source.userEncoding = TextEncoding::Windows1251;
+    for (const BookmarkState& b : tab.bookmarks)
+        if (b.source == m.source.source)
+            m.bookmarks.append(b);
+    m.view = tab.view;
+    m.lastUsed = QDateTime::fromString(QStringLiteral("2026-11-19T10:00:00.000Z"), Qt::ISODateWithMs);
+    return m;
+}
+
+static void checkFileMemoryFormat()
+{
+    g_context = QStringLiteral("память файла: формат");
+    const FileMemory golden = goldenMemory();
+    const QJsonObject json = golden.toJson();
+    QString error;
+    const auto back = FileMemory::fromJson(bytesToObject(objectToBytes(json)), &error);
+    CHECK(back.has_value(), QStringLiteral("читается: ") + error);
+    if (back) {
+        CHECK(back->toJson() == json, QStringLiteral("круговой проход — тот же JSON"));
+        CHECK(back->source.userEncoding == TextEncoding::Windows1251 && back->bookmarks.size() == 1
+                  && back->view && back->view->hasCurrent() && back->lastUsed == golden.lastUsed,
+              QStringLiteral("поля на месте"));
+    }
+
+    QFile file(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/file-memory-v1.json"));
+    CHECK(file.open(QIODevice::ReadOnly), QStringLiteral("эталон открывается"));
+    QByteArray bytes = file.readAll();
+    bytes.replace("@ROOT@", root().toUtf8());
+    const QJsonObject stored = bytesToObject(bytes);
+    const auto parsed = FileMemory::fromJson(stored, &error);
+    CHECK(parsed.has_value(), QStringLiteral("эталон читается: ") + error);
+    if (parsed)
+        CHECK(parsed->toJson() == stored, QStringLiteral("прочитанный эталон пишется им же"));
+    const bool same = json == stored;
+    CHECK(same, QStringLiteral("память из известных значений пишется ровно в эталон"));
+    if (!same)
+        std::fprintf(stderr, "--- сейчас пишется:\n%s\n", objectToBytes(json).constData());
+
+    // Без ViewState (файл был в слитой вкладке) — читается, вида нет.
+    FileMemory noView = golden;
+    noView.view.reset();
+    const auto noViewBack = FileMemory::fromJson(noView.toJson());
+    CHECK(noViewBack && !noViewBack->view && !noView.toJson().contains("view"),
+          QStringLiteral("без вида"));
+
+    const auto refused = [&](QJsonObject j, const QString& what, bool newer = false) {
+        bool isNewer = !newer;
+        QString why;
+        CHECK(!FileMemory::fromJson(j, &why, &isNewer) && !why.isEmpty() && isNewer == newer,
+              QStringLiteral("отказ: ") + what);
+    };
+    QJsonObject bad = json;
+    bad.insert("version", 2);
+    refused(bad, QStringLiteral("версия 2 — новее"), true);
+    bad = json;
+    bad.insert("format", "dendrolog-tab-state");
+    refused(bad, QStringLiteral("чужой формат"));
+    bad = json;
+    bad.insert("version", 0);
+    refused(bad, QStringLiteral("версия 0"));
+    bad = json;
+    bad.insert("lastUsed", "вчера");
+    refused(bad, QStringLiteral("битое время"));
+    bad = json;
+    bad.insert("bookmarks", QJsonObject());
+    refused(bad, QStringLiteral("закладки объектом"));
+    bad = json;
+    bad.insert("view", 5);
+    refused(bad, QStringLiteral("вид числом"));
+    bad = json;
+    bad.insert("source", QJsonObject()); // Ephemeral (спул stdin) не пишется
+    refused(bad, QStringLiteral("пустой источник"));
+    QJsonObject extra = json;
+    extra.insert("schema", "из будущей версии F-5");
+    CHECK(FileMemory::fromJson(extra).has_value(), QStringLiteral("лишние ключи не мешают"));
+}
+
+static void checkFileMemoryStore(const QDir& dir)
+{
+    const QDir logs(dir.filePath(QStringLiteral("memory-logs")));
+    QDir().mkpath(logs.path());
+
+    // ---- По пути: запись, чтение, дозапись -----------------------------------
+    g_context = QStringLiteral("память файла: по пути");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-path"));
+        const QString a = writeFile(logs, "a.log", logBytes(60));
+        FileMemoryStore store(memDir);
+        CHECK(store.open(a).found == FileMemoryStore::Found::None, QStringLiteral("сначала пусто"));
+        store.save(memoryOf(a, { 3, 7 }), {});
+        store.waitForWrites();
+        CHECK(memoryFiles(memDir) == QStringList{ FileMemoryStore::fileNameForPath(a) },
+              QStringLiteral("один файл с именем-отпечатком пути"));
+        FileMemoryStore other(memDir);
+        const auto found = other.open(a);
+        CHECK(found.found == FileMemoryStore::Found::ByPath && linesOf(found.memory) == (QVector<qint64>{ 3, 7 })
+                  && found.memory->view && found.memory->lastUsed.isValid(),
+              QStringLiteral("второе хранилище читает её по пути"));
+        CHECK(appendToFile(a, logBytes(5, 900, "more")), QStringLiteral("дописан"));
+        CHECK(other.open(a).found == FileMemoryStore::Found::ByPath, QStringLiteral("дописанный — та же память"));
+        CHECK(store.clear() == 1 && memoryFiles(memDir).isEmpty(), QStringLiteral("clear удаляет"));
+    }
+
+    // ---- Нормализация пути ----------------------------------------------------
+    g_context = QStringLiteral("память файла: нормализация пути");
+    {
+        const QString plain = logs.filePath(QStringLiteral("x/app.log"));
+        const QString dotted = logs.path() + QStringLiteral("/x/./y/../app.log");
+        CHECK(FileMemoryStore::fileNameForPath(plain) == FileMemoryStore::fileNameForPath(dotted),
+              QStringLiteral(". и .. не меняют ключ"));
+        CHECK(FileMemoryStore::fileNameForPath(plain)
+                  == FileMemoryStore::fileNameForPath(QDir::toNativeSeparators(plain)),
+              QStringLiteral("родные разделители не меняют ключ"));
+        const QString upper = logs.filePath(QStringLiteral("x/APP.log"));
+#ifdef Q_OS_WIN
+        CHECK(FileMemoryStore::fileNameForPath(plain) == FileMemoryStore::fileNameForPath(upper),
+              QStringLiteral("Windows: регистр не меняет ключ"));
+#else
+        CHECK(FileMemoryStore::fileNameForPath(plain) != FileMemoryStore::fileNameForPath(upper),
+              QStringLiteral("Linux: регистр различается"));
+#endif
+        CHECK(FileMemoryStore::fileNameForPath(plain).size() == 16 + 5, QStringLiteral("16 hex + .json"));
+    }
+
+    // ---- Большая версия: не применяется и не перезаписывается -------------------
+    g_context = QStringLiteral("память файла: большая версия");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-newer"));
+        const QString b = writeFile(logs, "b.log", logBytes(60));
+        QJsonObject future = memoryOf(b, { 1 }).toJson();
+        future.insert("version", 2);
+        future.insert("somethingNew", true);
+        QDir().mkpath(memDir);
+        const QByteArray bytes = objectToBytes(future);
+        CHECK(writeBytes(memoryFileOf(memDir, b), bytes), QStringLiteral("файл версии 2"));
+        FileMemoryStore store(memDir);
+        CHECK(store.open(b).found == FileMemoryStore::Found::Refused, QStringLiteral("отказ"));
+        store.save(memoryOf(b, { 5 }), {});
+        store.waitForWrites();
+        CHECK(readBytes(memoryFileOf(memDir, b)) == bytes, QStringLiteral("не перезаписан"));
+        // И не вытесняется, и не служит кандидатом поиска по содержимому.
+        const QString moved = logs.filePath(QStringLiteral("b-moved.log"));
+        CHECK(QFile::copy(b, moved), QStringLiteral("копия"));
+        CHECK(store.open(moved).found == FileMemoryStore::Found::None, QStringLiteral("не кандидат"));
+        QFile::remove(moved);
+    }
+
+    // ---- Битый файл -------------------------------------------------------------
+    g_context = QStringLiteral("память файла: битый файл");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-broken"));
+        const QString c = writeFile(logs, "c.log", logBytes(60));
+        QDir().mkpath(memDir);
+        CHECK(writeBytes(memoryFileOf(memDir, c), "{ \"format\": \"dendrolog-file-memory\", "),
+              QStringLiteral("битые байты"));
+        FileMemoryStore store(memDir);
+        CHECK(store.open(c).found == FileMemoryStore::Found::None, QStringLiteral("не читается — нет памяти"));
+        store.save(memoryOf(c, { 2 }), {});
+        store.waitForWrites();
+        FileMemoryStore again(memDir);
+        CHECK(linesOf(again.open(c).memory) == (QVector<qint64>{ 2 }), QStringLiteral("следующая запись его заменяет"));
+    }
+
+    // ---- Прерванная запись --------------------------------------------------------
+    g_context = QStringLiteral("память файла: прерванная запись");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-abort"));
+        const QString d = writeFile(logs, "d.log", logBytes(60));
+        FileMemoryStore store(memDir);
+        store.save(memoryOf(d, { 4 }), {});
+        store.waitForWrites();
+        const QString target = memoryFileOf(memDir, d);
+        const QByteArray before = readBytes(target);
+        const QByteArray next = objectToBytes(memoryOf(d, { 4, 9, 11 }).toJson());
+        CHECK(!FileMemoryStore::writeFileAtomically(target, next, next.size() / 2),
+              QStringLiteral("оборванная запись — неуспех"));
+        CHECK(readBytes(target) == before, QStringLiteral("прежний файл цел"));
+        CHECK(QDir(memDir).entryList(QDir::Files).size() == 1, QStringLiteral("временных файлов не осталось"));
+        CHECK(linesOf(FileMemoryStore(memDir).open(d).memory) == (QVector<qint64>{ 4 }),
+              QStringLiteral("память — прежняя"));
+    }
+
+    // ---- Источник Changed: с закладками — отсоединить, без — удалить --------------
+    g_context = QStringLiteral("память файла: переписан");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-changed"));
+        const QString r = writeFile(logs, "r.log", logBytes(60, 0, "first"));
+        const QByteArray oldBytes = readBytes(r);
+        const QString s = writeFile(logs, "s.log", logBytes(60, 0, "plain"));
+        FileMemoryStore store(memDir);
+        store.save(memoryOf(r, { 5 }), {});
+        store.save(memoryOf(s, {}), {});
+        store.waitForWrites();
+        CHECK(writeBytes(r, logBytes(60, 3, "second")) && writeBytes(s, logBytes(60, 3, "other")),
+              QStringLiteral("переписаны"));
+        const auto stale = store.open(r);
+        CHECK(stale.found == FileMemoryStore::Found::Stale && linesOf(stale.memory) == (QVector<qint64>{ 5 }),
+              QStringLiteral("с закладками: Stale, память прежнего содержимого"));
+        CHECK(!QFileInfo::exists(memoryFileOf(memDir, r)), QStringLiteral("по пути её больше нет"));
+        const QStringList detached = memoryFiles(memDir).filter(QStringLiteral("~"));
+        CHECK(detached.size() == 1, QStringLiteral("отсоединённая лежит в каталоге"));
+        CHECK(store.open(s).found == FileMemoryStore::Found::Stale, QStringLiteral("без закладок: Stale"));
+        CHECK(!QFileInfo::exists(memoryFileOf(memDir, s)) && memoryFiles(memDir).size() == 1,
+              QStringLiteral("без закладок — удалена"));
+        CHECK(store.open(r).found == FileMemoryStore::Found::None, QStringLiteral("новое содержимое — чистое"));
+        // Прежнее содержимое появилось под другим именем — память находит его.
+        const QString old = writeFile(logs, "r.log.1", oldBytes);
+        const auto found = store.open(old);
+        CHECK(found.found == FileMemoryStore::Found::ByContent && !found.copied
+                  && linesOf(found.memory) == (QVector<qint64>{ 5 }) && pathsAre(*found.memory, old)
+                  && found.previousPath == r,
+              QStringLiteral("отсоединённая переехала к r.log.1"));
+        store.waitForWrites();
+        CHECK(memoryFiles(memDir) == QStringList{ FileMemoryStore::fileNameForPath(old) },
+              QStringLiteral("отсоединённая убрана, память — по новому пути"));
+    }
+
+    // ---- По содержимому: перенос, копия, короткий, пустой ---------------------------
+    g_context = QStringLiteral("память файла: по содержимому");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-content"));
+        FileMemoryStore store(memDir);
+        const QString m = writeFile(logs, "m.log", logBytes(80, 0, "moving"));
+        const QString c = writeFile(logs, "copied.log", logBytes(80, 0, "copying"));
+        const QString shortFile = writeFile(logs, "short.log", logBytes(4, 0, "tiny")); // < 4 КБ
+        const QString empty = writeFile(logs, "empty.log", QByteArray());
+        store.save(memoryOf(m, { 2, 4 }), {});
+        store.save(memoryOf(c, { 1 }), {});
+        store.save(memoryOf(shortFile, { 1 }), {});
+        store.save(memoryOf(empty, {}), {});
+        store.waitForWrites();
+        CHECK(QFileInfo(shortFile).size() < 4096, QStringLiteral("сценарий: короткий файл"));
+
+        QDir().mkpath(logs.filePath(QStringLiteral("elsewhere")));
+        const QString movedTo = logs.filePath(QStringLiteral("elsewhere/m.log"));
+        CHECK(QFile::rename(m, movedTo), QStringLiteral("перенесён в другую папку"));
+        const auto moved = store.open(movedTo);
+        CHECK(moved.found == FileMemoryStore::Found::ByContent && !moved.copied
+                  && linesOf(moved.memory) == (QVector<qint64>{ 2, 4 }) && pathsAre(*moved.memory, movedTo),
+              QStringLiteral("перенос: память переехала"));
+        store.waitForWrites();
+        CHECK(!QFileInfo::exists(memoryFileOf(memDir, m)) && QFileInfo::exists(memoryFileOf(memDir, movedTo)),
+              QStringLiteral("перенос: прежняя память убрана"));
+        CHECK(FileMemoryStore(memDir).open(movedTo).found == FileMemoryStore::Found::ByPath,
+              QStringLiteral("перенос: дальше — по пути"));
+
+        const QString copyTo = logs.filePath(QStringLiteral("copied-again.log"));
+        CHECK(QFile::copy(c, copyTo), QStringLiteral("скопирован"));
+        const auto copied = store.open(copyTo);
+        CHECK(copied.found == FileMemoryStore::Found::ByContent && copied.copied
+                  && linesOf(copied.memory) == (QVector<qint64>{ 1 }),
+              QStringLiteral("копия: память скопирована"));
+        store.waitForWrites();
+        CHECK(QFileInfo::exists(memoryFileOf(memDir, c)) && QFileInfo::exists(memoryFileOf(memDir, copyTo)),
+              QStringLiteral("копия: обе памяти на месте"));
+
+        const QString shortMoved = logs.filePath(QStringLiteral("short-renamed.log"));
+        CHECK(QFile::rename(shortFile, shortMoved) && appendToFile(shortMoved, logBytes(2, 50, "grew")),
+              QStringLiteral("короткий переименован и дописан"));
+        const auto foundShort = store.open(shortMoved);
+        CHECK(foundShort.found == FileMemoryStore::Found::ByContent
+                  && linesOf(foundShort.memory) == (QVector<qint64>{ 1 }),
+              QStringLiteral("короткий файл (< 4 КБ) находится по содержимому"));
+        const QString unrelated = writeFile(logs, "unrelated.log", logBytes(4, 9, "else"));
+        CHECK(store.open(unrelated).found == FileMemoryStore::Found::None,
+              QStringLiteral("чужой короткий — не найден"));
+        const QString otherEmpty = writeFile(logs, "empty-2.log", QByteArray());
+        CHECK(store.open(otherEmpty).found == FileMemoryStore::Found::None,
+              QStringLiteral("пустой файл по содержимому не ищется"));
+    }
+
+    // ---- Лимит и вытеснение -----------------------------------------------------
+    for (const int limit : { 4, 2 }) {
+        g_context = QStringLiteral("память файла: лимит %1").arg(limit);
+        const QString memDir = dir.filePath(QStringLiteral("mem-limit-%1").arg(limit));
+        QDir().mkpath(memDir);
+        const QDateTime base = QDateTime::fromString(QStringLiteral("2026-11-01T00:00:00.000Z"), Qt::ISODateWithMs);
+        QStringList paths;
+        for (int i = 0; i < 6; ++i) {
+            const QString p = writeFile(logs, QStringLiteral("limit-%1-%2.log").arg(limit).arg(i).toUtf8(),
+                                        logBytes(20, i, "limit"));
+            paths << p;
+            // Давние: l0, l1 — с закладками; l2…l5 — без, по возрастанию времени.
+            FileMemory m = memoryOf(p, i < 2 ? QVector<qint64>{ 1 } : QVector<qint64>{});
+            m.lastUsed = base.addSecs(60 * i);
+            CHECK(FileMemoryStore::writeFileAtomically(memoryFileOf(memDir, p), objectToBytes(m.toJson())),
+                  QStringLiteral("память %1").arg(i));
+        }
+        const QString fresh = writeFile(logs, QStringLiteral("limit-%1-new.log").arg(limit).toUtf8(),
+                                        logBytes(20, 99, "fresh"));
+        FileMemoryStore store(memDir, limit);
+        store.save(memoryOf(fresh, {}), {});
+        store.waitForWrites();
+        QStringList expected{ FileMemoryStore::fileNameForPath(paths[0]), FileMemoryStore::fileNameForPath(paths[1]),
+                              FileMemoryStore::fileNameForPath(fresh) };
+        if (limit == 4)
+            expected << FileMemoryStore::fileNameForPath(paths[5]); // самая свежая из прежних
+        expected.sort();
+        CHECK(memoryFiles(memDir) == expected,
+              QStringLiteral("остались: %1").arg(memoryFiles(memDir).join(QStringLiteral(", "))));
+    }
+
+    // ---- Два экземпляра на один каталог --------------------------------------------
+    g_context = QStringLiteral("память файла: два экземпляра");
+    {
+        const QString memDir = dir.filePath(QStringLiteral("mem-two"));
+        const QString p = writeFile(logs, "shared.log", logBytes(60));
+        FileMemoryStore first(memDir);
+        FileMemoryStore second(memDir);
+        CHECK(first.open(p).found == FileMemoryStore::Found::None
+                  && second.open(p).found == FileMemoryStore::Found::None,
+              QStringLiteral("оба открыли без памяти"));
+        // Первое окно поставило 1 и закрыло вкладку; второе — 2 (своя база пуста).
+        first.save(memoryOf(p, { 1 }), {});
+        first.waitForWrites();
+        FileMemory secondMemory = memoryOf(p, { 2 });
+        secondMemory.view->viewportOffset = 77;
+        second.save(secondMemory, {});
+        second.waitForWrites();
+        auto now = FileMemoryStore(memDir).open(p);
+        CHECK(linesOf(now.memory) == (QVector<qint64>{ 1, 2 }), QStringLiteral("закладки объединены"));
+        CHECK(now.memory && now.memory->view && now.memory->view->viewportOffset == 77,
+              QStringLiteral("вид — последней записи"));
+        // Первое окно добавило 3 (база — его прошлая запись {1}).
+        first.save(memoryOf(p, { 1, 3 }), { RecordId::forLine(1, QStringLiteral("text of 1")) });
+        first.waitForWrites();
+        CHECK(linesOf(FileMemoryStore(memDir).open(p).memory) == (QVector<qint64>{ 1, 2, 3 }),
+              QStringLiteral("чужая закладка 2 не потерялась"));
+        // Первое окно сняло 1: она не воскресает, 2 остаётся.
+        first.save(memoryOf(p, { 3 }), { RecordId::forLine(1, QStringLiteral("text of 1")),
+                                         RecordId::forLine(3, QStringLiteral("text of 3")) });
+        first.waitForWrites();
+        CHECK(linesOf(FileMemoryStore(memDir).open(p).memory) == (QVector<qint64>{ 2, 3 }),
+              QStringLiteral("снятая закладка не воскресла"));
+        // Запись без вида (файл был в слитой вкладке) оставляет лежащий вид.
+        FileMemory withOffset = memoryOf(p, { 2, 3 });
+        withOffset.view->viewportOffset = 55;
+        first.save(withOffset, { RecordId::forLine(3, QStringLiteral("text of 3")) });
+        first.waitForWrites();
+        second.save(memoryOf(p, { 2, 3 }, false), { RecordId::forLine(2, QStringLiteral("text of 2")) });
+        second.waitForWrites();
+        now = FileMemoryStore(memDir).open(p);
+        CHECK(now.memory && now.memory->view && now.memory->view->viewportOffset == 55,
+              QStringLiteral("запись без вида не стирает вид"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Память файла во вкладке: открыть → закладки, маркер, позиция, фильтр →
+// закрыть → открыть снова
+// ---------------------------------------------------------------------------
+
+static std::unique_ptr<LogViewWidget> openWithMemory(FileMemoryStore& store, const QString& path,
+                                                     const QString& schema, QStringList* messages = nullptr)
+{
+    auto tab = makeTab(schema);
+    tab->setFileMemory(&store);
+    tab->setFileMemorySaveDelay(30);
+    if (messages)
+        QObject::connect(tab.get(), &LogViewWidget::statusMessage,
+                         [messages](const QString& text) { messages->append(text); });
+    tab->addLogFile(path);
+    CHECK(settled(*tab), QStringLiteral("загрузка"));
+    return tab;
+}
+
+static bool offerBarShown(LogViewWidget& tab)
+{
+    auto* bar = tab.findChild<QFrame*>(QStringLiteral("filtersOfferBar"));
+    return bar && !bar->isHidden();
+}
+
+// Ответить на ближайший QMessageBox (вопрос панели) кнопкой answer; вопрос
+// появится внутри click() — во вложенном цикле событий.
+static void clickQuestion(QMessageBox::StandardButton answer)
+{
+    if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+        if (QAbstractButton* button = box->button(answer))
+            button->click();
+        return;
+    }
+    QTimer::singleShot(10, [answer]() { clickQuestion(answer); });
+}
+
+static void answerNextQuestion(QMessageBox::StandardButton answer)
+{
+    QTimer::singleShot(0, [answer]() { clickQuestion(answer); });
+}
+
+static void checkTabMemory(const QDir& dir, const QString& name, const QString& schema)
+{
+    const QString memDir = dir.filePath(name + QStringLiteral("-tab-memory"));
+    FileMemoryStore store(memDir);
+    const QString path = writeFile(dir, name + "-memory.log", logBytes(400));
+    const QString neighbour = writeFile(dir, name + "-memory-neighbour.log", logBytes(50, 5000, "neighbour"));
+
+    // ---- Исходная вкладка ---------------------------------------------------------
+    g_context = name + QStringLiteral(" / память: исходная");
+    Saved saved;
+    saved.path = path;
+    {
+        auto tab = openWithMemory(store, path, schema);
+        LogModel& model = *tab->model();
+        for (const qint64 line : { qint64(2), qint64(40), qint64(120), qint64(200) }) {
+            const QString note = QStringLiteral("заметка к %1").arg(line);
+            tab->bookmarks().add(rowOfLine(model, path, line), note);
+            saved.notes.insert(line, note);
+        }
+        HighlightPattern marker;
+        marker.text = QStringLiteral("line 1");
+        marker.color = QColor(Qt::yellow);
+        model.setRowMarkers({ marker });
+        FilterRule rule;
+        rule.action = FilterRule::Action::Exclude;
+        rule.text = QStringLiteral("line 13");
+        FilterRuleSet rules;
+        rules.rules = { rule };
+        rules.bindFields(tab->parserFieldNames(), false);
+        model.setFilters({ LogLevel::Info, LogLevel::Warn, LogLevel::Unknown }, QDateTime(), QDateTime(), rules);
+        CHECK(settled(*tab), QStringLiteral("фильтр"));
+        const int row = rowOfLine(model, path, 170);
+        tab->view()->goToRow(row);
+        pump(20);
+        QScrollBar* bar = tab->view()->verticalScrollBar();
+        bar->setValue(bar->value() + bar->singleStep() * 3);
+        pump(20);
+        saved.currentLine = 170;
+        saved.currentTop = topOf(*tab, row);
+        saved.state = tab->captureState();
+        tab->saveFileMemory(); // как closeTab
+    }
+    store.waitForWrites();
+    CHECK(QFileInfo::exists(memoryFileOf(memDir, path)), QStringLiteral("память записана"));
+
+    // ---- Открыть снова: всё на месте, фильтр предложен ---------------------------
+    g_context = name + QStringLiteral(" / память: открыть снова");
+    {
+        auto tab = openWithMemory(store, path, schema);
+        LogModel& model = *tab->model();
+        checkBookmarksOnLines(*tab, saved, QStringLiteral("закладки"));
+        CHECK(highlightPatternsToJson(model.rowMarkers()) == highlightPatternsToJson(saved.state.view.markers),
+              QStringLiteral("маркеры — сразу"));
+        CHECK(model.logLevelFilter().isEmpty() && !model.filterRules().isActive(),
+              QStringLiteral("фильтры не применены сами"));
+        CHECK(tab->hasOfferedFilters() && offerBarShown(*tab), QStringLiteral("фильтры предложены плашкой"));
+        checkPositionRestored(*tab, saved, QStringLiteral("позиция"));
+        const int allRows = model.rowCount();
+        auto* restore = tab->findChild<QPushButton*>(QStringLiteral("restoreFiltersButton"));
+        CHECK(restore != nullptr, QStringLiteral("кнопка «вернуть фильтры»"));
+        if (restore)
+            restore->click();
+        CHECK(settled(*tab), QStringLiteral("фильтры возвращены"));
+        CHECK(model.logLevelFilter() == saved.state.view.levels && model.rowCount() < allRows
+                  && rowOfLine(model, path, 15) < 0 && !offerBarShown(*tab) && !tab->hasOfferedFilters(),
+              QStringLiteral("щелчок вернул фильтры, плашка ушла"));
+        CHECK(tab->view()->userSelectedRow() == rowOfLine(model, path, saved.currentLine),
+              QStringLiteral("выбор пережил фильтр"));
+
+        // Правка закладки — запись сама, через задержку (ждём состояние).
+        g_context = name + QStringLiteral(" / память: отложенная запись");
+        CHECK(!tab->isFileMemorySavePending(), QStringLiteral("сверка закладок записи не просит"));
+        const int row = rowOfLine(model, path, 300);
+        CHECK(row >= 0 && tab->bookmarks().add(row, QStringLiteral("новая")) >= 0, QStringLiteral("поставлена"));
+        CHECK(tab->isFileMemorySavePending(), QStringLiteral("запись запланирована"));
+        CHECK(waitFor([&] { return !tab->isFileMemorySavePending(); }, 10000), QStringLiteral("запись прошла"));
+        store.waitForWrites();
+        const auto onDisk = FileMemoryStore(memDir).open(path);
+        CHECK(linesOf(onDisk.memory).contains(300), QStringLiteral("новая закладка на диске до закрытия"));
+        const Bookmark* added = nullptr;
+        for (const Bookmark& b : tab->bookmarks().bookmarks())
+            if (b.line == 300)
+                added = tab->bookmarks().find(b.id);
+        CHECK(added && tab->bookmarks().remove(added->id), QStringLiteral("снята"));
+        CHECK(tab->isFileMemorySavePending(), QStringLiteral("снятие тоже пишется"));
+        tab->saveFileMemory();
+    }
+    store.waitForWrites();
+
+    // ---- Отказ от предложения: до закрытия вкладки, фильтры не теряются ------------
+    g_context = name + QStringLiteral(" / память: отказ от фильтров");
+    {
+        // Фильтры возвращены щелчком и записаны — теперь они предлагаются снова.
+        auto tab = openWithMemory(store, path, schema);
+        CHECK(offerBarShown(*tab), QStringLiteral("предложены"));
+        auto* dismiss = tab->findChild<QToolButton*>(QStringLiteral("dismissFiltersOfferButton"));
+        if (dismiss)
+            dismiss->click();
+        CHECK(!offerBarShown(*tab) && tab->model()->logLevelFilter().isEmpty(),
+              QStringLiteral("плашка закрыта, фильтров нет"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+        auto again = openWithMemory(store, path, schema);
+        CHECK(again->hasOfferedFilters() && offerBarShown(*again),
+              QStringLiteral("при следующем открытии предложены снова"));
+    }
+
+    // ---- Второй файл вкладки — только закладки -------------------------------------
+    g_context = name + QStringLiteral(" / память: второй файл");
+    {
+        auto tab = openWithMemory(store, neighbour, schema);
+        tab->addLogFile(path);
+        CHECK(settled(*tab), QStringLiteral("загрузка"));
+        CHECK(tab->bookmarks().count() == saved.notes.size(), QStringLiteral("закладки файла пришли"));
+        CHECK(!tab->hasOfferedFilters() && tab->model()->rowMarkers().isEmpty(),
+              QStringLiteral("вид (фильтры, маркеры) — нет"));
+        CHECK(tab->view()->userSelectedRow() < 0, QStringLiteral("позиция — нет"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+        const auto memory = FileMemoryStore(memDir).open(path);
+        CHECK(memory.memory && memory.memory->view && memory.memory->bookmarks.size() == saved.notes.size(),
+              QStringLiteral("слитая вкладка не стёрла вид файла"));
+    }
+
+    // ---- Выключенная настройка: не читает и не пишет ---------------------------------
+    g_context = name + QStringLiteral(" / память: выключена");
+    {
+        AppSettings::instance().setRememberFileState(false);
+        const QByteArray before = readBytes(memoryFileOf(memDir, path));
+        auto tab = openWithMemory(store, path, schema);
+        CHECK(tab->bookmarks().isEmpty() && !tab->hasOfferedFilters() && tab->model()->rowMarkers().isEmpty(),
+              QStringLiteral("не читает"));
+        tab->bookmarks().add(rowOfLine(*tab->model(), path, 10), QStringLiteral("не запишется"));
+        CHECK(!tab->isFileMemorySavePending(), QStringLiteral("запись не планируется"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+        CHECK(readBytes(memoryFileOf(memDir, path)) == before, QStringLiteral("не пишет"));
+        AppSettings::instance().setRememberFileState(true);
+    }
+
+    // ---- Снимок (сессия R-5) главнее памяти, закладки объединяются -----------------------
+    g_context = name + QStringLiteral(" / память: снимок главнее памяти");
+    {
+        auto tab = makeTab(schema);
+        tab->setFileMemory(&store);
+        TabState session = saved.state;
+        session.bookmarks.resize(1);
+        tab->applyState(session, LogViewWidget::StateFilters::Apply);
+        CHECK(settled(*tab), QStringLiteral("загрузка"));
+        CHECK(!tab->hasOfferedFilters() && tab->model()->logLevelFilter() == saved.state.view.levels,
+              QStringLiteral("фильтры снимка применены, а не предложены"));
+        CHECK(tab->bookmarks().count() == saved.notes.size(),
+              QStringLiteral("закладки памяти дополнили снимок: %1").arg(tab->bookmarks().count()));
+        checkPositionRestored(*tab, saved, QStringLiteral("позиция снимка"));
+    }
+
+    // ---- Дописан ------------------------------------------------------------------------
+    g_context = name + QStringLiteral(" / память: дописан");
+    {
+        CHECK(appendToFile(path, logBytes(50, 3000, "appended")), QStringLiteral("дописан"));
+        auto tab = openWithMemory(store, path, schema);
+        checkBookmarksOnLines(*tab, saved, QStringLiteral("закладки"));
+        checkPositionRestored(*tab, saved, QStringLiteral("позиция"));
+    }
+
+    // ---- Переписан: память отсоединена, закладки не цепляются к чужим строкам ----------
+    g_context = name + QStringLiteral(" / память: переписан");
+    {
+        CHECK(writeBytes(path, logBytes(400, 7, "other")), QStringLiteral("переписан"));
+        QStringList messages;
+        auto tab = openWithMemory(store, path, schema, &messages);
+        CHECK(messages.size() == 1 && messages.value(0).contains(QStringLiteral("changed")),
+              QStringLiteral("сообщение: %1").arg(messages.join(QStringLiteral(" | "))));
+        CHECK(tab->bookmarks().count() == saved.notes.size(), QStringLiteral("прежние закладки — в панели"));
+        for (const Bookmark& b : tab->bookmarks().bookmarks())
+            CHECK(tab->bookmarks().status(b.id) == BookmarkStore::Status::Missing
+                      && b.note == saved.notes.value(b.line),
+                  QStringLiteral("строка %1 — серая, заметка цела").arg(b.line));
+        CHECK(tab->bookmarks().visibleRows().isEmpty(), QStringLiteral("к чужим строкам не прицепились"));
+        CHECK(!tab->hasOfferedFilters() && tab->model()->rowMarkers().isEmpty()
+                  && tab->view()->userSelectedRow() < 0,
+              QStringLiteral("открыт чистым"));
+        CHECK(memoryFiles(memDir).filter(QStringLiteral("~")).size() == 1, QStringLiteral("память отсоединена"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+        const auto fresh = FileMemoryStore(memDir).open(path);
+        CHECK(fresh.found == FileMemoryStore::Found::ByPath && fresh.memory->bookmarks.isEmpty(),
+              QStringLiteral("память нового содержимого — без серых закладок"));
+    }
+
+    // ---- Перенос вкладки (объединение): снятая после переноса закладка не воскресает ----
+    g_context = name + QStringLiteral(" / память: объединение вкладок");
+    {
+        const QString merged = writeFile(dir, name + "-memory-merge.log", logBytes(100, 0, "merge"));
+        {
+            auto first = openWithMemory(store, merged, schema);
+            first->bookmarks().add(rowOfLine(*first->model(), merged, 5), QStringLiteral("пять"));
+            first->bookmarks().add(rowOfLine(*first->model(), merged, 9), QStringLiteral("девять"));
+            first->saveFileMemory();
+        }
+        store.waitForWrites();
+        auto source = openWithMemory(store, merged, schema);
+        auto target = makeTab(schema);
+        target->setFileMemory(&store);
+        target->addFilesFrom(*source);
+        CHECK(settled(*target), QStringLiteral("загрузка приёмника"));
+        source->saveFileMemory(); // closeTab источника
+        source.reset();
+        for (const Bookmark& b : target->bookmarks().bookmarks())
+            if (b.line == 5)
+                target->bookmarks().remove(b.id);
+        target->saveFileMemory();
+        store.waitForWrites();
+        CHECK(linesOf(FileMemoryStore(memDir).open(merged).memory) == (QVector<qint64>{ 9 }),
+              QStringLiteral("снятая в приёмнике закладка не вернулась"));
+    }
+
+    // ---- Clear All — с подтверждением -----------------------------------------------------
+    if (name == QLatin1String("resident")) {
+        g_context = QStringLiteral("Clear All с подтверждением");
+        auto tab = openWithMemory(store, neighbour, schema);
+        tab->bookmarks().add(0, QStringLiteral("одна"));
+        tab->bookmarks().add(1, QStringLiteral("две"));
+        BookmarkPanelWidget panel;
+        panel.setLogView(tab.get());
+        auto* clear = panel.findChild<QToolButton*>(QStringLiteral("bookmarkClearAll"));
+        CHECK(clear != nullptr, QStringLiteral("кнопка"));
+        if (clear) {
+            answerNextQuestion(QMessageBox::No);
+            clear->click();
+            CHECK(tab->bookmarks().count() == 2, QStringLiteral("«нет» — закладки на месте"));
+            answerNextQuestion(QMessageBox::Yes);
+            clear->click();
+            CHECK(tab->bookmarks().isEmpty(), QStringLiteral("«да» — сняты"));
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -764,6 +1494,7 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
 
     checkFormat();
+    checkFileMemoryFormat();
 
     QTemporaryDir tmp;
     if (!tmp.isValid()) {
@@ -779,10 +1510,12 @@ int main(int argc, char** argv)
         checkReopen(dir, name, schema);
         checkFollowTail(dir, name, schema);
         checkMerged(dir, name, schema);
+        checkTabMemory(dir, name, schema);
     }
     settings.setIndexedThresholdMB(512);
     checkStdin(dir, schema);
     checkMidLoadAndThreshold(dir, schema);
+    checkFileMemoryStore(dir);
 
     std::fprintf(failures ? stderr : stdout, "document_state: %d проверок, %d нарушений\n",
                  checks, failures);
