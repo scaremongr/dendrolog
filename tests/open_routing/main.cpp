@@ -35,6 +35,7 @@
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QUrl>
+#include <atomic>
 #include <cstdio>
 #include <initializer_list>
 #include <memory>
@@ -499,21 +500,24 @@ static void testSimultaneousLaunches()
     for (int round = 0; round < 20; ++round) {
         const QString key = QStringLiteral("DendroLogRace-%1-%2").arg(pid).arg(round);
         QSemaphore start, decided, finish;
-        Role roles[2] = { Role::Separate, Role::Separate };
+        // Роль — атомиком: QSemaphore неинструментированного Qt TSan не видит.
+        std::atomic<Role> roles[2] = { Role::Separate, Role::Separate };
         QFuture<void> runs[2];
         for (int i = 0; i < 2; ++i) {
             runs[i] = QtConcurrent::run([&, i]() {
                 start.acquire();
                 SingleInstance instance(key, OpenRouting::parseCommandLine({}));
-                roles[i] = instance.role();
+                roles[i].store(instance.role(), std::memory_order_release);
                 decided.release();
                 finish.acquire(); // оба решили — тогда «процессы» выходят
             });
         }
         start.release(2);
         decided.acquire(2);
-        const int primaries = int(roles[0] == Role::Primary) + int(roles[1] == Role::Primary);
-        const int forwards = int(roles[0] == Role::Forward) + int(roles[1] == Role::Forward);
+        const Role r0 = roles[0].load(std::memory_order_acquire);
+        const Role r1 = roles[1].load(std::memory_order_acquire);
+        const int primaries = int(r0 == Role::Primary) + int(r1 == Role::Primary);
+        const int forwards = int(r0 == Role::Forward) + int(r1 == Role::Forward);
         if (primaries == 2)
             ++bothPrimary;
         else if (primaries != 1 || forwards != 1)
