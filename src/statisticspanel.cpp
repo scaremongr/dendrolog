@@ -204,7 +204,7 @@ QVector<BinRun> runsAboveThreshold(const QVector<quint32>& bins, double threshol
 struct TemplateAgg {
     int      count = 0;
     LogLevel level = LogLevel::Unknown;
-    qint64   firstMs = -1, lastMs = -1;
+    qint64   firstMs = kNoTimestampMs, lastMs = kNoTimestampMs;
     // Захвачено жадно при вставке шаблона: снапшот (и текст его строк) может
     // не пережить показ результата, а индексному бэкенду и вовсе нечего
     // будет разыменовать.
@@ -213,7 +213,7 @@ struct TemplateAgg {
     LogFilePtr firstFile;
 };
 
-DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
+DocumentStats collectStats(const LogScanSnapshot& snapshot,
                                    const std::shared_ptr<std::atomic_bool>& cancel,
                                    int generation)
 {
@@ -225,16 +225,9 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
     s.valid = true;
     s.rows = int(snapshot.rowCount());
 
-    // Диапазон времени: список отсортирован по времени, записи без валидной
-    // метки — в конце (как на таймлайне).
-    qint64 validEnd = snapshot.rowCount();
-    while (validEnd > 0 && snapshot.metaAt(validEnd - 1).timestampMs < 0)
-        --validEnd;
-    const bool hasTime = validEnd > 0 && snapshot.metaAt(0).timestampMs >= 0;
-    if (hasTime) {
-        s.tMinMs = snapshot.metaAt(0).timestampMs;
-        s.tMaxMs = snapshot.metaAt(validEnd - 1).timestampMs;
-    }
+    // Диапазон времени: список отсортирован по времени, записи без метки —
+    // в конце (как на таймлайне). Метка до 1970 года — отрицательный момент.
+    const bool hasTime = snapshot.timeRange(&s.tMinMs, &s.tMaxMs);
     const qint64 spanMs   = hasTime ? qMax<qint64>(0, s.tMaxMs - s.tMinMs) : 0;
     const double bucketMs = spanMs > 0 ? double(spanMs) / kBins : 0.0;
 
@@ -250,7 +243,7 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
     int prevId = 0;
     const LogFile* prevFile = nullptr;
     bool firstRow = true;
-    qint64 prevTsMs = -1;
+    qint64 prevTsMs = kNoTimestampMs;
     bool scanCancelled = false;
 
     snapshot.forEachLine(0, [&](qint64 i, const LogEntryMeta& m,
@@ -289,20 +282,23 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
         }
 
         const qint64 tsMs = m.timestampMs;
-        if (tsMs >= 0) {
+        if (hasTimestampMs(tsMs)) {
             ++s.recordsWithTs;
-            if (fs.firstMs < 0)
+            if (!hasTimestampMs(fs.firstMs))
                 fs.firstMs = tsMs;
             fs.lastMs = tsMs;
 
             if (bucketMs > 0) {
-                const int b = qBound(0, int((tsMs - s.tMinMs) / bucketMs), kBins - 1);
+                // Прижать до приведения к int: в порядке файла (одно-файловая
+                // индексная вкладка) метка может лежать вне [tMin, tMax].
+                const int b = int(qBound(0.0, double(tsMs - s.tMinMs) / bucketMs,
+                                         double(kBins - 1)));
                 ++totalBins[b];
                 if (m.level == LogLevel::Error || m.level == LogLevel::Fatal)
                     ++errorBins[b];
             }
 
-            if (prevTsMs >= 0) {
+            if (hasTimestampMs(prevTsMs)) {
                 const qint64 gap = tsMs - prevTsMs;
                 if (gap > topGaps[2].ms) {
                     const GapInfo g{gap, prevTsMs, tsMs};
@@ -325,8 +321,8 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
         const auto it = templates.find(key);
         if (it != templates.end()) {
             ++it->count;
-            if (tsMs >= 0) {
-                if (it->firstMs < 0)
+            if (hasTimestampMs(tsMs)) {
+                if (!hasTimestampMs(it->firstMs))
                     it->firstMs = tsMs;
                 it->lastMs = tsMs;
             }
@@ -485,7 +481,7 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
                 continue;
             const double share = double(r.agg->count) / s.records;
             double density = 0.0;
-            if (r.agg->firstMs >= 0 && r.agg->lastMs > r.agg->firstMs)
+            if (hasTimestampMs(r.agg->firstMs) && r.agg->lastMs > r.agg->firstMs)
                 density = r.agg->count * 1000.0 / double(r.agg->lastMs - r.agg->firstMs);
             const bool dominant = share >= kSpamShare;
             const bool dense = density >= kSpamDensityAbs
@@ -583,6 +579,13 @@ DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
 }
 
 } // namespace
+
+DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
+                                   const std::shared_ptr<std::atomic_bool>& cancel,
+                                   int generation)
+{
+    return collectStats(snapshot, cancel, generation);
+}
 
 // ===========================================================================
 
@@ -823,7 +826,7 @@ void StatisticsPanel::startCollection(bool manual)
     m_cancelFlag = cancel;
     const int generation = m_generation;
     m_watcher.setFuture(QtConcurrent::run([snapshot, cancel, generation]() {
-        return collectDocumentStats(snapshot, cancel, generation);
+        return collectStats(snapshot, cancel, generation);
     }));
 }
 
@@ -885,7 +888,7 @@ void StatisticsPanel::onAnchorClicked(const QUrl& url)
     const NavTarget& target = m_navTargets[idx];
     if (target.toEntry && target.file)
         emit jumpToEntryRequested(target.entryId, target.file);
-    else if (target.timeMs >= 0)
+    else if (hasTimestampMs(target.timeMs))
         emit jumpToTimeRequested(QDateTime::fromMSecsSinceEpoch(target.timeMs),
                                  target.preferErrors);
 }
@@ -960,7 +963,7 @@ QString StatisticsPanel::buildHtml()
             .arg(tileBg.name(), value, muted.name(), caption);
     };
 
-    const bool hasTime = m_stats.tMinMs >= 0 && m_stats.tMaxMs >= m_stats.tMinMs;
+    const bool hasTime = hasTimestampMs(m_stats.tMinMs) && m_stats.tMaxMs >= m_stats.tMinMs;
     const qint64 spanMs = hasTime ? m_stats.tMaxMs - m_stats.tMinMs : 0;
 
     html += QLatin1String("<table width=\"100%\" cellspacing=\"2\" cellpadding=\"0\"><tr>");
@@ -973,7 +976,7 @@ QString StatisticsPanel::buildHtml()
                  tr("time span"));
     html += tile(rate(m_stats.avgPerSec), tr("records / sec, average"));
     QString peakCaption = tr("records / sec, peak");
-    if (m_stats.peakFromMs >= 0) {
+    if (hasTimestampMs(m_stats.peakFromMs)) {
         const QString at = QDateTime::fromMSecsSinceEpoch(m_stats.peakFromMs)
                                .toString(QStringLiteral("HH:mm:ss"));
         peakCaption += QStringLiteral(" @ ")
@@ -1046,7 +1049,7 @@ QString StatisticsPanel::buildHtml()
             QString glyph = QStringLiteral("▲");
             QString body;
             const QString interval =
-                in.fromMs >= 0 && in.toMs >= in.fromMs
+                hasTimestampMs(in.fromMs) && in.toMs >= in.fromMs
                     ? shortRangeText(in.fromMs, in.toMs) : QString();
             switch (in.kind) {
             case DocumentStats::Insight::ErrorSpike:
@@ -1180,7 +1183,7 @@ QString StatisticsPanel::buildHtml()
                 badges << colorSpan(t.treeBadgeError, QStringLiteral("E ") + num(fs.error));
             if (fs.fatal > 0)
                 badges << colorSpan(t.treeBadgeFatal, QStringLiteral("F ") + num(fs.fatal));
-            const QString range = fs.firstMs >= 0
+            const QString range = hasTimestampMs(fs.firstMs)
                                       ? shortRangeText(fs.firstMs, fs.lastMs) : QString();
             html += QStringLiteral(
                         "<tr><td valign=\"top\">%1&nbsp;</td>"

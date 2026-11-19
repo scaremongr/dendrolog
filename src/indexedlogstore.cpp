@@ -39,10 +39,10 @@ bool linesInTimeOrder(const LineIndex& index, qint64 shownLines)
     const quint32 firstId = snap.logicalId(0);
     const quint32 lastId = snap.logicalId(shownLines - 1);
     qint64 prev = snap.timestampMs(firstId);
-    bool prevValid = prev >= 0;
+    bool prevValid = hasTimestampMs(prev);
     for (quint32 id = firstId + 1; id <= lastId; ++id) {
         const qint64 ts = snap.timestampMs(id);
-        if (ts < 0) {
+        if (!hasTimestampMs(ts)) {
             prevValid = false;
             continue;
         }
@@ -283,7 +283,7 @@ void IndexedLogStore::materializeAllRefs(bool sortByTime)
         ids.append(id);
     const auto key = [&snap](quint32 id) {
         const qint64 ts = snap.timestampMs(id);
-        return ts >= 0 ? ts : std::numeric_limits<qint64>::max();
+        return hasTimestampMs(ts) ? ts : std::numeric_limits<qint64>::max();
     };
     std::stable_sort(ids.begin(), ids.end(),
                      [&key](quint32 a, quint32 b) { return key(a) < key(b); });
@@ -610,15 +610,17 @@ bool IndexedLogStore::lessRef(RowRef a, RowRef b) const
     const LineIndex& ia = *m_files[fa].index;
     const LineIndex& ib = *m_files[fb].index;
 
-    // 1. Время логической записи (невалидные — «больше» любых валидных).
+    // 1. Время логической записи (без метки — «больше» любой метки, в том
+    // числе отрицательной: до 1970 года).
     const qint64 ta = ia.timestampMs(ia.logicalId(la));
     const qint64 tb = ib.timestampMs(ib.logicalId(lb));
-    if (ta >= 0 && tb >= 0) {
+    const bool hasA = hasTimestampMs(ta), hasB = hasTimestampMs(tb);
+    if (hasA && hasB) {
         if (ta != tb)
             return ta < tb;
-    } else if (ta >= 0) {
+    } else if (hasA) {
         return true;
-    } else if (tb >= 0) {
+    } else if (hasB) {
         return false;
     }
 
@@ -692,7 +694,7 @@ std::shared_ptr<LogEntry> IndexedLogStore::materializeEntry(RowRef ref) const
     const quint32 logical = index.logicalId(line);
     QDateTime ts;
     const qint64 ms = index.timestampMs(logical);
-    if (ms >= 0)
+    if (hasTimestampMs(ms))
         ts = QDateTime::fromMSecsSinceEpoch(ms);
 
     const QString text = m_textCache.lineText(f.cacheFileId,
@@ -726,8 +728,8 @@ LogEntryMeta IndexedLogStore::visibleMetaAt(int row) const
 QDateTime IndexedLogStore::visibleTimestampAt(int row) const
 {
     const LogEntryMeta m = visibleMetaAt(row);
-    return m.timestampMs >= 0 ? QDateTime::fromMSecsSinceEpoch(m.timestampMs)
-                              : QDateTime();
+    return hasTimestampMs(m.timestampMs) ? QDateTime::fromMSecsSinceEpoch(m.timestampMs)
+                                         : QDateTime();
 }
 
 LogLevel IndexedLogStore::visibleLevelAt(int row) const
@@ -770,15 +772,16 @@ bool IndexedLogStore::isNewAt(int visibleRow) const
 
 int IndexedLogStore::firstVisibleRowAtOrAfter(const QDateTime& t) const
 {
-    const qint64 wantMs = t.isValid() ? t.toMSecsSinceEpoch()
-                                      : std::numeric_limits<qint64>::min();
     // Видимые строки упорядочены глобальным порядком (время → файл → запись),
-    // невалидные метки в конце — двоичный поиск по «ts < want».
+    // строки без метки в конце — двоичный поиск по «ts < want». Невалидный
+    // момент — «раньше всего»: ни одна метка не меньше его (kNoTimestampMs —
+    // минимум qint64, а у строки без метки «меньше» всегда ложно).
+    const qint64 wantMs = t.isValid() ? t.toMSecsSinceEpoch() : kNoTimestampMs;
     int lo = 0, hi = visibleCount();
     while (lo < hi) {
         const int mid = lo + (hi - lo) / 2;
         const LogEntryMeta m = visibleMetaAt(mid);
-        const bool less = (m.timestampMs >= 0) && m.timestampMs < wantMs;
+        const bool less = hasTimestampMs(m.timestampMs) && m.timestampMs < wantMs;
         if (less)
             lo = mid + 1;
         else
@@ -806,10 +809,10 @@ QPair<QDateTime, QDateTime> IndexedLogStore::fullTimeRange() const
         return s.timestampMs(s.logicalId(refLine(ref)));
     };
     qint64 end = total;
-    while (end > 0 && tsOfAll(end - 1) < 0)
+    while (end > 0 && !hasTimestampMs(tsOfAll(end - 1)))
         --end;
     const qint64 firstMs = tsOfAll(0);
-    if (end <= 0 || firstMs < 0)
+    if (end <= 0 || !hasTimestampMs(firstMs))
         return {};
     return { QDateTime::fromMSecsSinceEpoch(firstMs),
              QDateTime::fromMSecsSinceEpoch(tsOfAll(end - 1)) };
@@ -1016,8 +1019,7 @@ bool IndexedLogStore::refForKey(const RecordKey& key, RowRef* ref) const
     const quint32 logical = index.logicalId(line);
     if (key.logicalEntryId < 0 || logical != quint32(key.logicalEntryId))
         return false;
-    const qint64 ms = index.timestampMs(logical);
-    if ((ms >= 0 ? ms : RecordKey::kNoTimestamp) != key.timestampMs)
+    if (index.timestampMs(logical) != key.timestampMs)
         return false;
     *ref = makeRef(fileId, line);
     return true;
@@ -1034,12 +1036,11 @@ RecordKey IndexedLogStore::keyForLine(const LogFile* file, qint64 line, qint64* 
     if (l >= f.index->lineCount() || !refShown(makeRef(fileId, l)))
         return {};
     const quint32 logical = f.index->logicalId(l);
-    const qint64 ms = f.index->timestampMs(logical);
     RecordKey key;
     key.file = f.logFile;
     key.line = line;
     key.logicalEntryId = int(logical);
-    key.timestampMs = ms >= 0 ? ms : RecordKey::kNoTimestamp;
+    key.timestampMs = f.index->timestampMs(logical);   // kNoTimestampMs — метки нет
     if (offset)
         *offset = f.index->lineStartOffset(l);
     if (length)
@@ -1055,12 +1056,11 @@ RecordKey IndexedLogStore::keyAt(int visibleRow) const
     const IndexedFile& f = m_files[refFile(ref)];
     const qint64 line = refLine(ref);
     const quint32 logical = f.index->logicalId(line);
-    const qint64 ms = f.index->timestampMs(logical);
     RecordKey key;
     key.file = f.logFile;
     key.line = line + 1;
     key.logicalEntryId = int(logical);
-    key.timestampMs = ms >= 0 ? ms : RecordKey::kNoTimestamp;
+    key.timestampMs = f.index->timestampMs(logical);   // kNoTimestampMs — метки нет
     return key;
 }
 
@@ -1331,9 +1331,9 @@ bool IndexedLogStore::refPassesFiltersNow(RowRef ref) const
     const QDateTime startTime = m_model.startTimeFilter();
     const QDateTime endTime = m_model.endTimeFilter();
     if (startTime.isValid()
-        && (tsMs < 0 || tsMs < startTime.toMSecsSinceEpoch()))
+        && (!hasTimestampMs(tsMs) || tsMs < startTime.toMSecsSinceEpoch()))
         return false;
-    if (endTime.isValid() && tsMs >= 0 && tsMs > endTime.toMSecsSinceEpoch())
+    if (endTime.isValid() && hasTimestampMs(tsMs) && tsMs > endTime.toMSecsSinceEpoch())
         return false;
 
     const FilterRuleSet& rules = m_model.filterRules();
@@ -1466,9 +1466,9 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                 const qint64 tsMs = index.timestampMs(logical);
                 if (!levels.isEmpty() && !levels.contains(index.level(line)))
                     continue;
-                if (startValid && (tsMs < 0 || tsMs < startMs))
+                if (startValid && (!hasTimestampMs(tsMs) || tsMs < startMs))
                     continue;
-                if (endValid && tsMs >= 0 && tsMs > endMs)
+                if (endValid && hasTimestampMs(tsMs) && tsMs > endMs)
                     continue;
 
                 if (needText) {

@@ -16,6 +16,7 @@
 #include "LogListView.h"
 #include "gotodialog.h"
 #include "gotolocation.h"
+#include "statisticspanel.h"
 #include "testdocuments.h"
 
 #include <QApplication>
@@ -28,6 +29,7 @@
 #include <QTemporaryDir>
 #include <QTimeZone>
 #include <cstdio>
+#include <limits>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -438,6 +440,114 @@ static void checkDialog(const QString& name, testdocs::Document& doc)
           name + ": invalid input does not accept");
 }
 
+// F-13. Переход ко времени до 1970 года: ввод разбирается в отрицательный
+// момент, и строка находится на обоих бэкендах — по заданным моментам.
+static void checkPre1970(const QDir& dir, const QString& schema)
+{
+    const auto utcMs = [](const char* text) {
+        const GoToTarget t = GoToLocation::parse(QString::fromUtf8(text), QDateTime());
+        return t.kind == GoToTarget::Kind::Time ? t.time.toMSecsSinceEpoch()
+                                                : std::numeric_limits<qint64>::min();
+    };
+    CHECK(utcMs("1969-12-31T23:59:59.999Z") == -1, "pre-1970: -1 ms parses");
+    CHECK(utcMs("1970-01-01 00:00:00Z") == 0, "pre-1970: the epoch parses");
+    CHECK(utcMs("1970-01-01 01:00:00+02:00") == -3600000, "pre-1970: zone gives a negative moment");
+    CHECK(GoToLocation::parse(QStringLiteral("1969-07-20 20:17"), QDateTime()).time
+              == QDateTime(QDate(1969, 7, 20), QTime(20, 17)),
+          "pre-1970: local date and time parse");
+
+    const QString path = testdocs::writeFile(dir, "pre1970.log",
+        "1969-12-31T23:59:59.000Z [main] INFO - p0\n"
+        "1969-12-31T23:59:59.999Z [main] INFO - p1\n"
+        "1970-01-01T00:00:00.000Z [main] ERROR - p2\n"
+        "1970-01-01T00:00:00.500Z [main] INFO - p3\n");
+    const struct { qint64 at; int row; bool exact; } cases[] = {
+        { -1000000000000LL, 0, false }, { -1500, 0, false }, { -1000, 0, true },
+        { -999, 1, false }, { -1, 1, true }, { 0, 2, true }, { 1, 3, false },
+        { 500, 3, true }, { 501, 3, false },
+    };
+    const auto check = [&](const QString& name, testdocs::Document doc) {
+        const LogModel& model = *doc.model;
+        CHECK(doc.errors.isEmpty() && model.rowCount() == 4, name + ": pre-1970 document loads");
+        for (const auto& c : cases) {
+            GoToTarget target;
+            target.kind = GoToTarget::Kind::Time;
+            target.time = QDateTime::fromMSecsSinceEpoch(c.at);
+            const GoToResult got = GoToLocation::resolve(model, target, nullptr);
+            CHECK(got.row == c.row && got.exact == c.exact,
+                  QStringLiteral("%1: time %2 ms → row %3 exact %4, expected row %5 exact %6")
+                      .arg(name).arg(c.at).arg(got.row).arg(got.exact).arg(c.row).arg(c.exact));
+        }
+        // Опорный момент — метка строки, даже если она до 1970 года.
+        CHECK(GoToLocation::referenceTime(model, 1).toMSecsSinceEpoch() == -1,
+              name + ": reference moment of a -1 ms row");
+
+        // Статистика: диапазон и счётчики меток видят отрицательные моменты.
+        const DocumentStats stats = collectDocumentStats(model.scanSnapshot(false), nullptr, 0);
+        CHECK(stats.tMinMs == -1000 && stats.tMaxMs == 500 && stats.recordsWithTs == 4,
+              QStringLiteral("%1: statistics range %2 — %3, stamped %4")
+                  .arg(name).arg(stats.tMinMs).arg(stats.tMaxMs).arg(stats.recordsWithTs));
+        CHECK(stats.files.size() == 1 && stats.files[0].firstMs == -1000
+                  && stats.files[0].lastMs == 500,
+              name + ": statistics per file keep pre-1970 moments");
+    };
+    check("resident pre-1970", testdocs::buildResident({path}, schema));
+    check("indexed pre-1970", testdocs::buildIndexed({path}, schema));
+
+    // Края диапазона: годы 0001 и 9999 в одной вкладке — диапазон, корзины,
+    // паузы и темп считаются без переполнения (UBSan в санитайзерной сборке);
+    // строка без метки диапазон не задевает.
+    const QString wide = testdocs::writeFile(dir, "wide.log",
+        "0001-01-01T00:00:00.000Z [main] INFO - first\n"
+        "1969-12-31T23:59:59.999Z [main] ERROR - before epoch\n"
+        "9999-12-31T23:59:59.999Z [main] ERROR - last\n"
+        "no stamp at all\n");
+    const qint64 year1 = QDateTime(QDate(1, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+    const qint64 year9999 =
+        QDateTime(QDate(9999, 12, 31), QTime(23, 59, 59, 999), QTimeZone::UTC).toMSecsSinceEpoch();
+    const auto checkWide = [&](const QString& name, testdocs::Document doc) {
+        const LogModel& model = *doc.model;
+        const DocumentStats stats = collectDocumentStats(model.scanSnapshot(false), nullptr, 0);
+        CHECK(stats.tMinMs == year1 && stats.tMaxMs == year9999 && stats.recordsWithTs == 3,
+              QStringLiteral("%1: statistics over years 0001-9999: %2 — %3, stamped %4")
+                  .arg(name).arg(stats.tMinMs).arg(stats.tMaxMs).arg(stats.recordsWithTs));
+        CHECK(stats.avgPerSec > 0 && stats.peakFromMs >= year1 && stats.peakToMs <= year9999 + 1,
+              name + ": rate and peak bucket stay inside the range");
+        GoToTarget target;
+        target.kind = GoToTarget::Kind::Time;
+        target.time = QDateTime::fromMSecsSinceEpoch(year9999);
+        CHECK(GoToLocation::resolve(model, target, nullptr).row == 2,
+              name + ": going to year 9999 finds its row");
+    };
+    checkWide("resident wide", testdocs::buildResident({wide}, schema));
+    checkWide("indexed wide", testdocs::buildIndexed({wide}, schema));
+
+    // Одно-файловая индексная вкладка держит порядок файла: преамбула без
+    // метки сверху и строка 0001 года посреди 2026-го. Диапазон — от первой
+    // до последней строки с меткой, далёкая строка прижимается к краю корзин
+    // (без переполнения при приведении к int — UBSan).
+    const QString stray = testdocs::writeFile(dir, "stray.log",
+        "=== service started ===\n"
+        "2026-03-05T10:00:00.000Z [main] INFO - a\n"
+        "0001-01-01T00:00:00.000Z [main] ERROR - stray\n"
+        "2026-03-05T11:00:00.000Z [main] INFO - b\n");
+    const qint64 tenUtc = QDateTime(QDate(2026, 3, 5), QTime(10, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+    {
+        testdocs::Document doc = testdocs::buildIndexed({stray}, schema);
+        const DocumentStats stats = collectDocumentStats(doc.model->scanSnapshot(false), nullptr, 0);
+        CHECK(stats.tMinMs == tenUtc && stats.tMaxMs == tenUtc + 3600000 && stats.recordsWithTs == 3,
+              QStringLiteral("indexed stray: range %1 — %2, stamped %3")
+                  .arg(stats.tMinMs).arg(stats.tMaxMs).arg(stats.recordsWithTs));
+    }
+    {
+        testdocs::Document doc = testdocs::buildResident({stray}, schema);
+        const DocumentStats stats = collectDocumentStats(doc.model->scanSnapshot(false), nullptr, 0);
+        CHECK(stats.tMinMs == year1 && stats.tMaxMs == tenUtc + 3600000 && stats.recordsWithTs == 3,
+              QStringLiteral("resident stray: range %1 — %2, stamped %3")
+                  .arg(stats.tMinMs).arg(stats.tMaxMs).arg(stats.recordsWithTs));
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -447,6 +557,7 @@ int main(int argc, char** argv)
     const QString schema = testdocs::buildSchema();
 
     checkParsing();
+    checkPre1970(dir, schema);
 
     const QString first = testdocs::writeFile(dir, "first.log", fixture(0, "alpha"));
     // Второй файл начинается позже и пересекается с первым по времени.

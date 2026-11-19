@@ -37,7 +37,7 @@ inline qint64 tsOf(const QVector<std::shared_ptr<LineIndex::TsBlock>>& tsBlocks,
                    quint32 logicalId, quint32 logicalCount)
 {
     if (logicalId >= logicalCount)
-        return -1;
+        return kNoTimestampMs;
     return tsBlocks.at(int(logicalId / LineIndex::kTsBlockEntries))
         ->ms[logicalId % LineIndex::kTsBlockEntries];
 }
@@ -207,7 +207,7 @@ void LineIndex::setLogicalTimestamp(quint32 logicalId, qint64 tsMs)
     const int blockIdx = int(logicalId / kTsBlockEntries);
     if (blockIdx >= m_tsBlocks.size()) {
         auto block = std::make_shared<TsBlock>();
-        std::fill(std::begin(block->ms), std::end(block->ms), qint64(-1));
+        std::fill(std::begin(block->ms), std::end(block->ms), kNoTimestampMs);
         QMutexLocker lock(&m_mutex);
         m_tsBlocks.append(std::move(block));
     }

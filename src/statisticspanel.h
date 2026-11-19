@@ -11,6 +11,7 @@
 #include "logfile.h"
 
 class LogModel;
+class LogScanSnapshot;
 class QLabel;
 class QShowEvent;
 class QTextBrowser;
@@ -32,7 +33,7 @@ struct DocumentStats {
         QString    example;            // исходная строка первого вхождения
         int        count = 0;          // записей с этим шаблоном
         LogLevel   level = LogLevel::Unknown; // уровень первого вхождения
-        qint64     firstMs = -1, lastMs = -1; // время первого/последнего (мс epoch)
+        qint64     firstMs = kNoTimestampMs, lastMs = kNoTimestampMs; // время первого/последнего (мс epoch)
         int        firstEntryId = 0;   // прыжок к первому вхождению
         LogFilePtr firstFile;
     };
@@ -43,7 +44,7 @@ struct DocumentStats {
     struct Insight {
         enum Kind { ErrorSpike, Burst, Spam, Gap, RisingErrors, RisingVolume };
         Kind       kind = Burst;
-        qint64     fromMs = -1, toMs = -1; // интервал аномалии (мс epoch)
+        qint64     fromMs = kNoTimestampMs, toMs = kNoTimestampMs; // интервал аномалии (мс epoch)
         qint64     count = 0;          // записей/ошибок в интервале или шаблоне
         double     factor = 0;         // ×N к типичному/среднему уровню
         double     share = 0;          // доля от всех записей (спам/тренд)
@@ -58,7 +59,7 @@ struct DocumentStats {
         LogFilePtr file;
         int        records = 0, lines = 0;
         int        warn = 0, error = 0, fatal = 0;
-        qint64     firstMs = -1, lastMs = -1;
+        qint64     firstMs = kNoTimestampMs, lastMs = kNoTimestampMs;
     };
 
     bool   valid = false;              // false — статистики нет (нет документа)
@@ -68,14 +69,14 @@ struct DocumentStats {
     int    rows = 0;                   // строк в снапшоте
     int    records = 0;                // логических записей
     int    recordsWithTs = 0;          // из них с валидным таймстампом
-    qint64 tMinMs = -1, tMaxMs = -1;   // диапазон времени (мс epoch)
+    qint64 tMinMs = kNoTimestampMs, tMaxMs = kNoTimestampMs;   // диапазон времени (мс epoch)
 
     // Счётчики по уровням логических записей; индекс — int(LogLevel).
     qint64 levelCounts[7] = {};
 
     double avgPerSec  = 0;             // средний темп записей
     double peakPerSec = 0;             // темп в самой плотной корзине
-    qint64 peakFromMs = -1, peakToMs = -1; // границы пиковой корзины
+    qint64 peakFromMs = kNoTimestampMs, peakToMs = kNoTimestampMs; // границы пиковой корзины
 
     QVector<Template> topMessages;     // топ шаблонов по количеству
     QVector<Template> topErrors;       // топ шаблонов уровня Error/Fatal
@@ -85,6 +86,13 @@ struct DocumentStats {
     bool   templatesCapped = false;    // словарь шаблонов упёрся в предел
     qint64 collectMs = 0;              // длительность сбора (для подписи)
 };
+
+// Сбор статистики по снапшоту: одна проходка + постобработка, без виджетов —
+// безопасен в воркере (так его зовёт панель) и вызывается тестами напрямую.
+// «Метки нет» во всех полях времени — kNoTimestampMs.
+DocumentStats collectDocumentStats(const LogScanSnapshot& snapshot,
+                                   const std::shared_ptr<std::atomic_bool>& cancel,
+                                   int generation);
 
 // ============================================================================
 // StatisticsPanel — содержимое дока «Statistics»: сводная статистика по
@@ -175,7 +183,7 @@ private:
     // Адресаты ссылок «nav:N» текущего HTML (индекс — N).
     struct NavTarget {
         bool       toEntry = false;
-        qint64     timeMs = -1;
+        qint64     timeMs = kNoTimestampMs;
         bool       preferErrors = false;
         int        entryId = -1;
         LogFilePtr file;

@@ -4,6 +4,7 @@
 #include <QString>
 #include <QDateTime>
 #include <atomic>
+#include <limits>
 #include "logfile.h"
 #include "logfield.h"
 
@@ -21,6 +22,16 @@ enum class LogLevel {
 // сравнивает байт метаданных с маской, без QSet.
 using LogLevelMask = quint32;
 constexpr LogLevelMask levelBit(LogLevel level) { return LogLevelMask(1) << int(level); }
+
+// Момент метки в мс epoch и признак «метки нет» — один на всё хранилище:
+// индекс (блоки меток по id записи), снапшоты (LogEntryMeta), ключ строки
+// (RecordKey), статистика и таймлайн (F-13). Не -1 и не «любое
+// отрицательное»: метка до 1970 года — законный отрицательный момент, ровно
+// эпоха — 0. Минимум qint64 классификатор дать не может (годы 0001–9999 —
+// это ±2,6·10^14 мс), поэтому с законным моментом признак не совпадает, а
+// разности законных моментов не переполняются.
+constexpr qint64 kNoTimestampMs = std::numeric_limits<qint64>::min();
+constexpr bool hasTimestampMs(qint64 ms) { return ms != kNoTimestampMs; }
 
 // Одна физическая строка лога. Доступ к данным — только через аксессоры:
 // это шов, за которым хранилище сможет стать нерезидентным (индекс + чтение

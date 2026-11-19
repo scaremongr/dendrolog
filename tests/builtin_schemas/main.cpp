@@ -431,7 +431,7 @@ void testClassifierTime(const SchemaCase& sc)
 
 struct RowInfo {
     int     recordId = -1;
-    qint64  ms = -1;      // момент записи, -1 — нет
+    qint64  ms = kNoTimestampMs; // момент записи (logentry.h)
     QString fieldsText;   // поля строки, как их отдаёт хранилище
 };
 
@@ -447,7 +447,7 @@ QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const LogPattern& pattern
             continue;
         RowInfo info;
         info.recordId = e->logicalEntryId();
-        info.ms = e->timestamp().isValid() ? e->timestamp().toMSecsSinceEpoch() : -1;
+        info.ms = e->timestamp().isValid() ? e->timestamp().toMSecsSinceEpoch() : kNoTimestampMs;
         info.fieldsText = e->fields().isEmpty()
             ? QString()
             : describeFields(pattern, e->message(), e->fields());
@@ -499,7 +499,7 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
               QStringLiteral("%1: момент строки %2 у бэкендов: %3 | %4")
                   .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms));
         if (!s.continuation)
-            check((r.ms >= 0) == expectsTime(sc, s),
+            check(hasTimestampMs(r.ms) == expectsTime(sc, s),
                   QStringLiteral("%1: у записи строки %2 %3момент: %4")
                       .arg(sc.file).arg(i + 1).arg(expectsTime(sc, s) ? QString() : QStringLiteral("нет "), s.line));
         check(r.fieldsText == x.fieldsText,
@@ -549,7 +549,7 @@ void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
         check(resStarts == !s.continuation && idxStarts == !s.continuation,
               QStringLiteral("%1 без схемы: начало записи на строке %2 (резидентный %3, индексный %4): %5")
                   .arg(sc.file).arg(i + 1).arg(resStarts).arg(idxStarts).arg(s.line));
-        check(r.ms == x.ms && (s.continuation || r.ms >= 0),
+        check(r.ms == x.ms && (s.continuation || hasTimestampMs(r.ms)),
               QStringLiteral("%1 без схемы: момент строки %2: %3 | %4")
                   .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms));
     }

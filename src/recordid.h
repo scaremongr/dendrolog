@@ -1,6 +1,7 @@
 #ifndef RECORDID_H
 #define RECORDID_H
 
+#include "logentry.h"   // kNoTimestampMs
 #include "logfile.h"
 
 #include <QByteArrayView>
@@ -35,7 +36,7 @@
 //     до 1970 года — законный отрицательный момент.
 // ============================================================================
 struct RecordKey {
-    static constexpr qint64 kNoTimestamp = std::numeric_limits<qint64>::min();
+    static constexpr qint64 kNoTimestamp = kNoTimestampMs;   // logentry.h
 
     LogFilePtr file;
     qint64 line = 0;                // с 1

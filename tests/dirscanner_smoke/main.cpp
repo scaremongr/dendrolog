@@ -1076,6 +1076,87 @@ static void testContentIncremental()
 }
 
 // ---------------------------------------------------------------------------
+// F-13. Даты до 1970 года: From/To в дереве, ключ сортировки (отрицательный
+// момент, ровно эпоха — 0) и фильтр по датам. Моменты заданы заранее.
+static void testPre1970Dates()
+{
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL cannot create temp dir for the pre-1970 test\n");
+        return;
+    }
+    const QString dir = tmp.path();
+    writeFile(dir + "/moon.log",
+              "1969-07-20 20:17:40 INFO  landing\n"
+              "1969-07-21 02:56:15 WARN  first step\n");
+    writeFile(dir + "/epoch.log",
+              "1969-12-31T23:59:59.999Z INFO  one ms before\n"
+              "1970-01-01T00:00:00.000Z INFO  epoch\n");
+    writeFile(dir + "/now.log", "2026-04-01 10:00:00 INFO  now\n");
+
+    const QDateTime moonFrom(QDate(1969, 7, 20), QTime(20, 17, 40));
+    const QDateTime moonTo(QDate(1969, 7, 21), QTime(2, 56, 15));
+    const LogParser parser;
+    const LogParser::FileStats moon = parser.analyzeFileForStats(dir + "/moon.log").stats;
+    CHECK(moon.firstEntryTimestamp == moonFrom && moon.lastEntryTimestamp == moonTo,
+          "pre-1970: analyzeFileForStats keeps moments before the epoch");
+    const LogParser::FileStats epoch = parser.analyzeFileForStats(dir + "/epoch.log").stats;
+    CHECK(epoch.firstEntryTimestamp.isValid() && epoch.firstEntryTimestamp.toMSecsSinceEpoch() == -1
+              && epoch.lastEntryTimestamp.isValid()
+              && epoch.lastEntryTimestamp.toMSecsSinceEpoch() == 0,
+          "pre-1970: -1 ms and the epoch itself are timestamps");
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == 3
+                            && allScanned(tree.invisibleRootItem()); }),
+          "pre-1970: scan completes");
+
+    QTreeWidgetItem* moonItem = findItem(tree.invisibleRootItem(), u"moon.log"_s);
+    QTreeWidgetItem* epochItem = findItem(tree.invisibleRootItem(), u"epoch.log"_s);
+    QTreeWidgetItem* nowItem = findItem(tree.invisibleRootItem(), u"now.log"_s);
+    CHECK(moonItem && epochItem && nowItem, "pre-1970: all files listed");
+    if (!moonItem || !epochItem || !nowItem)
+        return;
+    CHECK(moonItem->text(ScanCol::From) == u"1969-07-20 20:17:40"_s
+              && moonItem->text(ScanCol::To) == u"1969-07-21 02:56:15"_s,
+          qPrintable(u"pre-1970: From/To shown, got "_s + moonItem->text(ScanCol::From)
+                     + u" / "_s + moonItem->text(ScanCol::To)));
+    CHECK(moonItem->data(ScanCol::From, ScanRole::SortKey).toLongLong()
+              == moonFrom.toMSecsSinceEpoch(),
+          "pre-1970: From sort key is the negative moment");
+    CHECK(epochItem->data(ScanCol::From, ScanRole::SortKey).isValid()
+              && epochItem->data(ScanCol::From, ScanRole::SortKey).toLongLong() == -1
+              && epochItem->data(ScanCol::To, ScanRole::SortKey).isValid()
+              && epochItem->data(ScanCol::To, ScanRole::SortKey).toLongLong() == 0,
+          "pre-1970: -1 ms and 0 ms are sort keys, not 'no timestamp'");
+
+    // Сортировка по From: 1969-07 < −1 мс < 2026.
+    tree.sortItems(ScanCol::From, Qt::AscendingOrder);
+    QStringList order;
+    for (int i = 0; i < tree.topLevelItemCount(); ++i)
+        order << tree.topLevelItem(i)->text(ScanCol::Name);
+    CHECK(order == (QStringList{ u"moon.log"_s, u"epoch.log"_s, u"now.log"_s }),
+          qPrintable(u"pre-1970: sorting by From, got "_s + order.join(u", "_s)));
+
+    // Фильтр по датам: окно [−1 с, −1 мс] задевает только epoch.log.
+    scanner.setDateFilter(true, QDateTime::fromMSecsSinceEpoch(-1000),
+                          QDateTime::fromMSecsSinceEpoch(-1));
+    scanner.applyFilters();
+    CHECK(waitFor([&] { return moonItem->isHidden() && !epochItem->isHidden()
+                            && nowItem->isHidden(); }),
+          "pre-1970: date filter around the epoch keeps only epoch.log");
+    scanner.setDateFilter(true, QDateTime(QDate(1969, 7, 21), QTime(0, 0)),
+                          QDateTime(QDate(1969, 7, 22), QTime(0, 0)));
+    scanner.applyFilters();
+    CHECK(waitFor([&] { return !moonItem->isHidden() && epochItem->isHidden()
+                            && nowItem->isHidden(); }),
+          "pre-1970: date filter in 1969 keeps only moon.log");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1102,6 +1183,7 @@ int main(int argc, char** argv)
     testContentCancel();
     testStatsAcrossEncodings();
     testContentIncremental();
+    testPre1970Dates();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =

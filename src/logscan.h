@@ -24,7 +24,7 @@ struct TextQuery;
 // ============================================================================
 
 struct LogEntryMeta {
-    qint64   timestampMs = -1;            // мс epoch; -1 — метка невалидна
+    qint64   timestampMs = kNoTimestampMs; // мс epoch; kNoTimestampMs — метки нет
     LogLevel level = LogLevel::Unknown;
     int      logicalEntryId = 0;
     const LogFile* sourceFile = nullptr;
@@ -176,6 +176,14 @@ public:
     qint64 findRowWithText(const TextQuery& query, qint64 startRow, bool forward,
                            bool wrapAround, const std::atomic_bool* cancel = nullptr,
                            std::atomic<int>* progress = nullptr) const;
+
+    // Диапазон меток в порядке вкладки (время; строки без метки — в конце,
+    // как у таймлайна и статистики): метка первой и последней строки С
+    // меткой (в порядке файла одно-файловой индексной вкладки — приближение); *timedRows — число строк до хвоста без меток. false — меток
+    // нет или отменено. «Метки нет» — только kNoTimestampMs: отрицательный
+    // момент (до 1970 года) — метка. Хвост без меток проходится с конца.
+    bool timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows = nullptr,
+                   const std::atomic_bool* cancel = nullptr) const;
 
     // Последовательный обход от fromRow до конца; visit вернул false — стоп.
     void forEachMeta(qint64 fromRow,
