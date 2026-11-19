@@ -219,6 +219,19 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - **Turn off and clear:** **Settings → General → File memory** — the “Remember bookmarks, markers, position and filters of each file” check box (off — the memory is neither read nor written) and the **Clear Memory…** button. Tabs open at that moment save their state again when they are closed.
 - Two windows (`--new-instance`) on the same file do not wipe each other's bookmarks: the last write wins, but bookmarks added in the other window are added, and those removed in this window do not come back.
 
+## Sessions
+
+A session is a snapshot of the whole window in a `*.dlsession` file: open it later, on another machine, or hand it to a colleague together with the logs.
+
+- **File → Save Session As…** saves every tab: the files of each tab (a merged tab keeps all of its files), the filters (levels, time, Text Filters), markers (Row Highlighters), bookmarks with notes, the selected line and its place on screen (or following the tail), auto-reload and an encoding chosen by hand — plus the active tab, the field schema (its name and the schema itself), the field-extraction check box and the column selection.
+- **Not saved:** a piped stream (stdin) — its tab is left out, a merged “stdin + file” tab keeps the file; the panel layout (kept in the settings); the contents of the Text Filters and Row Highlighters panels (their profiles survive restarts anyway). A session file is a snapshot: it does not update itself — save the session again to keep changes.
+- **File → Open Session…** opens the session's tabs in their saved order **next to the tabs already open** (it closes nothing) and activates the saved active tab. A session also opens as a file: pass `*.dlsession` on the command line (`DendroLog.exe incident.dlsession`, also into a window that is already open) or drop it into the window. The extension is not registered with the system.
+- **Field schema.** If the schema folder has a schema with the same definition (whatever its name), that one is selected; otherwise the session's schema is added to the folder under its name marked “(from session)”. DendroLog has one schema per window, so the tabs already open switch to it too; a session saved without a schema leaves the window's schema as it is.
+- **Bookmarks and file memory.** A tab takes its filters, markers and position from the session, not from the file memory; bookmarks are merged: newer bookmarks from the file memory are added to the session's ones, and for the same line the note comes from the session.
+- **Moving to another machine or folder.** Next to the absolute path of every file the session keeps the path relative to itself. Keep the session file next to the logs (or in a folder shared with them): after the whole folder is moved, the files are found by the relative path. If a file is found both at its old path and next to the session, the old path wins.
+- **Restore report.** Opening asks nothing. A file found at neither path is skipped (its bookmarks wait for it); a file that changed since the session was saved (rotation, overwrite) opens clean, its bookmarks are greyed out in the panel (**line not found**) and the position is not restored. A link in the status bar says so — and also lists files found next to the session — and opens the **Session Report** window: tab, file, what happened. For a missing file **Locate File…** lets you point at where it is now: only the same file is accepted (its beginning and saved part match), and its bookmarks move to it. A missing file that was not located stays in the session when you save it again.
+- A session saved by a newer version of DendroLog is not opened, and the file is left untouched.
+
 ## Reloading
 
 - **Reload** — `F5` or the toolbar button: re-reads appended content.

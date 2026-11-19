@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QPointer>
 #include <QPair>
 #include <QHash>
 #include <QStringList>
@@ -52,6 +53,9 @@ class LogModel;
 class LogListView;
 class LogPattern;
 class SearchResultsController;
+class SessionController;
+class SessionReportDialog;
+struct SessionState;
 class SearchResultsNavigator;
 class FieldReextraction;
 class QModelIndex;
@@ -83,6 +87,10 @@ public:
     // Командная строка целиком (своя или второго экземпляра): файлы и папка,
     // stdin, кодировка из --encoding; ошибка разбора — сообщение в окне.
     void openCommandLine(const OpenRouting::CommandLine& commandLine);
+    // Сессия (R-5): вкладки файла сессии добавляются к открытым, схема сессии
+    // ставится до них; о пропавших и изменённых файлах — ссылка в строке
+    // состояния на отчёт. Логика — SessionController.
+    void openSessionFile(const QString& path);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -293,6 +301,13 @@ private:
     class StdinSpooler* m_stdinSpooler = nullptr;
     // Память файлов (R-4): общая на окно; читают и пишут вкладки сами.
     std::unique_ptr<class FileMemoryStore> m_fileMemory;
+    // Сессии (R-5): снятие, открытие, отчёт — в контроллере; окну — меню,
+    // диалоги, схема окна и ссылка на отчёт в строке состояния.
+    SessionController* m_sessionController = nullptr;
+    QPointer<SessionReportDialog> m_sessionReport;
+    QLabel* m_sessionReportLink = nullptr;
+    void saveSessionAs();
+    void applySessionSchema(const SessionState& session);
 
     // Тулбар «Filters»: по кнопке-индикатору на каждый вид фильтра.
     // Кнопка зажата = фильтр применён (Time/Text/Markers — к активной

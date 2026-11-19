@@ -1554,6 +1554,30 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
     return report;
 }
 
+void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource& source)
+{
+    QVector<BookmarkState> moved;
+    for (const Bookmark& b : bookmarks().bookmarks()) {
+        if (!samePath(b.filePath, savedPath))
+            continue;
+        // Закладку, которую не снять (нет идентификатора), оставляем как есть:
+        // лучше «line not loaded», чем потерянная заметка.
+        if (auto state = bookmarks().state(b.id)) {
+            state->source.path = source.source.path;
+            moved.append(*state);
+            bookmarks().remove(b.id);
+        }
+    }
+    for (const BookmarkState& b : moved)
+        bookmarks().restore(b);
+    FileEncoding initial;
+    if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
+        initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+    const bool wasApplying = std::exchange(m_applyingState, true);
+    addLogFile(source.source.path, initial);
+    m_applyingState = wasApplying;
+}
+
 void LogViewWidget::applyOfferedFilters()
 {
     if (!m_offeredFilters)

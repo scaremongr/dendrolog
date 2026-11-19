@@ -52,6 +52,10 @@
 - **File memory** — a file opened again gets back its bookmarks, row
   highlighters and position, and its last filters with one click; a rotated or
   moved file finds its memory by its content.
+- **Sessions** — save all tabs with their filters, bookmarks and positions to a
+  `.dlsession` file and open it later, elsewhere or on a colleague's machine:
+  logs moved together with the session are found by a relative path, missing
+  or changed files are listed in a restore report.
 - **Navigation history** — `Alt+←` / `Alt+→` go back to where a jump (search,
   Statistics, timeline, bookmark, Go to, `F8`) started and forward again.
 - **Marks on the scrollbar** — errors, warnings, bookmarks and Search panel

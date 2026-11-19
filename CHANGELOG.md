@@ -7,6 +7,20 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Sessions.** **File → Save Session As…** writes the whole window to a
+  `*.dlsession` file: every tab with its files (a merged tab keeps all of
+  them), filters, row highlighters, bookmarks with notes, the selected line
+  and its place on screen, auto-reload and a hand-picked encoding, plus the
+  active tab, the field schema and the column selection. **File → Open
+  Session…** (or a `.dlsession` passed on the command line, sent to the open
+  window or dropped into it) adds the session's tabs next to the open ones.
+  A session moved together with its logs to another folder or machine finds
+  them by their path relative to the session file. Opening asks nothing: a
+  missing file is skipped, a changed one opens clean with its bookmarks
+  greyed out, and a status-bar link opens the **Session Report**, where
+  **Locate File…** points a missing file at its new place (only the same file
+  is accepted). The session's schema is selected if the schema folder has it,
+  otherwise added as “(from session)”. Standard input is not saved.
 - **File memory.** A file opened again gets back its bookmarks with notes, row
   highlighters and position (the selected line at the same place on screen, or
   following the tail), auto-reload and an encoding chosen by hand — however it

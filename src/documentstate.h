@@ -9,9 +9,11 @@
 #include "textmatchhighlighter.h"
 
 #include <QDateTime>
+#include <QHash>
 #include <QJsonObject>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <optional>
@@ -52,8 +54,8 @@
 //     годится памяти одного файла (R-4) без TabState вокруг;
 //   • кодировка — только ВЫБОР пользователя (FileEncoding::Source::User);
 //     решение автоматики не хранится: файл решает его заново тем же правилом;
-//   • SessionState (R-5) здесь не заведён: формат вкладки от него не зависит,
-//     сессия — массив TabState плюс схема и выбор колонок.
+//   • SessionState (R-5) — массив TabState плюс схема и выбор колонок; формат
+//     вкладки от него не зависит (файл сессии — src/sessionfile.h).
 // ============================================================================
 
 struct ViewState {
@@ -108,6 +110,65 @@ struct TabState {
 
     QJsonObject toJson() const;
     static std::optional<TabState> fromJson(const QJsonObject& json, QString* error = nullptr);
+};
+
+// ============================================================================
+// Сессия (R-5, шаг 1; docs/design/R-5.md, «Модель», «Три хранилища»): вкладки
+// окна целиком, активная вкладка, схема полей и выбор колонок. Пишется в файл
+// *.dlsession по команде пользователя (SessionFile) — это снимок, сам он не
+// обновляется.
+//
+// Формат (версия 1; эталон — tests/document_state/session-v1.json):
+//   {"format":"dendrolog-session","version":1,
+//    "schema":{"name":"Spring Boot","definition":{…схема LogPattern…}},
+//    "fieldExtraction":true,"visibleFields":["Level","Message"],
+//    "activeTab":1,
+//    "files":[{"path":"/logs/app.log","relative":"../logs/app.log"}],
+//    "tabs":[{TabState}…]}
+// Пути внутри вкладок — абсолютные (форматы R-1 и TabState относительных не
+// принимают). Таблица files рядом с каждым абсолютным путём держит
+// относительный — к каталогу файла сессии: сессия, перенесённая вместе с
+// логами в другую папку или на другую машину, находит их по нему
+// (SessionFile::rebind). Относительный не пишется, если его не построить
+// (другой диск на Windows); разделитель в нём — '/' на всех платформах.
+// Нет схемы — нет ключа schema; visibleFields пусто — все колонки.
+//
+// Чтение — с явным отказом: чужой format, версия не 1, битые поля и вложенные
+// вкладки — nullopt и причина; большая версия отличается от битых данных
+// (newerVersion). Лишние ключи не мешают.
+// ============================================================================
+
+struct SessionState {
+    static constexpr int kFormatVersion = 1;
+    static constexpr char kFormatName[] = "dendrolog-session";
+    static constexpr char kFileSuffix[] = "dlsession"; // без точки
+
+    QString schemaName;          // пусто вместе с schema — без схемы
+    QString schema;              // определение схемы (как SchemaEntry::schema)
+    bool fieldExtraction = false;
+    QStringList visibleFields;   // пусто — все колонки
+    int activeTab = -1;          // индекс в tabs; -1 — не задана
+    QVector<TabState> tabs;
+
+    // Прочитанное из таблицы files: абсолютный путь (как сохранён) →
+    // относительный к каталогу файла сессии. toJson его не читает — строит
+    // заново от sessionFilePath.
+    QHash<QString, QString> relativePaths;
+
+    bool hasSchema() const { return !schema.isEmpty(); }
+    // Регистр пути — как у файловой системы платформы (как у SourceIdentity).
+    static bool samePath(const QString& a, const QString& b);
+    // Относительный путь из таблицы files для абсолютного; пусто — нет.
+    QString relativePathOf(const QString& path) const;
+    // Все абсолютные пути вкладок (без повторов): файлы, источники закладок и
+    // текущей строки.
+    QStringList paths() const;
+
+    // sessionFilePath — куда пишется файл: относительные пути — к его каталогу.
+    // Пусто — без относительных путей.
+    QJsonObject toJson(const QString& sessionFilePath = QString()) const;
+    static std::optional<SessionState> fromJson(const QJsonObject& json, QString* error = nullptr,
+                                                bool* newerVersion = nullptr);
 };
 
 #endif // DOCUMENTSTATE_H

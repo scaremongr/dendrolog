@@ -75,6 +75,12 @@ public:
     // Позиция ставится, когда локатор найдёт строку, и только если пользователь
     // к тому времени не выбрал строку и не прокрутил вид сам (инвариант 10).
     StateApplyReport applyState(const TabState& state, StateFilters filters = StateFilters::Apply);
+    // Пропавший при applyState источник найден в другом месте (отчёт о
+    // восстановлении сессии, «указать файл»; R-5): закладки, ждущие файл по
+    // savedPath, переезжают на новый путь, файл открывается с выбором
+    // кодировки source — как файл снимка (память дополняет только закладки).
+    // Проверку источника (Valid) делает вызывающий.
+    void addRelocatedSource(const QString& savedPath, const TabSource& source);
     // Фильтры, предложенные applyState(…, Offer) и ещё не принятые.
     bool hasOfferedFilters() const { return m_offeredFilters.has_value(); }
     const std::optional<ViewState>& offeredFilters() const { return m_offeredFilters; }

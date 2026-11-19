@@ -60,6 +60,9 @@
 #include <QSettings>
 #include <QCloseEvent>
 #include <QMessageBox>
+#include "sessioncontroller.h"
+#include "sessionfile.h"
+#include "sessionreportdialog.h"
 #include <QComboBox>
 #include <QToolButton>
 #include <QMouseEvent>
@@ -310,6 +313,25 @@ MainWindow::MainWindow(QWidget *parent)
             closeTab(ui->tabWidget->currentIndex());
     });
     connect(ui->actionExit, &QAction::triggered, this, &QWidget::close);
+    // Сессии (R-5): файл *.dlsession — вкладки целиком, схема и колонки.
+    m_sessionController = new SessionController(this);
+    QAction* openSession = new QAction(tr("Open Session..."), this);
+    openSession->setToolTip(tr("Open the tabs of a saved session next to the open ones"));
+    connect(openSession, &QAction::triggered, this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(this, tr("Open Session"), m_lastOpenDir,
+            tr("DendroLog sessions (*.dlsession);;All files (*)"));
+        if (!path.isEmpty())
+            openSessionFile(path);
+    });
+    QAction* saveSession = new QAction(tr("Save Session As..."), this);
+    saveSession->setToolTip(tr("Save all tabs with their filters, bookmarks and positions to a file"));
+    connect(saveSession, &QAction::triggered, this, &MainWindow::saveSessionAs);
+    ui->menuFile->insertActions(ui->actionCloseTab, { openSession, saveSession });
+    ui->menuFile->insertSeparator(ui->actionCloseTab);
+    connect(m_sessionController, &SessionController::reportChanged, this, [this]() {
+        if (m_sessionReportLink && m_sessionController->report().isEmpty())
+            m_sessionReportLink->hide(); // вкладки с проблемами закрыты
+    });
     connect(ui->actionZoomIn,  &QAction::triggered, this, [this]() { changeFontSize(+1); });
     connect(ui->actionZoomOut, &QAction::triggered, this, [this]() { changeFontSize(-1); });
     connect(ui->actionZoomReset, &QAction::triggered, this, [this]() { changeFontSize(0); });
@@ -836,7 +858,9 @@ void MainWindow::dropEvent(QDropEvent* event)
     // drop, командную строку и второй экземпляр (OpenRouting::plan).
     if (!OpenRouting::plan(paths).isEmpty()) {
         event->acceptProposedAction();
-        openFilesFromCommandLine(paths);
+        // После выхода из обработчика: сообщение (битая сессия) не держит
+        // перетаскивание источника (Explorer) открытым.
+        QTimer::singleShot(0, this, [this, paths]() { openFilesFromCommandLine(paths); });
     }
 }
 
@@ -1780,6 +1804,19 @@ void MainWindow::setupStatusBar()
 
     m_statusLabel = new QLabel(tr("Ready"), this);
     ui->statusbar->addWidget(m_statusLabel, 1);
+    // Отчёт о восстановлении сессии: ссылка живёт, пока в отчёте что-то есть.
+    m_sessionReportLink = new QLabel(this);
+    m_sessionReportLink->setObjectName(QStringLiteral("sessionReportLink"));
+    m_sessionReportLink->setTextFormat(Qt::RichText);
+    m_sessionReportLink->hide();
+    connect(m_sessionReportLink, &QLabel::linkActivated, this, [this]() {
+        if (!m_sessionReport)
+            m_sessionReport = new SessionReportDialog(m_sessionController, this);
+        m_sessionReport->show();
+        m_sessionReport->raise();
+        m_sessionReport->activateWindow();
+    });
+    ui->statusbar->addPermanentWidget(m_sessionReportLink);
     updateLineInfoLabel(-1, 0);
 
     m_progressBar = new QProgressBar(this);
@@ -2744,6 +2781,14 @@ void MainWindow::on_actionOpen_triggered()
         return;
 
     m_lastOpenDir = QFileInfo(files.first()).absolutePath();
+
+    // Файл сессии, выбранный здесь, открывается как сессия (R-5).
+    for (const QString& f : files)
+        if (SessionFile::isSessionFile(f))
+            openSessionFile(f);
+    files.removeIf([](const QString& f) { return SessionFile::isSessionFile(f); });
+    if (files.isEmpty())
+        return;
 
     for (const QString& f : files)
         addToRecentFiles(f);
@@ -3813,6 +3858,8 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEn
     // Что куда идёт, решает OpenRouting::plan: файлы — вкладками, как раньше;
     // папка — в Directory Scanner (из нескольких — первая).
     const OpenRouting::Plan plan = OpenRouting::plan(paths);
+    for (const QString& session : plan.sessions)
+        openSessionFile(session);
     for (const QString& file : plan.files)
         openRecentFile(file, initial);
     if (plan.scanDirectory.isEmpty())
@@ -3824,6 +3871,131 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEn
                nullptr, int(plan.skippedDirectories.size()))
                 .arg(QDir::toNativeSeparators(plan.scanDirectory)));
     }
+}
+
+void MainWindow::openSessionFile(const QString& path)
+{
+    const SessionFile::LoadResult loaded = SessionFile::load(path);
+    const QString name = QDir::toNativeSeparators(path);
+    if (!loaded.state) {
+        QMessageBox::warning(this, tr("Open Session"), loaded.newerVersion
+            ? tr("%1 was saved by a newer version of DendroLog and cannot be opened here. "
+                 "The file was not changed.").arg(name)
+            : tr("%1 is not a DendroLog session or is damaged:\n%2").arg(name, loaded.error));
+        return;
+    }
+    m_lastOpenDir = QFileInfo(path).absolutePath();
+    // Схема — до вкладок: правила вкладок привязываются к схеме при применении.
+    applySessionSchema(*loaded.state);
+    const SessionController::OpenResult result =
+        m_sessionController->open(*loaded.state, path, [this]() {
+            LogViewWidget* view = createLogViewWidget();
+            ui->tabWidget->addTab(view, tr("Logs"));
+            return view;
+        });
+    for (LogViewWidget* view : result.tabs)
+        updateTabLabel(view);
+    if (result.active)
+        ui->tabWidget->setCurrentWidget(result.active);
+    const QString summary = SessionController::summary(result);
+    if (result.hasProblems() || result.relocated) {
+        m_sessionReportLink->setText(QStringLiteral("<a href=\"report\">%1</a>")
+            .arg((summary + QLatin1Char(' ') + tr("Details…")).toHtmlEscaped()));
+        m_sessionReportLink->show();
+    } else {
+        statusBar()->showMessage(summary, 10000);
+    }
+}
+
+void MainWindow::saveSessionAs()
+{
+    QList<LogViewWidget*> tabs;
+    for (int i = 0; i < ui->tabWidget->count(); ++i)
+        if (auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
+            tabs << view;
+    SessionState session = m_sessionController->capture(
+        tabs, qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()));
+    if (session.tabs.isEmpty()) {
+        QMessageBox::information(this, tr("Save Session As"),
+            tr("There is nothing to save: no tab has files (standard input is not saved)."));
+        return;
+    }
+    // Схема и колонки глобальные (до F-5) — их даёт окно.
+    if (!m_conversionPattern.isEmpty()) {
+        session.schema = m_conversionPattern;
+        const int index = m_conversionPatternCombo ? m_conversionPatternCombo->currentIndex() : -1;
+        if (index >= 0 && index < m_patternList.size() && m_patternList[index].schema == m_conversionPattern)
+            session.schemaName = m_patternList[index].name;
+    }
+    session.fieldExtraction = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
+    session.visibleFields = selectedVisibleFieldNames();
+
+    // defaultSuffix — до проверки «файл уже есть, заменить?» внутри диалога.
+    QFileDialog dialog(this, tr("Save Session As"), m_lastOpenDir,
+                       tr("DendroLog sessions (*.dlsession)"));
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setDefaultSuffix(QLatin1String(SessionState::kFileSuffix));
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty())
+        return;
+    const QString path = SessionFile::withSuffix(dialog.selectedFiles().first());
+    QString error;
+    if (!SessionFile::save(path, session, &error)) {
+        QMessageBox::warning(this, tr("Save Session As"),
+            tr("Could not save %1:\n%2").arg(QDir::toNativeSeparators(path), error));
+        return;
+    }
+    statusBar()->showMessage(tr("Session saved to %1: %n tab(s).", nullptr, int(session.tabs.size()))
+                                 .arg(QDir::toNativeSeparators(path)), 10000);
+}
+
+void MainWindow::applySessionSchema(const SessionState& session)
+{
+    // Сессия без схемы схему окна не трогает: открытые вкладки не теряют поля.
+    if (!session.hasSchema())
+        return;
+    // Каталог схем — источник правды, и его могли изменить с прошлой загрузки
+    // (sync ниже удалил бы файлы, которых нет в устаревшем списке).
+    const auto reloadSchemas = [this](const QString& extraName) {
+        QStringList order;
+        for (const auto& e : m_patternList)
+            order << e.name;
+        if (!extraName.isEmpty())
+            order << extraName;
+        m_patternList = SchemaStore::loadAll(order);
+        m_conversionPatternCombo->blockSignals(true);
+        m_conversionPatternCombo->clear();
+        for (const auto& e : m_patternList)
+            addSchemaComboItem(m_conversionPatternCombo, e);
+        m_conversionPatternCombo->blockSignals(false);
+    };
+    reloadSchemas(QString());
+    const SessionController::SchemaChoice choice =
+        SessionController::chooseSchema(m_patternList, session.schemaName, session.schema);
+    int index = choice.index;
+    if (choice.added) { // нет в каталоге — добавить под именем с пометкой
+        m_patternList.append(choice.newEntry);
+        QString error;
+        if (!SchemaStore::sync(m_patternList, &error) && !error.isEmpty())
+            statusBar()->showMessage(tr("Could not save the session schema: %1").arg(error), 10000);
+        reloadSchemas(choice.newEntry.name);
+        index = -1;
+        for (int i = 0; i < m_patternList.size(); ++i)
+            if (m_patternList[i].name == choice.newEntry.name)
+                index = i;
+    }
+    // Не записалась в каталог — схема всё равно действует, без пункта в списке.
+    m_conversionPattern = index >= 0 ? m_patternList[index].schema : session.schema;
+    m_conversionPatternCombo->blockSignals(true);
+    m_conversionPatternCombo->setCurrentIndex(index);
+    m_conversionPatternCombo->blockSignals(false);
+    if (m_fieldFilterEnabledCheckBox) {
+        m_fieldFilterEnabledCheckBox->blockSignals(true);
+        m_fieldFilterEnabledCheckBox->setChecked(session.fieldExtraction);
+        m_fieldFilterEnabledCheckBox->blockSignals(false);
+    }
+    m_savedVisibleFieldNames = session.visibleFields;
+    applyPatternToAllViews();
+    updateFilterStatusButtons();
 }
 
 void MainWindow::openStdinStream(const FileEncoding& initial)

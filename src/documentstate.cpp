@@ -1,6 +1,10 @@
 #include "documentstate.h"
 
+#include <QDir>
+#include <algorithm>
+#include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 
 namespace {
 
@@ -268,5 +272,180 @@ std::optional<TabState> TabState::fromJson(const QJsonObject& json, QString* err
     if (!v)
         return fail(error, QStringLiteral("view: ") + why);
     s.view = *v;
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// SessionState
+// ---------------------------------------------------------------------------
+
+bool SessionState::samePath(const QString& a, const QString& b)
+{
+#ifdef Q_OS_WIN
+    return a.compare(b, Qt::CaseInsensitive) == 0;
+#else
+    return a == b;
+#endif
+}
+
+QString SessionState::relativePathOf(const QString& path) const
+{
+    for (auto it = relativePaths.cbegin(); it != relativePaths.cend(); ++it)
+        if (samePath(it.key(), path))
+            return it.value();
+    return QString();
+}
+
+QStringList SessionState::paths() const
+{
+    QStringList out;
+    const auto add = [&out](const QString& path) {
+        if (!path.isEmpty() && std::none_of(out.cbegin(), out.cend(),
+                                            [&](const QString& p) { return samePath(p, path); }))
+            out.append(path);
+    };
+    for (const TabState& tab : tabs) {
+        for (const TabSource& s : tab.sources)
+            add(s.source.path);
+        for (const BookmarkState& b : tab.bookmarks)
+            add(b.source.path);
+        if (tab.view.currentSource)
+            add(tab.view.currentSource->path);
+    }
+    return out;
+}
+
+QJsonObject SessionState::toJson(const QString& sessionFilePath) const
+{
+    QJsonObject json;
+    json.insert(QStringLiteral("format"), QLatin1String(kFormatName));
+    json.insert(QStringLiteral("version"), kFormatVersion);
+    if (hasSchema()) {
+        QJsonObject s;
+        s.insert(QStringLiteral("name"), schemaName);
+        const QJsonDocument doc = QJsonDocument::fromJson(schema.toUtf8());
+        // Определение — объектом (читается глазами); не JSON — строкой как есть.
+        if (doc.isObject())
+            s.insert(QStringLiteral("definition"), doc.object());
+        else
+            s.insert(QStringLiteral("definition"), schema);
+        json.insert(QStringLiteral("schema"), s);
+    }
+    json.insert(QStringLiteral("fieldExtraction"), fieldExtraction);
+    if (!visibleFields.isEmpty())
+        json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
+    json.insert(QStringLiteral("activeTab"), activeTab);
+
+    QJsonArray files;
+    const QString baseDir = sessionFilePath.isEmpty()
+        ? QString() : QFileInfo(sessionFilePath).absolutePath();
+    for (const QString& path : paths()) {
+        QJsonObject f;
+        f.insert(QStringLiteral("path"), path);
+        if (!baseDir.isEmpty()) {
+            const QString rel = QDir(baseDir).relativeFilePath(path);
+            // Другой диск на Windows — относительного нет.
+            if (!rel.isEmpty() && QDir::isRelativePath(rel))
+                f.insert(QStringLiteral("relative"), QDir::fromNativeSeparators(rel));
+        }
+        files.append(f);
+    }
+    json.insert(QStringLiteral("files"), files);
+
+    QJsonArray list;
+    for (const TabState& tab : tabs)
+        list.append(tab.toJson());
+    json.insert(QStringLiteral("tabs"), list);
+    return json;
+}
+
+std::optional<SessionState> SessionState::fromJson(const QJsonObject& json, QString* error,
+                                                   bool* newerVersion)
+{
+    if (newerVersion)
+        *newerVersion = false;
+    if (json.value(QLatin1String("format")).toString() != QLatin1String(kFormatName))
+        return fail(error, QStringLiteral("not a DendroLog session"));
+    const QJsonValue versionValue = json.value(QLatin1String("version"));
+    if (!versionValue.isDouble())
+        return fail(error, QStringLiteral("bad session version"));
+    const int version = versionValue.toInt(-1);
+    if (version > kFormatVersion) {
+        if (newerVersion)
+            *newerVersion = true;
+        return fail(error, QStringLiteral("session version %1 is newer than %2")
+                               .arg(version).arg(kFormatVersion));
+    }
+    if (version != kFormatVersion)
+        return fail(error, QStringLiteral("unsupported session version"));
+
+    SessionState s;
+    QString why;
+
+    const QJsonValue schema = json.value(QLatin1String("schema"));
+    if (!schema.isUndefined()) {
+        if (!schema.isObject())
+            return fail(error, QStringLiteral("bad schema"));
+        const QJsonObject o = schema.toObject();
+        const QJsonValue name = o.value(QLatin1String("name"));
+        const QJsonValue def = o.value(QLatin1String("definition"));
+        if (!name.isString())
+            return fail(error, QStringLiteral("bad schema name"));
+        if (def.isObject())
+            s.schema = QString::fromUtf8(QJsonDocument(def.toObject()).toJson(QJsonDocument::Compact));
+        else if (def.isString() && !def.toString().isEmpty())
+            s.schema = def.toString();
+        else
+            return fail(error, QStringLiteral("bad schema definition"));
+        s.schemaName = name.toString();
+    }
+
+    if (!boolField(json, "fieldExtraction", &s.fieldExtraction, error))
+        return std::nullopt;
+
+    const QJsonValue visible = json.value(QLatin1String("visibleFields"));
+    if (!visible.isUndefined()) {
+        if (!visible.isArray())
+            return fail(error, QStringLiteral("bad visibleFields"));
+        for (const QJsonValue& v : visible.toArray()) {
+            if (!v.isString())
+                return fail(error, QStringLiteral("bad visibleFields"));
+            s.visibleFields.append(v.toString());
+        }
+    }
+
+    const QJsonValue tabs = json.value(QLatin1String("tabs"));
+    if (!tabs.isArray())
+        return fail(error, QStringLiteral("bad tabs"));
+    for (const QJsonValue& v : tabs.toArray()) {
+        const auto tab = v.isObject() ? TabState::fromJson(v.toObject(), &why) : std::nullopt;
+        if (!tab)
+            return fail(error, QStringLiteral("tabs: ") + (v.isObject() ? why : QStringLiteral("not an object")));
+        s.tabs.append(*tab);
+    }
+
+    const QJsonValue active = json.value(QLatin1String("activeTab"));
+    if (!active.isUndefined()) {
+        if (!active.isDouble())
+            return fail(error, QStringLiteral("bad activeTab"));
+        s.activeTab = active.toInt(-1);
+        if (s.activeTab < -1 || s.activeTab >= s.tabs.size())
+            return fail(error, QStringLiteral("activeTab out of range"));
+    }
+
+    const QJsonValue files = json.value(QLatin1String("files"));
+    if (!files.isUndefined()) {
+        if (!files.isArray())
+            return fail(error, QStringLiteral("bad files"));
+        for (const QJsonValue& v : files.toArray()) {
+            const QJsonObject f = v.toObject();
+            const QJsonValue path = f.value(QLatin1String("path"));
+            const QJsonValue rel = f.value(QLatin1String("relative"));
+            if (!v.isObject() || !path.isString() || (!rel.isUndefined() && !rel.isString()))
+                return fail(error, QStringLiteral("bad files"));
+            if (rel.isString() && !rel.toString().isEmpty())
+                s.relativePaths.insert(path.toString(), rel.toString());
+        }
+    }
     return s;
 }

@@ -24,6 +24,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QTreeWidget>
+#include <QUrl>
 #include <cstdio>
 #include <initializer_list>
 #include <utility>
@@ -253,6 +254,55 @@ static void testCommandLine(const QTemporaryDir& tmp)
     }
 }
 
+// R-5: файл сессии (*.dlsession) открывается как сессия, а не как лог —
+// одно правило на командную строку, второй экземпляр и drag&drop.
+static void testSessions(const QTemporaryDir& tmp)
+{
+    const QString root = QDir(tmp.path()).absolutePath();
+    const QString log = writeFile(root + "/s/app.log", "2026-03-05 10:00:00.000 INFO a\n");
+    const QString session = writeFile(root + "/s/incident.dlsession", "{}");
+    const QString upper = writeFile(root + "/s/OTHER.DLSESSION", "{}");
+    const QString dir = root + "/s";
+
+    {   // Командная строка этого процесса.
+        const auto cl = OpenRouting::parseCommandLine({ session, log });
+        const auto plan = OpenRouting::plan(cl.paths);
+        CHECK(plan.sessions == QStringList({ session }), "command line: .dlsession is a session");
+        CHECK(plan.files == QStringList({ log }), "command line: the log still opens as a file");
+        CHECK(!plan.isEmpty(), "command line: session-only plan is not empty");
+        CHECK(OpenRouting::plan({ upper }).sessions == QStringList({ upper }),
+              "suffix is case-insensitive");
+        CHECK(!OpenRouting::plan({ session }).isEmpty() && OpenRouting::plan({ session }).files.isEmpty(),
+              "a session alone: not opened as a log");
+    }
+    {   // Второй экземпляр: относительный путь разрешён от ЕГО каталога,
+        // первый разбирает переданное тем же правилом.
+        const QString saved = QDir::currentPath();
+        QDir::setCurrent(dir);
+        const auto secondary = OpenRouting::parseCommandLine({ "incident.dlsession", "app.log" });
+        const QStringList forwarded = OpenRouting::forwardedArguments(secondary);
+        QDir::setCurrent(root);
+        const auto primary = OpenRouting::parseCommandLine(forwarded);
+        const auto plan = OpenRouting::plan(primary.paths);
+        CHECK(plan.sessions == QStringList({ session }), "second instance: the session reaches the first one");
+        CHECK(plan.files == QStringList({ log }), "second instance: the log reaches the first one");
+        QDir::setCurrent(saved);
+    }
+    {   // Брошенное в окно: локальные URL → пути → то же правило; повтор убран.
+        QStringList dropped;
+        for (const QUrl& url : { QUrl::fromLocalFile(session), QUrl::fromLocalFile(log),
+                                 QUrl::fromLocalFile(session) })
+            dropped << url.toLocalFile();
+        const auto plan = OpenRouting::plan(dropped);
+        CHECK(plan.sessions == QStringList({ session }) && plan.files == QStringList({ log }),
+              "drop: session opens as a session, log as a file");
+    }
+    {   // Пропавший файл сессии — назван, не открывается.
+        const auto plan = OpenRouting::plan({ root + "/gone.dlsession" });
+        CHECK(plan.isEmpty() && plan.missing.size() == 1, "missing session is reported");
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -268,6 +318,7 @@ int main(int argc, char** argv)
     testFolderStartsScan(tmp);
     testRecentFiles(tmp);
     testCommandLine(tmp);
+    testSessions(tmp);
 
     if (failures == 0)
         std::printf("open_routing: OK\n");
