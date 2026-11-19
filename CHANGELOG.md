@@ -7,6 +7,35 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Sessions.** **File → Save Session As…** writes the whole window to a
+  `*.dlsession` file: every tab with its files (a merged tab keeps all of
+  them), filters, row highlighters, bookmarks with notes, the selected line
+  and its place on screen, auto-reload and a hand-picked encoding, plus the
+  active tab, the field schema and the column selection. **File → Open
+  Session…** (or a `.dlsession` passed on the command line, sent to the open
+  window or dropped into it) adds the session's tabs next to the open ones.
+  A session moved together with its logs to another folder or machine finds
+  them by their path relative to the session file. Opening asks nothing: a
+  missing file is skipped, a changed one opens clean with its bookmarks
+  greyed out, and a status-bar link opens the **Session Report**, where
+  **Locate File…** points a missing file at its new place (only the same file
+  is accepted). The session's schema is selected if the schema folder has it,
+  otherwise added as “(from session)”. Standard input is not saved.
+- **File memory.** A file opened again gets back its bookmarks with notes, row
+  highlighters and position (the selected line at the same place on screen, or
+  following the tail), auto-reload and an encoding chosen by hand — however it
+  is opened: command line, drag and drop, Recent Files, Directory Scanner. Its
+  filters are not applied by themselves: a bar above the log offers
+  **Restore Filters** for one click. A file added to a tab as the second one
+  gets only its bookmarks. A rotated, moved or unpacked-elsewhere file
+  (`app.log` → `app.log.1`) finds its memory by its content; a rewritten file
+  opens clean, its old bookmarks greyed out in the Bookmarks panel. The memory
+  is written when a tab closes, on exit and 2 seconds after a bookmark edit;
+  it lives in the `memory` folder of the settings folder (paths of the logs and
+  fragments of bookmarked lines are stored there), keeps up to 200 files
+  (files with bookmarks are never dropped) and can be turned off or cleared in
+  **Settings → General → File memory**. Two windows on the same file merge
+  their bookmarks instead of wiping each other's.
 - **Navigation history.** `Alt+←` (`View → Navigate Back`) returns to the
   place you jumped from — by Go to, the timeline, Statistics, a Search result,
   the quick search, next error, a bookmark or the "↓ N new lines" badge;
@@ -38,8 +67,8 @@ All notable changes to DendroLog are documented here. The format follows
   reload of the file and the switch of a growing file to the large-file mode.
   If the file is rewritten and the line is gone, the bookmark stays in the
   panel with its text and note, marked "line not found", instead of moving to
-  another line. Bookmarks live until the tab is closed; keeping them between
-  runs comes later.
+  another line. Bookmarks are kept between runs (see *File memory*), so
+  **Clear All** now asks for confirmation.
 - **Logs not in UTF-8 are readable, and the encoding can be chosen by hand.**
   A log in Windows-1251, IBM866 (cp866), KOI8-R or Windows-1252 is now shown
   with its real text instead of `�`, and Cyrillic in it is found by quick

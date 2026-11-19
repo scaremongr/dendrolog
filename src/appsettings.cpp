@@ -77,6 +77,7 @@ void AppSettings::load()
     m_themeMode              = themeModeFromString(s.value(QStringLiteral("theme")).toString());
     m_fallbackEncoding       = fallbackEncodingFromString(
         s.value(QStringLiteral("fallbackEncoding")).toString());
+    m_rememberFileState      = s.value(QStringLiteral("rememberFileState"), true).toBool();
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -141,6 +142,7 @@ void AppSettings::save()
     s.setValue(QStringLiteral("textCacheBudgetMB"),      m_textCacheBudgetMB);
     s.setValue(QStringLiteral("theme"),                  themeModeToString(m_themeMode));
     s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
+    s.setValue(QStringLiteral("rememberFileState"),      m_rememberFileState);
     s.endGroup();
 
     writeQuickSearch(s);
@@ -324,6 +326,20 @@ void AppSettings::setIndexedThresholdMB(int mb)
 qint64 AppSettings::indexedThresholdBytes() const
 {
     return qint64(m_indexedThresholdMB) * 1024 * 1024;
+}
+
+// ---------------------------------------------------------------------------
+void AppSettings::setRememberFileState(bool enabled)
+{
+    if (m_rememberFileState == enabled)
+        return;
+    m_rememberFileState = enabled;
+    emit settingsChanged();
+}
+
+QString AppSettings::fileMemoryDir()
+{
+    return configDir() + QStringLiteral("/memory");
 }
 
 int AppSettings::textCacheBudgetMB() const

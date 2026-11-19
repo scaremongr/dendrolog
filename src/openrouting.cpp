@@ -1,5 +1,6 @@
 #include "openrouting.h"
 
+#include "sessionfile.h"
 #include "stdinspooler.h"
 
 #include <QCoreApplication>
@@ -94,6 +95,9 @@ Plan plan(const QStringList& paths)
         if (info.isDir()) {
             if (!directories.contains(path))
                 directories << path;
+        } else if (info.isFile() && SessionFile::isSessionFile(path)) {
+            if (!result.sessions.contains(path))
+                result.sessions << path;
         } else if (info.isFile()) {
             if (!result.files.contains(path))
                 result.files << path;

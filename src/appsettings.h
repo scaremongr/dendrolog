@@ -154,6 +154,17 @@ public:
     static QString fallbackEncodingToString(std::optional<TextEncoding> encoding);
     static std::optional<TextEncoding> fallbackEncodingFromString(const QString& text);
 
+    // ---- Память файла (R-4) ---------------------------------------------- //
+
+    // Помнить ли состояние файлов между запусками: закладки, маркеры,
+    // позицию, фильтры (предложением), ручной выбор кодировки. Выключено —
+    // память не читается и не пишется (уже записанное остаётся на диске до
+    // «Clear Memory»). В ini — [App] rememberFileState, по умолчанию true.
+    bool rememberFileState() const { return m_rememberFileState; }
+    void setRememberFileState(bool enabled);
+    // Каталог памяти файлов: <configDir>/memory (FileMemoryStore).
+    static QString fileMemoryDir();
+
     // ---- Быстрый поиск (поле в тулбаре) ----------------------------------- //
 
     // Переключатели «Aa», «слово целиком», «.*» и история запросов; в ini —
@@ -199,6 +210,7 @@ private:
     int         m_fontSize        { kDefaultFontSize };
     int         m_indexedThresholdMB { 512 };
     int         m_textCacheBudgetMB { 256 };
+    bool        m_rememberFileState { true };
     bool        m_quickSearchMatchCase { false };
     bool        m_quickSearchWholeWord { false };
     bool        m_quickSearchRegex { false };

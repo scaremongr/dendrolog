@@ -72,6 +72,10 @@ set(DENDROLOG_CORE_SOURCES
     src/bookmarkstore.cpp
     src/documentstate.h
     src/documentstate.cpp
+    src/filememorystore.h
+    src/filememorystore.cpp
+    src/sessionfile.h
+    src/sessionfile.cpp
     src/navhistory.h
     src/navhistory.cpp
     src/residentlogstore.h
@@ -186,6 +190,10 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/markerpanelwidget.cpp
     src/bookmarkpanelwidget.h
     src/bookmarkpanelwidget.cpp
+    src/sessioncontroller.h
+    src/sessioncontroller.cpp
+    src/sessionreportdialog.h
+    src/sessionreportdialog.cpp
     src/searchresultsnavigator.h
     src/searchresultsnavigator.cpp
     src/entrydetailspanel.h

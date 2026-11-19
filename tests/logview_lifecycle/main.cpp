@@ -19,9 +19,13 @@
 //     файла, строка, дописанная частями, — одна строка, даже когда порция
 //     обрывается посреди двухбайтного символа или суррогатной пары; файл выше
 //     порога индексного бэкенда не перечитывается целиком на каждый тик.
+//   • память файла (R-4): ротация app.log → app.log.1 (память находит
+//     переименованный файл по содержимому, новый app.log открывается чистым —
+//     в обоих порядках открытия) и перенос файла в другую папку; оба бэкенда.
 // ============================================================================
 
 #include "appsettings.h"
+#include "filememorystore.h"
 #include "logviewwidget.h"
 #include "testdocuments.h"
 
@@ -42,6 +46,7 @@
 #include <QWheelEvent>
 #include <cstdio>
 #include <functional>
+#include <memory>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -1633,6 +1638,125 @@ static void checkLocatorLive(const QDir& dir, const QString& schema)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Память файла (R-4, шаг 2): ротация (app.log → app.log.1, новый app.log) и
+// перенос файла в другую папку. Память находит прежнее содержимое по нему
+// самому; новый app.log открывается чистым.
+// ---------------------------------------------------------------------------
+
+static QByteArray memoryLog(const QByteArray& tag, int lines)
+{
+    QByteArray bytes;
+    for (int i = 0; i < lines; ++i)
+        bytes += record(i, i % 9 == 4 ? "ERROR" : "INFO", tag + ' ' + QByteArray::number(i));
+    return bytes;
+}
+
+static std::unique_ptr<LogViewWidget> memoryTab(FileMemoryStore& store, const QString& path,
+                                                const QString& schema)
+{
+    auto tab = std::make_unique<LogViewWidget>();
+    tab->setParserPattern(schema);
+    tab->setFileMemory(&store);
+    tab->resize(800, 300);
+    tab->show();
+    tab->addLogFile(path);
+    CHECK(testdocs::waitFor([&] { return !tab->isLoading() && !tab->isPositionPending(); }, 60000)
+              && testdocs::settle(*tab->model()),
+          QStringLiteral("memory: load %1").arg(path));
+    return tab;
+}
+
+// Закладки 10 и 50 с заметками, выбрана строка 30; память записана.
+static void rememberFile(FileMemoryStore& store, const QString& path, const QString& schema)
+{
+    auto tab = memoryTab(store, path, schema);
+    LogModel& model = *tab->model();
+    tab->bookmarks().add(rowOfLine(model, 10), QStringLiteral("ten"));
+    tab->bookmarks().add(rowOfLine(model, 50), QStringLiteral("fifty"));
+    tab->view()->goToRow(rowOfLine(model, 30));
+    tab->saveFileMemory();
+    store.waitForWrites();
+}
+
+static void checkRemembered(LogViewWidget& tab, const QString& what)
+{
+    LogModel& model = *tab.model();
+    QStringList found;
+    for (const Bookmark& b : tab.bookmarks().bookmarks())
+        if (tab.bookmarks().visibleRow(b.id) == rowOfLine(model, b.line))
+            found << QStringLiteral("%1:%2").arg(b.line).arg(b.note);
+    CHECK(found == (QStringList{ QStringLiteral("10:ten"), QStringLiteral("50:fifty") }),
+          what + QStringLiteral(": закладки на своих строках: ") + found.join(QStringLiteral(", ")));
+    CHECK(tab.view()->userSelectedRow() == rowOfLine(model, 30),
+          what + QStringLiteral(": выбрана строка 30"));
+}
+
+static void checkClean(LogViewWidget& tab, const QString& what)
+{
+    CHECK(tab.bookmarks().visibleRows().isEmpty(), what + QStringLiteral(": закладок на строках нет"));
+    for (const Bookmark& b : tab.bookmarks().bookmarks())
+        CHECK(tab.bookmarks().status(b.id) == BookmarkStore::Status::Missing,
+              what + QStringLiteral(": прежняя закладка %1 — серая").arg(b.line));
+    CHECK(tab.view()->userSelectedRow() < 0 && !tab.hasOfferedFilters(),
+          what + QStringLiteral(": ни позиции, ни фильтров"));
+}
+
+static void checkFileMemoryRotation(const QDir& dir, const QString& name, const QString& schema)
+{
+    for (const bool rotatedFirst : { false, true }) {
+        const QString label = QStringLiteral("memory/%1/rotation (%2)")
+            .arg(name, rotatedFirst ? QStringLiteral("app.log.1 first") : QStringLiteral("app.log first"));
+        QDir work(dir.filePath(QStringLiteral("memory-%1-%2").arg(name).arg(int(rotatedFirst))));
+        QDir().mkpath(work.path());
+        FileMemoryStore store(work.filePath(QStringLiteral("memory")));
+        const QString app = testdocs::writeFile(work, "app.log", memoryLog("first", 200));
+        rememberFile(store, app, schema);
+
+        // Ротация: app.log → app.log.1, новый app.log с другим содержимым.
+        const QString rotated = work.filePath(QStringLiteral("app.log.1"));
+        CHECK(QFile::rename(app, rotated), label + QStringLiteral(": rename"));
+        testdocs::writeFile(work, "app.log", memoryLog("second", 120));
+
+        if (rotatedFirst) {
+            auto old = memoryTab(store, rotated, schema);
+            checkRemembered(*old, label + QStringLiteral(": app.log.1"));
+            auto fresh = memoryTab(store, app, schema);
+            checkClean(*fresh, label + QStringLiteral(": новый app.log"));
+            CHECK(fresh->bookmarks().isEmpty(), label + QStringLiteral(": память уехала к app.log.1"));
+            CHECK(fresh->model()->rowCount() == 120, label + QStringLiteral(": новое содержимое"));
+        } else {
+            auto fresh = memoryTab(store, app, schema);
+            checkClean(*fresh, label + QStringLiteral(": новый app.log"));
+            CHECK(fresh->model()->rowCount() == 120, label + QStringLiteral(": новое содержимое"));
+            fresh->saveFileMemory(); // закрыть: память нового содержимого — без серых закладок
+            auto old = memoryTab(store, rotated, schema);
+            checkRemembered(*old, label + QStringLiteral(": app.log.1"));
+        }
+        // И ещё раз: обе памяти — по своим путям.
+        store.waitForWrites();
+        FileMemoryStore probe(store.directory());
+        CHECK(probe.open(rotated).found == FileMemoryStore::Found::ByPath,
+              label + QStringLiteral(": app.log.1 — память по пути"));
+    }
+
+    // Перенос в другую папку.
+    const QString label = QStringLiteral("memory/%1/move").arg(name);
+    QDir work(dir.filePath(QStringLiteral("memory-%1-move").arg(name)));
+    QDir().mkpath(work.filePath(QStringLiteral("archive")));
+    FileMemoryStore store(work.filePath(QStringLiteral("memory")));
+    const QString path = testdocs::writeFile(work, "service.log", memoryLog("moved", 150));
+    rememberFile(store, path, schema);
+    const QString moved = work.filePath(QStringLiteral("archive/service.log"));
+    CHECK(QFile::rename(path, moved), label + QStringLiteral(": rename"));
+    auto tab = memoryTab(store, moved, schema);
+    checkRemembered(*tab, label);
+    store.waitForWrites();
+    CHECK(!QFileInfo::exists(store.directory() + QLatin1Char('/') + FileMemoryStore::fileNameForPath(path))
+              && QFileInfo::exists(store.directory() + QLatin1Char('/') + FileMemoryStore::fileNameForPath(moved)),
+          label + QStringLiteral(": память переехала"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1674,6 +1798,10 @@ int main(int argc, char** argv)
     checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);
     checkEncodingSwitch(dir, schema);
     checkLocatorLive(dir, schema);
+    settings.setIndexedThresholdMB(512);
+    checkFileMemoryRotation(dir, QStringLiteral("resident"), schema);
+    settings.setIndexedThresholdMB(0);
+    checkFileMemoryRotation(dir, QStringLiteral("indexed"), schema);
 
     // Растущий файл пересекает порог: вкладка становится индексной на лету.
     {

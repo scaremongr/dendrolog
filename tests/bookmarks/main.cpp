@@ -32,12 +32,15 @@
 
 #include "LogListView.h"
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
 
 #include <cstdio>
@@ -333,6 +336,24 @@ static void selectRow(LogViewWidget& tab, int row)
     tab.view()->goToRow(row);
 }
 
+
+// Ответить на ближайший QMessageBox кнопкой answer (вопрос появится внутри
+// click() — во вложенном цикле событий).
+static void clickQuestion(QMessageBox::StandardButton answer)
+{
+    if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+        if (QAbstractButton* button = box->button(answer))
+            button->click();
+        return;
+    }
+    QTimer::singleShot(10, [answer]() { clickQuestion(answer); });
+}
+
+static void answerNextQuestion(QMessageBox::StandardButton answer)
+{
+    QTimer::singleShot(0, [answer]() { clickQuestion(answer); });
+}
+
 static void checkTab(const QDir& dir, const QString& name, const QString& schema)
 {
     g_context = name + QStringLiteral(" / вкладка");
@@ -491,8 +512,11 @@ static void checkTab(const QDir& dir, const QString& name, const QString& schema
     }
     pump(5);
     CHECK(!store.find(id3) && cardsOf(panel).size() == lines.size() - 1, QStringLiteral("✕ снимает закладку"));
-    if (auto* clearAll = panel.findChild<QToolButton*>(QStringLiteral("bookmarkClearAll")))
+    if (auto* clearAll = panel.findChild<QToolButton*>(QStringLiteral("bookmarkClearAll"))) {
+        // Clear All спрашивает подтверждение (закладки постоянные, R-4): «да».
+        answerNextQuestion(QMessageBox::Yes);
         clearAll->click();
+    }
     pump(5);
     CHECK(store.isEmpty() && cardsOf(panel).isEmpty(), QStringLiteral("Clear All"));
 }

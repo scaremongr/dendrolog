@@ -1,10 +1,18 @@
 // logviewwidget.cpp
 #include "logviewwidget.h"
 #include "appsettings.h"
+#include "filememorystore.h"
 #include "indexedlogstore.h"
+#include "stdinspooler.h"
 #include "quicksearch.h"
 #include "recordlocator.h"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFrame>
+#include <QLabel>
+#include <QPushButton>
+#include <QTimer>
+#include <QToolButton>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -30,7 +38,49 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_view->setMinimumSize(0, 0);
     m_view->setWordWrap(true);
+
+    // Плашка «вернуть фильтры прошлого раза» (память файла, R-4): над логом,
+    // скрыта, пока фильтры не предложены.
+    m_filtersOfferBar = new QFrame(this);
+    m_filtersOfferBar->setObjectName(QStringLiteral("filtersOfferBar"));
+    m_filtersOfferBar->setFrameShape(QFrame::StyledPanel);
+    m_filtersOfferBar->setAutoFillBackground(true);
+    m_filtersOfferBar->setBackgroundRole(QPalette::ToolTipBase);
+    m_filtersOfferBar->setForegroundRole(QPalette::ToolTipText);
+    auto* barLayout = new QHBoxLayout(m_filtersOfferBar);
+    m_filtersOfferText = new QLabel(m_filtersOfferBar);
+    m_filtersOfferText->setObjectName(QStringLiteral("filtersOfferText"));
+    m_filtersOfferText->setWordWrap(true);
+    barLayout->addWidget(m_filtersOfferText, 1);
+    auto* restoreButton = new QPushButton(tr("Restore Filters"), m_filtersOfferBar);
+    restoreButton->setObjectName(QStringLiteral("restoreFiltersButton"));
+    restoreButton->setToolTip(tr("Apply the filters this file had when it was last closed"));
+    barLayout->addWidget(restoreButton);
+    auto* dismissButton = new QToolButton(m_filtersOfferBar);
+    dismissButton->setObjectName(QStringLiteral("dismissFiltersOfferButton"));
+    dismissButton->setText(QStringLiteral("✕"));
+    dismissButton->setAutoRaise(true);
+    dismissButton->setToolTip(tr("Hide this offer for this tab"));
+    barLayout->addWidget(dismissButton);
+    m_filtersOfferBar->hide();
+    layout->addWidget(m_filtersOfferBar);
+    connect(restoreButton, &QPushButton::clicked, this, &LogViewWidget::applyOfferedFilters);
+    connect(dismissButton, &QToolButton::clicked, this, [this]() {
+        // Отказ — до закрытия вкладки; сами фильтры не теряются: их снимет
+        // captureState, и плашка появится при следующем открытии файла.
+        m_filtersOfferDismissed = true;
+        updateFiltersOfferBar();
+    });
+    connect(this, &LogViewWidget::offeredFiltersChanged, this, &LogViewWidget::updateFiltersOfferBar);
+
     layout->addWidget(m_view);
+
+    // Отложенная запись памяти файла после правки закладки или заметки.
+    m_memorySaveTimer = new QTimer(this);
+    m_memorySaveTimer->setSingleShot(true);
+    m_memorySaveTimer->setInterval(2000);
+    connect(m_memorySaveTimer, &QTimer::timeout, this, &LogViewWidget::saveFileMemory);
+    connect(&bookmarks(), &BookmarkStore::changed, this, &LogViewWidget::onBookmarksChanged);
 
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMinimumSize(0, 0);
@@ -459,6 +509,14 @@ void LogViewWidget::addLogFile(const QString &filePath)
 
 void LogViewWidget::addFilesFrom(const LogViewWidget& other)
 {
+    // Файлы переезжают со своим состоянием — память файла здесь не читается
+    // (её закладки уже в other, а свежие правки ещё не записаны).
+    const bool wasApplying = std::exchange(m_memoryApplying, true);
+    // И «база» объединения памяти (что other прочитал из памяти или записал):
+    // иначе запись этой вкладки вернула бы закладки, снятые после переноса.
+    for (auto it = other.m_memoryBase.cbegin(); it != other.m_memoryBase.cend(); ++it)
+        if (!m_memoryBase.contains(it.key()))
+            m_memoryBase.insert(it.key(), it.value());
     // Закладки — до файлов: строки найдутся по ходу загрузки. Источник —
     // идентичность по концу прочитанного в other: тот же файл в том же
     // процессе (и спул stdin — Ephemeral) проходит проверку.
@@ -467,6 +525,7 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
     for (const LogFilePtr& lf : other.loadedFiles())
         if (lf)
             addLogFile(lf->filePath, other.fileEncoding(lf));
+    m_memoryApplying = wasApplying;
 }
 
 QString LogViewWidget::loadFailureMessage(const LogFilePtr& logFile) const
@@ -498,6 +557,11 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
             return;
         }
     }
+
+    // Память файла (R-4): до старта загрузки — закладки и позиция ищутся по
+    // ходу загрузки, фильтры стоят в модели до первой порции.
+    if (!m_memoryApplying && fileMemoryActive() && applyFileMemory(filePath, initial))
+        return;
 
     auto logFile = std::make_shared<LogFile>(filePath);
     m_loadedFiles.append(logFile);
@@ -1380,7 +1444,16 @@ TabState LogViewWidget::captureState() const
     view.markers = m_model->rowMarkers();
     view.followTail = m_view->followTail();
     view.autoReload = m_autoReload;
-    if (!view.followTail) {
+    if (!view.followTail && isPositionPending() && m_pendingPosition.record.isValid()
+        && m_view->userActionCount() == m_pendingPosition.userActions) {
+        // Восстановленная позиция ещё ждёт строку (файл грузится), а
+        // пользователь вид не трогал: снимок — она, а не верх
+        // недогруженного экрана (запись памяти посреди загрузки её бы потеряла).
+        view.currentSource = m_pendingPosition.source;
+        view.current = m_pendingPosition.record;
+        view.viewportOffset = m_pendingPosition.offset;
+        view.currentSelected = m_pendingPosition.selected;
+    } else if (!view.followTail) {
         const LogListView::ViewAnchor anchor = m_view->viewAnchor();
         const RecordKey key = anchor.isValid() ? m_model->keyAt(anchor.row) : RecordKey();
         if (key.isValid()) {
@@ -1470,9 +1543,39 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         FileEncoding initial;
         if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
             initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+        // Память файла здесь дополняет снимок только закладками: вид, фильтры
+        // и позиция — снимка (сессия главнее памяти, docs/design/R-5.md).
+        const bool wasApplying = std::exchange(m_applyingState, true);
         addLogFile(source.source.path, initial);
+        m_applyingState = wasApplying;
     }
+    // Восстановленные закладки — не правка: отложенной записи памяти не надо.
+    m_bookmarkSignature = bookmarkSignature();
     return report;
+}
+
+void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource& source)
+{
+    QVector<BookmarkState> moved;
+    for (const Bookmark& b : bookmarks().bookmarks()) {
+        if (!samePath(b.filePath, savedPath))
+            continue;
+        // Закладку, которую не снять (нет идентификатора), оставляем как есть:
+        // лучше «line not loaded», чем потерянная заметка.
+        if (auto state = bookmarks().state(b.id)) {
+            state->source.path = source.source.path;
+            moved.append(*state);
+            bookmarks().remove(b.id);
+        }
+    }
+    for (const BookmarkState& b : moved)
+        bookmarks().restore(b);
+    FileEncoding initial;
+    if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
+        initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+    const bool wasApplying = std::exchange(m_applyingState, true);
+    addLogFile(source.source.path, initial);
+    m_applyingState = wasApplying;
 }
 
 void LogViewWidget::applyOfferedFilters()
@@ -1542,4 +1645,187 @@ void LogViewWidget::retryPendingPosition()
 {
     if (m_pendingPosition.waitingRow && !m_loading && !m_model->isFiltering())
         finishPendingPosition(&m_pendingPosition.key);
+}
+
+void LogViewWidget::setAutoReload(bool enabled)
+{
+    if (m_autoReload == enabled)
+        return;
+    m_autoReload = enabled;
+    emit autoReloadChanged(enabled);
+}
+
+// ---------------------------------------------------------------------------
+// Память файла на диске (R-4, шаг 2)
+// ---------------------------------------------------------------------------
+
+bool LogViewWidget::fileMemoryActive() const
+{
+    return m_fileMemory && AppSettings::instance().rememberFileState();
+}
+
+void LogViewWidget::setFileMemorySaveDelay(int ms)
+{
+    m_memorySaveTimer->setInterval(qMax(0, ms));
+}
+
+bool LogViewWidget::isFileMemorySavePending() const
+{
+    return m_memorySaveTimer->isActive();
+}
+
+static QVector<RecordId> recordsOf(const QVector<BookmarkState>& list)
+{
+    QVector<RecordId> records;
+    records.reserve(list.size());
+    for (const BookmarkState& b : list)
+        records.append(b.record);
+    return records;
+}
+
+bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding& initial)
+{
+    if (StdinSpooler::isSpoolFilePath(filePath))
+        return false;
+    const FileMemoryStore::Lookup found = m_fileMemory->open(filePath);
+    const QString name = QFileInfo(filePath).fileName();
+    switch (found.found) {
+    case FileMemoryStore::Found::None:
+        return false;
+    case FileMemoryStore::Found::Refused:
+        emit statusMessage(tr("The saved state of %1 was written by a newer version of "
+                              "DendroLog and was left untouched.").arg(name));
+        return false;
+    case FileMemoryStore::Found::Stale: {
+        // Память прежнего содержимого: файл открывается чистым, закладки —
+        // серыми (с текстом и заметкой, в логе не показаны). Сама память
+        // отсоединена и найдётся, когда прежнее содержимое появится снова.
+        const auto count = found.memory ? found.memory->bookmarks.size() : 0;
+        if (found.memory)
+            for (const BookmarkState& b : found.memory->bookmarks)
+                bookmarks().restore(b);
+        m_bookmarkSignature = bookmarkSignature();
+        emit statusMessage(count > 0
+            ? tr("%1 has changed since it was last opened: %n saved bookmark(s) could not be "
+                 "found and are shown greyed out in the Bookmarks panel.", nullptr, int(count)).arg(name)
+            : tr("%1 has changed since it was last opened: its saved position and markers "
+                 "no longer apply.").arg(name));
+        return false;
+    }
+    case FileMemoryStore::Found::ByPath:
+    case FileMemoryStore::Found::ByContent:
+        break;
+    }
+
+    FileMemory memory = *found.memory;
+    if (initial.source == FileEncoding::Source::User)
+        memory.source.userEncoding = initial.decoder.encoding(); // --encoding главнее памяти
+    m_memoryBase.insert(FileMemoryStore::normalizedKeyPath(filePath), recordsOf(memory.bookmarks));
+
+    const bool wasApplying = std::exchange(m_memoryApplying, true);
+    if (m_loadedFiles.isEmpty() && memory.view && !m_applyingState) {
+        // Первый файл вкладки — состояние целиком, фильтры предложением.
+        applyState(memory.toTabState(), StateFilters::Offer);
+    } else {
+        // Второй файл или память без ViewState — закладки и выбор кодировки;
+        // файл снимка (applyState) — только закладки: кодировку даёт снимок.
+        for (const BookmarkState& b : memory.bookmarks)
+            bookmarks().restore(b);
+        FileEncoding encoding = initial;
+        if (!m_applyingState && initial.source != FileEncoding::Source::User && memory.source.userEncoding
+            && TextEncodings::isDecodable(*memory.source.userEncoding))
+            encoding = FileEncoding().withUserChoice(TextDecoder(*memory.source.userEncoding));
+        addLogFile(filePath, encoding);
+    }
+    m_memoryApplying = wasApplying;
+    m_bookmarkSignature = bookmarkSignature(); // восстановление — не правка
+
+    if (found.found == FileMemoryStore::Found::ByContent) {
+        emit statusMessage(tr("%1: restored the saved state of %2 — the same content under another name.")
+                               .arg(name, QDir::toNativeSeparators(found.previousPath)));
+    }
+    return true;
+}
+
+QString LogViewWidget::bookmarkSignature() const
+{
+    // Что пишется в память: строка и заметка. Статус (сверка, видимость) —
+    // нет: на каждую порцию загрузки запись не нужна.
+    QString signature;
+    for (const BookmarkState& b : bookmarks().states()) {
+        signature += b.source.path;
+        signature += QLatin1Char('\x1f');
+        signature += QString::number(b.record.line);
+        signature += QLatin1Char('\x1f');
+        signature += QString::number(b.record.text, 16);
+        signature += QLatin1Char('\x1f');
+        signature += b.note;
+        signature += QLatin1Char('\x1e');
+    }
+    return signature;
+}
+
+void LogViewWidget::onBookmarksChanged()
+{
+    if (!fileMemoryActive() || m_memoryApplying)
+        return;
+    const QString signature = bookmarkSignature();
+    if (signature == m_bookmarkSignature)
+        return;
+    m_bookmarkSignature = signature;
+    m_memorySaveTimer->start(); // дебаунс: серия правок — одна запись
+}
+
+void LogViewWidget::saveFileMemory()
+{
+    m_memorySaveTimer->stop();
+    if (!fileMemoryActive())
+        return;
+    const TabState state = captureState();
+    // ViewState — только у файла, который во вкладке один (спул stdin рядом —
+    // тоже второй файл: позиция могла быть на нём).
+    const bool single = state.sources.size() == 1 && m_loadedFiles.size() == 1;
+    for (const TabSource& source : state.sources) {
+        FileMemory memory;
+        memory.source = source;
+        QHash<QString, bool> sameContent; // идентичность закладки → то же содержимое
+        for (const BookmarkState& b : state.bookmarks) {
+            if (!samePath(b.source.path, source.source.path))
+                continue;
+            // Серая закладка прежнего содержимого (файл переписан) — в
+            // отсоединённой памяти, а не в памяти нового содержимого.
+            const QString id = QStringLiteral("%1:%2:%3").arg(b.source.size).arg(b.source.head).arg(b.source.tail);
+            auto it = sameContent.constFind(id);
+            if (it == sameContent.constEnd())
+                it = sameContent.insert(id, b.source.sameContent(source.source)
+                    || b.source.checkAt(source.source.path) == SourceIdentity::State::Valid);
+            if (*it)
+                memory.bookmarks.append(b);
+        }
+        if (single)
+            memory.view = state.view;
+        const QString key = FileMemoryStore::normalizedKeyPath(source.source.path);
+        m_fileMemory->save(memory, m_memoryBase.value(key));
+        m_memoryBase.insert(key, recordsOf(memory.bookmarks));
+    }
+    m_bookmarkSignature = bookmarkSignature();
+}
+
+void LogViewWidget::updateFiltersOfferBar()
+{
+    const bool show = m_offeredFilters.has_value() && !m_filtersOfferDismissed;
+    if (show) {
+        const ViewState& v = *m_offeredFilters;
+        QStringList parts;
+        if (!v.levels.isEmpty())
+            parts << tr("levels");
+        if (v.timeFrom.isValid() || v.timeTo.isValid())
+            parts << tr("time range");
+        if (v.textRules.isActive())
+            parts << tr("text rules");
+        m_filtersOfferText->setText(parts.isEmpty()
+            ? tr("This file was filtered when you last closed it.")
+            : tr("This file was filtered when you last closed it (%1).").arg(parts.join(QStringLiteral(", "))));
+    }
+    m_filtersOfferBar->setVisible(show);
 }

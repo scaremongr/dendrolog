@@ -39,6 +39,10 @@ public:
     explicit SettingsDialog(QWidget* parent = nullptr);
     ~SettingsDialog() override;
 
+    // Хранилище памяти файлов окна: «Clear Memory» чистит через него
+    // (дожидается записей, сбрасывает перечень). Без него — каталог напрямую.
+    void setFileMemory(class FileMemoryStore* store) { m_fileMemory = store; }
+
 protected:
     void accept() override;
 
@@ -75,6 +79,8 @@ private:
     // clashes ("keys — command, command"), empty when there are none.
     QStringList updateShortcutConflicts();
     void buildPerformanceControls();
+    // Память файлов (R-4): «помнить состояние файлов» и «Clear Memory».
+    void buildFileMemoryControls();
     void resetShortcutsToDefaults();
 
     // ---- Init / finalise ---------------------------------------------------
@@ -93,4 +99,6 @@ private:
     // Запасная кодировка автоопределения (F-1); данные пункта — int
     // TextEncoding, -1 — по локали системы.
     QComboBox* m_fallbackEncodingCombo = nullptr;
+    class QCheckBox* m_rememberFileStateCheckBox = nullptr;
+    class FileMemoryStore* m_fileMemory = nullptr;
 };

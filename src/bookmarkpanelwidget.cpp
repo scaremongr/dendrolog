@@ -1,4 +1,6 @@
 #include "bookmarkpanelwidget.h"
+
+#include <QMessageBox>
 #include "apptheme.h"
 #include "logviewwidget.h"
 
@@ -145,7 +147,15 @@ BookmarkPanelWidget::BookmarkPanelWidget(QWidget* parent)
         tr("Remove every bookmark of the CURRENT tab"));
     m_clearButton->setObjectName(QStringLiteral("bookmarkClearAll"));
     connect(m_clearButton, &QToolButton::clicked, this, [this]() {
-        if (m_logView)
+        if (!m_logView || m_logView->bookmarks().isEmpty())
+            return;
+        // Закладки постоянные (память файла, R-4): снятие всех — с вопросом.
+        const int count = m_logView->bookmarks().count();
+        const auto answer = QMessageBox::question(this, tr("Clear Bookmarks"),
+            tr("Remove all %n bookmark(s) of this tab, with their notes?\n"
+               "They are also removed from the saved state of the file.", nullptr, count),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer == QMessageBox::Yes && m_logView)
             m_logView->bookmarks().clear();
     });
     controls->addWidget(m_clearButton);

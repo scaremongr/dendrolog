@@ -19,6 +19,12 @@
 #include "documentstate.h"
 
 class QuickSearch;
+class FileMemoryStore;
+class QFrame;
+class QLabel;
+class QPushButton;
+class QTimer;
+class QToolButton;
 
 class LogViewWidget : public QWidget {
     Q_OBJECT
@@ -69,6 +75,12 @@ public:
     // Позиция ставится, когда локатор найдёт строку, и только если пользователь
     // к тому времени не выбрал строку и не прокрутил вид сам (инвариант 10).
     StateApplyReport applyState(const TabState& state, StateFilters filters = StateFilters::Apply);
+    // Пропавший при applyState источник найден в другом месте (отчёт о
+    // восстановлении сессии, «указать файл»; R-5): закладки, ждущие файл по
+    // savedPath, переезжают на новый путь, файл открывается с выбором
+    // кодировки source — как файл снимка (память дополняет только закладки).
+    // Проверку источника (Valid) делает вызывающий.
+    void addRelocatedSource(const QString& savedPath, const TabSource& source);
     // Фильтры, предложенные applyState(…, Offer) и ещё не принятые.
     bool hasOfferedFilters() const { return m_offeredFilters.has_value(); }
     const std::optional<ViewState>& offeredFilters() const { return m_offeredFilters; }
@@ -78,6 +90,33 @@ public:
     // Ждёт ли восстановленная позиция ответа локатора.
     bool isPositionPending() const
     { return m_pendingPosition.token != 0 || m_pendingPosition.waitingRow; }
+
+    // ---- Память файла на диске (R-4, шаг 2; filememorystore.h) ----------------
+    // Хранилище памяти (общее на окно; nullptr — вкладка ничего не помнит).
+    // Действует, пока включена настройка AppSettings::rememberFileState:
+    // выключена — память не читается и не пишется.
+    //
+    // Чтение — в addLogFile, до старта загрузки (одна точка входа для
+    // командной строки, drag&drop, недавних, сканера): первый файл вкладки
+    // получает состояние целиком — applyState(…, Offer): закладки, маркеры и
+    // позиция сразу, фильтры — предложением (плашка над логом «вернуть
+    // фильтры прошлого раза»); файл, добавленный вторым, — только закладки и
+    // выбор кодировки. --encoding (выбор в initial) главнее памяти. Итог
+    // (найдено по содержимому, файл изменился — закладки серые, память новой
+    // версии не тронута) — statusMessage.
+    // Запись — saveFileMemory: при закрытии вкладки и выходе (окно), и сама
+    // через fileMemorySaveDelay после правки закладки или заметки.
+    void setFileMemory(FileMemoryStore* store) { m_fileMemory = store; }
+    FileMemoryStore* fileMemory() const { return m_fileMemory; }
+    // Задержка записи после правки закладки (по умолчанию 2 с; тесты — меньше).
+    void setFileMemorySaveDelay(int ms);
+    bool isFileMemorySavePending() const;
+    // Снять состояние и записать память каждого файла вкладки: закладки
+    // файла (кроме серых закладок прежнего содержимого — они в отсоединённой
+    // памяти), выбор кодировки; ViewState — только если файл во вкладке один.
+    // Спул stdin не пишется. Запись — в фоне (FileMemoryStore::save).
+    void saveFileMemory();
+
     // Сообщение для строки статуса, почему файл не загрузился
     // (fileParsingFailed): понятная причина — UTF-16/32 во вкладке с
     // несколькими файлами (индексный путь его не читает, а откат в
@@ -103,7 +142,7 @@ public:
 
     // Per-tab auto-reload. Default is taken from AppSettings at construction time.
     bool autoReload() const { return m_autoReload; }
-    void setAutoReload(bool enabled) { m_autoReload = enabled; }
+    void setAutoReload(bool enabled);
 
     // Идёт ли по вкладке фоновая загрузка данных: первичный разбор/индексация
     // либо дочитывание хвоста. Потребители (панель статистики) используют это,
@@ -243,6 +282,11 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // пересмотр, выбор пользователя, «авто», перечитывание переписанного
     // файла) — индикатор кодировки перечитывает fileEncoding.
     void fileEncodingChanged(const LogFilePtr& logFile);
+    // Флаг авто-обновления вкладки сменился (setAutoReload, применение
+    // состояния) — окно обновляет таймер и кнопку.
+    void autoReloadChanged(bool enabled);
+    // Сообщение для строки состояния (итог применения памяти файла).
+    void statusMessage(const QString& text);
     // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
     void offeredFiltersChanged(bool available);
     // Восстановленная позиция поставлена (true) или не будет поставлена:
@@ -463,6 +507,28 @@ private:
     PendingPosition m_pendingPosition;
     void finishPendingPosition(const RecordKey* key);
     void retryPendingPosition();
+
+    // ---- Память файла (R-4, шаг 2) -------------------------------------------------
+    bool fileMemoryActive() const;
+    // Найти и применить память файла; true — файл уже добавлен (applyState
+    // или addLogFile изнутри), вызывающему addLogFile делать нечего.
+    bool applyFileMemory(const QString& filePath, const FileEncoding& initial);
+    // Закладки изменились: правка пользователя (а не сверка) — отложенная запись.
+    void onBookmarksChanged();
+    QString bookmarkSignature() const;
+    void updateFiltersOfferBar();
+    FileMemoryStore* m_fileMemory = nullptr;
+    QTimer* m_memorySaveTimer = nullptr;
+    // Закладки файла, прочитанные из памяти или записанные прошлый раз (ключ —
+    // FileMemoryStore::normalizedKeyPath): «база» объединения при записи.
+    QHash<QString, QVector<RecordId>> m_memoryBase;
+    QString m_bookmarkSignature;
+    bool m_memoryApplying = false; // applyState памяти, перенос вкладки — без памяти
+    bool m_applyingState = false;  // файлы applyState: из памяти — только закладки
+    // Плашка «вернуть фильтры прошлого раза»; закрыта — до закрытия вкладки.
+    QFrame* m_filtersOfferBar = nullptr;
+    QLabel* m_filtersOfferText = nullptr;
+    bool m_filtersOfferDismissed = false;
 };
 
 #endif // LOGVIEWWIDGET_H

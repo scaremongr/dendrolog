@@ -20,6 +20,8 @@
 //     каталогов сканируется ПЕРВЫЙ; остальные перечислены в
 //     skippedDirectories — окно сообщает о них в строке статуса;
 //   • файлы вперемешку с каталогами: и то и другое, файлы — первыми;
+//   • файл сессии (*.dlsession, R-5) открывается как сессия, а не как лог:
+//     вкладки сессии добавляются к открытым; сессии — до обычных файлов;
 //   • чего нет на диске — в missing; молча, как и раньше, не открывается.
 // Пути в плане абсолютные и очищенные (QDir::cleanPath), повторы убраны.
 //
@@ -34,12 +36,13 @@
 namespace OpenRouting {
 
 struct Plan {
+    QStringList sessions;            // открыть как сессии (*.dlsession)
     QStringList files;               // открыть вкладками
     QString     scanDirectory;       // открыть в Directory Scanner; пусто — нет
     QStringList skippedDirectories;  // каталоги сверх первого
     QStringList missing;             // не существует (или не файл и не каталог)
 
-    bool isEmpty() const { return files.isEmpty() && scanDirectory.isEmpty(); }
+    bool isEmpty() const { return sessions.isEmpty() && files.isEmpty() && scanDirectory.isEmpty(); }
 };
 
 Plan plan(const QStringList& paths);
