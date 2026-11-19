@@ -113,6 +113,18 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     // индексном пути идёт в фоне — пока она не кончилась, вкладка «грузится».
     connect(&m_model->recordLocator(), &RecordLocator::busyChanged,
             this, [this](bool) { updateLoadingState(); });
+    // Позиция из сохранённого состояния вкладки (R-4): строку ищет тот же
+    // локатор, что и закладки.
+    connect(&m_model->recordLocator(), &RecordLocator::resolved, this,
+            [this](int token, const RecordKey& key) {
+        if (token == m_pendingPosition.token)
+            finishPendingPosition(&key);
+    });
+    connect(&m_model->recordLocator(), &RecordLocator::refused, this,
+            [this](int token, RecordLocator::Refusal) {
+        if (token == m_pendingPosition.token)
+            finishPendingPosition(nullptr);
+    });
 
     // Пробрасываем сигнал фильтрации модели
     connect(m_model, &LogModel::modelFiltered, this, &LogViewWidget::handleModelFilteredRelay);
@@ -447,6 +459,11 @@ void LogViewWidget::addLogFile(const QString &filePath)
 
 void LogViewWidget::addFilesFrom(const LogViewWidget& other)
 {
+    // Закладки — до файлов: строки найдутся по ходу загрузки. Источник —
+    // идентичность по концу прочитанного в other: тот же файл в том же
+    // процессе (и спул stdin — Ephemeral) проходит проверку.
+    for (const BookmarkState& b : other.bookmarks().states())
+        bookmarks().restore(b);
     for (const LogFilePtr& lf : other.loadedFiles())
         if (lf)
             addLogFile(lf->filePath, other.fileEncoding(lf));
@@ -574,6 +591,11 @@ void LogViewWidget::updateLoadingState()
         return;
     m_loading = loading;
     emit loadingChanged(m_loading);
+    if (!m_loading) {
+        retryPendingPosition();
+        if (!m_model->isFiltering())
+            m_view->settleAwaitedAnchor();
+    }
     if (!m_loading && m_reconsiderPending)
         reconsiderProvisional(); // запасную сменили посреди загрузки
 }
@@ -926,6 +948,9 @@ void LogViewWidget::handleModelFilteredRelay(int totalRowsAfterFilter)
             refreshTextFragments(path);
     }
     emit modelFiltered(totalRowsAfterFilter);
+    retryPendingPosition();
+    if (!m_loading && !m_model->isFiltering())
+        m_view->settleAwaitedAnchor();
 }
 
 bool LogViewWidget::reloadChangedFiles(bool force)
@@ -1313,3 +1338,208 @@ void LogViewWidget::handleQuickSearchFinished(int row)
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Состояние вкладки вне вкладки (R-4, documentstate.h)
+// ---------------------------------------------------------------------------
+
+TabState LogViewWidget::captureState() const
+{
+    TabState state;
+    const RecordLocator& locator = m_model->recordLocator();
+    for (const LogFilePtr& lf : m_loadedFiles) {
+        const auto source = locator.sourceFor(lf);
+        if (!source || source->ephemeral)
+            continue; // спул stdin не сохраняется; файла нет — снимать нечего
+        TabSource ts;
+        ts.source = *source;
+        const FileEncoding encoding = fileEncoding(lf);
+        if (encoding.source == FileEncoding::Source::User)
+            ts.userEncoding = encoding.decoder.encoding();
+        state.sources.append(ts);
+    }
+    for (const BookmarkState& b : bookmarks().states())
+        if (!b.source.ephemeral)
+            state.bookmarks.append(b);
+
+    ViewState& view = state.view;
+    if (m_offeredFilters && m_model->filterRules().rules.isEmpty()
+        && m_model->logLevelFilter().isEmpty() && !m_model->startTimeFilter().isValid()
+        && !m_model->endTimeFilter().isValid()) {
+        // Предложенные фильтры не приняты, своих нет — не теряем их.
+        view.levels = m_offeredFilters->levels;
+        view.timeFrom = m_offeredFilters->timeFrom;
+        view.timeTo = m_offeredFilters->timeTo;
+        view.textRules = m_offeredFilters->textRules;
+    } else {
+        view.levels = m_model->logLevelFilter();
+        view.timeFrom = m_model->startTimeFilter();
+        view.timeTo = m_model->endTimeFilter();
+        view.textRules = m_model->filterRules();
+    }
+    view.markers = m_model->rowMarkers();
+    view.followTail = m_view->followTail();
+    view.autoReload = m_autoReload;
+    if (!view.followTail) {
+        const LogListView::ViewAnchor anchor = m_view->viewAnchor();
+        const RecordKey key = anchor.isValid() ? m_model->keyAt(anchor.row) : RecordKey();
+        if (key.isValid()) {
+            const auto source = locator.sourceFor(key.file);
+            if (source && !source->ephemeral) {
+                view.currentSource = *source;
+                view.current = locator.idFor(key, m_model->messageAt(anchor.row));
+                view.viewportOffset = anchor.offset;
+                view.currentSelected = anchor.selected;
+            }
+        }
+    }
+    return state;
+}
+
+void LogViewWidget::setStateFilters(const ViewState& view)
+{
+    FilterRuleSet rules = view.textRules;
+    rules.bindFields(parserFieldNames(), m_extractionEnabled);
+    // Те же фильтры — без перефильтрации (и без reset вида).
+    if (view.levels == m_model->logLevelFilter() && view.timeFrom == m_model->startTimeFilter()
+        && view.timeTo == m_model->endTimeFilter() && rules == m_model->filterRules())
+        return;
+    m_model->setFilters(view.levels, view.timeFrom, view.timeTo, rules);
+}
+
+LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state, StateFilters filters)
+{
+    StateApplyReport report;
+    const ViewState& view = state.view;
+
+    // Закладки — до файлов: строки ищутся по ходу загрузки (RecordLocator).
+    // Переписанный источник — отказ (Missing: серая, с фрагментом и
+    // заметкой); пропавший файл не открывается — закладка ждёт его.
+    for (const BookmarkState& b : state.bookmarks)
+        bookmarks().restore(b);
+
+    m_model->setRowMarkers(view.markers);
+    if (filters == StateFilters::Apply) {
+        setStateFilters(view);
+        dismissOfferedFilters();
+    } else if (view.hasFilters()) {
+        m_offeredFilters = view;
+        emit offeredFiltersChanged(true);
+    }
+    setAutoReload(view.autoReload);
+
+    // Проверка источников — по разу на файл (два чтения по 4 КБ).
+    QHash<QString, SourceIdentity::State> checks;
+    for (const TabSource& source : state.sources)
+        checks.insert(source.source.path, source.source.check());
+    const auto checkOf = [&checks](const SourceIdentity& source) {
+        const auto it = checks.constFind(source.path);
+        return it != checks.constEnd() ? *it : source.check();
+    };
+
+    // Позиция: follow-tail главнее — вид у хвоста, строка не ставится.
+    if (m_pendingPosition.token)
+        m_model->recordLocator().cancel(m_pendingPosition.token);
+    m_pendingPosition = {};
+    if (view.followTail) {
+        m_view->setFollowTail(true);
+    } else if (view.hasCurrent()
+               && checkOf(*view.currentSource) != SourceIdentity::State::Missing) {
+        // Файла нет — он не откроется, строке неоткуда взяться.
+        m_pendingPosition.token = m_model->recordLocator().request(*view.currentSource, view.current);
+        m_pendingPosition.source = *view.currentSource;
+        m_pendingPosition.record = view.current;
+        m_pendingPosition.requests = 1;
+        m_pendingPosition.offset = view.viewportOffset;
+        m_pendingPosition.selected = view.currentSelected;
+        m_pendingPosition.userActions = m_view->userActionCount();
+    }
+
+    for (const TabSource& source : state.sources) {
+        switch (checkOf(source.source)) {
+        case SourceIdentity::State::Missing:
+            report.missingSources.append(source.source.path);
+            continue;
+        case SourceIdentity::State::Changed:
+            report.changedSources.append(source.source.path);
+            break;
+        case SourceIdentity::State::Valid:
+        case SourceIdentity::State::Ephemeral:
+            break;
+        }
+        FileEncoding initial;
+        if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
+            initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+        addLogFile(source.source.path, initial);
+    }
+    return report;
+}
+
+void LogViewWidget::applyOfferedFilters()
+{
+    if (!m_offeredFilters)
+        return;
+    const ViewState view = *m_offeredFilters;
+    m_offeredFilters.reset();
+    setStateFilters(view);
+    emit offeredFiltersChanged(false);
+}
+
+void LogViewWidget::dismissOfferedFilters()
+{
+    if (!m_offeredFilters)
+        return;
+    m_offeredFilters.reset();
+    emit offeredFiltersChanged(false);
+}
+
+void LogViewWidget::finishPendingPosition(const RecordKey* found)
+{
+    m_pendingPosition.token = 0;
+    m_pendingPosition.waitingRow = false;
+    const auto drop = [this]() {
+        m_pendingPosition = {};
+        emit positionRestoreFinished(false);
+    };
+    // Инвариант 10: пользователь успел выбрать строку, прокрутить вид или
+    // включить слежение за хвостом — его выбор главнее восстановленного.
+    if (!found || m_view->userActionCount() != m_pendingPosition.userActions
+        || m_view->followTail()) {
+        drop();
+        return;
+    }
+    const RecordKey key = *found; // found может указывать на m_pendingPosition.key
+    int row = m_model->rowForKey(key);
+    if (row < 0 && (m_loading || m_model->isFiltering())) {
+        // Строка уже в данных, но видимый набор ещё строится (фильтр в фоне,
+        // порции загрузки): решать «скрыта ли она» рано.
+        m_pendingPosition.waitingRow = true;
+        m_pendingPosition.key = key;
+        return;
+    }
+    const bool visible = row >= 0;
+    if (!visible)
+        row = m_model->nearestRowForKey(key); // скрыта фильтром — рядом с её местом
+    if (row < 0) {
+        // Ключ больше ничего не значит (строки файла сброшены, файл закрыт) —
+        // спросить локатор заново, пока есть попытки.
+        if (m_pendingPosition.requests < kPositionRequests && m_pendingPosition.record.isValid()) {
+            ++m_pendingPosition.requests;
+            m_pendingPosition.token = m_model->recordLocator().request(m_pendingPosition.source,
+                                                                       m_pendingPosition.record);
+            return;
+        }
+        drop();
+        return;
+    }
+    const PendingPosition done = m_pendingPosition;
+    m_pendingPosition = {};
+    m_view->setViewAnchor({ row, done.offset, done.selected && visible });
+    emit positionRestoreFinished(true);
+}
+
+void LogViewWidget::retryPendingPosition()
+{
+    if (m_pendingPosition.waitingRow && !m_loading && !m_model->isFiltering())
+        finishPendingPosition(&m_pendingPosition.key);
+}

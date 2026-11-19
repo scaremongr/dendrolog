@@ -18,7 +18,9 @@
 //     пропавшая — «строка не найдена», без отметки на чужой строке;
 //   • рост файла за порог — вкладка становится индексной, закладки на месте;
 //   • панель: карточки, статус «скрыта фильтром», переход щелчком, заметка,
-//     удаление, Clear All.
+//     удаление, Clear All;
+//   • объединение вкладок (addFilesFrom) переносит закладки источника в
+//     приёмник: на своих строках, с заметками (R-4, шаг 1), оба бэкенда.
 // ============================================================================
 
 #include "appsettings.h"
@@ -939,6 +941,51 @@ static void checkPartialLine(const QDir& dir, const QString& name, const QString
           QStringLiteral("закладка дописанной строки — на ней, с полным отпечатком"));
 }
 
+// Объединение вкладок: закладки исходной вкладки — в приёмник.
+static void checkMergeTabs(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / объединение вкладок");
+    QByteArray a, b;
+    for (int i = 0; i < 120; ++i) {
+        a += record(i * 2, i % 7 == 3 ? "ERROR" : "INFO", "alpha " + QByteArray::number(i));
+        b += record(i * 2 + 1, "WARN", "beta " + QByteArray::number(i));
+    }
+    const QString pathA = writeFile(dir, name + "-merge-a.log", a);
+    const QString pathB = writeFile(dir, name + "-merge-b.log", b);
+    LogViewWidget src;
+    src.setParserPattern(schema);
+    src.addLogFile(pathA);
+    LogViewWidget dst;
+    dst.setParserPattern(schema);
+    dst.addLogFile(pathB);
+    CHECK(settled(src) && settled(dst), QStringLiteral("загрузка"));
+    QHash<LineId, QString> expected;
+    for (const qint64 line : { qint64(1), qint64(4), qint64(60), qint64(120) }) {
+        const QString note = QStringLiteral("из источника %1").arg(line);
+        CHECK(src.bookmarks().add(rowOfLine(*src.model(), pathA, line), note) >= 0,
+              QStringLiteral("закладка источника %1").arg(line));
+        expected.insert({ pathA, line }, note);
+    }
+    CHECK(dst.bookmarks().add(rowOfLine(*dst.model(), pathB, 10), QStringLiteral("своя")) >= 0,
+          QStringLiteral("закладка приёмника"));
+    expected.insert({ pathB, 10 }, QStringLiteral("своя"));
+
+    dst.addFilesFrom(src);
+    CHECK(settled(dst), QStringLiteral("приёмник дочитал"));
+    const QVector<Bookmark> list = dst.bookmarks().bookmarks();
+    CHECK(list.size() == expected.size(), QStringLiteral("закладок в приёмнике %1").arg(list.size()));
+    QSet<LineId> lines;
+    for (const Bookmark& bm : list) {
+        const LineId id(bm.filePath, bm.line);
+        lines.insert(id);
+        CHECK(expected.value(id) == bm.note, QStringLiteral("заметка строки %1").arg(bm.line));
+        CHECK(dst.bookmarks().status(bm.id) == BookmarkStore::Status::Visible
+                  && dst.bookmarks().idAtRow(rowOfLine(*dst.model(), bm.filePath, bm.line)) == bm.id,
+              QStringLiteral("закладка %1:%2 на своей строке").arg(bm.filePath).arg(bm.line));
+    }
+    checkRoles(*dst.model(), lines, QStringLiteral("отметки после объединения"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -978,6 +1025,7 @@ int main(int argc, char** argv)
     checkHiddenAtReload(dir, QStringLiteral("resident"), schema);
     checkHiddenEncodingChange(dir, QStringLiteral("resident"), schema);
     checkPartialLine(dir, QStringLiteral("resident"), schema);
+    checkMergeTabs(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
     checkPlainRewrite(dir, QStringLiteral("indexed"), schema);
@@ -985,6 +1033,7 @@ int main(int argc, char** argv)
     checkHiddenAtReload(dir, QStringLiteral("indexed"), schema);
     checkHiddenEncodingChange(dir, QStringLiteral("indexed"), schema);
     checkPartialLine(dir, QStringLiteral("indexed"), schema);
+    checkMergeTabs(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
     checkSaveRestore(dir, schema);
     checkPanelLifecycle(dir, schema);
