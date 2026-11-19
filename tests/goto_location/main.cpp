@@ -315,9 +315,17 @@ static void checkView(const QString& name, testdocs::Document& doc)
     CHECK(currentShown(), name + ": the row stays in view after the resize recalculation");
 
     // То же с фильтром: новое окно пересчёта, фильтр применён внутри него.
-    view.resize(900, 420);
-    testdocs::pump(0);
-    CHECK(view.hasPendingLayout(), name + ": the second resize recalculation is pending");
+    // Окно — таймер (150 мс): под параллельной нагрузкой процесс может
+    // простоять дольше, и пересчёт успеет пройти внутри pump(0). Тогда
+    // resize повторяется, пока окно не застанем открытым (P-10); между
+    // проверкой и фильтром цикл событий не крутится, таймер не сработает.
+    bool pending = false;
+    for (int attempt = 0; attempt < 20 && !pending; ++attempt) {
+        view.resize(900, attempt % 2 == 0 ? 420 : 421);
+        testdocs::pump(0);
+        pending = view.hasPendingLayout();
+    }
+    CHECK(pending, name + ": the second resize recalculation is pending");
     model.setLogLevelFilter({LogLevel::Error});
     CHECK(testdocs::settle(model), name + ": filter settles");
     settleView(view);
