@@ -126,4 +126,5 @@ If DendroLog is useful to you, a ⭐ helps others find it.
 ## License
 
 [MIT](LICENSE) © Anton Petrov. Built with [Qt](https://www.qt.io) (LGPLv3,
-dynamically linked).
+dynamically linked). Includes [miniz](https://github.com/richgel999/miniz)
+3.0.2 (MIT, statically linked; see `third_party/miniz/LICENSE`).

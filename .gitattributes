@@ -3,3 +3,9 @@
 # настроек core.autocrlf на конкретной машине.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# Сторонний код хранится байт в байт, как в архиве релиза (SHA-256 в README):
+# без перевода концов строк при core.autocrlf.
+third_party/miniz/miniz.c -text
+third_party/miniz/miniz.h -text
+third_party/miniz/LICENSE -text

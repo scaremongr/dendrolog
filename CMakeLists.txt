@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(DendroLog VERSION 0.6.0 LANGUAGES CXX)
+project(DendroLog VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,7 +48,8 @@ set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если 
 # Найти Qt 6
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Concurrent Svg Network)
 
-# Исходники разложены по четырём целям — каждый файл ровно в одной из них:
+# Исходники разложены по четырём целям — каждый файл ровно в одной из них
+# (плюс сторонний miniz — своей целью в third_party/miniz):
 #   dendrolog_core    — данные, разбор, хранилище, модель, экспорт. Без Qt Widgets;
 #   dendrolog_widgets — представление лога, тема, настройки, сканер каталога и
 #                       общие элементы UI (всё, что тестам нужно из виджетов);
@@ -63,6 +64,12 @@ set(DENDROLOG_CORE_SOURCES
     src/logfield.h
     src/logfile.h
     src/logfile.cpp
+    src/gzipdevice.h
+    src/gzipdevice.cpp
+    src/spooldir.h
+    src/spooldir.cpp
+    src/sourceunpacker.h
+    src/sourceunpacker.cpp
     src/logmodel.h
     src/logmodel.cpp
     src/logstore.h
@@ -252,12 +259,20 @@ set(PROJECT_SOURCES
     resources/resources.qrc
 )
 
+# Сторонний код (F-2): miniz — inflate и чтение zip. Своя статическая цель,
+# приватно у ядра: заголовок miniz виден только ядру (и тестам, что линкуют
+# цель сами), флаги предупреждений — только у неё.
+add_subdirectory(third_party/miniz)
+
 add_library(dendrolog_core STATIC ${DENDROLOG_CORE_SOURCES})
 target_include_directories(dendrolog_core PUBLIC src)
-target_link_libraries(dendrolog_core PUBLIC
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Concurrent
+target_link_libraries(dendrolog_core
+    PUBLIC
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Concurrent
+    PRIVATE
+        miniz
 )
 
 # TSan не видит мьютексы неинструментированного Qt. Обёртки над вызовами в Qt

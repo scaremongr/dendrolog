@@ -106,9 +106,12 @@ public:
 
         // 2. Сравнение по файлу источнику для стабильности
         if (m_sourceFile && other.m_sourceFile && m_sourceFile != other.m_sourceFile) {
-            // Сравниваем по пути к файлу для детерминированного порядка
-            if (m_sourceFile->filePath != other.m_sourceFile->filePath) {
-                return m_sourceFile->filePath < other.m_sourceFile->filePath;
+            // Детерминированный порядок — по ключу источника (F-2): у обычного
+            // файла это путь, у сжатого — архив, а не временная копия.
+            const QString& ka = m_sourceFile->orderKey();
+            const QString& kb = other.m_sourceFile->orderKey();
+            if (ka != kb) {
+                return ka < kb;
             }
         } else if (m_sourceFile && !other.m_sourceFile) { // Только у this есть sourceFile
             return true;

@@ -556,12 +556,13 @@ bool entryLessKey(const std::shared_ptr<LogEntry>& entry, const RecordKey& key)
         return false;
     }
 
-    // 2. Файл: разные экземпляры — по пути.
+    // 2. Файл: разные экземпляры — по ключу источника (LogFile::orderKey,
+    // как у LogEntry::operator<).
     const LogFile* ef = e.sourceFile().get();
     const LogFile* kf = key.file.get();
     if (ef && kf && ef != kf) {
-        if (ef->filePath != kf->filePath)
-            return ef->filePath < kf->filePath;
+        if (ef->orderKey() != kf->orderKey())
+            return ef->orderKey() < kf->orderKey();
     } else if (ef && !kf) {
         return true;
     } else if (!ef && kf) {

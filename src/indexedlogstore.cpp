@@ -624,10 +624,11 @@ bool IndexedLogStore::lessRef(RowRef a, RowRef b) const
         return false;
     }
 
-    // 2. Файл-источник (детерминированный порядок по пути).
+    // 2. Файл-источник: детерминированный порядок по ключу источника
+    // (LogFile::orderKey, как у LogEntry::operator<).
     if (fa != fb) {
-        const QString& pa = m_files[fa].logFile->filePath;
-        const QString& pb = m_files[fb].logFile->filePath;
+        const QString& pa = m_files[fa].logFile->orderKey();
+        const QString& pb = m_files[fb].logFile->orderKey();
         if (pa != pb)
             return pa < pb;
     }
