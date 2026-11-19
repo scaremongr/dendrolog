@@ -36,7 +36,14 @@
 //     «воркер записал — что-то послал — GUI-поток что-то получил — прочитал»
 //     считается упорядоченной, даже если послано было не то и не туда.
 //     Рёбра направленные (отдал → принял): одновременный доступ двух потоков
-//     без передачи между ними по-прежнему ловится (tests/tsan_canary);
+//     без передачи между ними по-прежнему ловится (tests/tsan_canary). Так же
+//     грубо — report*/wait* у QFuture: один ключ на все будущие процесса;
+//   • точные рёбра — только у счётчиков ссылок QFuture (derefT и деструктор):
+//     ключ — разделяемое состояние d конкретного будущего, несвязанные QFuture
+//     друг друга не упорядочивают (режимы future/future-race канарейки).
+//     Старую копию при КОПИРУЮЩЕМ присваивании QFuture<void>
+//     (QFutureInterfaceBase::operator=) Qt разрушает внутри себя, мимо
+//     обёртки; перемещающее присваивание встроено в наш код и её проходит;
 //   • покрыты только пути, которыми пользуется проект: сигналы, postEvent,
 //     QtConcurrent::run/map/mapped, QFuture/QFutureWatcher. Голый QRunnable,
 //     QThreadPool::start(std::function), queued invokeMethod из воркера рёбер
@@ -44,6 +51,12 @@
 //   • манглинг символов — Qt 6.8 без пространства имён (проверка версии — в
 //     корневом CMakeLists.txt).
 // ============================================================================
+
+// Qt открывает поле d у QFutureInterfaceBase (и QFuture) для своих тестов
+// макросом QFUTURE_TEST. Слою оно нужно как ключ разделяемого состояния
+// будущего: доступ по имени проверяет компилятор, а не догадка о смещении.
+// Раскладка от этого не меняется — убирается только метка private:.
+#define QFUTURE_TEST
 
 #include <QCoreApplication>
 #include <QDeadlineTimer>
@@ -60,8 +73,9 @@
 
 #include <atomic>
 #include <chrono>
-#include <mutex>
 #include <thread>
+
+#include <sched.h>
 
 namespace {
 
@@ -142,6 +156,106 @@ struct EngineRunScope {
         g_engineRunsInFlight.fetch_sub(1, std::memory_order_relaxed);
         --t_engineDepth;
     }
+};
+
+// Взаимное исключение деструкторов копий одного QFutureInterfaceBase (ключ —
+// разделяемый d), невидимое для TSan: см. обёртку деструктора ниже. Таблица
+// занятых ключей под спин-блокировкой; функции не инструментируются
+// (no_sanitize_thread), поэтому ни их атомики, ни обычные чтения и записи
+// TSan не видит и рёбер между потоками не получает. Деструкторы, идущие
+// одновременно, — редкость, таблица на 256 ключей с запасом; переполненная —
+// ждёт освобождения.
+namespace gate {
+
+constexpr int kSlots = 256;
+struct Slot {
+    const void* key;
+    const void* owner; // адрес thread_local-маркера потока-владельца
+    int depth;
+};
+Slot g_slots[kSlots];
+int g_tableLock;
+thread_local char t_threadMarker;
+
+#define DENDRO_TSAN_INVISIBLE __attribute__((no_sanitize_thread, noinline))
+
+DENDRO_TSAN_INVISIBLE void lockTable()
+{
+    while (__atomic_exchange_n(&g_tableLock, 1, __ATOMIC_ACQUIRE) != 0)
+        sched_yield();
+}
+
+DENDRO_TSAN_INVISIBLE void unlockTable()
+{
+    __atomic_store_n(&g_tableLock, 0, __ATOMIC_RELEASE);
+}
+
+// true — ключ взят этим потоком (впервые или повторно).
+DENDRO_TSAN_INVISIBLE bool tryEnter(const void* key, const void* me)
+{
+    lockTable();
+    Slot* freeSlot = nullptr;
+    for (Slot& slot : g_slots) {
+        if (slot.key == key) {
+            const bool mine = slot.owner == me;
+            if (mine)
+                ++slot.depth;
+            unlockTable();
+            return mine;
+        }
+        if (!slot.key && !freeSlot)
+            freeSlot = &slot;
+    }
+    if (freeSlot) {
+        freeSlot->key = key;
+        freeSlot->owner = me;
+        freeSlot->depth = 1;
+    }
+    unlockTable();
+    return freeSlot != nullptr;
+}
+
+DENDRO_TSAN_INVISIBLE void leave(const void* key)
+{
+    lockTable();
+    for (Slot& slot : g_slots) {
+        if (slot.key == key) {
+            if (--slot.depth == 0)
+                slot.key = nullptr;
+            break;
+        }
+    }
+    unlockTable();
+}
+
+#undef DENDRO_TSAN_INVISIBLE
+
+} // namespace gate
+
+// Секция деструктора копии разделяемого состояния d: исключение по d, затем
+// видимое TSan «атомарное» ребро на d (принять от прежних владельцев, отдать
+// своё). d == nullptr — перемещённая копия, ей нечего упорядочивать.
+class DestructorGate {
+public:
+    explicit DestructorGate(void* shared) : m_shared(shared)
+    {
+        if (!m_shared)
+            return;
+        while (!gate::tryEnter(m_shared, &gate::t_threadMarker))
+            sched_yield();
+        __tsan_acquire(m_shared);
+        __tsan_release(m_shared);
+    }
+    ~DestructorGate()
+    {
+        if (m_shared)
+            gate::leave(m_shared);
+    }
+    DestructorGate(const DestructorGate&) = delete;
+    DestructorGate& operator=(const DestructorGate&) = delete;
+
+private:
+    void* const m_shared;
 };
 
 // Доставка события получателю. Интересны только события, которые ставят в
@@ -262,12 +376,16 @@ void __wrap__ZN20QFutureInterfaceBase18reportResultsReadyEii(QFutureInterfaceBas
 // результаты: обычно поток пула, разрушая задачу после того, как GUI-поток
 // прочитал result() и отпустил свой QFuture. Ведёт себя как атомарная
 // операция: принимает всё, что отдали прежние владельцы, и отдаёт своё. Ключ —
-// общий для копий d-указатель (первое поле после vptr), а не this.
+// общий для копий указатель d (разделяемое состояние), а не this.
+// У перемещённой копии d == nullptr (Qt тогда ничего не считает): ребро по
+// адресу 0 связало бы между собой ВСЕ потоки, разрушившие хоть одну такую
+// копию, — а их создаёт каждое перемещающее присваивание QFuture.
 bool __real__ZNK20QFutureInterfaceBase6derefTEv(const QFutureInterfaceBase*);
 bool __wrap__ZNK20QFutureInterfaceBase6derefTEv(const QFutureInterfaceBase* f)
 {
-    void* const shared =
-        *reinterpret_cast<void* const*>(reinterpret_cast<const char*>(f) + sizeof(void*));
+    void* const shared = f->d;
+    if (!shared)
+        return __real__ZNK20QFutureInterfaceBase6derefTEv(f);
     __tsan_release(shared);
     const bool stillReferenced = __real__ZNK20QFutureInterfaceBase6derefTEv(f);
     __tsan_acquire(shared);
@@ -276,29 +394,47 @@ bool __wrap__ZNK20QFutureInterfaceBase6derefTEv(const QFutureInterfaceBase* f)
 
 // QFutureInterfaceBase::~QFutureInterfaceBase — второй счётчик ссылок, на сам
 // разделяемый d (атомик внутри Qt): последний владелец удаляет d вместе с
-// хранилищем результатов. ~QFutureInterface<T> сначала читает хранилище
+// хранилищем результатов. ~QFutureInterface<T> сначала пишет в хранилище
 // (clear<T>, если derefT сказал «последний по результатам»), потом зовёт этот
 // деструктор; поток пула, разрушая задачу, может оказаться последним по d и
-// удалить его. Удаление — ВНУТРИ настоящей функции, поэтому пара
-// release/acquire вокруг вызова ребра «чужой деструктор → моё удаление» не
-// даёт. Вместо неё — настоящий мьютекс вокруг всего деструктора: TSan видит
-// его (pthread) и упорядочивает деструкторы копий целиком. Рекурсивный —
-// удаление d может разрушить вложенный QFutureInterface (продолжения).
-// Только в сборке с TSan; деструкторы QFuture друг друга не ждут, так что
-// взаимоблокировки нет.
-static std::recursive_mutex g_futureDestructor;
+// удалить его. Нужное ребро — «всё, что сделал любой прежний владелец ЭТОГО d
+// → удаление d».
+//
+// Пара release/acquire вокруг вызова его не даёт: удаление — ВНУТРИ настоящей
+// функции, после декремента, и acquire перед вызовом может случиться раньше
+// release другого владельца, который затем уронит счётчик не последним. Поэтому
+// деструкторы копий одного d взаимно исключены (DestructorGate): кто удаляет
+// d, тот вошёл в свою секцию после того, как все прежние владельцы вышли из
+// своих, и его acquire видит их release. Пара acquire + release стоит до
+// вызова: после него d может быть уже удалён, а синхронизационный объект на
+// освобождённом адресе достался бы следующему владельцу памяти. Освобождение
+// d TSan видит сам (перехват operator delete) и стирает объект вместе с ним.
+//
+// Исключение настоящее, но TSan его не видит: это спин-блокировка по точному
+// ключу d в функциях без инструментирования. Видимое TSan ребро — только
+// acquire/release на самом d, поэтому несвязанные QFuture (другой d) друг
+// друга не упорядочивают, и гонку между их потоками TSan по-прежнему поймает
+// (режим future-race в tests/tsan_canary). Прежняя версия держала один
+// рекурсивный std::mutex на все деструкторы процесса и прятала такие гонки.
+//
+// Вложенность: удаление d может разрушить вложенный QFutureInterface
+// (продолжения) — это другой d, своя секция; тот же d из своей же секции
+// блокировка допускает (счётчик глубины). Взаимоблокировки нет: поток ждёт
+// чужой d, только входя в деструктор или удаляя свой d, а цикл «удаление d1
+// держит ссылку на d2, удаление d2 — на d1» невозможен — d с живой ссылкой не
+// удаляется.
 
 void __real__ZN20QFutureInterfaceBaseD1Ev(QFutureInterfaceBase*);
 void __wrap__ZN20QFutureInterfaceBaseD1Ev(QFutureInterfaceBase* f)
 {
-    std::lock_guard<std::recursive_mutex> lock(g_futureDestructor);
+    DestructorGate section(f->d);
     __real__ZN20QFutureInterfaceBaseD1Ev(f);
 }
 
 void __real__ZN20QFutureInterfaceBaseD2Ev(QFutureInterfaceBase*);
 void __wrap__ZN20QFutureInterfaceBaseD2Ev(QFutureInterfaceBase* f)
 {
-    std::lock_guard<std::recursive_mutex> lock(g_futureDestructor);
+    DestructorGate section(f->d);
     __real__ZN20QFutureInterfaceBaseD2Ev(f);
 }
 
