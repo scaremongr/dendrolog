@@ -91,7 +91,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     bool     hasCurrent   = false;
     quint32  currentId    = 0;
     LogLevel currentLevel = LogLevel::Unknown;
-    qint64   currentTsMs  = -1;
+    qint64   currentTsMs  = kNoTimestampMs;
 
     if (!initial) {
         const qint64 oldCount = index->lineCount();
@@ -199,7 +199,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     const auto processLine = [&](const char* data, qint64 len, quint8 eol) {
         text = encoding.decoder.decode(data, qsizetype(len));
 
-        qint64 tsMs = -1;
+        qint64 tsMs = kNoTimestampMs;
         LogLevel lvl = LogLevel::Unknown;
         // detectTimestampMs: мс epoch без построения QDateTime на строку.
         bool leadingTs = false;
@@ -224,7 +224,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         if (primaryWithoutSchema || schemaMatched) {
             currentId = nextId++;
             currentLevel = lvl;
-            currentTsMs = hasTs ? tsMs : -1;
+            currentTsMs = hasTs ? tsMs : kNoTimestampMs;
             index->setLogicalTimestamp(currentId, currentTsMs);
             rec.isPrimary = true;
         } else if (!hasCurrent) {
@@ -232,15 +232,15 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
             // (та же семантика, что у LogParser).
             currentId = nextId++;
             currentLevel = LogLevel::Unknown;
-            currentTsMs = -1;
-            index->setLogicalTimestamp(currentId, -1);
+            currentTsMs = kNoTimestampMs;
+            index->setLogicalTimestamp(currentId, kNoTimestampMs);
         }
         hasCurrent = true;
 
         rec.level = currentLevel;
         // Паритет с LogEntry::isPlainText(): унаследованные ts/level пусты и
         // схема эту строку не распознала (у primary со схемой fields непусты).
-        rec.isPlainText = (currentTsMs < 0) && currentLevel == LogLevel::Unknown
+        rec.isPlainText = !hasTimestampMs(currentTsMs) && currentLevel == LogLevel::Unknown
                        && !schemaMatched;
         rec.logicalId = currentId;
         index->appendLine(rec);

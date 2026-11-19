@@ -47,6 +47,7 @@
 #include "logparser.h"
 #include "logpattern.h"
 #include "logscan.h"
+#include "recordid.h"
 #include "filterconfigs.h"
 #include "testdocuments.h"
 #include "textmatchhighlighter.h"
@@ -66,6 +67,7 @@
 #include <QTimeZone>
 
 #include <cstdio>
+#include <limits>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -1103,6 +1105,141 @@ static void testZonedMerge(const QDir& dir, const QString& schema)
 }
 
 // ---------------------------------------------------------------------------
+// F-13. Метки до 1970 года и на краях диапазона: 0 мс (ровно эпоха), −1 мс,
+// момент, отрицательный из-за зоны, годы 0001 и 9999 — законные метки, а
+// «метки нет» (kNoTimestampMs) не совпадает ни с одной из них. Слитая
+// вкладка из такого файла и обычного: порядок, моменты, ключи строк,
+// снапшот, фильтр времени, переход ко времени и диапазон меток сверяются с
+// заданным заранее эталоном — общую ошибку сравнение бэкендов не увидит.
+// ---------------------------------------------------------------------------
+static void testPre1970Merge(const QDir& dir, const QString& schema)
+{
+    const auto utc = [](int y, int mo, int d, int h, int mi, int s, int ms) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s, ms), QTimeZone::UTC)
+            .toMSecsSinceEpoch();
+    };
+    const qint64 year1 = utc(1, 1, 1, 0, 0, 0, 0);
+    const qint64 year9999 = utc(9999, 12, 31, 23, 59, 59, 999);
+    const qint64 now = utc(2026, 9, 20, 10, 0, 0, 0);
+
+    // Файл «a» нарочно не по порядку и с преамбулой без метки; «b» —
+    // обычный, с совпадающим моментом −1 мс (при равенстве — порядок путей).
+    const QString aPath = writeFile(dir, QStringLiteral("a-pre1970.log"),
+        "a preamble without a stamp\n"
+        "0001-01-01T00:00:00.000Z INFO a year one\n"
+        "1970-01-01T00:00:00.000Z INFO a epoch\n"
+        "    at continuation of the epoch record\n"
+        "1969-12-31T23:59:59.999Z INFO a minus one\n"
+        "1970-01-01T01:00:00.000+02:00 INFO a minus hour\n"
+        "9999-12-31T23:59:59.999Z INFO a year 9999\n"
+        "1900-01-01T00:00:00.000Z ERROR a far past\n");
+    const QString bPath = writeFile(dir, QStringLiteral("b-now.log"),
+        "2026-09-20T10:00:00.000Z INFO b now\n"
+        "1969-12-31T23:59:59.999Z WARN b minus one\n");
+
+    struct Row { const char* text; qint64 ms; };
+    const QVector<Row> expected = {
+        { "a year one", year1 },
+        { "a far past", utc(1900, 1, 1, 0, 0, 0, 0) },
+        { "a minus hour", -3600000 },
+        { "a minus one", -1 },
+        { "b minus one", -1 },
+        { "a epoch", 0 },
+        { "at continuation of the epoch record", 0 },
+        { "b now", now },
+        { "a year 9999", year9999 },
+        { "a preamble without a stamp", kNoTimestampMs },
+    };
+
+    const auto check = [&](const QString& name, const Document& doc) {
+        g_context = QStringLiteral("до 1970 / ") + name;
+        g_contextFailures = 0;
+        LogModel& m = *doc.model;
+        const auto visibleTexts = [&m]() {
+            QStringList out;
+            for (int row = 0; row < m.rowCount(); ++row)
+                out << m.messageAt(row);
+            return out;
+        };
+
+        CHECK(m.rowCount() == expected.size(),
+              QStringLiteral("строк %1, ожидается %2").arg(m.rowCount()).arg(expected.size()));
+        const LogScanSnapshot snap = m.scanSnapshot(false);
+        for (int row = 0; row < qMin(m.rowCount(), int(expected.size())); ++row) {
+            const Row& want = expected[row];
+            CHECK(m.messageAt(row).endsWith(QLatin1String(want.text)),
+                  QStringLiteral("строка %1: %2, ожидается …%3")
+                      .arg(row).arg(describe(m.messageAt(row)), QLatin1String(want.text)));
+            const QDateTime ts = m.visibleTimestampAt(row);
+            const qint64 gotMs = ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
+            CHECK(gotMs == want.ms,
+                  QStringLiteral("строка %1: момент %2, ожидается %3")
+                      .arg(row).arg(gotMs).arg(want.ms));
+            CHECK(snap.metaAt(row).timestampMs == want.ms,
+                  QStringLiteral("строка %1: снапшот %2, ожидается %3")
+                      .arg(row).arg(snap.metaAt(row).timestampMs).arg(want.ms));
+            const RecordKey key = m.keyAt(row);
+            CHECK(key.timestampMs == want.ms && key.hasTimestamp() == (want.ms != kNoTimestampMs),
+                  QStringLiteral("строка %1: ключ %2, ожидается %3")
+                      .arg(row).arg(key.timestampMs).arg(want.ms));
+            CHECK(m.rowForKey(key) == row,
+                  QStringLiteral("строка %1: rowForKey → %2").arg(row).arg(m.rowForKey(key)));
+        }
+
+        // Диапазон меток: первая строка и последняя с меткой.
+        const QPair<QDateTime, QDateTime> range = m.fullTimeRange();
+        CHECK(range.first.isValid() && range.first.toMSecsSinceEpoch() == year1
+                  && range.second.isValid() && range.second.toMSecsSinceEpoch() == year9999,
+              QStringLiteral("fullTimeRange: %1 — %2")
+                  .arg(describe(range.first), describe(range.second)));
+        qint64 minMs = 0, maxMs = 0;
+        CHECK(snap.timeRange(&minMs, &maxMs) && minMs == year1 && maxMs == year9999,
+              QStringLiteral("снапшот: диапазон меток %1 — %2").arg(minMs).arg(maxMs));
+
+        // Переход ко времени: первая строка не раньше момента.
+        const struct { qint64 at; int row; } jumps[] = {
+            { -1, 3 }, { 0, 5 }, { 1, 7 }, { year1, 0 }, { year1 - 1, 0 },
+            { -3600000, 2 }, { year9999, 8 }, { year9999 + 1, 9 },
+        };
+        for (const auto& j : jumps)
+            CHECK(m.firstVisibleRowAtOrAfter(QDateTime::fromMSecsSinceEpoch(j.at)) == j.row,
+                  QStringLiteral("firstVisibleRowAtOrAfter(%1) = %2, ожидается %3")
+                      .arg(j.at).arg(m.firstVisibleRowAtOrAfter(QDateTime::fromMSecsSinceEpoch(j.at)))
+                      .arg(j.row));
+
+        // Фильтр времени: границы включительно, строка без метки при заданном
+        // начале скрыта.
+        const struct { qint64 from, to; QStringList rows; } windows[] = {
+            { -1, 0, { QStringLiteral("a minus one"), QStringLiteral("b minus one"),
+                       QStringLiteral("a epoch"),
+                       QStringLiteral("at continuation of the epoch record") } },
+            { year1, -3600000, { QStringLiteral("a year one"), QStringLiteral("a far past"),
+                                 QStringLiteral("a minus hour") } },
+            { 1, year9999, { QStringLiteral("b now"), QStringLiteral("a year 9999") } },
+            { -3599999, -2, {} },
+        };
+        for (const auto& w : windows) {
+            FilterConfig cfg;
+            cfg.name = QStringLiteral("время %1 — %2").arg(w.from).arg(w.to);
+            cfg.start = QDateTime::fromMSecsSinceEpoch(w.from);
+            cfg.end = QDateTime::fromMSecsSinceEpoch(w.to);
+            applyChecked(m, cfg, {});
+            const QStringList got = visibleTexts();
+            bool same = got.size() == w.rows.size();
+            for (int i = 0; same && i < got.size(); ++i)
+                same = got[i].endsWith(w.rows[i]);
+            CHECK(same, cfg.name + QStringLiteral(": ") + got.join(QStringLiteral(" | ")));
+        }
+        applyChecked(m, FilterConfig{}, {});
+        CHECK(m.rowCount() == expected.size(), QStringLiteral("сброс фильтра времени"));
+    };
+    check(QStringLiteral("резидентный"), loadResident({ aPath, bPath }, schema));
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        check(QStringLiteral("индексный, ") + describe(mode),
+              loadIndexed({ aPath, bPath }, schema, mode));
+}
+
+// ---------------------------------------------------------------------------
 // Второй файл дописан во вкладку с файлом «не по порядку» при АКТИВНОМ
 // фильтре: переход «один файл → несколько» переупорядочивает и видимые
 // строки (materializeAllRefs). Эталон — резидентная вкладка с теми же
@@ -1828,7 +1965,18 @@ int main(int argc, char** argv)
     const QString fileF = writeFile(dir, QStringLiteral("nolevel-access.log"),
                                     makeNoLevelBytes(200, 1, baseA.addSecs(30), true));
 
-    for (const QString& path : { fileA, fileB, fileC, fileD, fileE, fileF }) {
+    // F-13: метки до 1970 года. Монотонный файл, переходящий эпоху (строгое
+    // сравнение одно-файловой вкладки), и файл из далёкого прошлого с
+    // преамбулой и метками не по порядку — в слитой вкладке с обычным.
+    const QString filePre = writeFile(
+        dir, QStringLiteral("pre-epoch.log"),
+        makeLogBytes(320, 11u, "\n", QDateTime::fromMSecsSinceEpoch(-120000), false, true, true));
+    const QString filePast = writeFile(
+        dir, QStringLiteral("far-past.log"),
+        makeLogBytes(260, 12u, "\r\n", QDateTime(QDate(1901, 3, 5), QTime(10, 0)),
+                     true, false, false));
+
+    for (const QString& path : { fileA, fileB, fileC, fileD, fileE, fileF, filePre, filePast }) {
         if (path.isEmpty()) {
             std::fprintf(stderr, "не удалось записать фикстуру\n");
             return 2;
@@ -1855,9 +2003,15 @@ int main(int argc, char** argv)
         runFixture(QStringLiteral("без слов уровня, два файла, ") + describe(mode),
                    { fileE, fileF }, schema, fieldNames, mode);
 
+    runFixture(QStringLiteral("до 1970, один файл через эпоху"), { filePre }, schema, fieldNames);
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent })
+        runFixture(QStringLiteral("до 1970 и после, три файла, ") + describe(mode),
+                   { filePre, filePast, fileA }, schema, fieldNames, mode);
+
     testSingleFileOrdering(fileA, fileC, schema, fieldNames);
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);
     testZonedMerge(dir, schema);
+    testPre1970Merge(dir, schema);
     testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);
     testLineNumbers(dir, schema);
     testEncodings(dir, schema, fieldNames);

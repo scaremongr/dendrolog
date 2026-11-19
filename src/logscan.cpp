@@ -5,12 +5,42 @@ LogEntryMeta LogScanSnapshot::metaFor(const LogEntry& entry)
 {
     LogEntryMeta m;
     m.timestampMs = entry.timestamp().isValid()
-        ? entry.timestamp().toMSecsSinceEpoch() : -1;
+        ? entry.timestamp().toMSecsSinceEpoch() : kNoTimestampMs;
     m.level = entry.level();
     m.logicalEntryId = entry.logicalEntryId();
     m.sourceFile = entry.sourceFile().get();
     m.isPlainText = entry.isPlainText();
     return m;
+}
+
+bool LogScanSnapshot::timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
+                                const std::atomic_bool* cancel) const
+{
+    qint64 end = rowCount();
+    while (end > 0 && !hasTimestampMs(metaAt(end - 1).timestampMs)) {
+        --end;
+        if (cancel && (end & 0x3FFF) == 0 && cancel->load(std::memory_order_relaxed)) {
+            end = 0;
+            break;
+        }
+    }
+    if (timedRows)
+        *timedRows = end;
+    if (end <= 0)
+        return false;
+    // Первая строка с меткой. В порядке времени это строка 0; в порядке файла
+    // (одно-файловая индексная вкладка) перед ней может стоять преамбула.
+    qint64 begin = 0;
+    while (!hasTimestampMs(metaAt(begin).timestampMs)) {
+        ++begin;   // строка end - 1 с меткой — выход гарантирован
+        if (cancel && (begin & 0x3FFF) == 0 && cancel->load(std::memory_order_relaxed))
+            return false;
+    }
+    if (minMs)
+        *minMs = metaAt(begin).timestampMs;
+    if (maxMs)
+        *maxMs = metaAt(end - 1).timestampMs;
+    return true;
 }
 
 namespace {

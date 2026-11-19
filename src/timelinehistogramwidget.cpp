@@ -269,26 +269,24 @@ TimelineHistogramWidget::HistogramData TimelineHistogramWidget::buildHistogram(
     h.errorPrefix = QVector<quint32>(kBins + 1, 0);
     h.fatalPrefix = QVector<quint32>(kBins + 1, 0);
 
-    // Список отсортирован по времени, записи без валидной метки — в конце:
-    // min — первая запись, max — последняя валидная с конца.
-    qint64 validEnd = snap.rowCount();
-    while (validEnd > 0 && snap.metaAt(validEnd - 1).timestampMs < 0) {
-        --validEnd;
-        if (cancel && (validEnd & 0x3FFF) == 0
-            && cancel->load(std::memory_order_relaxed))
-            return h;
-    }
+    // Список отсортирован по времени, записи без метки — в конце: min —
+    // первая запись, max — последняя с меткой (LogScanSnapshot::timeRange;
+    // метка до 1970 года — отрицательный момент, а не «метки нет»).
+    qint64 validEnd = 0;
+    qint64 dataMin = 0, dataMax = 0;
+    const bool haveEntries = snap.timeRange(&dataMin, &dataMax, &validEnd, cancel);
+    if (cancel && cancel->load(std::memory_order_relaxed))
+        return h;
 
     // Диапазон шкалы: границы данных, РАСШИРЕННЫЕ до границ активного
     // фильтра по времени. Так zoom-out за пределы загруженных данных виден
     // как пустые поля по краям (иначе шкала прижимается к данным и отдаление
     // «не применяется» визуально), а зум в пустой промежуток не блокирует
     // дальнейшую работу колеса.
-    const bool haveEntries = validEnd > 0 && snap.metaAt(0).timestampMs >= 0;
     qint64 viewMin = 0, viewMax = 0;
     if (haveEntries) {
-        viewMin = snap.metaAt(0).timestampMs;
-        viewMax = snap.metaAt(validEnd - 1).timestampMs;
+        viewMin = dataMin;
+        viewMax = dataMax;
     }
     if (filterValid) {
         if (haveEntries) {
@@ -326,9 +324,15 @@ TimelineHistogramWidget::HistogramData TimelineHistogramWidget::buildHistogram(
         firstRow = false;
         prevId = m.logicalEntryId;
         prevFile = m.sourceFile;
+        // Строка без метки посреди порядка файла (преамбула одно-файловой
+        // индексной вкладки) — не точка на шкале времени.
+        if (!hasTimestampMs(m.timestampMs))
+            return true;
 
-        const int bin = qBound(0, int((m.timestampMs - h.tMin) * kBins / span),
-                               kBins - 1);
+        // Прижать до приведения к int: на одно-файловой индексной вкладке
+        // (порядок файла) метка может лежать далеко вне [tMin, tMax].
+        const int bin = int(qBound<qint64>(qint64(0), (m.timestampMs - h.tMin) * qint64(kBins) / span,
+                                           qint64(kBins) - 1));
         ++h.totalPrefix[bin + 1];
         switch (m.level) {
             case LogLevel::Warn:  ++h.warnPrefix[bin + 1];  break;
@@ -568,7 +572,13 @@ void TimelineHistogramWidget::paintAxis(QPainter& p, const Layout& l) const
     // иначе часовые/суточные тики попадают на некруглые локальные значения.
     const qint64 utcOffsetMs =
         qint64(QDateTime::fromMSecsSinceEpoch(m_tMin).offsetFromUtc()) * 1000;
-    qint64 tick = ((m_tMin + utcOffsetMs + step - 1) / step) * step - utcOffsetMs;
+    // Округление вверх до кратного step; деление в C++ к нулю, поэтому для
+    // шкалы до 1970 года (отрицательные моменты) — через частное с поправкой.
+    const qint64 alignFrom = m_tMin + utcOffsetMs;
+    qint64 q = alignFrom / step;
+    if (q * step < alignFrom)
+        ++q;
+    qint64 tick = q * step - utcOffsetMs;
 
     // Лог может тянуться на много суток: у первого тика (при
     // многодневной шкале) и на каждой смене дня подпись получает дату.

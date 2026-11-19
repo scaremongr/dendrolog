@@ -118,6 +118,14 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- Timestamps before 1970 behave the same in large files as in small ones.
+  Above the large-file threshold (and in tabs that crossed it) a record dated
+  before 1 January 1970 — or one whose time zone puts it just before that
+  moment — was treated as having no timestamp: it sorted to the end of a
+  merged tab, disappeared under a time filter, was skipped by Go to Time and
+  left out of the timeline and statistics. Such records now keep their time
+  on both paths, and the timeline, statistics and Go to Time also handle
+  them in small files. Dates from year 0001 to 9999 work.
 - **Find shortcuts with the Find toolbar hidden.** Hiding the Find toolbar
   (right-click on the toolbar area) also switched off **F3**, **Shift+F3**,
   **Ctrl+Shift+F** and the **Alt+C / Alt+W / Alt+R** search toggles; they now

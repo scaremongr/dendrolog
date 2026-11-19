@@ -12,7 +12,8 @@
 // внутри блока), EOL (0/1/2 байта), упакованные метаданные (уровень, primary,
 // plain-text) и id логической записи; на логическую запись — таймстамп (мс).
 // Текст строк НЕ хранится — его читает с диска TextChunkCache по смещениям.
-// ≈10 байт/строку + 8 байт/логическую запись.
+// ≈10 байт/строку + 8 байт/логическую запись. «Метки нет» у записи —
+// kNoTimestampMs (logentry.h): отрицательный момент — метка до 1970 года.
 //
 // Потоковая модель:
 //   • пишет ровно один поток (воркер LogIndexer): appendLine()/
@@ -47,7 +48,7 @@ public:
         quint32 logicalId[kBlockLines];
     };
     struct TsBlock {
-        qint64 ms[kTsBlockEntries];          // -1 — метка невалидна
+        qint64 ms[kTsBlockEntries];          // kNoTimestampMs — метки нет
     };
 
     // Данные одной строки для аппендера.
@@ -81,7 +82,7 @@ public:
     bool    isPrimary(qint64 line) const;
     bool    isPlainTextLine(qint64 line) const;
     quint32 logicalId(qint64 line) const;
-    qint64  timestampMs(quint32 logicalId) const;
+    qint64  timestampMs(quint32 logicalId) const;   // kNoTimestampMs — метки нет
 
     LineIndexSnapshot snapshot() const;
 

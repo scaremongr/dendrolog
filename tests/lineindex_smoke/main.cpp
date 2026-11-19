@@ -192,7 +192,7 @@ static void compareParserVsIndex(const QString& tag, const QString& path,
                              .arg(tag).arg(i).arg(index.logicalId(i))
                              .arg(e.logicalEntryId())));
         const qint64 expectedMs = e.timestamp().isValid()
-            ? e.timestamp().toMSecsSinceEpoch() : -1;
+            ? e.timestamp().toMSecsSinceEpoch() : kNoTimestampMs;
         CHECK(index.timestampMs(index.logicalId(i)) == expectedMs,
               qPrintable(QString("%1: line %2 timestamp mismatch").arg(tag).arg(i)));
         CHECK(index.isPlainTextLine(i) == e.isPlainText(),
@@ -411,7 +411,7 @@ static void testRecordBoundariesBackends(const QDir& dir)
         return QDateTime(QDate(2026, 11, 18), QTime(h, mi, s)).toMSecsSinceEpoch();
     };
     if (index->lineCount() == qint64(std::size(kBoundaryCorpus))) {
-        CHECK(index->timestampMs(index->logicalId(1)) == -1, "boundaries.log: banner has no moment");
+        CHECK(index->timestampMs(index->logicalId(1)) == kNoTimestampMs, "boundaries.log: banner has no moment");
         CHECK(index->timestampMs(index->logicalId(2)) == utc(13, 55, 36), "boundaries.log: access moment");
         CHECK(index->timestampMs(index->logicalId(3)) == utc(13, 55, 37), "boundaries.log: IPv6 access moment");
         CHECK(index->timestampMs(index->logicalId(5)) == local(13, 55, 39), "boundaries.log: stamp-message moment");
@@ -1476,6 +1476,123 @@ static void testTimestampGolden()
           "missing file: reference date is today");
 }
 
+// F-13. Метки до 1970 года и на краях диапазона. «Метки нет» — одно
+// значение kNoTimestampMs на всё хранилище, и ни один законный момент с ним
+// не совпадает: 0 мс (ровно эпоха), −1 мс, отрицательный момент из-за зоны,
+// год 0001 и год 9999 — обычные метки. Моменты заданы заранее (QDateTime в
+// UTC), а не взяты у второго бэкенда: общую ошибку сравнение не увидит.
+static void testPre1970(const QDir& dir)
+{
+    const LineClassifier classifier;
+    const auto utc = [](int y, int mo, int d, int h, int mi, int s, int ms) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s, ms), QTimeZone::UTC)
+            .toMSecsSinceEpoch();
+    };
+    const auto local = [](int y, int mo, int d, int h, int mi, int s, int ms) {
+        return QDateTime(QDate(y, mo, d), QTime(h, mi, s, ms)).toMSecsSinceEpoch();
+    };
+    const qint64 year1 = utc(1, 1, 1, 0, 0, 0, 0);
+    const qint64 year9999 = utc(9999, 12, 31, 23, 59, 59, 999);
+    CHECK(year1 == -62135596800000LL && year9999 == 253402300799999LL,
+          "pre-1970: reference moments of years 0001 and 9999");
+
+    struct Case { const char* line; qint64 expected; };
+    const Case cases[] = {
+        { "1970-01-01T00:00:00.000Z INFO epoch", 0 },
+        { "1969-12-31T23:59:59.999Z INFO one ms before", -1 },
+        { "1970-01-01T00:00:00.001Z INFO one ms after", 1 },
+        { "1970-01-01T01:00:00.000+02:00 INFO zone makes it negative", -3600000 },
+        { "1970-01-01 00:00:00.000 -0100 INFO west of UTC", 3600000 },
+        { "1969-07-20T20:17:40.000Z WARN landing", utc(1969, 7, 20, 20, 17, 40, 0) },
+        { "1900-01-01T00:00:00.000Z ERROR far past", utc(1900, 1, 1, 0, 0, 0, 0) },
+        { "0001-01-01T00:00:00.000Z INFO year one", year1 },
+        { "9999-12-31T23:59:59.999Z INFO year 9999", year9999 },
+        { "1965-05-05 05:05:05.005 DEBUG local, no zone", local(1965, 5, 5, 5, 5, 5, 5) },
+        { "no timestamp at all", kNoTimestampMs },
+    };
+    for (const Case& c : cases) {
+        const QString line = QString::fromUtf8(c.line);
+        qint64 ms = 12345;
+        const bool found = classifier.detectTimestampMs(line, ms);
+        const qint64 got = found ? ms : kNoTimestampMs;
+        QDateTime ts;
+        const bool foundDt = classifier.detectTimestamp(line, ts);
+        const qint64 gotDt = foundDt ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
+        if (got != c.expected || gotDt != c.expected) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL pre-1970 classifier '%s': ms=%lld dt=%lld expected=%lld\n",
+                         c.line, (long long)got, (long long)gotDt, (long long)c.expected);
+        }
+        // Найденная метка никогда не равна признаку отсутствия.
+        CHECK(!found || ms != kNoTimestampMs, "pre-1970: a found stamp is never kNoTimestampMs");
+    }
+
+    // Индекс и резидентный разбор: каждая запись — с заданным моментом;
+    // продолжение без метки наследует момент своей записи, а у первой строки
+    // без метки момента нет. Запись с меткой и без слова уровня — не
+    // «свободный текст» (isPlainText), даже если момент −1 мс.
+    QByteArray bytes = "preamble without a stamp\n";
+    QVector<qint64> expected = { kNoTimestampMs };
+    for (const Case& c : cases) {
+        if (c.expected == kNoTimestampMs)
+            continue;
+        bytes += c.line;
+        bytes += "\n    continuation line\n";
+        expected << c.expected << c.expected;
+    }
+    bytes += "1969-12-31T23:59:59.999Z no level, one ms before\n";
+    bytes += "    continuation of a record without a level\n";
+    expected << -1 << -1;
+    const QString path = writeFile(dir, QStringLiteral("pre1970.log"), bytes);
+    auto lf = std::make_shared<LogFile>(path);
+    const auto entries = parseFile(lf);
+    const auto index = indexFile(lf);
+    compareParserVsIndex(QStringLiteral("pre1970.log"), path, lf, entries, *index);
+    CHECK(index->lineCount() == expected.size(), "pre1970.log: line count");
+    for (qint64 i = 0; i < qMin<qint64>(index->lineCount(), expected.size()); ++i) {
+        const qint64 got = index->timestampMs(index->logicalId(i));
+        if (got != expected[int(i)]) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL pre1970.log line %lld: index ms=%lld expected=%lld\n",
+                         (long long)i, (long long)got, (long long)expected[int(i)]);
+        }
+        const LineIndexSnapshot snap = index->snapshot();
+        CHECK(snap.timestampMs(snap.logicalId(i)) == got, "pre1970.log: snapshot moment");
+    }
+    const qint64 last = index->lineCount() - 1;
+    CHECK(last > 0 && !index->isPlainTextLine(last) && !index->isPlainTextLine(last - 1),
+          "pre1970.log: a record stamped -1 ms is not plain text");
+    CHECK(index->isPlainTextLine(0), "pre1970.log: the preamble is plain text");
+    // Вне опубликованного — тоже «нет метки», а не 0 и не −1.
+    CHECK(index->timestampMs(index->logicalEntryCount()) == kNoTimestampMs,
+          "pre1970.log: an unpublished record has no stamp");
+
+    // Дозапись: продолжение, дописанное отдельной порцией за записью с
+    // моментом −1 мс, остаётся в своей записи и наследует её момент.
+    const QString grow = writeFile(dir, QStringLiteral("pre1970_grow.log"),
+                                   "1969-12-31T23:59:59.999Z started\n");
+    auto growLf = std::make_shared<LogFile>(grow);
+    const auto growIndex = indexFile(growLf);
+    appendToFile(grow, "    appended continuation\n"
+                       "1970-01-01T00:00:00.000Z INFO epoch\n"
+                       "no stamp, continues the epoch record\n");
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, growLf, growIndex, false);
+    }
+    const auto fresh = indexFile(std::make_shared<LogFile>(grow));
+    compareIndexes(QStringLiteral("pre1970_grow.log"), *growIndex, *fresh);
+    compareParserVsIndex(QStringLiteral("pre1970_grow.log"), grow, growLf,
+                         parseFile(std::make_shared<LogFile>(grow)), *growIndex);
+    const qint64 growExpected[] = { -1, -1, 0, 0 };
+    CHECK(growIndex->lineCount() == 4, "pre1970_grow.log: four lines");
+    for (qint64 i = 0; i < qMin<qint64>(4, growIndex->lineCount()); ++i)
+        CHECK(growIndex->timestampMs(growIndex->logicalId(i)) == growExpected[i],
+              qPrintable(QString("pre1970_grow.log: line %1 moment").arg(i)));
+    CHECK(growIndex->lineCount() == 4 && !growIndex->isPlainTextLine(1),
+          "pre1970_grow.log: the appended continuation of a -1 ms record is not plain text");
+}
+
 // Бенчмарк-режим: lineindex_smoke --bench <файл> [строка-схемы] — чистая
 // скорость LogIndexer без GUI (для локализации узких мест индексации).
 static int runBench(const QString& path, const QString& patternString)
@@ -2125,6 +2242,7 @@ int main(int argc, char** argv)
     testClassifierRegexEquivalence();
     testLevelVocabulary();
     testTimestampGolden();
+    testPre1970(dir);
     testGolden(dir);
     testNewTimestampFormsBackends(dir);
     testRecordBoundariesBackends(dir);
