@@ -1,5 +1,6 @@
 #include "logparser.h"
 #include "patternheuristics.h"
+#include "bytelinereader.h"
 #include <QFile>
 #include <QStringDecoder>
 #include <QTextStream>
@@ -7,6 +8,8 @@
 #include <QFileInfo>    // Для получения размера файла (для progress)
 #include <QStringView>
 #include <QDebug>       // Для qWarning()
+
+#include <optional>
 
 LogParser::LogParser(QObject* parent)
     : QObject(parent)
@@ -151,14 +154,14 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         emit parsingFailed(logFile);
         return;
     }
-    // Транспорт байтов (F-1, docs/design/F-1.md, «Резидентный путь»):
+    // Транспорт (F-1, docs/design/F-1.md, «Резидентный путь»; Q-18):
     //   • UTF-16/32 (BOM в начале файла; у дозаписи — streamEncoding) —
     //     QTextStream в этой кодировке, как до F-1;
-    //   • всё остальное — QTextStream с Latin1: строка приходит байтами один к
-    //     одному (символ U+00xx = байт), разрез строк и снятие '\r' — те же,
-    //     pos() — сырое смещение. Строку с символами ≥ U+0080 декодирует
-    //     декодер файла (UTF-8: toLatin1 + fromUtf8, как индексатор строку;
-    //     однобайтная: remapLatin1 на месте), ASCII-строка берётся как есть.
+    //   • всё остальное — ByteLineReader: строка приходит сырыми байтами, разрез
+    //     строк и снятие '\r' — как у QTextStream::readLine, позиция каждой
+    //     строки в файле — счётчик. Строку с байтами ≥ 0x80 декодирует
+    //     декодер файла (UTF-8 — fromUtf8, как индексатор строку), ASCII-строка
+    //     берётся как есть (fromLatin1).
     // BOM разбирает TextEncodings::detectBom — тот же разбор, что у
     // индексатора: UTF-8 BOM пропускается и решает кодировку (Source::Bom).
     bool byteMode = true;
@@ -187,44 +190,30 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         // tailState, иначе хвост декодировался бы как UTF-8.
         byteMode = false;
     }
-    QTextStream in(&file);
-    // Начало чтения — seek САМОГО потока, а не устройства до его создания:
-    // иначе QTextStream::pos() посреди потока считает от нуля (его опорная
-    // позиция буфера — 0, пока буфер не прочитан целиком; tests/textencoding).
-    // У UTF-16/32 поток стоит в нуле и снимает BOM сам.
-    const qint64 readFrom = detectUnicodeBom ? 0 : linesBegin;
-    if (readFrom > 0 && !in.seek(readFrom)) {
-        emit parsingFinished(0, logFile);
-        return;
-    }
-    in.setAutoDetectUnicode(detectUnicodeBom);
-    if (byteMode)
-        in.setEncoding(QStringConverter::Latin1);
-    else if (!detectUnicodeBom)
-        in.setEncoding(TextEncodings::toQt(streamEncoding).value_or(QStringConverter::Utf8));
-    // Начало строки в файле и её перевод строки — только для решения о
-    // кодировке, то есть только для не-ASCII строк, пока решение не
-    // окончательное. Цена — pos() и чтение двух байтов вторым дескриптором;
-    // таких строк за проход меньше 2 × kFinalHighBytes: строки внутри
-    // свидетельства несут его байты ≥ 0x80, каждая следующая добавляет хотя
-    // бы один, а набралось kFinalHighBytes — решение окончательное.
-    QFile rawLine(logFile->filePath);
-    struct LinePlace { qint64 start = -1; int eol = 0; };
-    const auto placeOf = [&](const QString& text) -> LinePlace {
-        const qint64 after = in.pos();
-        if (after < 0)
-            return {};
-        int eol = 0;
-        if (rawLine.isOpen() || rawLine.open(QIODevice::ReadOnly)) {
-            const qint64 from = qMax<qint64>(0, after - 2);
-            if (rawLine.seek(from)) {
-                const QByteArray tail = rawLine.read(after - from);
-                if (tail.endsWith('\n'))
-                    eol = tail.endsWith("\r\n") ? 2 : 1;
-            }
+    std::optional<ByteLineReader> bytes;
+    std::optional<QTextStream> stream;
+    if (byteMode) {
+        if (linesBegin > 0 && !file.seek(linesBegin)) {
+            emit parsingFinished(0, logFile);
+            return;
         }
-        return {after - eol - text.size(), eol};
-    };
+        bytes.emplace(&file, linesBegin);
+    } else {
+        stream.emplace(&file);
+        QTextStream& in = *stream;
+        // Начало чтения — seek САМОГО потока, а не устройства до его создания:
+        // иначе QTextStream::pos() посреди потока считает от нуля (его опорная
+        // позиция буфера — 0, пока буфер не прочитан целиком; tests/textencoding).
+        // У UTF-16/32 с BOM поток стоит в нуле и снимает BOM сам.
+        const qint64 readFrom = detectUnicodeBom ? 0 : linesBegin;
+        if (readFrom > 0 && !in.seek(readFrom)) {
+            emit parsingFinished(0, logFile);
+            return;
+        }
+        in.setAutoDetectUnicode(detectUnicodeBom);
+        if (!detectUnicodeBom)
+            in.setEncoding(TextEncodings::toQt(streamEncoding).value_or(QStringConverter::Utf8));
+    }
     qint64 reportedEvidenceEnd = fileEncoding.evidence.end;
     QVector<std::shared_ptr<LogEntry>> batchEntries;
     const int BATCH_SIZE = 5000;
@@ -249,50 +238,65 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
 
+    // Последняя строка байтового транспорта: начало и кончилась ли '\n' —
+    // для tailState без второго прохода по файлу.
+    qint64 bytesLastStart = -1;
+    bool bytesLastNewline = true;
     QString line;
-    while (!in.atEnd()) {
+    for (;;) {
         if (m_abort.load(std::memory_order_relaxed))
             return; // Parser is shutting down — drop the rest.
         // Строка — то, что кончается '\n', плюс хвост без него; пустая
         // последняя строка ("…\n\n") — тоже строка. За завершающим '\n'
-        // readLine строки не отдаёт (atEnd), поэтому пропускать здесь нечего:
+        // строки нет (оба транспорта), поэтому пропускать здесь нечего:
         // прежний пропуск пустой строки у конца терял настоящую пустую строку
         // и сдвигал номера всех дописанных за ней — номера разошлись бы с
         // индексным путём, а на номере строки стоит её идентификатор (R-1).
-        line = in.readLine();
-        // Исключение одно: файл из одного BOM. readLine съедает BOM и отдаёт
-        // пустую строку, которой в файле нет.
-        if (line.isEmpty() && in.atEnd() && startOffset == 0 && totalParsedEntries == 0
-            && isOnlyByteOrderMark(logFile->filePath))
-            break;
-        if (byteMode && !QtPrivate::isAscii(line)) {
-            // Первая не-ASCII строка «не решённого» файла решает кодировку —
-            // правилом индексатора, по окну от её первого байта ≥ 0x80
-            // (EncodingDetector::advance). Строки до неё — ASCII: их текст от
-            // решения не зависит. Предварительное решение (шаг 3а) копит
-            // свидетельство по каждой следующей не-ASCII строке; строка
-            // подаётся с '\n', если кончилась переводом строки — как в
-            // буфере индексатора (оборванная последовательность в конце
-            // строки — битая, а не «оборвана краем»).
-            if (!fileEncoding.detectionSettled()) {
-                const LinePlace place = placeOf(line);
-                if (place.start >= 0) {
-                    QByteArray raw = line.toLatin1();
-                    if (place.eol > 0)
-                        raw.append('\n');
-                    if (EncodingDetector::advance(fileEncoding, raw, place.start,
+        if (bytes) {
+            if (!bytes->next())
+                break;
+            const QByteArrayView raw = bytes->line();
+            bytesLastStart = bytes->lineStart();
+            bytesLastNewline = bytes->endsWithNewline();
+            if (EncodingDetector::firstHighByte(raw.data(), raw.size()) < 0) {
+                line = QString::fromLatin1(raw.data(), raw.size());
+            } else {
+                // Не-ASCII строка, пока автоматике есть что решать, — порция
+                // для EncodingDetector::advance (правило индексатора; первая
+                // такая строка «не решённого» файла открывает окно от своего
+                // первого байта ≥ 0x80). Строки до неё — ASCII: их текст от
+                // решения не зависит. Предварительное решение (шаг 3а) копит
+                // свидетельство по каждой следующей не-ASCII строке; строка
+                // подаётся с '\n', если кончилась переводом строки — как в
+                // буфере индексатора (оборванная последовательность в конце
+                // строки — битая, а не «оборвана краем»). Начало строки в
+                // файле — счётчик читателя (Q-18: не QTextStream::pos()).
+                if (!fileEncoding.detectionSettled()) {
+                    QByteArray portion = raw.toByteArray();
+                    if (bytes->endsWithNewline())
+                        portion.append('\n');
+                    if (EncodingDetector::advance(fileEncoding, portion, bytes->lineStart(),
                                                   logFile->filePath, fallback)) {
                         emit encodingDecided(logFile, fileEncoding);
                         reportedEvidenceEnd = fileEncoding.evidence.end;
                     }
                 }
+                line = fileEncoding.decoder.decode(raw);
             }
-            if (fileEncoding.decoder.isUtf8())
-                line = QString::fromUtf8(std::move(line).toLatin1());
-            else
-                fileEncoding.decoder.remapLatin1(line);
+        } else {
+            QTextStream& in = *stream;
+            if (in.atEnd())
+                break;
+            line = in.readLine();
+            // Исключение одно: файл из одного BOM. readLine съедает BOM и
+            // отдаёт пустую строку, которой в файле нет.
+            if (line.isEmpty() && in.atEnd() && startOffset == 0 && totalParsedEntries == 0
+                && isOnlyByteOrderMark(logFile->filePath))
+                break;
         }
-        bytesRead += line.length() + 1; // Приблизительный подсчет, +1 для \n
+        // Прогресс: у байтового транспорта — точная позиция, у потока —
+        // приблизительно (символы + 1 на перевод строки).
+        bytesRead = bytes ? bytes->pos() : bytesRead + line.length() + 1;
         fileLineNumber++;
 
         QDateTime lineTs;
@@ -334,7 +338,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         }
 
         if (fileSize > 0) {
-            int progress = static_cast<int>((bytesRead * 100) / fileSize);
+            const int progress = static_cast<int>(qMin<qint64>(100, (bytesRead * 100) / fileSize));
             if (progress != lastReportedProgress) {
                 emit parsingProgress(progress, logFile);
                 lastReportedProgress = progress;
@@ -354,43 +358,54 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // кодировки: в UTF-16 перевод строки — два байта, а порция может
     // оборваться посреди единицы — такой огрызок не считается прочитанным
     // (единицы выровнены от начала файла: BOM — ровно одна единица).
-    const QStringConverter::Encoding encoding = in.encoding();
-    const CodeUnit unit = codeUnitOf(encoding);
-    const TextEncoding reported = byteMode
-        ? fileEncoding.decoder.encoding()
-        : TextEncodings::fromQt(encoding).value_or(TextEncoding::Utf8);
-    qint64 endOffset = in.pos();
-    if (endOffset < 0)
-        endOffset = file.size();
-    endOffset -= endOffset % unit.width;
     bool lastLinePartial = false;
     qint64 lastLineStart = -1;
-    // Строки начинаются после BOM: перечитывание с нуля отдало бы его
-    // декодеру без автоопределения.
-    const qint64 firstLineStart = linesBegin;
-    if (totalParsedEntries > 0 && endOffset > firstLineStart) {
-        QFile raw(logFile->filePath);
-        if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - unit.width)
-            && afterLastNewline(raw.read(unit.width), unit) < 0) {
+    qint64 endOffset = -1;
+    TextEncoding reported = fileEncoding.decoder.encoding();
+    if (bytes) {
+        // Байтовый транспорт знает и конец, и последнюю строку сам.
+        endOffset = bytes->pos();
+        if (totalParsedEntries > 0 && !bytesLastNewline) {
             lastLinePartial = true;
-            lastLineStart = firstLineStart;
-            constexpr qint64 kChunk = 64 * 1024;
-            for (qint64 pos = endOffset; pos > firstLineStart;) {
-                const qint64 from = qMax(firstLineStart, pos - kChunk);
-                if (!raw.seek(from))
-                    break;
-                const qsizetype after = afterLastNewline(raw.read(pos - from), unit);
-                if (after >= 0) {
-                    lastLineStart = from + after;
-                    break;
+            lastLineStart = bytesLastStart;
+        }
+    } else {
+        const QStringConverter::Encoding encoding = stream->encoding();
+        const CodeUnit unit = codeUnitOf(encoding);
+        reported = TextEncodings::fromQt(encoding).value_or(TextEncoding::Utf8);
+        // Один вызов pos() на проход: буфер потока здесь прочитан целиком, и
+        // QTextStream отдаёт позицию устройства без перечитывания.
+        endOffset = stream->pos();
+        if (endOffset < 0)
+            endOffset = file.size();
+        endOffset -= endOffset % unit.width;
+        // Строки начинаются после BOM: перечитывание с нуля отдало бы его
+        // декодеру без автоопределения.
+        const qint64 firstLineStart = linesBegin;
+        if (totalParsedEntries > 0 && endOffset > firstLineStart) {
+            QFile raw(logFile->filePath);
+            if (raw.open(QIODevice::ReadOnly) && raw.seek(endOffset - unit.width)
+                && afterLastNewline(raw.read(unit.width), unit) < 0) {
+                lastLinePartial = true;
+                lastLineStart = firstLineStart;
+                constexpr qint64 kChunk = 64 * 1024;
+                for (qint64 pos = endOffset; pos > firstLineStart;) {
+                    const qint64 from = qMax(firstLineStart, pos - kChunk);
+                    if (!raw.seek(from))
+                        break;
+                    const qsizetype after = afterLastNewline(raw.read(pos - from), unit);
+                    if (after >= 0) {
+                        lastLineStart = from + after;
+                        break;
+                    }
+                    pos = from;
                 }
-                pos = from;
             }
         }
     }
     // Свидетельство предварительного решения подросло без смены решения —
     // отдаём его вкладке: следующий проход продолжит копить с этого места.
-    if (byteMode && !fileEncoding.detectionSettled() && fileEncoding.evidence.end != reportedEvidenceEnd)
+    if (bytes && !fileEncoding.detectionSettled() && fileEncoding.evidence.end != reportedEvidenceEnd)
         emit encodingDecided(logFile, fileEncoding);
     emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, reported);
     emit parsingFinished(totalParsedEntries, logFile);

@@ -10,11 +10,16 @@
 //
 // Без окна и без QApplication: модуль ядра.
 
+#include "bytelinereader.h"
 #include "lineclassifier.h"
+#include "logfile.h"
+#include "logparser.h"
 #include "textencoding.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QString>
 #include <QStringDecoder>
 #include <QStringEncoder>
@@ -1066,9 +1071,11 @@ static void testClassifierIsAsciiOnly()
 }
 
 // ---------------------------------------------------------------------------
-// Риск шага 3 (docs/design/F-1.md, «Риски»): резидентный путь читает файл
+// Риск шага 3 (docs/design/F-1.md, «Риски»): резидентный путь читал файл
 // QTextStream с кодировкой Latin1 и автоопределением BOM — как транспорт
-// байтов. Закрепляем то, на что он опирается: без BOM строка — байты один к
+// байтов (с Q-18 — ByteLineReader, а QTextStream остался у UTF-16/32; его
+// разрез строк — эталон ByteLineReader, testByteLineReader). Закрепляем
+// поведение потока: без BOM строка — байты один к
 // одному (все 254 значения, кроме '\n' и '\r'), с BOM поток переходит на
 // UTF-8/16/32 и снимает BOM, разрез строк и снятие '\r' — как в режиме UTF-8,
 // pos() — точное байтовое смещение, а при чтении с середины без
@@ -1228,6 +1235,431 @@ static void testTextStreamLatin1Transport()
     CHECK(tailEnc == QStringConverter::Latin1, "latin1 tail: encoding stays Latin1");
 }
 
+
+// ---------------------------------------------------------------------------
+// Q-18: транспорт резидентного пути — ByteLineReader вместо QTextStream
+// ---------------------------------------------------------------------------
+
+// Эталон разбиения байтов файла на строки — независимо от ByteLineReader:
+// строка кончается '\n' ('\r' перед ним снимается), хвост без '\n' — строка
+// ('\r' в его конце снимается, как у QTextStream в конце данных).
+struct RefLine {
+    qint64 start = 0;
+    QByteArray text;
+    int eol = 0;
+    bool newline = false;
+};
+
+static QVector<RefLine> referenceLines(const QByteArray& data, qint64 from = 0)
+{
+    QVector<RefLine> out;
+    qint64 pos = from;
+    while (pos < data.size()) {
+        RefLine r;
+        r.start = pos;
+        const qint64 nl = data.indexOf('\n', pos);
+        const qint64 end = nl >= 0 ? nl : data.size();
+        r.text = data.mid(pos, end - pos);
+        r.newline = nl >= 0;
+        r.eol = r.newline ? 1 : 0;
+        if (r.text.endsWith('\r')) {
+            r.text.chop(1);
+            ++r.eol;
+        }
+        out.append(r);
+        pos = r.newline ? nl + 1 : data.size();
+    }
+    return out;
+}
+
+static QByteArray randomLineBytes(std::mt19937& rng, int maxLen)
+{
+    // Алфавит с перекосом в сторону того, что ломает разрез: '\r', '\n',
+    // байты ≥ 0x80 и NUL.
+    static const char kAlphabet[] = {'a', 'b', ' ', '\r', '\n', '\n', '\r', char(0xE0),
+                                     char(0xD0), char(0xFF), '\0', 'z'};
+    const int len = std::uniform_int_distribution<int>(0, maxLen)(rng);
+    QByteArray out;
+    for (int i = 0; i < len; ++i)
+        out.append(kAlphabet[std::uniform_int_distribution<int>(0, int(sizeof kAlphabet) - 1)(rng)]);
+    return out;
+}
+
+static void testByteLineReader()
+{
+    QTemporaryDir dir;
+    std::mt19937 rng(18);
+    const qsizetype chunks[] = {1, 2, 3, 7, 64, 1 << 20};
+    int cases = 0;
+    for (int iter = 0; iter < 600; ++iter) {
+        QByteArray data = randomLineBytes(rng, iter < 400 ? 60 : 40000);
+        if (iter % 50 == 7)
+            data.prepend("\xEF\xBB\xBF");
+        const QString path = dir.path() + QStringLiteral("/r%1.log").arg(iter);
+        {
+            QFile out(path);
+            if (!out.open(QIODevice::WriteOnly) || out.write(data) != data.size())
+                std::abort();
+        }
+        // Старт: с начала, за BOM и с начала каждой строки (как дозапись).
+        QVector<qint64> starts{0};
+        if (data.startsWith("\xEF\xBB\xBF"))
+            starts << 3;
+        for (const RefLine& r : referenceLines(data))
+            if (r.start > 0 && starts.size() < 6)
+                starts << r.start;
+        for (const qint64 from : starts) {
+            const QVector<RefLine> ref = referenceLines(data, from);
+
+            // QTextStream с Latin1 — прежний транспорт: те же строки, тот же текст.
+            QStringList stream;
+            {
+                QFile f(path);
+                f.open(QIODevice::ReadOnly);
+                QTextStream in(&f);
+                in.setAutoDetectUnicode(false);
+                in.setEncoding(QStringConverter::Latin1);
+                if (from > 0)
+                    in.seek(from);
+                while (!in.atEnd())
+                    stream << in.readLine();
+            }
+
+            for (const qsizetype chunk : chunks) {
+                QFile f(path);
+                f.open(QIODevice::ReadOnly);
+                f.seek(from);
+                ByteLineReader reader(&f, from, chunk);
+                QVector<RefLine> got;
+                while (reader.next()) {
+                    RefLine r;
+                    r.start = reader.lineStart();
+                    r.text = reader.line().toByteArray();
+                    r.eol = reader.eolBytes();
+                    r.newline = reader.endsWithNewline();
+                    got.append(r);
+                }
+                ++cases;
+                bool same = got.size() == ref.size();
+                for (qsizetype i = 0; same && i < got.size(); ++i)
+                    same = got[i].start == ref[i].start && got[i].text == ref[i].text
+                        && got[i].eol == ref[i].eol && got[i].newline == ref[i].newline;
+                CHECK(same, QStringLiteral("ByteLineReader vs reference split: file %1 from %2 chunk %3 (%4 vs %5 lines)")
+                                .arg(iter).arg(from).arg(chunk).arg(got.size()).arg(ref.size()));
+                CHECK(reader.pos() == data.size(),
+                      QStringLiteral("ByteLineReader: pos() at the end %1 of %2").arg(reader.pos()).arg(data.size()));
+                QStringList asText;
+                for (const RefLine& r : got)
+                    asText << QString::fromLatin1(r.text);
+                CHECK(asText == stream,
+                      QStringLiteral("ByteLineReader vs QTextStream Latin1: file %1 from %2 chunk %3 (%4 vs %5 lines)")
+                          .arg(iter).arg(from).arg(chunk).arg(asText.size()).arg(stream.size()));
+                if (!same || asText != stream)
+                    return; // одной подробной ошибки достаточно
+            }
+        }
+    }
+
+    // Растущий файл: читатель дочитывает дописанное после «конца» —
+    // оборванная строка без '\n' и "\r", разорванный посреди "\r\n".
+    {
+        const QString path = dir.path() + QStringLiteral("/grow.log");
+        QFile out(path);
+        out.open(QIODevice::WriteOnly);
+        out.write("one\r\ntwo\r");
+        out.flush();
+        QFile f(path);
+        f.open(QIODevice::ReadOnly);
+        ByteLineReader reader(&f, 0, 4);
+        CHECK(reader.next() && reader.line() == "one" && reader.eolBytes() == 2 && reader.lineStart() == 0,
+              "grow: first line");
+        CHECK(reader.next() && reader.line() == "two" && reader.eolBytes() == 1 && !reader.endsWithNewline()
+                  && reader.lineStart() == 5,
+              "grow: '\\r' at the current end is stripped, line is not terminated");
+        CHECK(!reader.next() && reader.pos() == 9, "grow: end");
+        // Дописано: строка дочитывается со своего начала, как парсер дозаписи.
+        out.write("\nthree");
+        out.flush();
+        QFile g(path);
+        g.open(QIODevice::ReadOnly);
+        g.seek(5);
+        ByteLineReader again(&g, 5, 4);
+        CHECK(again.next() && again.line() == "two" && again.eolBytes() == 2 && again.endsWithNewline(),
+              "grow: the line torn between '\\r' and '\\n' reads whole");
+        CHECK(again.next() && again.line() == "three" && again.lineStart() == 10 && !again.next()
+                  && again.pos() == 15,
+              "grow: appended line");
+    }
+    std::printf("ByteLineReader: %d reader runs match the reference split and QTextStream\n", cases);
+}
+
+// Прогон LogParser (полный разбор или дозапись) до конца прохода.
+struct ParserRun {
+    QVector<FileEncoding> decided;     // каждое encodingDecided по порядку
+    FileEncoding finalState;
+    qint64 endOffset = -1;
+    bool lastLinePartial = false;
+    qint64 lastLineStart = -1;
+    QStringList texts;
+    bool finished = false;
+};
+
+static ParserRun runParser(const QString& path, FileEncoding state, qint64 from = 0,
+                           TextEncoding fallback = TextEncoding::Windows1251)
+{
+    ParserRun run;
+    run.finalState = state;
+    auto lf = std::make_shared<LogFile>(path);
+    LogParser parser;
+    parser.setFallbackEncoding(fallback);
+    QObject relay;
+    QObject::connect(&parser, &LogParser::encodingDecided, &relay,
+                     [&](const LogFilePtr&, const FileEncoding& e) {
+                         run.decided.append(e);
+                         run.finalState = e;
+                     });
+    QObject::connect(&parser, &LogParser::entriesParsed, &relay,
+                     [&](const QVector<std::shared_ptr<LogEntry>>& batch, const LogFilePtr&) {
+                         for (const auto& e : batch)
+                             run.texts << e->message();
+                     });
+    QObject::connect(&parser, &LogParser::tailState, &relay,
+                     [&](const LogFilePtr&, qint64 end, bool partial, qint64 lastStart, TextEncoding) {
+                         run.endOffset = end;
+                         run.lastLinePartial = partial;
+                         run.lastLineStart = lastStart;
+                     });
+    QObject::connect(&parser, &LogParser::parsingFinished, &relay,
+                     [&](int, const LogFilePtr&) { run.finished = true; });
+    QObject::connect(&parser, &LogParser::parsingFailed, &relay,
+                     [&](const LogFilePtr&) { run.finished = true; });
+    if (from == 0)
+        parser.startParsing(lf, state);
+    else
+        parser.startParsingFrom(lf, from, LogParser::ResumeContext{}, TextEncoding::Utf8, state);
+    QElapsedTimer t;
+    t.start();
+    while (!run.finished && t.elapsed() < 600000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return run;
+}
+
+// Эталон того, что парсер подаёт автоматике: не-ASCII строки по эталонному
+// разбиению, с '\n', если строка им кончилась, НАЧАЛО СТРОКИ — по байтам файла.
+static FileEncoding referenceAdvance(const QString& path, const QByteArray& data, FileEncoding state,
+                                     qint64 from, int* changes,
+                                     TextEncoding fallback = TextEncoding::Windows1251)
+{
+    for (const RefLine& r : referenceLines(data, from)) {
+        if (state.detectionSettled() || EncodingDetector::firstHighByte(r.text) < 0)
+            continue;
+        QByteArray portion = r.text;
+        if (r.newline)
+            portion.append('\n');
+        if (EncodingDetector::advance(state, portion, r.start, path, fallback))
+            ++*changes;
+    }
+    return state;
+}
+
+static bool sameEncodingState(const FileEncoding& a, const FileEncoding& b)
+{
+    return a.decoder == b.decoder && a.source == b.source && a.provisional == b.provisional
+        && a.evidence.bytes == b.evidence.bytes && a.evidence.end == b.evidence.end
+        && a.evidence.highBytes == b.evidence.highBytes && a.autoDecoder == b.autoDecoder
+        && a.autoSource == b.autoSource;
+}
+
+// Позиция не-ASCII строки, переданная парсером в EncodingDetector::advance,
+// против эталона — через состояние автоматики: evidence.end = начало порции
+// + поглощённое, а пропуск уже учтённого идёт по нему же, поэтому сдвиг
+// начала хотя бы одной строки меняет свидетельство. Решение держится
+// предварительным (меньше kFinalHighBytes байтов ≥ 0x80) — advance зовётся на
+// каждой не-ASCII строке. Плюс tailState против эталона.
+static void testParserLinePositions()
+{
+    QTemporaryDir dir;
+    std::mt19937 rng(1818);
+    // Не-ASCII вставки: cp1251-слово, UTF-8-слово, одиночный байт.
+    const QByteArray words[] = {QByteArray("\xEF\xF0\xE8\xE2\xE5\xF2"), QByteArray("\xD0\xBC\xD0\xB8\xD1\x80"),
+                                QByteArray("\xFF")};
+    struct Variant {
+        const char* name;
+        int eolKind;      // 0 — "\n", 1 — "\r\n", 2 — смешанные, 3 — со одиночным '\r' в строках
+        bool bom;
+        bool partialTail; // последняя строка без '\n'
+        bool crTail;      // последняя строка оканчивается одиночным '\r'
+    };
+    const Variant variants[] = {
+        {"LF", 0, false, false, false},
+        {"CRLF", 1, false, false, false},
+        {"mixed", 2, false, false, false},
+        {"lone CR", 3, false, false, false},
+        {"partial tail", 2, false, true, false},
+        {"CR tail", 1, false, true, true},
+        {"BOM", 2, true, true, false},
+    };
+    int checked = 0;
+    for (const Variant& v : variants) {
+        for (int rep = 0; rep < 4; ++rep) {
+            QByteArray data;
+            if (v.bom)
+                data += "\xEF\xBB\xBF";
+            const int lines = 120;
+            int high = 0;
+            for (int i = 0; i < lines; ++i) {
+                QByteArray line = "2026-11-18 12:00:00.000 INFO line " + QByteArray::number(i);
+                if (v.eolKind == 3 && i % 7 == 3)
+                    line += "\rinner";
+                const bool last = i == lines - 1;
+                // Последняя строка — не-ASCII: начало оборванной строки (в том
+                // числе с '\r' в конце файла) тоже идёт в advance.
+                if ((i % 3 == 1 || last) && high < 200) {
+                    const QByteArray& w = words[std::uniform_int_distribution<int>(0, 2)(rng)];
+                    line += ' ' + w + " tail";
+                    high += int(w.size());
+                }
+                if (last && v.partialTail) {
+                    data += line;
+                    if (v.crTail)
+                        data += '\r';
+                    break;
+                }
+                const int kind = v.eolKind == 2 ? std::uniform_int_distribution<int>(0, 1)(rng)
+                                                : (v.eolKind == 1 ? 1 : 0);
+                data += line + (kind ? "\r\n" : "\n");
+            }
+            const QString path = dir.path() + QStringLiteral("/p_%1_%2.log").arg(checked).arg(rep);
+
+            // Полный разбор.
+            {
+                QFile out(path);
+                out.open(QIODevice::WriteOnly);
+                out.write(data);
+            }
+            const ParserRun run = runParser(path, FileEncoding{});
+            int refChanges = 0;
+            FileEncoding refState;
+            if (v.bom)
+                refState = FileEncoding{TextDecoder(TextEncoding::Utf8), FileEncoding::Source::Bom};
+            refState = referenceAdvance(path, data, refState, v.bom ? 3 : 0, &refChanges);
+            CHECK(run.finished, QString::fromLatin1(v.name) + ": parser finished");
+            CHECK(sameEncodingState(run.finalState, refState),
+                  QString::fromLatin1(v.name) + QStringLiteral(": evidence of the whole parse = reference (end %1 vs %2, bytes %3 vs %4)")
+                      .arg(run.finalState.evidence.end).arg(refState.evidence.end)
+                      .arg(run.finalState.evidence.bytes.size()).arg(refState.evidence.bytes.size()));
+            if (!v.bom)
+                CHECK(refState.provisional, QString::fromLatin1(v.name) + ": decision stays provisional (test premise)");
+            const QVector<RefLine> ref = referenceLines(data, v.bom ? 3 : 0);
+            CHECK(run.texts.size() == ref.size(),
+                  QString::fromLatin1(v.name) + QStringLiteral(": line count %1 vs %2").arg(run.texts.size()).arg(ref.size()));
+            CHECK(run.endOffset == data.size(),
+                  QString::fromLatin1(v.name) + QStringLiteral(": tailState end %1 vs %2").arg(run.endOffset).arg(data.size()));
+            const bool refPartial = !ref.isEmpty() && !ref.constLast().newline;
+            CHECK(run.lastLinePartial == refPartial
+                      && (!refPartial || run.lastLineStart == ref.constLast().start),
+                  QString::fromLatin1(v.name) + QStringLiteral(": tailState partial %1 start %2")
+                      .arg(run.lastLinePartial).arg(run.lastLineStart));
+
+            // Дозапись частями: разрезы в случайных местах (посреди строки,
+            // между '\r' и '\n'), каждая порция — с tailState прошлой, как у
+            // вкладки; свидетельство обязано совпасть с эталоном на каждом шаге.
+            if (v.bom)
+                continue; // BOM решает окончательно — автоматике нечего копить
+            QVector<qint64> cuts;
+            for (int k = 0; k < 5; ++k)
+                cuts << std::uniform_int_distribution<qint64>(1, data.size() - 1)(rng);
+            std::sort(cuts.begin(), cuts.end());
+            cuts << data.size();
+            const QString growPath = path + QStringLiteral(".grow");
+            QFile grow(growPath);
+            grow.open(QIODevice::WriteOnly);
+            FileEncoding state;
+            FileEncoding refGrow;
+            qint64 written = 0;
+            qint64 resume = 0;
+            for (const qint64 cut : cuts) {
+                grow.write(data.mid(written, cut - written));
+                grow.flush();
+                written = cut;
+                const QByteArray now = data.left(written);
+                const ParserRun part = runParser(growPath, state, resume);
+                int changes = 0;
+                refGrow = referenceAdvance(growPath, now, refGrow, resume, &changes);
+                CHECK(sameEncodingState(part.finalState, refGrow),
+                      QString::fromLatin1(v.name) + QStringLiteral(": append up to %1 from %2 — evidence = reference (end %3 vs %4)")
+                          .arg(written).arg(resume).arg(part.finalState.evidence.end).arg(refGrow.evidence.end));
+                // Следующая порция — с начала оборванной строки или с конца.
+                const QVector<RefLine> nowRef = referenceLines(now, resume);
+                const bool partial = !nowRef.isEmpty() && !nowRef.constLast().newline;
+                const qint64 refResume = partial ? nowRef.constLast().start : written;
+                const qint64 gotResume = part.lastLinePartial ? part.lastLineStart : part.endOffset;
+                CHECK(gotResume == refResume,
+                      QString::fromLatin1(v.name) + QStringLiteral(": resume offset %1 vs %2").arg(gotResume).arg(refResume));
+                state = part.finalState;
+                resume = refResume;
+            }
+            ++checked;
+        }
+    }
+    std::printf("parser line positions: %d files, whole and appended in parts\n", checked);
+}
+
+// Цена разбора под предварительным решением (Q-18): файл, где до конца
+// набирается меньше kFinalHighBytes байтов ≥ 0x80 на ~200 строках, против
+// того же файла без них. Строки по 998 байтов: конец строки не совпадает с
+// границей 16-КБ блока QTextStream ближе чем через 8 МБ — прежний транспорт
+// перечитывал бы буфер по байту на каждом вызове pos() (~0,2 с на вызов,
+// десятки секунд на файл). Сравнение — с базовым прогоном (не дольше
+// 4 × базового + 2 с), а не в абсолютных секундах.
+static void testParserProvisionalCost()
+{
+    QTemporaryDir dir;
+    QByteArray ascii;
+    const int lines = 3000;
+    ascii.reserve(lines * 998);
+    for (int i = 0; i < lines; ++i) {
+        QByteArray line = "2026-11-18 12:00:00.000 INFO line " + QByteArray::number(i) + ' ';
+        line += QByteArray(997 - line.size(), 'x');
+        ascii += line + '\n';
+    }
+    QByteArray sparse = ascii;
+    const int highLines = 200;
+    for (int i = 0; i < highLines; ++i)
+        sparse[qsizetype(i * (lines / highLines) + 7) * 998 + 500] = char(0xE0);
+    const QString asciiPath = dir.path() + QStringLiteral("/ascii.log");
+    const QString sparsePath = dir.path() + QStringLiteral("/sparse.log");
+    for (const auto& [path, bytes] : {std::pair{asciiPath, ascii}, std::pair{sparsePath, sparse}}) {
+        QFile out(path);
+        out.open(QIODevice::WriteOnly);
+        out.write(bytes);
+    }
+    const auto timed = [](const QString& path, ParserRun* last) {
+        qint64 best = -1;
+        for (int i = 0; i < 2; ++i) {
+            QElapsedTimer t;
+            t.start();
+            *last = runParser(path, FileEncoding{});
+            const qint64 ms = t.elapsed();
+            best = best < 0 ? ms : qMin(best, ms);
+        }
+        return best;
+    };
+    ParserRun asciiRun, sparseRun;
+    const qint64 asciiMs = timed(asciiPath, &asciiRun);
+    const qint64 sparseMs = timed(sparsePath, &sparseRun);
+    CHECK(sparseRun.finished && sparseRun.texts.size() == lines, "cost: sparse file parsed");
+    CHECK(sparseRun.finalState.source == FileEncoding::Source::Auto && sparseRun.finalState.provisional
+              && sparseRun.finalState.evidence.highBytes == highLines,
+          QStringLiteral("cost: decision provisional to the end with %1 high bytes (test premise)")
+              .arg(sparseRun.finalState.evidence.highBytes));
+    std::printf("parser cost: ascii %lld ms, provisional sparse %lld ms\n",
+                (long long)asciiMs, (long long)sparseMs);
+    // Запас — на шум CI и санитайзеры; прежний транспорт был дольше в тысячи раз.
+    CHECK(sparseMs <= 4 * asciiMs + 2000,
+          QStringLiteral("cost: provisional sparse parse %1 ms vs plain %2 ms").arg(sparseMs).arg(asciiMs));
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -1243,6 +1675,9 @@ int main(int argc, char** argv)
     testProvisionalFuzz();
     testClassifierIsAsciiOnly();
     testTextStreamLatin1Transport();
+    testByteLineReader();
+    testParserLinePositions();
+    testParserProvisionalCost();
     if (failures) {
         std::fprintf(stderr, "textencoding: %d failure(s)\n", failures);
         return 1;

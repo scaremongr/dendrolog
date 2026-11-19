@@ -79,6 +79,7 @@ set(DENDROLOG_CORE_SOURCES
     src/textchunkcache.h
     src/textchunkcache.cpp
     src/sequentiallinereader.h
+    src/bytelinereader.h
     src/stdinspooler.h
     src/stdinspooler.cpp
     src/logscan.h
