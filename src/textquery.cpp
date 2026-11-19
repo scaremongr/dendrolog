@@ -1,20 +1,13 @@
 #include "textquery.h"
 
+#include "userregex.h"
+
 namespace {
 
 // Символ слова — как TextToken::isWordChar (QChar::isLetterOrNumber или '_'):
 // буквы с их диакритикой, цифры, подчёркивание.
 const QLatin1String kNotAfterWord("(?<![\\p{L}\\p{M}\\p{N}_])");
 const QLatin1String kNotBeforeWord("(?![\\p{L}\\p{M}\\p{N}_])");
-
-QRegularExpression compile(const QString& pattern, bool caseSensitive)
-{
-    // Те же опции, что у правил Text Filters (FilterRuleSet::bindFields) и у
-    // TextMatchHighlighter: только регистр.
-    return QRegularExpression(pattern, caseSensitive
-        ? QRegularExpression::NoPatternOption
-        : QRegularExpression::CaseInsensitiveOption);
-}
 
 } // namespace
 
@@ -38,7 +31,7 @@ bool TextQuery::isValid(QString* error, int* offset) const
     // Сначала текст пользователя сам по себе: позиция ошибки — в том, что он
     // набрал, а не в выражении с границами слова.
     if (regex) {
-        const QRegularExpression own = compile(text, caseSensitive);
+        const QRegularExpression own = UserRegex::compile(text, caseSensitivity());
         if (!own.isValid()) {
             if (error)
                 *error = own.errorString();
@@ -50,7 +43,7 @@ bool TextQuery::isValid(QString* error, int* offset) const
     if (wholeWord) {
         // Выражение, годное само по себе, может не пережить обёртку
         // (незакрытое «\Q…» съедает её скобку) — позиции у такой ошибки нет.
-        const QRegularExpression wrapped = compile(patternText(), caseSensitive);
+        const QRegularExpression wrapped = UserRegex::compile(patternText(), caseSensitivity());
         if (!wrapped.isValid()) {
             if (error)
                 *error = wrapped.errorString();
@@ -79,7 +72,8 @@ TextMatcher::TextMatcher(const TextQuery& query)
     if (query.isEmpty())
         return;
     if (m_useRegex) {
-        m_regex = compile(query.patternText(), query.caseSensitive);
+        // Тот же диалект, что у Text Filters, подсветки и сканера каталога.
+        m_regex = UserRegex::compile(query.patternText(), query.caseSensitivity());
         m_usable = m_regex.isValid();
         // Компиляция (и JIT) — здесь, а не на первой строке скана.
         if (m_usable)

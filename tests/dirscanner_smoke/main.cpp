@@ -671,6 +671,13 @@ static QList<ContentProbe> cyrillicProbes()
         { u"Иванова"_s, true, false, 0 },
         { u"ascii preamble line 2$"_s, true, true, 1 },
         { u"зззнетничего"_s, false, false, 0 },
+        // F-14: \w, \d, \b и регистр — по Юникоду, как у вкладки.
+        { u"пользовател\\w+"_s, true, false, 1 },
+        { u"\\bошибка\\b"_s, true, false, 1 },
+        { u"\\bошибк\\b"_s, true, false, 0 },
+        { u"попытка \\d+ \\w+"_s, true, false, 1 },
+        { u"ОШИБКА \\d+"_s, true, false, 1 },
+        { u"ОШИБКА \\d+"_s, true, true, 0 },
     };
 }
 

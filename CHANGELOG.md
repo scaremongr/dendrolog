@@ -77,6 +77,17 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- Regular expressions understand letters and digits of any alphabet: `\w`,
+  `\b`, `\s` and classes like `[[:alpha:]]` now work on Cyrillic and other
+  non-Latin text, whatever the file's encoding — `пользовател\w+` finds
+  "пользователя", `\bошибка\b` finds the word. This applies everywhere a
+  regex is typed: Text Filters, the Search panel, the toolbar find box and
+  Find All, Row Highlighters, match highlighting and the Directory Scanner
+  content filter, and they all agree. `\d` now also accepts non-Latin digits
+  (such as Arabic-Indic). On plain English (ASCII) text queries find exactly
+  what they found before. Accented Latin letters (`é`, `ü`) now count as
+  letters too, so `\bcaf\b` no longer matches inside "café" and `\W`, `\D`
+  no longer match non-Latin letters.
 - Merging tabs (dragging one tab onto another, **Merge All Tabs**) no longer
   loses the bookmarks of the merged tab: they move to the receiving tab with
   their notes and find their lines as the files load.

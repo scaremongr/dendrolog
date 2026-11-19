@@ -19,6 +19,7 @@
 #include "quicksearchhistory.h"
 #include "filterruleset.h"
 #include "testdocuments.h"
+#include "userregex.h"
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -497,6 +498,56 @@ static int bench(const QString& path, const QString& needle)
         best = best < 0 ? ms : qMin(best, ms);
     }
     std::printf("%-28s best of 3: %lld ms\n", "forEachLine, ignore case", (long long)best);
+
+    // F-14: цена Юникод-классов (UseUnicodePropertiesOption) — полный проход
+    // по снапшоту, совпадения считаются во всех строках; без опции и с ней.
+    const QString patterns[] = {
+        QStringLiteral("ERROR.*timeout"), QStringLiteral("\\w+"), QStringLiteral("\\d+"),
+        QStringLiteral("lag=\\d+ms, peers=\\d"), QStringLiteral("\\bexpired\\b.*\\bu\\d+\\b"),
+        QStringLiteral("absent_\\w+_text"), QStringLiteral("Ошибка \\w+"),
+    };
+    // Текст строк заранее в памяти — чистая цена движка, без чтения с диска.
+    QStringList lines;
+    snapshot.forEachLine(0, [&](qint64, const LogEntryMeta&, QStringView text) {
+        lines.append(text.toString());
+        return true;
+    });
+    for (const QString& pattern : patterns) {
+        for (const bool unicode : { false, true }) {
+            // Опции приложения (UserRegex), без Юникод-классов — как до F-14.
+            QRegularExpression::PatternOptions options = UserRegex::options(Qt::CaseInsensitive);
+            if (!unicode)
+                options &= ~QRegularExpression::PatternOptions(QRegularExpression::UseUnicodePropertiesOption);
+            QRegularExpression re(pattern, options);
+            re.optimize();
+            qint64 rawBest = -1;
+            qint64 hits = 0;
+            for (int run = 0; run < 3; ++run) {
+                hits = 0;
+                t.restart();
+                snapshot.forEachLine(0, [&](qint64, const LogEntryMeta&, QStringView text) {
+                    hits += re.matchView(text).hasMatch();
+                    return true;
+                });
+                const qint64 ms = t.elapsed();
+                rawBest = rawBest < 0 ? ms : qMin(rawBest, ms);
+            }
+            qint64 memBest = -1;
+            for (int run = 0; run < 3; ++run) {
+                qint64 memHits = 0;
+                t.restart();
+                for (const QString& text : std::as_const(lines))
+                    memHits += re.matchView(text).hasMatch();
+                const qint64 ms = t.elapsed();
+                memBest = memBest < 0 ? ms : qMin(memBest, ms);
+                if (memHits != hits)
+                    std::printf("  (in-memory hits differ: %lld)\n", (long long)memHits);
+            }
+            std::printf("%-34s %-7s hits %8lld  indexed scan %5lld ms, in memory %5lld ms\n",
+                        qPrintable(pattern), unicode ? "unicode" : "ascii", (long long)hits,
+                        (long long)rawBest, (long long)memBest);
+        }
+    }
     return 0;
 }
 

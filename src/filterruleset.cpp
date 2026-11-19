@@ -1,4 +1,5 @@
 #include "filterruleset.h"
+#include "userregex.h"
 
 #include <QJsonArray>
 
@@ -62,10 +63,8 @@ void FilterRuleSet::bindFields(const QStringList& fieldNames, bool fieldScopeAct
             : static_cast<int>(fieldNames.indexOf(rule.fieldName));
 
         if (rule.isRegex && !rule.text.isEmpty()) {
-            QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-            if (!rule.caseSensitive)
-                options |= QRegularExpression::CaseInsensitiveOption;
-            m_compiledRegexes[i] = QRegularExpression(rule.text, options);
+            m_compiledRegexes[i] = UserRegex::compile(
+                rule.text, rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
         }
     }
 }
