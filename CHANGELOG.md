@@ -125,6 +125,9 @@ All notable changes to DendroLog are documented here. The format follows
   **Ctrl+F** does the same with the cursor in the search field.
 - Files opened from the **Directory Scanner** now appear in **Recent Files**,
   like files opened any other way.
+- Closing the window could touch already destroyed parts of it (and crash)
+  when tabs were open — in particular tabs from a session, the previous
+  session or **Reopen Closed Tab**.
 - Regular expressions understand letters and digits of any alphabet: `\w`,
   `\b`, `\s` and classes like `[[:alpha:]]` now work on Cyrillic and other
   non-Latin text, whatever the file's encoding — `пользовател\w+` finds

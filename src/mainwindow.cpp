@@ -869,6 +869,14 @@ MainWindow::~MainWindow()
     // release (closeEvent usually handles this, but not every teardown path
     // goes through it).
     cancelFieldExtraction();
+    // Вкладки разрушаются позже, в ~QWidget, когда полей окна уже нет: их
+    // сигналы (destroyed вкладки → SessionController::reportChanged, смена
+    // текущей вкладки) не должны дойти до лямбд и слотов окна (UBSan,
+    // tests/mainwindow_smoke под ASan).
+    if (m_sessionController)
+        disconnect(m_sessionController, nullptr, this, nullptr);
+    if (ui->tabWidget)
+        disconnect(ui->tabWidget, nullptr, this, nullptr);
     delete ui;
 }
 

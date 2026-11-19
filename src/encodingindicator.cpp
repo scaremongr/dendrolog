@@ -79,7 +79,16 @@ void EncodingIndicator::setTab(LogViewWidget* tab)
             << connect(tab->model(), &QAbstractItemModel::modelReset, this, refreshNow)
             << connect(tab->model(), &QAbstractItemModel::rowsInserted, this, refreshNow)
             << connect(tab->model(), &QAbstractItemModel::rowsRemoved, this, refreshNow)
-            << connect(tab, &QObject::destroyed, this, [this]() { setTab(nullptr); });
+            << connect(tab, &QObject::destroyed, this, [this]() {
+                   // Объект уже не LogViewWidget: setTab сравнил бы его с
+                   // QPointer<LogViewWidget> — приведение разрушенного (UBSan;
+                   // так закрывалось окно с открытыми вкладками).
+                   for (const QMetaObject::Connection& c : std::as_const(m_connections))
+                       disconnect(c);
+                   m_connections.clear();
+                   m_tab.clear();
+                   refresh();
+               });
     }
     refresh();
 }
