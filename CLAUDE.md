@@ -64,8 +64,8 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure -j$(nproc)
 ```
 
-Полная сборка — около минуты на 4 ядрах, тесты с `-j4` — около 3 минут (последовательно было бы
-~7 минут; дольше всех `logview_state`, ~155 с). Окна нет:
+Полная сборка — около минуты на 4 ядрах, тесты с `-j4` — около 2,5 минут (155–175 с;
+последовательно ~7 минут; дольше всех `logview_state`, ~155 с). Окна нет:
 тесты сами ставят `QT_QPA_PLATFORM=offscreen`, приложение запускать с этой
 переменной. Если `/opt/qt6` нет, setup script не отработал — сказать об этом
 автору; Qt из apt не подойдёт. Windows-сборку и установщики даёт только CI
@@ -190,7 +190,8 @@ cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-f
 Для TSan — то же с `build-tsan` и `thread`. Запускать через `ctest`: опции
 рантайма, подавления и увеличенные таймауты он берёт из `tests/CMakeLists.txt`
 (тест напрямую — с `TSAN_OPTIONS=suppressions=tests/sanitizers/tsan.supp`).
-Прогон с `-j4`: ASan — около 5 минут, TSan — около 10–15 минут. В CI — отдельный workflow
+Прогон с `-j`: на CI (4 ядра) шаг Test — ASan около 3,5 минуты, TSan около 5
+минут; локально рядом с другой нагрузкой — дольше (ASan ~5 минут). В CI — отдельный workflow
 `.github/workflows/sanitizers.yml` (пуш в `main` и вручную); его красный
 статус не блокирует сборку установщиков, но чинить его нужно так же.
 
