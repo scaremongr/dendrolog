@@ -46,18 +46,28 @@ SingleInstance::SingleInstance(const QString& appKey, const OpenRouting::Command
     // Проба и захват ключа одновременных запусков идут по очереди: иначе оба
     // не нашли бы сервер и оба стали бы первичными (на Unix listen() с
     // UserAccessOption молча заменяет файл чужого живого сокета). Блокировку
-    // упавшего процесса QLockFile снимает сам; не дождались (держатель
-    // завис) — работаем без неё, как до Q-20.
+    // упавшего процесса QLockFile снимает сам.
     QLockFile claimLock(QDir(QDir::tempPath()).filePath(m_socketName + QStringLiteral(".lock")));
-    claimLock.tryLock(3000);
+    const bool locked = claimLock.tryLock(3000);
+    // Блокировку держит другой запуск дольше 3 с (завис посреди захвата):
+    // занимать ключ мимо неё нельзя — передать файлы, если первичный уже
+    // есть, иначе отдельное окно. Файл блокировки не создаётся вовсе (права
+    // на временный каталог) — захват без неё, как до Q-20.
+    const bool mayClaim = locked || claimLock.error() != QLockFile::LockFailedError;
 
-    // Первичный уже работает — передаём ему.
-    if (primaryAnswers()) {
+    switch (probePrimary()) {
+    case Probe::Answers: // первичный уже работает — передаём ему
         m_role = Role::Forward;
         return;
+    case Probe::Unsure:  // сокет есть, но не ответил: возможно, живой и занятой
+        return;          // первичный — его ключ не отбираем, окно отдельное
+    case Probe::Absent:
+        break;
     }
-    // Никто не отвечает — занимаем. removeServer() подчищает сокет,
-    // оставшийся после аварийного завершения (Unix).
+    if (!mayClaim)
+        return;
+    // Никто не слушает — занимаем. removeServer() подчищает сокет,
+    // оставшийся после аварийного завершения (Unix: соединение отклонено).
     QLocalServer::removeServer(m_socketName);
     m_server = new QLocalServer(this);
     m_server->setSocketOptions(QLocalServer::UserAccessOption);
@@ -79,14 +89,20 @@ SingleInstance::SingleInstance(const QString& appKey, const OpenRouting::Command
     });
 }
 
-bool SingleInstance::primaryAnswers() const
+SingleInstance::Probe SingleInstance::probePrimary() const
 {
     QLocalSocket probe;
     probe.connectToServer(m_socketName);
-    if (!probe.waitForConnected(200))
-        return false;
-    probe.abort();
-    return true;
+    if (probe.waitForConnected(200)) {
+        probe.abort();
+        return Probe::Answers;
+    }
+    // Нет имени или соединение отклонено — первичного нет (или он упал и
+    // оставил сокет). Таймаут и прочее — не знаем: возможно, живой, но
+    // занятой первичный.
+    const auto error = probe.error();
+    return error == QLocalSocket::ServerNotFoundError || error == QLocalSocket::ConnectionRefusedError
+               ? Probe::Absent : Probe::Unsure;
 }
 
 bool SingleInstance::sendToPrimary(const QStringList& arguments) const

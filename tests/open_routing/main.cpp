@@ -31,6 +31,7 @@
 #include <QFile>
 #include <QLocalServer>
 #include <QSemaphore>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QTemporaryDir>
 #include <QTreeWidget>
@@ -497,6 +498,10 @@ static void testSimultaneousLaunches()
 {
     const qint64 pid = QCoreApplication::applicationPid();
     int bothPrimary = 0, unexpected = 0;
+    // Свой пул на два потока: «процессы» ждут друг друга, а глобальный пул
+    // на одном ядре дал бы один поток — тест завис бы.
+    QThreadPool pool;
+    pool.setMaxThreadCount(2);
     for (int round = 0; round < 20; ++round) {
         const QString key = QStringLiteral("DendroLogRace-%1-%2").arg(pid).arg(round);
         QSemaphore start, decided, finish;
@@ -504,7 +509,7 @@ static void testSimultaneousLaunches()
         std::atomic<Role> roles[2] = { Role::Separate, Role::Separate };
         QFuture<void> runs[2];
         for (int i = 0; i < 2; ++i) {
-            runs[i] = QtConcurrent::run([&, i]() {
+            runs[i] = QtConcurrent::run(&pool, [&, i]() {
                 start.acquire();
                 SingleInstance instance(key, OpenRouting::parseCommandLine({}));
                 roles[i].store(instance.role(), std::memory_order_release);
