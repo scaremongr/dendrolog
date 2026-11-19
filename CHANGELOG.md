@@ -7,6 +7,17 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **A file rewritten with the same length is reloaded.** When a log file was
+  overwritten in place so that its size stayed the same (or grew) and its last
+  bytes matched, but its beginning was different, the tab kept showing the old
+  text — or appended the new tail to the old beginning. The tail update now
+  also checks the start of the file and reloads such a file from scratch, on
+  both the normal and the large-file mode, in merged tabs too. Bookmarks on
+  rewritten lines show as "not found", the others stay on their lines. The
+  check of an untouched file costs the same as before; the start is read only
+  when the file's size or modification time has changed, or the file was
+  modified in the last few seconds. An edit only in the
+  middle of a file with the same length, start and end is still not noticed.
 - **A removed bookmark no longer comes back after merging tabs.** Saving a
   file's remembered state could run two writes of the same file at once when
   another file was opened right after a tab was closed or merged, and the

@@ -428,7 +428,7 @@ private:
     //                             failedStamp хранит то, что мы видели на диске,
     //                             и повтор случится, когда подпись изменится.
     struct FileReloadState {
-        FileChangeDetector::Anchor anchor;        // prefix size + boundary fingerprint
+        FileChangeDetector::Anchor anchor;        // prefix size + head and boundary fingerprints
         int    nextLogicalEntryId = 0;
         bool   initialLoadDone = false;           // файл успешно прочитан целиком
         // Загрузка (полная или дозапись) в полёте: вторую по тому же файлу не

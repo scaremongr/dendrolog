@@ -1113,7 +1113,7 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             continue;
         }
 
-        switch (FileChangeDetector::classify(logFile->filePath, st.anchor)) {
+        switch (FileChangeDetector::check(logFile->filePath, st.anchor)) {
         case FileChangeDetector::Change::Unchanged:
             break;
 

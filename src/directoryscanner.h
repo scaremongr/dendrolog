@@ -1,6 +1,7 @@
 #ifndef DIRECTORYSCANNER_H
 #define DIRECTORYSCANNER_H
 
+#include "filechangedetector.h"
 #include "filecontentsearch.h"
 #include "logparser.h"
 #include "textencoding.h"
@@ -247,7 +248,7 @@ private:
         FileStats   stats;
         FileStats   complete;
         StatsResume resume;
-        quint64     fingerprint = 0;  // boundary hash of the bytes ending there
+        FileChangeDetector::Anchor anchor;  // head + boundary of the bytes up to resume.offset
     };
 
     // A queued file analysis. `resume.offset` > 0 means the previous stats are
@@ -255,7 +256,7 @@ private:
     struct ScanRequest {
         QString     path;
         StatsResume resume;
-        quint64     fingerprint = 0;  // boundary hash captured at resume.offset
+        FileChangeDetector::Anchor anchor;  // captured at resume.offset
         FileStats   base;             // stats covering [0, resume.offset)
     };
 

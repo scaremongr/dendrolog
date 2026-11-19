@@ -911,8 +911,9 @@ static void checkSaveRestore(const QDir& dir, const QString& schema)
 
     // Прежнее содержимое вернули — отказанная сохранённая закладка
     // проверяется заново и находит строку.
-    // (Удалить и создать заново: правку только начала файла той же длины
-    // дочитывание не замечает — FileChangeDetector смотрит конец.)
+    // (Удалить и создать заново: перезапись начала той же длины дочитывание
+    // видит, только если сдвинулась mtime (Q-19, filechangedetector.h), а
+    // удаление от часов файловой системы не зависит.)
     CHECK(QFile::remove(path), QStringLiteral("файл удалён"));
     reload(tab);
     CHECK(writeBytes(path, bytes), QStringLiteral("содержимое возвращено"));
