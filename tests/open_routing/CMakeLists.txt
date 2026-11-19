@@ -1,1 +1,1 @@
-dendrolog_add_test(open_routing LIBRARIES dendrolog_widgets TIMEOUT 120)
+dendrolog_add_test(open_routing LIBRARIES dendrolog_app TIMEOUT 120)

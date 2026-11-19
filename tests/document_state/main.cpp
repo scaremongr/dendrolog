@@ -2264,11 +2264,7 @@ static void checkLastSession(const QDir& dir, const QString& schema)
         CHECK(!w.controller.takeLastSession().has_value(), QStringLiteral("вторичный: не читает"));
         CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::NotOwner && readBytes(last) == saved,
               QStringLiteral("вторичный: не пишет"));
-        CHECK(OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ cmd }), false)
-                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ QStringLiteral("--new-instance") }), false)
-                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ QStringLiteral("-") }), false)
-                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ cmd }), true),
-              QStringLiteral("владелец — только первичный: не --new-instance, не stdin, имя не занято"));
+        // Кто первичный (держит ключ) — SingleInstance, таблица в tests/open_routing.
     }
 
     // ---- Запуск, настройка выключена: ссылка появляется и пропадает --------------------

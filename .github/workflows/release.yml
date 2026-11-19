@@ -1,16 +1,46 @@
-# Релизный конвейер: пуш тега vX.Y.Z собирает все артефакты (через общий
-# build.yml) и публикует GitHub Release. Ничего не собирается вручную на
-# локальной машине — сборка воспроизводима из содержимого репозитория.
+# Релизный конвейер: собирает все артефакты (через общий build.yml), ставит
+# тег vX.Y.Z и публикует GitHub Release с разделом этой версии из CHANGELOG.md.
+# Ничего не собирается вручную на локальной машине — сборка воспроизводима из
+# содержимого репозитория.
 #
 # Как выпустить релиз:
-#   1. Обновить версию в CMakeLists.txt (project(... VERSION X.Y.Z)) и CHANGELOG.md.
-#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#   1. Обновить версию в CMakeLists.txt (project(... VERSION X.Y.Z)) и
+#      CHANGELOG.md (раздел «## [X.Y.Z] — дата»).
+#   2. Одним из двух способов:
+#      а) Actions → Release → Run workflow: версия X.Y.Z и коммит релиза
+#         (пусто — вершина выбранной ветки). Тег создаёт сам конвейер — после
+#         успешной сборки и тестов, перед публикацией. Так релиз выпускает и
+#         агент: отправка тегов из облачной сессии закрыта, запуск workflow — нет;
+#      б) git tag vX.Y.Z && git push origin vX.Y.Z — как раньше.
+#
+# Коммит релиза при ручном запуске — вершина ветки запуска либо коммит с теми
+# же файлами .github/workflows: тег на коммит с другими workflow-файлами
+# GITHUB_TOKEN поставить не может (проверяется до сборки).
+# Тег обязан совпадать с версией в CMake на коммите релиза; существующий тег
+# на другом коммите — отказ. «latest: false» — выпуск прошлой версии задним
+# числом: релиз не становится «последним» (его не предложит проверка обновлений).
 
 name: Release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия X.Y.Z — тег vX.Y.Z будет создан на коммите релиза'
+        required: true
+        type: string
+      commit:
+        description: 'Коммит релиза (полный SHA); пусто — вершина выбранной ветки'
+        required: false
+        type: string
+        default: ''
+      latest:
+        description: 'Пометить релиз как последний (false — выпуск прошлой версии задним числом)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -21,17 +51,56 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
       - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="${INPUT_VERSION#v}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version '$TAG' is not X.Y.Z"
+            exit 1
+          fi
           CMAKE_VER=$(grep -oP 'project\(DendroLog VERSION \K[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt)
           if [ "$TAG" != "$CMAKE_VER" ]; then
             echo "::error::Tag v$TAG does not match CMakeLists.txt version $CMAKE_VER"
             exit 1
           fi
+          if ! grep -qF "## [$TAG]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section [$TAG]"
+            exit 1
+          fi
+          SHA=$(git rev-parse HEAD)
+          # Тег уже стоит: аннотированный отдаёт коммит строкой «^{}», простой —
+          # самой ссылкой. На другом коммите — отказ, на этом — релиз по нему.
+          EXISTING=$(git ls-remote origin "refs/tags/v$TAG" "refs/tags/v$TAG^{}" | tail -n 1 | cut -f 1)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "$SHA" ]; then
+            echo "::error::Tag v$TAG already exists on $EXISTING, not on $SHA"
+            exit 1
+          fi
+          # Тег ставит GITHUB_TOKEN, а ему нельзя создать ссылку на коммит, чьи
+          # workflow-файлы отличаются от ветки по умолчанию («refusing to allow
+          # a GitHub App to create or update workflow … without `workflows`
+          # permission» — так упал первый запуск для 0.6.0). Узнать об этом
+          # надо до сборки, а не после неё: коммит релиза обязан нести те же
+          # .github/workflows, что и ветка, с которой запущен конвейер.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$SHA" != "$GITHUB_SHA" ]; then
+            git fetch --quiet --depth=1 origin "$GITHUB_SHA"
+            if ! git diff --quiet FETCH_HEAD HEAD -- .github/workflows; then
+              echo "::error::Workflow files of $SHA differ from $GITHUB_REF_NAME ($GITHUB_SHA): release a commit made after the last change in .github/workflows"
+              exit 1
+            fi
+          fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
   build:
     needs: verify-version
@@ -39,11 +108,42 @@ jobs:
     with:
       version: ${{ needs.verify-version.outputs.version }}
       numeric-version: ${{ needs.verify-version.outputs.version }}
+      ref: ${{ needs.verify-version.outputs.sha }}
 
   publish:
-    needs: build
+    needs: [verify-version, build]
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.verify-version.outputs.version }}
+      SHA: ${{ needs.verify-version.outputs.sha }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-version.outputs.sha }}
+
+      # Текст релиза — раздел этой версии из CHANGELOG.md (без заголовка).
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v head="## [$VERSION]" '
+            index($0, head) == 1 { on = 1; next }
+            on && index($0, "## [") == 1 { exit }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      # Тег ставится здесь — когда сборка и тесты на обеих платформах прошли.
+      # При запуске пушем тега он уже есть.
+      - name: Tag the release commit
+        run: |
+          if [ -n "$(git ls-remote origin "refs/tags/v$VERSION")" ]; then
+            echo "Tag v$VERSION already exists"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "DendroLog $VERSION" "$SHA"
+          git push origin "v$VERSION"
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -52,6 +152,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: DendroLog ${{ github.ref_name }}
+          tag_name: v${{ needs.verify-version.outputs.version }}
+          name: DendroLog v${{ needs.verify-version.outputs.version }}
+          body_path: ${{ runner.temp }}/release-notes.md
           generate_release_notes: true
+          make_latest: ${{ (github.event_name == 'workflow_dispatch' && !inputs.latest) && 'false' || 'true' }}
           files: dist/*

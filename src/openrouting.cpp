@@ -62,11 +62,6 @@ CommandLine parseCommandLine(const QStringList& arguments)
     return cl;
 }
 
-bool ownsLastSession(const CommandLine& commandLine, bool otherInstanceRunning)
-{
-    return !commandLine.newInstance && !commandLine.readStdin && !otherInstanceRunning;
-}
-
 FileEncoding initialEncoding(const CommandLine& commandLine)
 {
     if (!commandLine.encoding)

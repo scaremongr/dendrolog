@@ -10,24 +10,45 @@
 //     повторов и предел в 10 записей — как было в MainWindow;
 //   • командная строка (F-1, шаг 4): --encoding <имя> и --encoding=<имя>,
 //     синонимы, неизвестное и пропущенное имя — понятная ошибка, а не тихий
-//     UTF-8; что второй экземпляр передаёт первому и как тот это разбирает.
+//     UTF-8; что второй экземпляр передаёт первому и как тот это разбирает;
+//   • кто первичный (Q-20): таблица порядков запусков на настоящих
+//     SingleInstance (свой ключ с PID) — окно --new-instance и stdin ключ не
+//     занимают, обычный запуск рядом с ними становится первичным, следующий
+//     отдаёт файлы ему; первичный закрыт — ключ свободен; сокет, оставшийся
+//     после аварийного завершения (Unix), запуску не мешает; два обычных
+//     запуска одновременно — первичный ровно один.
 // ============================================================================
 
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
 #include "openrouting.h"
+#include "singleinstance.h"
 #include "stdinspooler.h"
 
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QLocalServer>
+#include <QSemaphore>
+#include <QThreadPool>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QUrl>
+#include <atomic>
 #include <cstdio>
 #include <initializer_list>
+#include <memory>
 #include <utility>
+#include <vector>
+
+#ifdef Q_OS_UNIX
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <cstring>
+#endif
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -303,6 +324,218 @@ static void testSessions(const QTemporaryDir& tmp)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Q-20: кто первичный и что кому передаётся. Запуск — настоящий
+// SingleInstance со своей командной строкой; «закрыть» — уничтожить его, как
+// при выходе процесса. Передача файлов — из другого потока (sendToPrimary
+// блокирует), пока этот крутит события первичного.
+// ---------------------------------------------------------------------------
+namespace {
+
+using Role = SingleInstance::Role;
+
+struct Step {
+    QStringList args;            // запуск с этими аргументами…
+    Role role = Role::Separate;  // …получает эту роль
+    int receiver = -1;           // Forward: номер запуска, чьё окно примет файлы
+    int close = -1;              // ≥ 0 — вместо запуска закрыть запуск с этим номером
+};
+
+Step launch(QStringList args, Role role, int receiver = -1) { return { std::move(args), role, receiver, -1 }; }
+Step closeLaunch(int index) { return { {}, Role::Separate, -1, index }; }
+
+const char* roleName(Role role)
+{
+    switch (role) {
+    case Role::Primary:  return "Primary";
+    case Role::Forward:  return "Forward";
+    case Role::Separate: return "Separate";
+    }
+    return "?";
+}
+
+void runLaunches(const QString& name, const QString& key, const QVector<Step>& steps)
+{
+    std::vector<std::unique_ptr<SingleInstance>> instances;
+    std::vector<QList<QStringList>> received;
+    for (const Step& step : steps) {
+        if (step.close >= 0) {
+            instances[size_t(step.close)].reset();
+            continue;
+        }
+        const int index = int(instances.size());
+        const QString label = QStringLiteral("%1, launch %2 (%3)").arg(name).arg(index).arg(step.args.join(' '));
+        const OpenRouting::CommandLine cl = OpenRouting::parseCommandLine(step.args);
+        auto instance = std::make_unique<SingleInstance>(key, cl);
+        CHECK(instance->role() == step.role,
+              label + QStringLiteral(": role %1, expected %2")
+                          .arg(QLatin1String(roleName(instance->role())), QLatin1String(roleName(step.role))));
+        CHECK(instance->isPrimary() == (step.role == Role::Primary),
+              label + ": primary (holds the key, owns the last session) only with the Primary role");
+        received.emplace_back();
+        QObject::connect(instance.get(), &SingleInstance::filesReceived, instance.get(),
+                         [&received, index](const QStringList& arguments) { received[size_t(index)] << arguments; });
+        SingleInstance* sender = instance.get();
+        instances.push_back(std::move(instance));
+
+        const QStringList forwarded = OpenRouting::forwardedArguments(cl);
+        QFuture<bool> sent = QtConcurrent::run([sender, forwarded]() { return sender->sendToPrimary(forwarded); });
+        CHECK(waitFor([&]() { return sent.isFinished(); }), label + ": send finishes");
+        sent.waitForFinished();
+        if (step.role != Role::Forward) {
+            CHECK(!sent.result(), label + ": only a forwarding launch sends");
+            continue;
+        }
+        CHECK(sent.result(), label + ": files are delivered");
+        CHECK(waitFor([&]() { return !received[size_t(step.receiver)].isEmpty(); }, 10000),
+              label + QStringLiteral(": launch %1 receives the files").arg(step.receiver));
+        // Пусто — значит, получатель другой; отдельные окна не принимают ничего.
+        for (size_t i = 0; i < received.size(); ++i) {
+            const QList<QStringList> expected = int(i) == step.receiver ? QList<QStringList>{ forwarded }
+                                                                        : QList<QStringList>{};
+            CHECK(received[i] == expected,
+                  label + QStringLiteral(": launch %1 got %2 deliveries").arg(i).arg(received[i].size()));
+            received[i].clear();
+        }
+    }
+}
+
+#ifdef Q_OS_UNIX
+// Сокет, оставшийся после аварийного завершения: файл есть, никто не слушает.
+bool leaveStaleSocket(const QString& key)
+{
+    const QString socketName = key + QLatin1Char('-') +
+                               qEnvironmentVariable("USERNAME", qEnvironmentVariable("USER"));
+    QString path;
+    {
+        QLocalServer probe;
+        if (!probe.listen(socketName))
+            return false;
+        path = probe.fullServerName();
+    } // close() убирает файл
+    const QByteArray native = QFile::encodeName(path);
+    sockaddr_un addr {};
+    addr.sun_family = AF_UNIX;
+    if (size_t(native.size()) >= sizeof(addr.sun_path))
+        return false;
+    std::memcpy(addr.sun_path, native.constData(), size_t(native.size()));
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return false;
+    const bool bound = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    ::close(fd); // без listen и без unlink — как после падения
+    return bound && QFileInfo::exists(path);
+}
+#endif
+
+} // namespace
+
+static void testSingleInstance(const QTemporaryDir& tmp)
+{
+    const QString a = writeFile(QDir(tmp.path()).filePath("si-a.log"), "a\n");
+    const QString b = writeFile(QDir(tmp.path()).filePath("si-b.log"), "b\n");
+    const QString c = writeFile(QDir(tmp.path()).filePath("si-c.log"), "c\n");
+    const QString d = writeFile(QDir(tmp.path()).filePath("si-d.log"), "d\n");
+    const qint64 pid = QCoreApplication::applicationPid();
+    int scenario = 0;
+    const auto key = [&]() { return QStringLiteral("DendroLogRouting-%1-%2").arg(pid).arg(++scenario); };
+
+    CHECK(SingleInstance::joinsSingleInstance(OpenRouting::parseCommandLine({ a }))
+              && SingleInstance::joinsSingleInstance(OpenRouting::parseCommandLine({}))
+              && !SingleInstance::joinsSingleInstance(OpenRouting::parseCommandLine({ "--new-instance", a }))
+              && !SingleInstance::joinsSingleInstance(OpenRouting::parseCommandLine({ "-" }))
+              && !SingleInstance::joinsSingleInstance(OpenRouting::parseCommandLine({ "--stdin", "--new-instance" })),
+          "only a plain launch joins the single instance");
+
+    runLaunches("plain, plain", key(), {
+        launch({ a }, Role::Primary),
+        launch({ "--encoding", "cp1251", b }, Role::Forward, 0),
+        launch({}, Role::Forward, 0),
+    });
+    runLaunches("new-instance, then plain", key(), {
+        launch({ "--new-instance", a }, Role::Separate),
+        launch({ b }, Role::Primary),
+        launch({ c }, Role::Forward, 1),
+    });
+    runLaunches("stdin, then plain, then plain", key(), {
+        launch({ "-" }, Role::Separate),
+        launch({ a }, Role::Primary),
+        launch({ b }, Role::Forward, 1),
+        launch({ "--stdin", c }, Role::Separate),
+        launch({ d }, Role::Forward, 1),
+    });
+    runLaunches("plain, new-instance, primary closed, plain", key(), {
+        launch({ a }, Role::Primary),
+        launch({ "--new-instance", b }, Role::Separate),
+        launch({ c }, Role::Forward, 0),
+        closeLaunch(0),
+        launch({ d }, Role::Primary),
+        launch({ a }, Role::Forward, 3),
+    });
+    runLaunches("all separate windows, then plain", key(), {
+        launch({ "--new-instance", a }, Role::Separate),
+        launch({ "-" }, Role::Separate),
+        launch({ "--new-instance" }, Role::Separate),
+        launch({ b }, Role::Primary),
+        launch({ c }, Role::Forward, 3),
+    });
+#ifdef Q_OS_UNIX
+    {
+        const QString stale = key();
+        CHECK(leaveStaleSocket(stale), "a stale socket file is left behind");
+        runLaunches("stale socket after a crash, then plain", stale, {
+            launch({ a }, Role::Primary),
+            launch({ b }, Role::Forward, 0),
+        });
+    }
+#endif
+}
+
+// Гонка: два обычных запуска одновременно, оба ещё не нашли сервер. Первичный
+// обязан быть ровно один, второй передаёт файлы ему. SingleInstance каждого
+// запуска живёт и умирает в своём потоке, как в своём процессе.
+static void testSimultaneousLaunches()
+{
+    const qint64 pid = QCoreApplication::applicationPid();
+    int bothPrimary = 0, unexpected = 0;
+    // Свой пул на два потока: «процессы» ждут друг друга, а глобальный пул
+    // на одном ядре дал бы один поток — тест завис бы.
+    QThreadPool pool;
+    pool.setMaxThreadCount(2);
+    for (int round = 0; round < 20; ++round) {
+        const QString key = QStringLiteral("DendroLogRace-%1-%2").arg(pid).arg(round);
+        QSemaphore start, decided, finish;
+        // Роль — атомиком: QSemaphore неинструментированного Qt TSan не видит.
+        std::atomic<Role> roles[2] = { Role::Separate, Role::Separate };
+        QFuture<void> runs[2];
+        for (int i = 0; i < 2; ++i) {
+            runs[i] = QtConcurrent::run(&pool, [&, i]() {
+                start.acquire();
+                SingleInstance instance(key, OpenRouting::parseCommandLine({}));
+                roles[i].store(instance.role(), std::memory_order_release);
+                decided.release();
+                finish.acquire(); // оба решили — тогда «процессы» выходят
+            });
+        }
+        start.release(2);
+        decided.acquire(2);
+        const Role r0 = roles[0].load(std::memory_order_acquire);
+        const Role r1 = roles[1].load(std::memory_order_acquire);
+        const int primaries = int(r0 == Role::Primary) + int(r1 == Role::Primary);
+        const int forwards = int(r0 == Role::Forward) + int(r1 == Role::Forward);
+        if (primaries == 2)
+            ++bothPrimary;
+        else if (primaries != 1 || forwards != 1)
+            ++unexpected;
+        finish.release(2);
+        runs[0].waitForFinished();
+        runs[1].waitForFinished();
+    }
+    CHECK(bothPrimary == 0 && unexpected == 0,
+          QStringLiteral("simultaneous plain launches: one primary, one forward (both primary %1 of 20, other %2)")
+              .arg(bothPrimary).arg(unexpected));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -319,6 +552,8 @@ int main(int argc, char** argv)
     testRecentFiles(tmp);
     testCommandLine(tmp);
     testSessions(tmp);
+    testSingleInstance(tmp);
+    testSimultaneousLaunches();
 
     if (failures == 0)
         std::printf("open_routing: OK\n");

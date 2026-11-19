@@ -1,5 +1,6 @@
 # Переиспользуемый workflow сборки и упаковки. Сам по себе не запускается —
-# его вызывают ci.yml (каждый push/PR) и release.yml (пуш тега vX.Y.Z),
+# его вызывают ci.yml (каждый push/PR) и release.yml (пуш тега vX.Y.Z либо
+# ручной запуск с версией и коммитом — тогда собирается коммит из `ref`),
 # поэтому упаковка описана ровно один раз.
 #
 # Артефакты каждого запуска:
@@ -20,6 +21,11 @@ on:
         required: false
         type: string
         default: '0.0.0'
+      ref:
+        description: 'Что собирать: коммит, ветка или тег; пусто — то, на чём запущен вызывающий workflow'
+        required: false
+        type: string
+        default: ''
 
 env:
   QT_VERSION: '6.8.*'
@@ -31,6 +37,8 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -85,6 +93,8 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4

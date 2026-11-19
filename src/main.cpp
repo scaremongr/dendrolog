@@ -69,16 +69,19 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
     }
 
-    // Один экземпляр на пользователя: повторный запуск (например, двойной клик
-    // по ассоциированному .log) передаёт файлы в уже открытое окно и выходит.
-    // Пайп stdin передать нельзя — при «-» всегда открываем своё окно.
-    SingleInstance guard(QStringLiteral("DendroLog"));
-    if (!commandLine.newInstance && !commandLine.readStdin && guard.isSecondary()) {
+    // Один экземпляр на пользователя (правило «кто первичный» —
+    // SingleInstance): обычный запуск рядом с первичным окном (например,
+    // двойной клик по ассоциированному .log) передаёт файлы ему и выходит.
+    // --new-instance и stdin ключ не занимают — открывают своё окно, а обычный
+    // запуск рядом с ними сам становится первичным (Q-20).
+    SingleInstance guard(QStringLiteral("DendroLog"), commandLine);
+    if (guard.role() == SingleInstance::Role::Forward) {
         // Пути разрешаем здесь: у первичного экземпляра другой текущий каталог.
         // --encoding едет вместе с ними (ошибку имени покажет окно первичного).
         if (guard.sendToPrimary(OpenRouting::forwardedArguments(commandLine)))
             return 0;
-        // Первичный экземпляр не ответил (завис/умер) — продолжаем как обычно.
+        // Первичный экземпляр не ответил (завис/умер) — открываемся отдельным
+        // окном: ключ не держим, прошлую сессию не трогаем.
     }
 
     // Fusion honours the QPalette consistently on every platform, unlike the
@@ -96,16 +99,17 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
-    // Файлы от вторичных экземпляров (с их --encoding): открыть и поднять
-    // окно поверх остальных.
-    w.attachSingleInstance(&guard);
+    // Файлы от вторичных запусков (с их --encoding) принимает только
+    // первичное окно: открыть и поднять поверх остальных.
+    if (guard.isPrimary())
+        w.attachSingleInstance(&guard);
 
     // Пути из командной строки: файлы открываются как обычные, папка — в
     // Directory Scanner; stdin спулится во временный файл и открывается
     // вкладкой-растущим логом (auto-reload + follow-tail). Первичное окно
-    // перед ними восстанавливает прошлый сеанс, если так настроено (R-5);
-    // вторичное (--new-instance, stdin) его не читает и не пишет.
-    w.startUp(commandLine, OpenRouting::ownsLastSession(commandLine, guard.isSecondary()));
+    // (держит ключ) перед ними восстанавливает прошлый сеанс, если так
+    // настроено (R-5); отдельное его не читает и не пишет.
+    w.startUp(commandLine, guard.isPrimary());
 
     return a.exec();
 }
