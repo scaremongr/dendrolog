@@ -699,7 +699,9 @@ RunResult runUnpack(SourceUnpacker& unpacker, const QString& src, const QString&
                          done = true;
                      });
     CHECK(unpacker.unpackGzip(src, dst));
-    CHECK(unpacker.isRunning());
+    // isRunning() здесь не проверяется: воркер снимает занятость сам, сразу
+    // после отправки итога, и быстрое задание (ошибка до чтения) может уже
+    // закончиться.
     CHECK(waitFor([&done] { return done; }));
     CHECK(!unpacker.isRunning());
     return rr;

@@ -84,11 +84,13 @@ quint64 SourceUnpacker::unpackGzip(const QString& sourcePath, const QString& tar
         r.targetPath = targetPath;
         const QString targetDir = QFileInfo(targetPath).absolutePath();
 
-        // Занятость снимается сразу после отправки итога: следующее задание
-        // можно ставить, не дожидаясь, пока Result дойдёт через очередь.
+        // Занятость снимается ДО отправки итога: к приходу finished
+        // isRunning() уже false, а следующее задание можно ставить, не
+        // дожидаясь очереди событий (пул на один поток запустит его, когда
+        // эта задача вернётся; итоги различаются номером job).
         const auto finish = [this, &r]() {
-            emit workerFinished(r, QPrivateSignal());
             m_busy.store(false);
+            emit workerFinished(r, QPrivateSignal());
         };
         const auto sourceFailed = [&r](GzipDevice::Error e, const QString& text) {
             r.error = Error::SourceError;
