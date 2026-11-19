@@ -43,6 +43,26 @@ class LogViewWidget;
 //   • chooseSchema — схема сессии против каталога схем: совпадающее
 //     определение (имя не важно) — она; иначе добавить под именем с
 //     пометкой «(from session)», при занятом имени — с номером.
+//
+// Шаг 2 (docs/design/R-5.md, «Восстановление вкладок и Ctrl+Shift+T»,
+// «Portable-режим и несколько экземпляров»):
+//   • сессия окна — setWindow даёт контроллеру вкладки окна по порядку,
+//     активную и схему с колонками; captureWindow снимает всё вместе (Save
+//     Session As и последняя сессия);
+//   • последняя сессия — <configDir>/last-session.json (setLastSessionFile).
+//     Пишет и читает только первичный экземпляр; вторичный (--new-instance,
+//     stdin; OpenRouting::ownsLastSession) файла не касается. Пишется при
+//     штатном выходе (saveLastSession). Окно без вкладок (и без сохраняемых
+//     вкладок: только stdin) прошлую сессию не затирает — файл остаётся как
+//     есть; файл новой версии не перезаписывается. startUp: включена
+//     настройка — восстановить, затем открыть командную строку; выключена —
+//     canRestoreLastSession() держит ссылку на стартовом экране, пока сессию
+//     не восстановили. Файлы от второго экземпляра идут мимо startUp;
+//   • закрытые вкладки — rememberClosedTab в closeTab ДО удаления страницы
+//     снимает TabState в стек (последние kClosedTabsLimit; вкладка stdin и
+//     пустая не идут), reopenClosedTab возвращает верхнюю тем же путём, что
+//     сессия (applyState(…, Apply), отчёт о пропавших и изменённых файлах), на
+//     прежнее место в ряду. Стек живёт до выхода, на диск не пишется.
 // ============================================================================
 class SessionController : public QObject {
     Q_OBJECT
@@ -74,8 +94,9 @@ public:
     // Отчёт: записи вкладок, которые ещё открыты (последняя сессия — в конце).
     QVector<ReportEntry> report() const;
     static QString describe(const ReportEntry& entry);
-    // Строка состояния после open.
-    static QString summary(const OpenResult& result);
+    // Строка состояния после open / reopenClosedTab.
+    enum class Origin { SessionFile, LastSession, ClosedTab };
+    static QString summary(const OpenResult& result, Origin origin = Origin::SessionFile);
 
     // «Указать файл» для записи report()[index] (Missing). false — и причина.
     bool locate(int index, const QString& filePath, QString* error = nullptr);
@@ -88,12 +109,77 @@ public:
     static SchemaChoice chooseSchema(const SchemaStore::SchemaList& list, const QString& name,
                                      const QString& schema);
 
+    // ---- Сессия окна ---------------------------------------------------------
+    // Что окно добавляет к вкладкам: схема и колонки (глобальные до F-5).
+    struct WindowSettings {
+        QString schemaName, schema;
+        bool fieldExtraction = false;
+        QStringList visibleFields;
+    };
+    struct Window {
+        std::function<QList<LogViewWidget*>()> tabs;   // в порядке ряда
+        std::function<LogViewWidget*()> active;
+        std::function<WindowSettings()> settings;
+    };
+    void setWindow(Window window) { m_window = std::move(window); }
+    SessionState captureWindow() const;
+    // Имя схемы для снимка: выбранная в списке, если её определение и есть
+    // действующее; иначе без имени.
+    static QString schemaNameFor(const SchemaStore::SchemaList& list, int currentIndex,
+                                 const QString& schema);
+
+    // ---- Последняя сессия -----------------------------------------------------
+    // primary == false — файл не читается и не пишется (вторичный экземпляр).
+    void setLastSessionFile(const QString& path, bool primary);
+    QString lastSessionFile() const { return m_lastSessionPath; }
+    bool ownsLastSession() const { return m_ownsLastSession; }
+    // Есть что восстановить: свой файл, в нём есть вкладки, в этом запуске
+    // его ещё не восстанавливали.
+    bool canRestoreLastSession() const { return m_lastSessionAvailable; }
+    enum class SaveOutcome { Saved, NotOwner, KeptEmpty, KeptNewer, Failed };
+    SaveOutcome saveLastSession(QString* error = nullptr);
+    // Прочитать для восстановления; после этого canRestoreLastSession() == false.
+    std::optional<SessionState> takeLastSession(QString* error = nullptr);
+    // Запуск окна: включена настройка (restore) — восстановить последнюю
+    // сессию (openSession), затем открыть командную строку.
+    void startUp(bool restore,
+                 const std::function<void(const SessionState&, const QString& path)>& openSession,
+                 const std::function<void()>& openCommandLine, QString* error = nullptr);
+
+    // ---- Закрытые вкладки (Ctrl+Shift+T) ---------------------------------------
+    static constexpr int kClosedTabsLimit = 10;
+    // Снять вкладку перед закрытием; position — её место в ряду. false — не
+    // запомнена (stdin, пустая).
+    bool rememberClosedTab(LogViewWidget* tab, int position);
+    int closedTabCount() const { return int(m_closedTabs.size()); }
+    // Вернуть последнюю закрытую: newTabAt(position) создаёт вкладку на этом
+    // месте ряда (если оно ещё есть — иначе в конце, решает окно). Стек пуст —
+    // результат без вкладок.
+    OpenResult reopenClosedTab(const std::function<LogViewWidget*(int position)>& newTabAt);
+
 signals:
     void reportChanged();
+    void lastSessionAvailabilityChanged(bool available);
+    void closedTabsChanged(int count);
 
 private:
     void prune();
+    TabState captureTab(LogViewWidget* tab) const;
+    OpenResult openTabs(SessionState state, const QString& sessionFilePath,
+                        const std::function<LogViewWidget*()>& newTab, bool numbered);
+    void setLastSessionAvailable(bool available);
+
     QVector<ReportEntry> m_entries;
+    Window m_window;
+    QString m_lastSessionPath;
+    bool m_ownsLastSession = false;
+    bool m_lastSessionAvailable = false;
+    std::optional<SessionState> m_lastSessionRead; // прочитанное в setLastSessionFile
+    struct ClosedTab {
+        TabState state;
+        int position = 0;
+    };
+    QVector<ClosedTab> m_closedTabs; // последняя закрытая — в конце
 };
 
 #endif // SESSIONCONTROLLER_H

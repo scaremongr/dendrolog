@@ -165,6 +165,16 @@ public:
     // Каталог памяти файлов: <configDir>/memory (FileMemoryStore).
     static QString fileMemoryDir();
 
+    // ---- Сессии (R-5) ------------------------------------------------------ //
+
+    // Восстанавливать ли вкладки прошлого сеанса при запуске (первичное окно).
+    // Выключено — стартовый экран предлагает ссылку «Restore previous
+    // session». В ini — [App] restoreSessionOnStartup, по умолчанию false.
+    bool restoreSessionOnStartup() const { return m_restoreSessionOnStartup; }
+    void setRestoreSessionOnStartup(bool enabled);
+    // Последняя сессия окна: <configDir>/last-session.json.
+    static QString lastSessionFile();
+
     // ---- Быстрый поиск (поле в тулбаре) ----------------------------------- //
 
     // Переключатели «Aa», «слово целиком», «.*» и история запросов; в ini —
@@ -211,6 +221,7 @@ private:
     int         m_indexedThresholdMB { 512 };
     int         m_textCacheBudgetMB { 256 };
     bool        m_rememberFileState { true };
+    bool        m_restoreSessionOnStartup { false };
     bool        m_quickSearchMatchCase { false };
     bool        m_quickSearchWholeWord { false };
     bool        m_quickSearchRegex { false };

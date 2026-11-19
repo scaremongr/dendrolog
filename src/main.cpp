@@ -108,8 +108,10 @@ int main(int argc, char *argv[])
 
     // Пути из командной строки: файлы открываются как обычные, папка — в
     // Directory Scanner; stdin спулится во временный файл и открывается
-    // вкладкой-растущим логом (auto-reload + follow-tail).
-    w.openCommandLine(commandLine);
+    // вкладкой-растущим логом (auto-reload + follow-tail). Первичное окно
+    // перед ними восстанавливает прошлый сеанс, если так настроено (R-5);
+    // вторичное (--new-instance, stdin) его не читает и не пишет.
+    w.startUp(commandLine, OpenRouting::ownsLastSession(commandLine, guard.isSecondary()));
 
     return a.exec();
 }

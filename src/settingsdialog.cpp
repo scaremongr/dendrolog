@@ -375,10 +375,24 @@ void SettingsDialog::buildFileMemoryControls()
         clearedLabel->setText(tr("Forgot the state of %n file(s).", nullptr, removed));
     });
 
-    if (auto* form = qobject_cast<QFormLayout*>(page->layout()))
-        form->addRow(group);
-    else
-        page->layout()->addWidget(group);
+    // Сессии (R-5): вкладки прошлого сеанса при запуске.
+    auto* sessions = new QGroupBox(tr("Sessions"), page);
+    auto* sessionsLayout = new QVBoxLayout(sessions);
+    m_restoreSessionCheckBox = new QCheckBox(tr("Restore the tabs of the previous session on startup"), sessions);
+    m_restoreSessionCheckBox->setObjectName(QStringLiteral("restoreSessionCheckBox"));
+    m_restoreSessionCheckBox->setToolTip(
+        tr("Off: the start screen offers \"Restore previous session\" instead.\n"
+           "The session is saved when DendroLog is closed normally (last-session.json\n"
+           "in the settings folder); windows opened with --new-instance or reading\n"
+           "standard input neither restore nor save it."));
+    sessionsLayout->addWidget(m_restoreSessionCheckBox);
+
+    for (QGroupBox* box : { group, sessions }) {
+        if (auto* form = qobject_cast<QFormLayout*>(page->layout()))
+            form->addRow(box);
+        else
+            page->layout()->addWidget(box);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +438,8 @@ void SettingsDialog::loadFromSettings()
         m_textCacheSpinBox->setValue(s.textCacheBudgetMB());
     if (m_rememberFileStateCheckBox)
         m_rememberFileStateCheckBox->setChecked(s.rememberFileState());
+    if (m_restoreSessionCheckBox)
+        m_restoreSessionCheckBox->setChecked(s.restoreSessionOnStartup());
     if (m_fallbackEncodingCombo) {
         const auto choice = s.fallbackEncodingChoice();
         m_fallbackEncodingCombo->setCurrentIndex(
@@ -482,6 +498,8 @@ void SettingsDialog::applyToSettings()
         s.setTextCacheBudgetMB(m_textCacheSpinBox->value());
     if (m_rememberFileStateCheckBox)
         s.setRememberFileState(m_rememberFileStateCheckBox->isChecked());
+    if (m_restoreSessionCheckBox)
+        s.setRestoreSessionOnStartup(m_restoreSessionCheckBox->isChecked());
     if (m_fallbackEncodingCombo) {
         const int data = m_fallbackEncodingCombo->currentData().toInt();
         s.setFallbackEncodingChoice(data < 0 ? std::nullopt

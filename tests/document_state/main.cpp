@@ -53,6 +53,17 @@
 //     экране, кодировка, активная вкладка; открытая раньше вкладка не тронута;
 //   • пропавший и изменённый источник, отчёт, пересохранение, «указать файл»
 //     (в контроллере и в окне отчёта); вкладка stdin не сохраняется.
+// Последняя сессия (R-5, шаг 2; SessionController с временным файлом, а не
+// с настоящим каталогом настроек):
+//   • выход: сессия окна (вкладки, схема, колонки) пишется; пустое окно и
+//     окно только со stdin прошлую не затирают; файл новой версии не
+//     перезаписывается;
+//   • вторичный экземпляр не пишет и не читает (ссылки нет, startUp не
+//     восстанавливает);
+//   • запуск: настройка включена — восстановленные вкладки, затем файлы
+//     командной строки; выключена — ссылка на стартовом экране (WelcomeWidget)
+//     появляется и пропадает после восстановления; файлы второго экземпляра
+//     восстановления не запускают; настройка по умолчанию выключена.
 // Ждём состояние (загрузка, ответ локатора, отложенная раскладка), а не время.
 // ============================================================================
 
@@ -65,6 +76,8 @@
 #include "sessionreportdialog.h"
 #include "logviewwidget.h"
 #include "stdinspooler.h"
+#include "welcomewidget.h"
+#include "openrouting.h"
 #include "testdocuments.h"
 
 #include "LogListView.h"
@@ -2063,6 +2076,226 @@ static void checkSessionStdin(const QDir& dir, const QString& schema)
     QFile::remove(spool);
 }
 
+// ---- Последняя сессия (R-5, шаг 2) -------------------------------------------------
+
+struct Window {
+    TabPool pool;
+    SessionController controller;
+    explicit Window(const QString& schema) : pool{ schema, {} }
+    {
+        controller.setWindow({
+            [this]() {
+                QList<LogViewWidget*> tabs;
+                for (const auto& t : pool.tabs)
+                    if (t)
+                        tabs << t.get();
+                return tabs;
+            },
+            [this]() { return pool.tabs.empty() ? nullptr : pool.tabs.front().get(); },
+            [this]() {
+                SessionController::WindowSettings w;
+                w.schemaName = QStringLiteral("window schema");
+                w.schema = pool.schema;
+                w.fieldExtraction = true;
+                w.visibleFields = { QStringLiteral("Level") };
+                return w;
+            } });
+    }
+    LogViewWidget* openFile(const QString& path)
+    {
+        LogViewWidget* tab = pool.make();
+        tab->addLogFile(path);
+        CHECK(settled(*tab), QStringLiteral("загрузка ") + path);
+        return tab;
+    }
+};
+
+static QStringList tabFiles(const std::vector<std::unique_ptr<LogViewWidget>>& tabs)
+{
+    QStringList out;
+    for (const auto& t : tabs) {
+        QStringList names;
+        for (const LogFilePtr& f : t->loadedFiles())
+            names << QFileInfo(f->filePath).fileName();
+        out << names.join(QLatin1Char('+'));
+    }
+    return out;
+}
+
+static void checkLastSession(const QDir& dir, const QString& schema)
+{
+    g_context = QStringLiteral("последняя сессия");
+    CHECK(!AppSettings::instance().restoreSessionOnStartup(), QStringLiteral("настройка по умолчанию выключена"));
+    QDir().mkpath(dir.filePath(QStringLiteral("config")));
+    const QString last = dir.filePath(QStringLiteral("config/last-session.json"));
+    const QString one = writeFile(dir, QStringLiteral("last-one.log"), logBytes(200));
+    const QString two = writeFile(dir, QStringLiteral("last-two.log"), logBytes(100, 3, "two"));
+    const QString cmd = writeFile(dir, QStringLiteral("last-cmd.log"), logBytes(50, 7, "cmd"));
+
+    // ---- Выход: пустое окно ничего не пишет ------------------------------------------
+    {
+        Window w(schema);
+        w.controller.setLastSessionFile(last, true);
+        CHECK(!w.controller.canRestoreLastSession(), QStringLiteral("файла нет — восстанавливать нечего"));
+        CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptEmpty && !QFile::exists(last),
+              QStringLiteral("пустое окно файл не создаёт"));
+    }
+    // ---- Выход: две вкладки, закладка, фильтр ---------------------------------------
+    {
+        Window w(schema);
+        w.controller.setLastSessionFile(last, true);
+        LogViewWidget* t1 = w.openFile(one);
+        t1->bookmarks().add(rowOfLine(*t1->model(), one, 30), QStringLiteral("тридцать"));
+        FilterRule rule;
+        rule.action = FilterRule::Action::Exclude;
+        rule.text = QStringLiteral("line 13");
+        FilterRuleSet rules;
+        rules.rules = { rule };
+        rules.bindFields(t1->parserFieldNames(), false);
+        t1->model()->setFilters({}, QDateTime(), QDateTime(), rules);
+        CHECK(settled(*t1), QStringLiteral("фильтр"));
+        w.openFile(two);
+        QString error;
+        CHECK(w.controller.saveLastSession(&error) == SessionController::SaveOutcome::Saved,
+              QStringLiteral("выход пишет сессию: ") + error);
+        const SessionFile::LoadResult loaded = SessionFile::load(last);
+        CHECK(loaded.state && loaded.state->tabs.size() == 2 && loaded.state->activeTab == 0
+                  && loaded.state->schema == schema && loaded.state->schemaName == QStringLiteral("window schema")
+                  && loaded.state->fieldExtraction
+                  && loaded.state->visibleFields == QStringList{ QStringLiteral("Level") },
+              QStringLiteral("в файле — вкладки, активная, схема и колонки"));
+        CHECK(loaded.state && loaded.state->tabs[0].bookmarks.size() == 1
+                  && loaded.state->tabs[0].view.textRules.isActive(),
+              QStringLiteral("в файле — закладка и фильтр первой вкладки"));
+    }
+    const QByteArray saved = readBytes(last);
+
+    // ---- Пустое окно и окно только со stdin не затирают ------------------------------
+    {
+        Window w(schema);
+        w.controller.setLastSessionFile(last, true);
+        CHECK(w.controller.canRestoreLastSession(), QStringLiteral("есть что восстанавливать"));
+        CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptEmpty && readBytes(last) == saved,
+              QStringLiteral("пустое окно прошлую сессию не затирает"));
+        const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+        CHECK(writeBytes(spool, logBytes(20, 0, "piped")), QStringLiteral("спул"));
+        w.openFile(spool);
+        CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptEmpty && readBytes(last) == saved,
+              QStringLiteral("окно только со stdin прошлую сессию не затирает"));
+        w.pool.tabs.clear();
+        QFile::remove(spool);
+    }
+
+    // ---- Вторичный экземпляр: не читает и не пишет -------------------------------------
+    {
+        Window w(schema);
+        w.controller.setLastSessionFile(last, false);
+        WelcomeWidget welcome;
+        QObject::connect(&w.controller, &SessionController::lastSessionAvailabilityChanged,
+                         &welcome, &WelcomeWidget::setRestoreSessionAvailable);
+        welcome.setRestoreSessionAvailable(w.controller.canRestoreLastSession());
+        auto* link = welcome.findChild<QLabel*>(QStringLiteral("restoreSessionLink"));
+        CHECK(link && link->isHidden() && !w.controller.canRestoreLastSession(),
+              QStringLiteral("вторичный: ссылки нет"));
+        bool restored = false, commandLine = false;
+        w.controller.startUp(true, [&](const SessionState&, const QString&) { restored = true; },
+                             [&]() { commandLine = true; w.openFile(cmd); });
+        CHECK(!restored && commandLine, QStringLiteral("вторичный: при включённой настройке не восстанавливает"));
+        CHECK(!w.controller.takeLastSession().has_value(), QStringLiteral("вторичный: не читает"));
+        CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::NotOwner && readBytes(last) == saved,
+              QStringLiteral("вторичный: не пишет"));
+        CHECK(OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ cmd }), false)
+                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ QStringLiteral("--new-instance") }), false)
+                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ QStringLiteral("-") }), false)
+                  && !OpenRouting::ownsLastSession(OpenRouting::parseCommandLine({ cmd }), true),
+              QStringLiteral("владелец — только первичный: не --new-instance, не stdin, имя не занято"));
+    }
+
+    // ---- Запуск, настройка выключена: ссылка появляется и пропадает --------------------
+    {
+        Window w(schema);
+        WelcomeWidget welcome;
+        QObject::connect(&w.controller, &SessionController::lastSessionAvailabilityChanged,
+                         &welcome, &WelcomeWidget::setRestoreSessionAvailable);
+        auto* link = welcome.findChild<QLabel*>(QStringLiteral("restoreSessionLink"));
+        CHECK(link && link->isHidden(), QStringLiteral("ссылки нет до запуска"));
+        w.controller.setLastSessionFile(last, true);
+        bool restored = false;
+        w.controller.startUp(false, [&](const SessionState&, const QString&) { restored = true; },
+                             [&]() { w.openFile(cmd); });
+        CHECK(!restored && w.pool.tabs.size() == 1, QStringLiteral("выключена: не восстанавливает, командная строка открыта"));
+        CHECK(link && !link->isHidden() && welcome.isRestoreSessionAvailable(),
+              QStringLiteral("выключена: ссылка на стартовом экране"));
+        // Файлы второго экземпляра — мимо startUp: восстановления нет, ссылка остаётся.
+        w.openFile(two);
+        CHECK(w.pool.tabs.size() == 2 && w.controller.canRestoreLastSession() && link && !link->isHidden(),
+              QStringLiteral("файлы второго экземпляра восстановления не запускают"));
+        // Щелчок по ссылке: сессия читается, ссылка пропадает.
+        int clicked = 0;
+        QObject::connect(&welcome, &WelcomeWidget::restoreSessionRequested, [&]() { ++clicked; });
+        if (link)
+            emit link->linkActivated(QStringLiteral("restore"));
+        CHECK(clicked == 1, QStringLiteral("ссылка просит восстановить"));
+        const auto session = w.controller.takeLastSession();
+        CHECK(session && session->tabs.size() == 2, QStringLiteral("прочитано две вкладки"));
+        CHECK(link && link->isHidden() && !w.controller.canRestoreLastSession(),
+              QStringLiteral("после восстановления ссылка пропала"));
+        w.pool.tabs.clear();
+    }
+
+    // ---- Запуск, настройка включена: прошлые вкладки, затем командная строка ----------
+    for (const bool indexed : { false, true }) {
+        g_context = QStringLiteral("последняя сессия: запуск (%1)").arg(indexed ? "indexed" : "resident");
+        AppSettings::instance().setIndexedThresholdMB(indexed ? 0 : 512);
+        Window w(schema);
+        WelcomeWidget welcome;
+        QObject::connect(&w.controller, &SessionController::lastSessionAvailabilityChanged,
+                         &welcome, &WelcomeWidget::setRestoreSessionAvailable);
+        w.controller.setLastSessionFile(last, true);
+        SessionController::OpenResult opened;
+        w.controller.startUp(true,
+            [&](const SessionState& session, const QString& path) {
+                opened = w.controller.open(session, path, [&w]() { return w.pool.make(); });
+            },
+            [&]() { w.openFile(cmd); });
+        CHECK(tabFiles(w.pool.tabs) == (QStringList{ QStringLiteral("last-one.log"), QStringLiteral("last-two.log"),
+                                                    QStringLiteral("last-cmd.log") }),
+              QStringLiteral("порядок: восстановленные, затем командная строка: ") + tabFiles(w.pool.tabs).join(", "));
+        CHECK(!opened.hasProblems() && opened.tabs.size() == 2, QStringLiteral("восстановлено без проблем"));
+        auto* link = welcome.findChild<QLabel*>(QStringLiteral("restoreSessionLink"));
+        CHECK(link && link->isHidden() && !w.controller.canRestoreLastSession(), QStringLiteral("ссылки нет"));
+        if (w.pool.tabs.size() == 3) {
+            LogViewWidget& t1 = *w.pool.tabs[0];
+            CHECK(settled(t1), QStringLiteral("загрузка"));
+            const QVector<Bookmark> list = t1.bookmarks().bookmarks();
+            CHECK(list.size() == 1 && list[0].note == QStringLiteral("тридцать")
+                      && t1.bookmarks().visibleRow(list[0].id) == rowOfLine(*t1.model(), one, 30),
+                  QStringLiteral("закладка на своей строке"));
+            CHECK(t1.model()->filterRules().isActive() && rowOfLine(*t1.model(), one, 15) < 0,
+                  QStringLiteral("фильтр действует"));
+            CHECK(t1.model()->isIndexedBackend() == indexed, QStringLiteral("бэкенд"));
+        }
+        w.pool.tabs.clear();
+    }
+    AppSettings::instance().setIndexedThresholdMB(512);
+
+    // ---- Файл новой версии ---------------------------------------------------------
+    g_context = QStringLiteral("последняя сессия: новая версия");
+    {
+        QJsonObject json = bytesToObject(saved);
+        json.insert(QStringLiteral("version"), 99);
+        const QByteArray newer = objectToBytes(json);
+        CHECK(writeBytes(last, newer), QStringLiteral("запись новой версии"));
+        Window w(schema);
+        w.controller.setLastSessionFile(last, true);
+        CHECK(!w.controller.canRestoreLastSession(), QStringLiteral("новую версию не предлагает"));
+        w.openFile(one);
+        CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptNewer && readBytes(last) == newer,
+              QStringLiteral("новую версию не перезаписывает"));
+        w.pool.tabs.clear();
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2099,6 +2332,7 @@ int main(int argc, char** argv)
     checkSessionRebind(dir);
     checkSessionProblems(dir, schema);
     checkSessionStdin(dir, schema);
+    checkLastSession(dir, schema);
 
     std::fprintf(failures ? stderr : stdout, "document_state: %d проверок, %d нарушений\n",
                  checks, failures);

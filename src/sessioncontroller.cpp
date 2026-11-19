@@ -15,25 +15,37 @@ SessionController::SessionController(QObject* parent)
 {
 }
 
+TabState SessionController::captureTab(LogViewWidget* tab) const
+{
+    TabState state = tab->captureState();
+    // Пропавший при открытии сессии и так и не указанный источник —
+    // снова в снимок: пересохранённая сессия его не теряет.
+    for (const ReportEntry& e : m_entries) {
+        if (e.tab != tab || e.kind != ReportEntry::Kind::Missing)
+            continue;
+        const bool present = std::any_of(state.sources.cbegin(), state.sources.cend(),
+            [&e](const TabSource& s) { return LogViewWidget::samePath(s.source.path, e.path); });
+        if (!present)
+            state.sources.append(e.source);
+    }
+    return state;
+}
+
+// Вкладка stdin: спул не снимается — вкладка без файлов и закладок не
+// сохраняется (ни в сессию, ни в стек закрытых).
+static bool isEmptyState(const TabState& state)
+{
+    return state.sources.isEmpty() && state.bookmarks.isEmpty();
+}
+
 SessionState SessionController::capture(const QList<LogViewWidget*>& tabs, LogViewWidget* active) const
 {
     SessionState session;
     for (LogViewWidget* tab : tabs) {
         if (!tab)
             continue;
-        TabState state = tab->captureState();
-        // Пропавший при открытии сессии и так и не указанный источник —
-        // снова в снимок: пересохранённая сессия его не теряет.
-        for (const ReportEntry& e : m_entries) {
-            if (e.tab != tab || e.kind != ReportEntry::Kind::Missing)
-                continue;
-            const bool present = std::any_of(state.sources.cbegin(), state.sources.cend(),
-                [&e](const TabSource& s) { return LogViewWidget::samePath(s.source.path, e.path); });
-            if (!present)
-                state.sources.append(e.source);
-        }
-        // Вкладка stdin: спул не снимается — пустая вкладка в сессию не идёт.
-        if (state.sources.isEmpty() && state.bookmarks.isEmpty())
+        const TabState state = captureTab(tab);
+        if (isEmptyState(state))
             continue;
         if (tab == active)
             session.activeTab = int(session.tabs.size());
@@ -44,6 +56,13 @@ SessionState SessionController::capture(const QList<LogViewWidget*>& tabs, LogVi
 
 SessionController::OpenResult SessionController::open(SessionState state, const QString& sessionFilePath,
                                                       const std::function<LogViewWidget*()>& newTab)
+{
+    return openTabs(std::move(state), sessionFilePath, newTab, /*numbered=*/true);
+}
+
+SessionController::OpenResult SessionController::openTabs(SessionState state, const QString& sessionFilePath,
+                                                          const std::function<LogViewWidget*()>& newTab,
+                                                          bool numbered)
 {
     OpenResult result;
     prune();
@@ -77,7 +96,9 @@ SessionController::OpenResult SessionController::open(SessionState state, const 
         QStringList names;
         for (const TabSource& s : tab.sources)
             names << QFileInfo(s.source.path).fileName();
-        const QString title = QStringLiteral("%1: %2").arg(i + 1).arg(names.join(QStringLiteral(", ")));
+        const QString title = numbered
+            ? QStringLiteral("%1: %2").arg(i + 1).arg(names.join(QStringLiteral(", ")))
+            : names.join(QStringLiteral(", "));
 
         const LogViewWidget::StateApplyReport applied =
             view->applyState(tab, LogViewWidget::StateFilters::Apply);
@@ -149,10 +170,22 @@ QString SessionController::describe(const ReportEntry& entry)
     return QString();
 }
 
-QString SessionController::summary(const OpenResult& result)
+QString SessionController::summary(const OpenResult& result, Origin origin)
 {
-    QString text = QCoreApplication::translate("SessionController", "Session opened: %n tab(s).",
-                                               nullptr, int(result.tabs.size()));
+    QString text;
+    switch (origin) {
+    case Origin::SessionFile:
+        text = QCoreApplication::translate("SessionController", "Session opened: %n tab(s).",
+                                           nullptr, int(result.tabs.size()));
+        break;
+    case Origin::LastSession:
+        text = QCoreApplication::translate("SessionController", "Previous session restored: %n tab(s).",
+                                           nullptr, int(result.tabs.size()));
+        break;
+    case Origin::ClosedTab:
+        text = QCoreApplication::translate("SessionController", "Closed tab reopened.");
+        break;
+    }
     if (result.missing)
         text += QLatin1Char(' ') + QCoreApplication::translate("SessionController",
                     "%n file(s) not found.", nullptr, result.missing);
@@ -236,4 +269,137 @@ SessionController::SchemaChoice SessionController::chooseSchema(const SchemaStor
     choice.index = int(list.size());
     choice.added = true;
     return choice;
+}
+
+// ---- Сессия окна ----------------------------------------------------------------
+
+SessionState SessionController::captureWindow() const
+{
+    const QList<LogViewWidget*> tabs = m_window.tabs ? m_window.tabs() : QList<LogViewWidget*>();
+    SessionState session = capture(tabs, m_window.active ? m_window.active() : nullptr);
+    if (m_window.settings) {
+        const WindowSettings w = m_window.settings();
+        if (!w.schema.isEmpty()) {
+            session.schema = w.schema;
+            session.schemaName = w.schemaName;
+        }
+        session.fieldExtraction = w.fieldExtraction;
+        session.visibleFields = w.visibleFields;
+    }
+    return session;
+}
+
+QString SessionController::schemaNameFor(const SchemaStore::SchemaList& list, int currentIndex,
+                                         const QString& schema)
+{
+    if (schema.isEmpty() || currentIndex < 0 || currentIndex >= list.size()
+        || list[currentIndex].schema != schema)
+        return QString();
+    return list[currentIndex].name;
+}
+
+// ---- Последняя сессия ---------------------------------------------------------
+
+void SessionController::setLastSessionFile(const QString& path, bool primary)
+{
+    m_lastSessionPath = path;
+    m_ownsLastSession = primary && !path.isEmpty();
+    m_lastSessionRead.reset();
+    if (m_ownsLastSession && QFileInfo::exists(path)) {
+        SessionFile::LoadResult loaded = SessionFile::load(path);
+        if (loaded.state && !loaded.state->tabs.isEmpty())
+            m_lastSessionRead = std::move(loaded.state); // takeLastSession не читает второй раз
+    }
+    setLastSessionAvailable(m_lastSessionRead.has_value());
+}
+
+void SessionController::setLastSessionAvailable(bool available)
+{
+    if (m_lastSessionAvailable == available)
+        return;
+    m_lastSessionAvailable = available;
+    emit lastSessionAvailabilityChanged(available);
+}
+
+SessionController::SaveOutcome SessionController::saveLastSession(QString* error)
+{
+    if (!m_ownsLastSession)
+        return SaveOutcome::NotOwner;
+    const SessionState session = captureWindow();
+    // Пустое окно прошлую сессию не затирает: закрыть все вкладки и выйти —
+    // не повод потерять вчерашний разбор.
+    if (session.tabs.isEmpty())
+        return SaveOutcome::KeptEmpty;
+    // Файл новой версии (записан более новой программой) не перезаписывается.
+    if (QFileInfo::exists(m_lastSessionPath) && SessionFile::load(m_lastSessionPath).newerVersion)
+        return SaveOutcome::KeptNewer;
+    if (!SessionFile::save(m_lastSessionPath, session, error))
+        return SaveOutcome::Failed;
+    return SaveOutcome::Saved;
+}
+
+std::optional<SessionState> SessionController::takeLastSession(QString* error)
+{
+    if (!m_ownsLastSession) {
+        if (error)
+            *error = QCoreApplication::translate("SessionController",
+                "This window does not keep the previous session (another DendroLog window does).");
+        return std::nullopt;
+    }
+    setLastSessionAvailable(false);
+    if (m_lastSessionRead) {
+        std::optional<SessionState> session = std::move(m_lastSessionRead);
+        m_lastSessionRead.reset();
+        return session;
+    }
+    SessionFile::LoadResult loaded = SessionFile::load(m_lastSessionPath);
+    if (!loaded.state && error)
+        *error = loaded.error;
+    return std::move(loaded.state);
+}
+
+void SessionController::startUp(bool restore,
+                                const std::function<void(const SessionState&, const QString&)>& openSession,
+                                const std::function<void()>& openCommandLine, QString* error)
+{
+    if (restore && canRestoreLastSession()) {
+        if (const std::optional<SessionState> session = takeLastSession(error); session && openSession)
+            openSession(*session, m_lastSessionPath);
+    }
+    if (openCommandLine)
+        openCommandLine();
+}
+
+// ---- Закрытые вкладки -------------------------------------------------------------
+
+bool SessionController::rememberClosedTab(LogViewWidget* tab, int position)
+{
+    if (!tab)
+        return false;
+    ClosedTab closed;
+    closed.state = captureTab(tab);
+    closed.position = qMax(0, position);
+    if (isEmptyState(closed.state))
+        return false;
+    m_closedTabs.append(std::move(closed));
+    while (m_closedTabs.size() > kClosedTabsLimit)
+        m_closedTabs.removeFirst();
+    emit closedTabsChanged(closedTabCount());
+    return true;
+}
+
+SessionController::OpenResult SessionController::reopenClosedTab(
+    const std::function<LogViewWidget*(int position)>& newTabAt)
+{
+    if (m_closedTabs.isEmpty())
+        return OpenResult();
+    const ClosedTab closed = m_closedTabs.takeLast();
+    emit closedTabsChanged(closedTabCount());
+    SessionState session;
+    session.tabs = { closed.state };
+    session.activeTab = 0;
+    // Без файла сессии: rebind проверяет только абсолютные пути.
+    return openTabs(std::move(session), QString(),
+                    [&newTabAt, &closed]() { return newTabAt ? newTabAt(closed.position) : nullptr; },
+                    /*numbered=*/false);
 }

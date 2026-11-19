@@ -18,6 +18,7 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("open"),        tr("Open log file(s)"),          QKeySequence(QKeySequence::Open) },
         { QStringLiteral("saveAs"),      tr("Save view as…"),             QKeySequence(QKeySequence::SaveAs) },
         { QStringLiteral("closeTab"),    tr("Close tab"),                 QKeySequence(Qt::CTRL | Qt::Key_W) },
+        { QStringLiteral("reopenTab"),   tr("Reopen closed tab"),         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T) },
         { QStringLiteral("reload"),      tr("Reload file"),               QKeySequence(Qt::Key_F5) },
         { QStringLiteral("autoReload"),  tr("Toggle auto-reload for this tab"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F5) },
         { QStringLiteral("followTail"),  tr("Toggle follow tail"),        QKeySequence(Qt::SHIFT | Qt::Key_F5) },

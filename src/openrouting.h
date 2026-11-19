@@ -75,6 +75,13 @@ CommandLine parseCommandLine(const QStringList& arguments);
 // тем же parseCommandLine.
 QStringList forwardedArguments(const CommandLine& commandLine);
 
+// Владеет ли окно этого процесса последней сессией (last-session.json, R-5):
+// только первичный экземпляр. --new-instance и stdin — вторичные, даже если
+// другого окна нет; занятое другим окном имя SingleInstance — тоже (его
+// первичный не ответил, и это окно открылось само). Вторичный прошлую сессию
+// не восстанавливает и не перезаписывает.
+bool ownsLastSession(const CommandLine& commandLine, bool otherInstanceRunning);
+
 // Начальное состояние кодировки файлов командной строки и stdin
 // (LogViewWidget::addLogFile): выбор пользователя из --encoding либо «не
 // решено» — автоопределение.

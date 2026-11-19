@@ -85,6 +85,17 @@ WelcomeWidget::WelcomeWidget(QWidget* parent)
 
     m_dropHint = new QLabel(tr("…or drop log files or a folder anywhere in this window."), column);
     col->addWidget(m_dropHint, 0, Qt::AlignHCenter);
+
+    // Прошлый сеанс (R-5): ссылка, пока его не восстановили.
+    m_restoreLink = new QLabel(column);
+    m_restoreLink->setObjectName(QStringLiteral("restoreSessionLink"));
+    m_restoreLink->setTextFormat(Qt::RichText);
+    m_restoreLink->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+    m_restoreLink->setToolTip(tr("Open the tabs that were open when DendroLog was closed last time"));
+    m_restoreLink->setVisible(false);
+    connect(m_restoreLink, &QLabel::linkActivated, this, &WelcomeWidget::restoreSessionRequested);
+    col->addSpacing(6);
+    col->addWidget(m_restoreLink, 0, Qt::AlignHCenter);
     col->addSpacing(12);
 
     // ---- Недавние файлы ------------------------------------------------ //
@@ -127,6 +138,12 @@ void WelcomeWidget::setRecentFiles(const QStringList& paths)
         return;
     m_recentFiles = paths;
     rebuildRecent();
+}
+
+void WelcomeWidget::setRestoreSessionAvailable(bool available)
+{
+    m_restoreAvailable = available;
+    m_restoreLink->setVisible(available);
 }
 
 void WelcomeWidget::setShortcutHints(const QKeySequence& open, const QKeySequence& find)
@@ -186,6 +203,9 @@ void WelcomeWidget::applyColors()
     m_hints->setStyleSheet(style);
     m_openButton->setIcon(CardFrame::tintedIcon(QStringLiteral(":/icons/open.svg"),
                                                 palette().color(QPalette::ButtonText)));
+    m_restoreLink->setText(QStringLiteral("<a href=\"restore\" style=\"color:%1;\">%2</a>")
+                               .arg(palette().color(QPalette::Link).name(),
+                                    tr("Restore previous session")));
     m_clearLink->setText(QStringLiteral(
         "<a href=\"clear\" style=\"color:%1;\">%2</a>").arg(muted, tr("Clear")));
     rebuildRecent();

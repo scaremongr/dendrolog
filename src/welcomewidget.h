@@ -13,7 +13,8 @@ class QVBoxLayout;
 // WelcomeWidget — стартовый экран центральной области, пока нет ни одной
 // вкладки. Вместо пустой рамки QTabWidget подсказывает, с чего начать:
 // открыть файлы, просканировать каталог, бросить файлы в окно, открыть
-// недавний файл одной ссылкой.
+// недавний файл одной ссылкой, вернуть вкладки прошлого сеанса (R-5), пока
+// они не восстановлены.
 //
 // Сам ничего не открывает — только сигналит MainWindow. Бросок файлов
 // обрабатывает окно: виджет drop не принимает, и Qt передаёт событие
@@ -26,6 +27,10 @@ public:
 
     // Недавние файлы, новые первыми; пустой список прячет секцию.
     void setRecentFiles(const QStringList& paths);
+    // Ссылка «Restore previous session» (R-5): видна, пока есть что
+    // восстанавливать (SessionController::canRestoreLastSession).
+    void setRestoreSessionAvailable(bool available);
+    bool isRestoreSessionAvailable() const { return m_restoreAvailable; }
     // Подсказки с текущими сочетаниями клавиш (они настраиваются).
     void setShortcutHints(const QKeySequence& open, const QKeySequence& find);
 
@@ -34,6 +39,7 @@ signals:
     void scanDirectoryRequested();
     void recentFileRequested(const QString& path);
     void clearRecentRequested();
+    void restoreSessionRequested();
 
 protected:
     void changeEvent(QEvent* event) override;
@@ -52,6 +58,8 @@ private:
     QLabel*      m_clearLink = nullptr;
     QVBoxLayout* m_recentList = nullptr;
     QLabel*      m_hints = nullptr;
+    QLabel*      m_restoreLink = nullptr;
+    bool         m_restoreAvailable = false;
 
     QStringList  m_recentFiles;
     QKeySequence m_openSeq;

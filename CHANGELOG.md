@@ -7,6 +7,18 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Previous session and closed tabs.** On a normal exit the main window
+  remembers its tabs (`last-session.json` in the settings folder; a window
+  closed without tabs keeps the previous one). **Settings → General → Sessions
+  → Restore the tabs of the previous session on startup** (off by default)
+  reopens them at startup before the command-line files; when it is off, the
+  start screen offers **Restore previous session**. Windows opened with
+  `--new-instance` or reading stdin neither restore nor overwrite it.
+  **`Ctrl+Shift+T`** (**File → Reopen Closed Tab**) brings back the last closed
+  tabs (up to 10) at their place with files, filters, highlighters,
+  bookmarks, position and encoding choice; missing or rewritten files are
+  reported in the status bar. A tab opened from a session whose files are all
+  missing is no longer taken over by the next file opened.
 - **Sessions.** **File → Save Session As…** writes the whole window to a
   `*.dlsession` file: every tab with its files (a merged tab keeps all of
   them), filters, row highlighters, bookmarks with notes, the selected line

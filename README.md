@@ -55,7 +55,9 @@
 - **Sessions** — save all tabs with their filters, bookmarks and positions to a
   `.dlsession` file and open it later, elsewhere or on a colleague's machine:
   logs moved together with the session are found by a relative path, missing
-  or changed files are listed in a restore report.
+  or changed files are listed in a restore report. The previous session's tabs
+  come back at startup (an option) or with one link on the start screen, and
+  `Ctrl+Shift+T` reopens a closed tab.
 - **Navigation history** — `Alt+←` / `Alt+→` go back to where a jump (search,
   Statistics, timeline, bookmark, Go to, `F8`) started and forward again.
 - **Marks on the scrollbar** — errors, warnings, bookmarks and Search panel
