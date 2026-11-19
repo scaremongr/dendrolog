@@ -118,6 +118,13 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- **Find shortcuts with the Find toolbar hidden.** Hiding the Find toolbar
+  (right-click on the toolbar area) also switched off **F3**, **Shift+F3**,
+  **Ctrl+Shift+F** and the **Alt+C / Alt+W / Alt+R** search toggles; they now
+  work whatever toolbars are shown and bring the hidden Find toolbar back, and
+  **Ctrl+F** does the same with the cursor in the search field.
+- Files opened from the **Directory Scanner** now appear in **Recent Files**,
+  like files opened any other way.
 - Regular expressions understand letters and digits of any alphabet: `\w`,
   `\b`, `\s` and classes like `[[:alpha:]]` now work on Cyrillic and other
   non-Latin text, whatever the file's encoding — `пользовател\w+` finds

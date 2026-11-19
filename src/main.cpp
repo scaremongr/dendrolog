@@ -98,13 +98,7 @@ int main(int argc, char *argv[])
 
     // Файлы от вторичных экземпляров (с их --encoding): открыть и поднять
     // окно поверх остальных.
-    QObject::connect(&guard, &SingleInstance::filesReceived,
-                     &w, [&w](const QStringList& arguments) {
-        w.openCommandLine(OpenRouting::parseCommandLine(arguments));
-        w.setWindowState((w.windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
-        w.raise();
-        w.activateWindow();
-    });
+    w.attachSingleInstance(&guard);
 
     // Пути из командной строки: файлы открываются как обычные, папка — в
     // Directory Scanner; stdin спулится во временный файл и открывается

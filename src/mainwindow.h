@@ -62,6 +62,7 @@ class QDialog;
 class QDragEnterEvent;
 class QDropEvent;
 class UpdateChecker;
+class SingleInstance;
 class QPoint;
 class WelcomeWidget;
 class SearchPanelWidget;
@@ -95,6 +96,9 @@ public:
     // сеанса, затем командная строка; файлы второго экземпляра идут мимо — в
     // openCommandLine.
     void startUp(const OpenRouting::CommandLine& commandLine, bool primary);
+    // Первичный экземпляр (main): файлы, присланные вторым запуском, —
+    // openCommandLine с его аргументами, окно поднимается поверх остальных.
+    void attachSingleInstance(SingleInstance* guard);
 
 protected:
     void closeEvent(QCloseEvent *event) override;

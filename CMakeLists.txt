@@ -48,11 +48,13 @@ set(CMAKE_AUTOUIC ON)    # Для обработки .ui файлов (если 
 # Найти Qt 6
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Concurrent Svg Network)
 
-# Исходники разложены по трём целям — каждый файл ровно в одной из них:
+# Исходники разложены по четырём целям — каждый файл ровно в одной из них:
 #   dendrolog_core    — данные, разбор, хранилище, модель, экспорт. Без Qt Widgets;
 #   dendrolog_widgets — представление лога, тема, настройки, сканер каталога и
 #                       общие элементы UI (всё, что тестам нужно из виджетов);
-#   DendroLog         — оболочка приложения: окно, вкладки, панели, диалоги.
+#   dendrolog_app     — оболочка: окно, вкладки, диалоги, один экземпляр,
+#                       проверка обновлений (её создаёт tests/mainwindow_smoke);
+#   DendroLog         — точка входа (main.cpp) и ресурсы.
 # Библиотеки статические и общие для приложения и тестов: каждый исходник
 # компилируется один раз, а тест линкует только то, чем пользуется.
 
@@ -214,8 +216,10 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/separatornode.cpp
 )
 
-set(PROJECT_SOURCES
-    src/main.cpp
+# Оболочка окна: в статической библиотеке, а не в exe, чтобы окно целиком
+# создавал тест (tests/mainwindow_smoke). Отдельно от dendrolog_widgets — ей
+# нужен Qt Network (проверка обновлений, один экземпляр), остальным тестам нет.
+set(DENDROLOG_APP_SOURCES
     src/mainwindow.h
     src/mainwindow.cpp
     src/mainwindow.ui
@@ -224,7 +228,6 @@ set(PROJECT_SOURCES
     src/logtabbar.cpp
     src/logtabwidget.h
     src/logtabwidget.cpp
-
 
     src/settingsdialog.h
     src/settingsdialog.cpp
@@ -239,7 +242,11 @@ set(PROJECT_SOURCES
     src/singleinstance.cpp
     src/updatechecker.h
     src/updatechecker.cpp
+)
 
+# В exe — только точка входа и ресурсы.
+set(PROJECT_SOURCES
+    src/main.cpp
     resources/resources.qrc
 )
 
@@ -296,6 +303,16 @@ target_link_libraries(dendrolog_widgets
         Qt6::Svg
 )
 
+add_library(dendrolog_app STATIC ${DENDROLOG_APP_SOURCES})
+target_link_libraries(dendrolog_app
+    PUBLIC
+        dendrolog_widgets
+        Qt6::Widgets
+        Qt6::Network
+    PRIVATE
+        Qt6::Svg
+)
+
 # Иконка и метаданные версии для проводника Windows. Версия подставляется
 # из project(VERSION), поэтому .rc генерируется при конфигурации.
 if(WIN32)
@@ -315,7 +332,7 @@ qt_add_executable(${PROJECT_NAME} WIN32 ${PROJECT_SOURCES})
 
 # Подключение Qt модулей
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    dendrolog_widgets
+    dendrolog_app
     Qt6::Widgets
     Qt6::Core
     Qt6::Gui

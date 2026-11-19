@@ -1,6 +1,8 @@
-# Тесты без окна. Каждый каталог — один исполняемый файл из своего main.cpp,
-# слинкованный с библиотеками приложения (dendrolog_core / dendrolog_widgets);
-# исходники приложения тесты сами не компилируют.
+# Тесты без дисплея (offscreen). Каждый каталог — один исполняемый файл из
+# своего main.cpp, слинкованный с библиотеками приложения (dendrolog_core /
+# dendrolog_widgets / dendrolog_app — у окна целиком, mainwindow_smoke);
+# исходники приложения тесты сами не компилируют. Ресурсы (иконки, справка)
+# тест, которому они нужны, добавляет себе сам: resources/resources.qrc.
 
 # На Windows тестовому exe нужны Qt DLL — каталог Qt bin идёт в PATH теста.
 if(WIN32)
@@ -83,6 +85,7 @@ add_subdirectory(scrollbar_marks)
 add_subdirectory(encoding_ui)
 add_subdirectory(document_state)
 add_subdirectory(user_regex)
+add_subdirectory(mainwindow_smoke)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни
 # пропускать правильные передачи через Qt как гонки, ни прятать настоящие.

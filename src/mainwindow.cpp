@@ -25,6 +25,7 @@
 #include "updatechecker.h"
 #include "stdinspooler.h"
 #include "openrouting.h"
+#include "singleinstance.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
 #include "searchresultsnavigator.h"
@@ -478,13 +479,34 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Quick-search focus action (Ctrl+F by default): just move focus to the
     // search field and pre-select its text for an immediate new query.
+    // Тулбар Find скрыт (контекстное меню окна) — показать: фокус в
+    // невидимое поле ничего бы не дал.
     QAction* focusSearchAction = new QAction(tr("Find"), this);
     connect(focusSearchAction, &QAction::triggered, this, [this]() {
+        if (ui->findToolBar->isHidden())
+            ui->findToolBar->show();
         m_searchLineEdit->setFocus(Qt::ShortcutFocusReason);
         m_searchLineEdit->selectAll();
     });
     addAction(focusSearchAction);   // window-level shortcut
     m_shortcutActions.insert(QStringLiteral("focusSearch"), focusSearchAction);
+
+    // Действия поиска живут только в тулбаре Find, а сочетание действия
+    // работает, пока виден хоть один его виджет: скрытый тулбар (контекстное
+    // меню окна) отнимал бы F3, Shift+F3, Ctrl+Shift+F и Alt+C/W/R. Окно —
+    // ещё один их виджет, всегда видимый; одно действие — одно сочетание,
+    // неоднозначности нет. Сработав, команда показывает скрытый тулбар:
+    // искать невидимый запрос и щёлкать невидимыми переключателями нельзя.
+    for (QAction* findAction : { ui->actionSearchNext, ui->actionSearchPrevious, m_findAllAction,
+                                 m_searchLineEdit->matchCaseAction(),
+                                 m_searchLineEdit->wholeWordAction(),
+                                 m_searchLineEdit->regexAction() }) {
+        addAction(findAction);
+        connect(findAction, &QAction::triggered, this, [this]() {
+            if (ui->findToolBar->isHidden())
+                ui->findToolBar->show();
+        });
+    }
 
     // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.
     m_goToAction = new QAction(tr("Go to Line / Time…"), this);
@@ -681,8 +703,12 @@ void MainWindow::applyShortcuts()
 {
     const ShortcutManager& mgr = ShortcutManager::instance();
     for (const auto& cmd : mgr.commands()) {
-        if (QAction* a = m_shortcutActions.value(cmd.id, nullptr))
+        if (QAction* a = m_shortcutActions.value(cmd.id, nullptr)) {
             a->setShortcut(mgr.sequence(cmd.id));
+            // Имя команды ShortcutManager — по нему действие находит оконный
+            // смоук-тест (tests/mainwindow_smoke), не завися от текста пункта.
+            a->setProperty("commandId", cmd.id);
+        }
     }
 
     // Подсказки кнопок — с текущими сочетаниями (дописываются к первой строке).
@@ -3732,6 +3758,10 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
     for (const QString &fPath : filePaths)
     {
         view->addLogFile(fPath);
+        // Как у Open: открытое из сканера — в Recent Files (раньше не
+        // попадало); файл, пропавший после скана, — нет.
+        if (QFileInfo::exists(fPath))
+            addToRecentFiles(fPath);
     }
 
     updateTabLabel(view);
@@ -3864,6 +3894,16 @@ void MainWindow::startUp(const OpenRouting::CommandLine& commandLine, bool prima
         [this, &commandLine]() { openCommandLine(commandLine); }, &error);
     if (!error.isEmpty())
         statusBar()->showMessage(tr("Could not restore the previous session: %1").arg(error), 10000);
+}
+
+void MainWindow::attachSingleInstance(SingleInstance* guard)
+{
+    connect(guard, &SingleInstance::filesReceived, this, [this](const QStringList& arguments) {
+        openCommandLine(OpenRouting::parseCommandLine(arguments));
+        setWindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+        raise();
+        activateWindow();
+    });
 }
 
 void MainWindow::openSessionFile(const QString& path)
