@@ -13,6 +13,9 @@
 #         агент: отправка тегов из облачной сессии закрыта, запуск workflow — нет;
 #      б) git tag vX.Y.Z && git push origin vX.Y.Z — как раньше.
 #
+# Коммит релиза при ручном запуске — вершина ветки запуска либо коммит с теми
+# же файлами .github/workflows: тег на коммит с другими workflow-файлами
+# GITHUB_TOKEN поставить не может (проверяется до сборки).
 # Тег обязан совпадать с версией в CMake на коммите релиза; существующий тег
 # на другом коммите — отказ. «latest: false» — выпуск прошлой версии задним
 # числом: релиз не становится «последним» (его не предложит проверка обновлений).
@@ -82,6 +85,19 @@ jobs:
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "$SHA" ]; then
             echo "::error::Tag v$TAG already exists on $EXISTING, not on $SHA"
             exit 1
+          fi
+          # Тег ставит GITHUB_TOKEN, а ему нельзя создать ссылку на коммит, чьи
+          # workflow-файлы отличаются от ветки по умолчанию («refusing to allow
+          # a GitHub App to create or update workflow … without `workflows`
+          # permission» — так упал первый запуск для 0.6.0). Узнать об этом
+          # надо до сборки, а не после неё: коммит релиза обязан нести те же
+          # .github/workflows, что и ветка, с которой запущен конвейер.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$SHA" != "$GITHUB_SHA" ]; then
+            git fetch --quiet --depth=1 origin "$GITHUB_SHA"
+            if ! git diff --quiet FETCH_HEAD HEAD -- .github/workflows; then
+              echo "::error::Workflow files of $SHA differ from $GITHUB_REF_NAME ($GITHUB_SHA): release a commit made after the last change in .github/workflows"
+              exit 1
+            fi
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"

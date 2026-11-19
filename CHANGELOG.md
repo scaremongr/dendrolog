@@ -6,21 +6,6 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- **A window opened with `--new-instance` or reading stdin (`program |
-  DendroLog -`) no longer takes the place of the single instance.** Before, if
-  such a window was the first one, plain launches handed their files to it,
-  and the previous session (`last-session.json`) was saved by no window. Now a
-  plain launch next to it opens the main window, which takes the files of
-  later launches and saves the session on exit. Two launches at the same moment
-  no longer both become the main window.
-- **A schema file the program cannot read is no longer deleted.** Any change
-  to the list of field schemas (OK in the schema editor, opening a session
-  that brings its own schema) removed every `*.json` in the `patterns` folder
-  that did not load as a schema — a file broken by a manual edit, or a schema
-  written by a newer version. Such files are now left as they are, and a new
-  schema no longer takes over their file name.
-
 ## [0.6.0] — 2026-11-19
 
 **An investigation can be put aside and picked up again.** Bookmarks with
@@ -222,6 +207,19 @@ by default.
   whatever it showed then, so the result of **Save View As** (and other
   messages shown in those seconds) could disappear at once. Only the
   "Finished parsing" message itself is now cleared.
+- **A window opened with `--new-instance` or reading stdin (`program |
+  DendroLog -`) no longer takes the place of the single instance.** Before, if
+  such a window was the first one, plain launches handed their files to it,
+  and the previous session (`last-session.json`) was saved by no window. Now a
+  plain launch next to it opens the main window, which takes the files of
+  later launches and saves the session on exit. Two launches at the same moment
+  no longer both become the main window.
+- **A schema file the program cannot read is no longer deleted.** Any change
+  to the list of field schemas (OK in the schema editor, opening a session
+  that brings its own schema) removed every `*.json` in the `patterns` folder
+  that did not load as a schema — a file broken by a manual edit, or a schema
+  written by a newer version. Such files are now left as they are, and a new
+  schema no longer takes over their file name.
 
 ## [0.5.0] — 2026-11-18
 
