@@ -247,8 +247,13 @@ void FileMemoryStore::enqueue(std::function<void()> task)
 
 void FileMemoryStore::waitForWrites()
 {
+    // Сначала пул: все записи выполнит его единственный поток, по порядку.
+    // waitForFinished() у ещё не начатой задачи забрал бы её в этот поток
+    // (work stealing QtConcurrent), и она шла бы одновременно со следующей в
+    // потоке пула: прежняя запись могла лечь на диск после новой (Q-21).
+    m_pool.waitForDone();
     for (QFuture<void>& f : m_writes)
-        f.waitForFinished();
+        f.waitForFinished(); // уже завершены: только синхронизация с потоком записи
     m_writes.clear();
 }
 

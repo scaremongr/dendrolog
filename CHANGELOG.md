@@ -18,6 +18,12 @@ All notable changes to DendroLog are documented here. The format follows
   when the file's size or modification time has changed, or the file was
   modified in the last few seconds. An edit only in the
   middle of a file with the same length, start and end is still not noticed.
+- **A removed bookmark no longer comes back after merging tabs.** Saving a
+  file's remembered state could run two writes of the same file at once when
+  another file was opened right after a tab was closed or merged, and the
+  older write could land last — a bookmark removed in the merged tab
+  reappeared on the next open. Writes of the file memory now always run one
+  after another, in order.
 
 ## [0.6.0] — 2026-11-19
 
