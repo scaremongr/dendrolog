@@ -32,11 +32,22 @@ elseif(DENDROLOG_SANITIZER STREQUAL "thread")
 endif()
 
 # dendrolog_add_test(<имя теста> LIBRARIES <цели>...
-#                    [TARGET <имя exe>] [TIMEOUT <секунды>])
+#                    [TARGET <имя exe>] [TIMEOUT <секунды>] [COST <секунды>])
 # Исходник — main.cpp в каталоге, откуда вызвана функция; имя exe по
 # умолчанию совпадает с именем теста.
+#
+# Набор идёт параллельно (ctest -j, P-10). Тест обязан это выдерживать:
+#   • временные файлы — только QTemporaryDir / QTemporaryFile (или имя с PID);
+#     в каталог исходников и в testdata/ не писать;
+#   • каталог настроек — каталог exe (маркер portable ниже), свой у теста;
+#   • ждать состояние (testdocs::waitFor / settle), а не время: под
+#     параллельной нагрузкой и санитайзером таймер ничего не гарантирует.
+# Каждый тест занимает около одного ядра (замер P-10), поэтому PROCESSORS
+# не задан. COST — примерная длительность в Release: CTest начинает с самых
+# долгих, и прогон не ждёт хвостом тест, стартовавший последним (на свежем
+# CI данных о прошлых прогонах нет).
 function(dendrolog_add_test test_name)
-    cmake_parse_arguments(ARG "" "TARGET;TIMEOUT" "LIBRARIES" ${ARGN})
+    cmake_parse_arguments(ARG "" "TARGET;TIMEOUT;COST" "LIBRARIES" ${ARGN})
     if(NOT ARG_TARGET)
         set(ARG_TARGET ${test_name})
     endif()
@@ -45,10 +56,33 @@ function(dendrolog_add_test test_name)
     target_include_directories(${ARG_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/tests/common)
     target_link_libraries(${ARG_TARGET} PRIVATE ${ARG_LIBRARIES})
 
+    # Каталог настроек теста — каталог его exe: маркер portable включает
+    # portable-режим AppSettings::configDir(). У каждого теста и каждого
+    # каталога сборки (build, build-asan, build-tsan) он свой, поэтому
+    # параллельные прогоны не делят ini, схемы и память файлов, а настоящий
+    # каталог настроек пользователя тесты не трогают (P-10).
+    # Маркер ставится и при конфигурации (exe, собранный до появления этого
+    # правила, может не перелинковаться), и после сборки — на случай другого
+    # каталога вывода.
+    if(CMAKE_CONFIGURATION_TYPES)
+        foreach(_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${_config}")
+            file(TOUCH "${CMAKE_CURRENT_BINARY_DIR}/${_config}/portable")
+        endforeach()
+    else()
+        file(TOUCH "${CMAKE_CURRENT_BINARY_DIR}/portable")
+    endif()
+    add_custom_command(TARGET ${ARG_TARGET} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E touch "$<TARGET_FILE_DIR:${ARG_TARGET}>/portable"
+        VERBATIM)
+
     add_test(NAME ${test_name} COMMAND ${ARG_TARGET})
     if(ARG_TIMEOUT)
         math(EXPR _timeout "${ARG_TIMEOUT} * ${DENDROLOG_TEST_TIMEOUT_FACTOR}")
         set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_timeout})
+    endif()
+    if(ARG_COST)
+        set_tests_properties(${test_name} PROPERTIES COST ${ARG_COST})
     endif()
     if(DENDROLOG_SANITIZER_ENV)
         set_tests_properties(${test_name} PROPERTIES

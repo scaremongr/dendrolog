@@ -43,8 +43,9 @@ jobs:
           cmake -S . -B build
           cmake --build build --config Release --parallel
 
+      # Тесты независимы (P-10): по процессу на ядро раннера.
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure -j $env:NUMBER_OF_PROCESSORS
 
       - name: Stage with Qt runtime
         shell: pwsh
@@ -103,7 +104,7 @@ jobs:
           cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j $(nproc)
 
       - name: Build AppImage
         run: |

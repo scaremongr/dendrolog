@@ -573,11 +573,14 @@ static bool tabFinds(testdocs::Document& doc, const ContentProbe& probe)
     rule.caseSensitive = probe.caseSensitive;
     rules.rules.append(rule);
     rules.bindFields({}, false);   // как MainWindow: без привязки регекс не скомпилирован
+    // У модели нет view, документ загружен, а фильтр стартует синхронно:
+    // конец фильтра — !isFiltering(), окно тишины settle() не нужно (P-10:
+    // по 80 мс на ~480 вызовов стоили ~38 с прогона).
     doc.model->setFilterRules(rules);
-    testdocs::settle(*doc.model);
+    testdocs::settle(*doc.model, /*quietMs*/ 0);
     const bool found = doc.model->rowCount() > 0;
     doc.model->setFilterRules(FilterRuleSet());
-    testdocs::settle(*doc.model);
+    testdocs::settle(*doc.model, /*quietMs*/ 0);
     return found;
 }
 

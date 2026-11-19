@@ -131,6 +131,12 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- **A removed bookmark no longer comes back after merging tabs.** Saving a
+  file's remembered state could run two writes of the same file at once when
+  another file was opened right after a tab was closed or merged, and the
+  older write could land last — a bookmark removed in the merged tab
+  reappeared on the next open. Writes of the file memory now always run one
+  after another, in order.
 - **A session saved on Windows opens on Linux, and the other way round.**
   An absolute path of the other OS (`C:\…`, `\\server\share\…`, `/home/…`)
   no longer makes the whole session file “broken”: the file is looked for next

@@ -1,1 +1,1 @@
-dendrolog_add_test(search_results LIBRARIES dendrolog_core TIMEOUT 120)
+dendrolog_add_test(search_results LIBRARIES dendrolog_core TIMEOUT 120 COST 17)

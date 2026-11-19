@@ -182,10 +182,13 @@ static void settleChecked(LogModel& model)
 
 // Конфигурации фильтров (FilterConfig, namedConfigs, randomConfigs) — общие
 // с tests/bookmarks, в tests/common/filterconfigs.h.
+// Здесь у моделей нет view, а документ загружен: конец фильтра — это
+// !isFiltering(), окно тишины settle() ничего не ловит (P-10).
+constexpr int kFilterQuietMs = 0;
 static void applyChecked(LogModel& model, const FilterConfig& cfg,
                          const QStringList& fieldNames)
 {
-    CHECK(testdocs::applyConfig(model, cfg, fieldNames),
+    CHECK(testdocs::applyConfig(model, cfg, fieldNames, kFilterQuietMs),
           QStringLiteral("модель не пришла в покой"));
 }
 
@@ -1343,8 +1346,8 @@ static void runEncodingFixture(const QString& name, const QStringList& utf8Paths
     for (const FilterConfig& cfg : encodingConfigs()) {
         g_context = name + QStringLiteral(" / ") + cfg.name;
         g_contextFailures = 0;
-        applyConfig(*ref.model, cfg, fieldNames);
-        applyConfig(*enc.model, cfg, fieldNames);
+        applyConfig(*ref.model, cfg, fieldNames, kFilterQuietMs);
+        applyConfig(*enc.model, cfg, fieldNames, kFilterQuietMs);
         if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
             CHECK(enc.model->rowCount() > 0,
                   QStringLiteral("правило с кириллицей ничего не нашло — фикстура не проверяет фильтр"));
@@ -1468,8 +1471,8 @@ static void runResidentEncodingFixture(const QString& name, const QStringList& p
     for (const FilterConfig& cfg : encodingConfigs()) {
         g_context = name + QStringLiteral(" / ") + cfg.name;
         g_contextFailures = 0;
-        applyConfig(*res.model, cfg, fieldNames);
-        applyConfig(*idx.model, cfg, fieldNames);
+        applyConfig(*res.model, cfg, fieldNames, kFilterQuietMs);
+        applyConfig(*idx.model, cfg, fieldNames, kFilterQuietMs);
         if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
             CHECK(res.model->rowCount() > 0,
                   QStringLiteral("правило с кириллицей ничего не нашло на резидентном бэкенде"));
@@ -1765,9 +1768,9 @@ static void testProvisionalEncodings(const QDir& dir, const QString& schema,
         for (const FilterConfig& cfg : encodingConfigs()) {
             g_context = QStringLiteral("предварительное, пересмотр дозаписью / ") + cfg.name;
             g_contextFailures = 0;
-            applyConfig(*res.model, cfg, fieldNames);
-            applyConfig(*idx.model, cfg, fieldNames);
-            applyConfig(*ref.model, cfg, fieldNames);
+            applyConfig(*res.model, cfg, fieldNames, kFilterQuietMs);
+            applyConfig(*idx.model, cfg, fieldNames, kFilterQuietMs);
+            applyConfig(*ref.model, cfg, fieldNames, kFilterQuietMs);
             compareVisibleRows(*res.model, *idx.model);
             compareTextWithReference(*res.model, *ref.model, QStringLiteral("резидентный против эталона"));
             if (!cfg.rules.rules.isEmpty()) {

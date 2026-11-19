@@ -1,1 +1,1 @@
-dendrolog_add_test(dirscanner_smoke LIBRARIES dendrolog_widgets)
+dendrolog_add_test(dirscanner_smoke LIBRARIES dendrolog_widgets COST 11)

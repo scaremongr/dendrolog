@@ -57,10 +57,11 @@ Qt 6.8 в `/opt/qt6` ставит setup script окружения (из conda-fo
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/qt6
 cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure -j$(nproc)
 ```
 
-Полная сборка — около минуты на 4 ядрах, тесты — около 2,5 минут. Окна нет:
+Полная сборка — около минуты на 4 ядрах, тесты с `-j4` — около 3 минут (последовательно было бы
+~7 минут; дольше всех `logview_state`, ~155 с). Окна нет:
 тесты сами ставят `QT_QPA_PLATFORM=offscreen`, приложение запускать с этой
 переменной. Если `/opt/qt6` нет, setup script не отработал — сказать об этом
 автору; Qt из apt не подойдёт. Windows-сборку и установщики даёт только CI
@@ -69,7 +70,7 @@ ctest --test-dir build --output-on-failure
 ## Тесты
 
 ```sh
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release --output-on-failure -j 4   # число — по ядрам
 ```
 
 Двадцать шесть тестов без дисплея (offscreen), зарегистрированы в CTest при `BUILD_TESTING`; CI
@@ -112,6 +113,25 @@ ctest --test-dir build -C Release --output-on-failure
 dendrolog_core)` (функция в `tests/CMakeLists.txt`: CTest, таймаут, путь к
 Qt DLL на Windows) плюс `add_subdirectory` там же.
 
+Набор идёт параллельно (`ctest -j`, P-10), и каждый тест обязан это
+выдерживать:
+
+- временные файлы и каталоги — только `QTemporaryDir` / `QTemporaryFile` или
+  имя с PID (спул stdin — `StdinSpooler::spoolFilePathFor(pid)`, ключ
+  `SingleInstance` — с PID); в каталог исходников и в `testdata/` тест не пишет;
+- каталог настроек теста — каталог его exe: `dendrolog_add_test` кладёт рядом
+  маркер `portable`, так что ini, схемы и память файлов у каждого теста и
+  каждого каталога сборки свои, а настоящие настройки пользователя не
+  трогаются;
+- ждать состояние (`testdocs::waitFor`, `settle`, `isFiltering()`,
+  `LogListView::hasPendingLayout()`), а не время: под нагрузкой и
+  санитайзером таймер ничего не гарантирует. У модели без view на
+  загруженном документе фильтр стартует синхронно, и `settle(model, 0)` ждёт
+  ровно его конца; окно тишины по умолчанию (80 мс) нужно только с view;
+- каждый тест занимает около одного ядра, поэтому `PROCESSORS` и `RUN_SERIAL`
+  не заданы; долгим задан `COST` (аргумент `dendrolog_add_test`), чтобы CTest
+  запускал их первыми.
+
 `logstore_equivalence` — главный страховочный трос хранилища: эталон
 поведения индексного бэкенда не написан прозой, им СЛУЖИТ резидентный. Тест
 грузит одни и те же файлы обоими путями, прогоняет 33 конфигурации фильтров
@@ -126,14 +146,18 @@ Qt DLL на Windows) плюс `add_subdirectory` там же.
 идентификатор строки (R-1), эталон — разбиение байтов файла
 (`testdocs::expectedPhysicalLines`). Ключ строки сверяется по строкам, а не по
 рядам: так он проверяется и на одно-файловой вкладке «не по порядку». Прогон
-занимает ~65 с; поэтапный тайминг он печатает сам.
+занимает ~47 с; поэтапный тайминг он печатает сам. Модели здесь без view, и
+конец фильтра ждётся по `isFiltering()` без окна тишины `settle()` (P-10: окно
+по 80 мс на каждое из ~1200 применений стоило 115 с).
 
 `logview_state` — страховочный трос представления. Инвариант один («текущая
 запись и позиция вьюпорта переживают изменение видимого набора»), а путей,
 которые его нарушают, много, поэтому проверка табличная: инварианты × 12
 триггеров (уровни, время, текст, маркеры, закладки, колонки, добавление файла) × три
 пути хранилища × позиции. Новый путь, добавленный мимо общего механизма
-восстановления, падает здесь сразу. Прогон ~85 с.
+восстановления, падает здесь сразу. Прогон ~155 с — самый долгий тест и
+критический путь параллельного прогона; почти всё это паузы по таймеру
+(`pump` и окна `settle`), перевод на ожидание состояния — задача P-6.
 
 `lineindex_smoke` среди прочего проверяет цену скана `SequentialLineReader`:
 число перечитываний окна вперёд, назад и с «дрожанием» обязано оставаться
@@ -156,13 +180,13 @@ Qt DLL на Windows) плюс `add_subdirectory` там же.
 
 ```sh
 cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=/opt/qt6 -DDENDROLOG_SANITIZER=address
-cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-failure
+cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-failure -j$(nproc)
 ```
 
 Для TSan — то же с `build-tsan` и `thread`. Запускать через `ctest`: опции
 рантайма, подавления и увеличенные таймауты он берёт из `tests/CMakeLists.txt`
 (тест напрямую — с `TSAN_OPTIONS=suppressions=tests/sanitizers/tsan.supp`).
-Прогон — примерно как обычный, 2–4 минуты. В CI — отдельный workflow
+Прогон с `-j4`: ASan — около 5 минут, TSan — около 10–15 минут. В CI — отдельный workflow
 `.github/workflows/sanitizers.yml` (пуш в `main` и вручную); его красный
 статус не блокирует сборку установщиков, но чинить его нужно так же.
 

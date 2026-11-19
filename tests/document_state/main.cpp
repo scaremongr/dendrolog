@@ -95,9 +95,12 @@
 #include <QJsonDocument>
 #include <QScrollBar>
 #include <QStandardPaths>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
+#include <QThread>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -966,6 +969,58 @@ static void checkFileMemoryFormat()
     CHECK(FileMemory::fromJson(extra).has_value(), QStringLiteral("лишние ключи не мешают"));
 }
 
+// Записи памяти — по одной и в потоке записи (Q-21). Ожидание записей не
+// должно выполнять ещё не начатую запись в ждущем потоке: тогда следующую
+// взял бы освободившийся поток записи, две записи одного файла шли бы
+// одновременно, и прежняя ложилась на диск после новой (под нагрузкой TSan
+// так воскресала снятая в приёмнике закладка, «объединение вкладок»).
+// Поток записи занят задачей мимо очереди, пока не начнётся первая запись;
+// первая ждёт начала второй. Оба ожидания — с запасом (1 с): с исправлением
+// они истекают (первая стоит за занятой, вторая — за первой), без него
+// кончаются сразу, и запас нужен лишь медленному потоку под нагрузкой.
+static void checkWriteOrder(const QDir& dir)
+{
+    g_context = QStringLiteral("память файла: порядок записей");
+    FileMemoryStore store(dir.filePath(QStringLiteral("write-order")));
+    QThread* const waiting = QThread::currentThread();
+    std::atomic<bool> firstStarted{ false };
+    std::atomic<bool> secondStarted{ false };
+    std::atomic<int> active{ 0 };
+    std::atomic<int> maxActive{ 0 };
+    std::atomic<int> onWaitingThread{ 0 };
+    const auto enter = [&] {
+        const int now = ++active;
+        int seen = maxActive.load();
+        while (now > seen && !maxActive.compare_exchange_weak(seen, now)) {
+        }
+        if (QThread::currentThread() == waiting)
+            ++onWaitingThread;
+    };
+    const auto waitUntil = [](const std::atomic<bool>& flag, int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (!flag.load() && t.elapsed() < ms)
+            QThread::msleep(1);
+    };
+    store.writerPoolForTesting().start([&] { waitUntil(firstStarted, 1000); });
+    store.enqueueForTesting([&] {
+        enter();
+        firstStarted = true;
+        waitUntil(secondStarted, 1000);
+        --active;
+    });
+    store.enqueueForTesting([&] {
+        enter();
+        secondStarted = true;
+        --active;
+    });
+    store.waitForWrites();
+    CHECK(maxActive.load() == 1,
+          QStringLiteral("записи не идут одновременно (сразу шло %1)").arg(maxActive.load()));
+    CHECK(onWaitingThread.load() == 0, QStringLiteral("запись не выполняется в ждущем потоке"));
+    CHECK(firstStarted.load() && secondStarted.load(), QStringLiteral("обе записи выполнены"));
+}
+
 static void checkFileMemoryStore(const QDir& dir)
 {
     const QDir logs(dir.filePath(QStringLiteral("memory-logs")));
@@ -1491,8 +1546,13 @@ static void checkTabMemory(const QDir& dir, const QString& name, const QString& 
                 target->bookmarks().remove(b.id);
         target->saveFileMemory();
         store.waitForWrites();
-        CHECK(linesOf(FileMemoryStore(memDir).open(merged).memory) == (QVector<qint64>{ 9 }),
-              QStringLiteral("снятая в приёмнике закладка не вернулась"));
+        const QVector<qint64> mergedLines = linesOf(FileMemoryStore(memDir).open(merged).memory);
+        QStringList shownLines;
+        for (const qint64 line : mergedLines)
+            shownLines << QString::number(line);
+        CHECK(mergedLines == (QVector<qint64>{ 9 }),
+              QStringLiteral("снятая в приёмнике закладка не вернулась (в памяти: %1)")
+                  .arg(shownLines.join(QStringLiteral(", "))));
     }
 
     // ---- Clear All — с подтверждением -----------------------------------------------------
@@ -2707,6 +2767,7 @@ int main(int argc, char** argv)
     checkStdin(dir, schema);
     checkMidLoadAndThreshold(dir, schema);
     checkFileMemoryStore(dir);
+    checkWriteOrder(dir);
     checkSessionFile(dir);
     checkSessionRebind(dir);
     checkForeignMemory(dir);

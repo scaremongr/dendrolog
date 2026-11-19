@@ -298,7 +298,13 @@ inline QVector<FilterConfig> allConfigs(const QDateTime& from, const QDateTime& 
 
 // Поставить конфигурацию в модель (правила привязываются к колонкам схемы) и
 // дождаться окончания фильтра; false — модель не успокоилась.
-inline bool applyConfig(LogModel& model, const FilterConfig& cfg, const QStringList& fieldNames)
+// quietMs — окно тишины settle(). Сеттеры фильтра запускают его синхронно
+// (isFiltering() истинно сразу после вызова), поэтому модели без view на
+// загруженном документе окно не нужно: 0 ждёт ровно конца фильтра. С view
+// окно даёт отработать её отложенным таймерам. На 66 применений за фикстуру
+// logstore_equivalence окно по умолчанию стоило ~5 с (P-10).
+inline bool applyConfig(LogModel& model, const FilterConfig& cfg, const QStringList& fieldNames,
+                        int quietMs = 80)
 {
     model.setAvailableFields(fieldNames);
     model.setFieldDisplaySelection(cfg.fieldFilterEnabled, cfg.visibleFields);
@@ -310,7 +316,7 @@ inline bool applyConfig(LogModel& model, const FilterConfig& cfg, const QStringL
     model.setTimeRangeFilter(cfg.start, cfg.end);
     model.setFilterRules(rules);
     model.setRowMarkers(cfg.markers);
-    return settle(model);
+    return settle(model, quietMs);
 }
 
 } // namespace testdocs
