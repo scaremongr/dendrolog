@@ -6,6 +6,14 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A schema file the program cannot read is no longer deleted.** Any change
+  to the list of field schemas (OK in the schema editor, opening a session
+  that brings its own schema) removed every `*.json` in the `patterns` folder
+  that did not load as a schema — a file broken by a manual edit, or a schema
+  written by a newer version. Such files are now left as they are, and a new
+  schema no longer takes over their file name.
+
 ## [0.6.0] — 2026-11-19
 
 **An investigation can be put aside and picked up again.** Bookmarks with
