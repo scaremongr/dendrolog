@@ -1,0 +1,132 @@
+{
+    "bookmarks": [
+        {
+            "created": "2026-11-17T10:00:00.000Z",
+            "note": "первый таймаут",
+            "preview": "2026-07-16 09:20:31.554 [db-pool] ERROR timeout",
+            "record": {
+                "hash": "sha1-64-ascii",
+                "line": 185,
+                "text": "a1b2c3d4e5f60718",
+                "version": 1
+            },
+            "source": {
+                "hash": "sha1-64",
+                "head": "9f0c11aa22bb33cc",
+                "path": "@ROOT@/logs/app.log",
+                "size": 1048576,
+                "tail": "3ca1deadbeef0042",
+                "version": 1
+            },
+            "version": 1
+        },
+        {
+            "created": "2026-11-17T10:00:00.000Z",
+            "preview": "недописанная",
+            "record": {
+                "hash": "sha1-64-ascii",
+                "line": 7,
+                "partial": true,
+                "version": 1
+            },
+            "source": {
+                "hash": "sha1-64",
+                "head": "0123456789abcdef",
+                "path": "@ROOT@/logs/db.log",
+                "size": 2048,
+                "tail": "0123456789abcdef",
+                "version": 1
+            },
+            "version": 1
+        }
+    ],
+    "format": "dendrolog-tab-state",
+    "sources": [
+        {
+            "source": {
+                "hash": "sha1-64",
+                "head": "9f0c11aa22bb33cc",
+                "path": "@ROOT@/logs/app.log",
+                "size": 1048576,
+                "tail": "3ca1deadbeef0042",
+                "version": 1
+            }
+        },
+        {
+            "encoding": "Windows-1251",
+            "source": {
+                "hash": "sha1-64",
+                "head": "0123456789abcdef",
+                "path": "@ROOT@/logs/db.log",
+                "size": 2048,
+                "tail": "0123456789abcdef",
+                "version": 1
+            }
+        }
+    ],
+    "version": 1,
+    "view": {
+        "autoReload": true,
+        "current": {
+            "offset": 120,
+            "record": {
+                "hash": "sha1-64-ascii",
+                "line": 185,
+                "text": "a1b2c3d4e5f60718",
+                "version": 1
+            },
+            "selected": true,
+            "source": {
+                "hash": "sha1-64",
+                "head": "9f0c11aa22bb33cc",
+                "path": "@ROOT@/logs/app.log",
+                "size": 1048576,
+                "tail": "3ca1deadbeef0042",
+                "version": 1
+            }
+        },
+        "followTail": false,
+        "levels": [
+            "warn",
+            "error",
+            "fatal"
+        ],
+        "markers": [
+            {
+                "caseSensitive": false,
+                "color": "#80ffcc00",
+                "enabled": true,
+                "regex": false,
+                "text": "timeout"
+            }
+        ],
+        "textRules": {
+            "rules": [
+                {
+                    "action": "exclude",
+                    "caseSensitive": false,
+                    "color": "#ff336699",
+                    "connector": "and",
+                    "enabled": true,
+                    "field": "",
+                    "highlight": true,
+                    "regex": false,
+                    "text": "heartbeat"
+                },
+                {
+                    "action": "include",
+                    "caseSensitive": false,
+                    "color": "",
+                    "connector": "or",
+                    "enabled": true,
+                    "field": "Thread",
+                    "highlight": true,
+                    "regex": true,
+                    "text": "pool-\\d+"
+                }
+            ]
+        },
+        "timeFrom": "2026-07-16T09:00:00.000Z",
+        "version": 1
+    }
+}

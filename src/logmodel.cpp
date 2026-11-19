@@ -481,6 +481,16 @@ void LogModel::setFilterRules(const FilterRuleSet& rules)
     applyFilter();
 }
 
+void LogModel::setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
+                          const QDateTime& end, const FilterRuleSet& rules)
+{
+    m_activeLogLevels = levels;
+    m_filterStartTime = start;
+    m_filterEndTime = end;
+    m_filterRules = rules;
+    applyFilter();
+}
+
 void LogModel::applyFilter()
 {
     m_store->applyFilter();

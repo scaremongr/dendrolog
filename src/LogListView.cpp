@@ -76,6 +76,7 @@ LogListView::LogListView(QWidget *parent)
     // позиция после перехода больше не удерживается (см. goToRow).
     connect(verticalScrollBar(), &QScrollBar::actionTriggered, this, [this]() {
         m_holdAfterGoTo = false;
+        noteUserAction();
     });
 
     // Перетаскивание ползунка вверх снимает follow-tail (пользователь ушёл
@@ -202,6 +203,8 @@ void LogListView::setModel(QAbstractItemModel *model) {
     m_persistentSelection.clear();
     m_resetViewportAnchor.clear();
     m_resetViewportOffset = 0;
+    m_holdRestoredOffset = false;
+    m_awaitedAnchor = {};
     {
         auto* logModel = qobject_cast<LogModel*>(model);
         m_indexedBackendModel = logModel && logModel->isIndexedBackend();
@@ -227,6 +230,21 @@ void LogListView::setModel(QAbstractItemModel *model) {
             m_resetViewportAnchor.logicalEntryId = key.logicalEntryId;
             m_resetViewportAnchor.sourceFile = key.sourceFile;
             m_resetViewportOffset = int(scrollY - rowYOffset(row));
+            // На случай, если reset оставит модель пустой (конверсия, полная
+            // перезагрузка): ключ выбранной строки, иначе верхней. Якорь,
+            // который уже ждёт своих строк, частичными данными не заменяется.
+            if (m_awaitedAnchor.armed)
+                return;
+            m_awaitedAnchor = {};
+            const int selected = userSelectedRow();
+            const int keyRow = selected >= 0 ? selected : row;
+            m_awaitedAnchor.key = logModel->keyAt(keyRow);
+            m_awaitedAnchor.selected = selected >= 0;
+            int offset = 0;
+            if (!captureVisibleRowOffset(keyRow, offset))
+                m_awaitedAnchor.centered = true;
+            m_awaitedAnchor.offset = offset;
+            m_awaitedAnchor.userActions = m_userActions;
         });
 
         m_modelConnections << connect(model, &QAbstractItemModel::modelReset, this, [this]() {
@@ -278,6 +296,22 @@ void LogListView::setModel(QAbstractItemModel *model) {
             const int viewportOffset = m_resetViewportOffset;
             m_resetViewportAnchor.clear();
             m_resetViewportOffset = 0;
+            // Строку поставил setViewAnchor (восстановленное состояние
+            // вкладки), а пользователь вид с тех пор не трогал — она остаётся
+            // на своём месте экрана, а не уходит в центр.
+            const bool keepRestoredOffset = m_holdRestoredOffset && selectedRow >= 0;
+            const int restoredOffset = m_restoredOffset;
+            // Строк нет вовсе (конверсия, полная перезагрузка) — якорь ждёт
+            // своих строк из вставок (placeAwaitedAnchor).
+            if (logModel && logModel->rowCount() == 0 && m_awaitedAnchor.isValid()) {
+                // Выбор без удерживаемого места встаёт по центру, как после
+                // обычного reset.
+                if (!m_awaitedAnchor.armed && m_awaitedAnchor.selected && !m_holdRestoredOffset)
+                    m_awaitedAnchor.centered = true;
+                m_awaitedAnchor.armed = true;
+            } else if (!m_awaitedAnchor.armed) {
+                m_awaitedAnchor = {};
+            }
 
             // Обновляем скроллбар ДО вызова setCurrentIndex, чтобы первоначальные границы были корректны
             updateScrollbar();
@@ -298,15 +332,25 @@ void LogListView::setModel(QAbstractItemModel *model) {
             // Поэтому прокрутку к элементу обязательно нужно делать через QTimer::singleShot,
             // чтобы наш код выполнился ПОСЛЕ того, как Qt закончит все свои внутренние обновления.
             if (centerRow >= 0 || viewportRow >= 0) {
-                QTimer::singleShot(0, this, [this, centerRow, viewportRow, viewportOffset]() {
+                const quint64 epoch = m_positionEpoch;
+                QTimer::singleShot(0, this, [this, centerRow, viewportRow, viewportOffset,
+                                             keepRestoredOffset, restoredOffset, epoch]() {
                     if (!this->model()) return;
+                    // Пользователь успел сам выбрать строку или прокрутить
+                    // вид после reset, либо позицию поставили явно
+                    // (setViewAnchor, ожидающий якорь) — это новее.
+                    if (m_positionEpoch != epoch) return;
                     const int rowCount = this->model()->rowCount();
 
                     // Еще раз обновляем скроллбар на случай, если Qt что-то сбросило
                     updateScrollbar();
 
                     int target = -1;
-                    if (centerRow >= 0 && centerRow < rowCount) {
+                    if (keepRestoredOffset && centerRow >= 0 && centerRow < rowCount) {
+                        if (refineHeightsAbove(centerRow))
+                            updateScrollbar();
+                        target = targetScrollValueForRowOffset(centerRow, restoredOffset);
+                    } else if (centerRow >= 0 && centerRow < rowCount) {
                         // Центрируем строку на экране
                         const qint64 rowY = rowYOffset(centerRow);
                         const int rowH = getRowHeight(centerRow);
@@ -327,6 +371,14 @@ void LogListView::setModel(QAbstractItemModel *model) {
                 verticalScrollBar()->setValue(0);
                 viewport()->update();
             }
+            // Якорь ждёт строку с прошлого пустого reset, а этот пришёл уже
+            // со строками (фильтр по частичным данным, батч слитой вкладки):
+            // строка могла прийти с ним — после восстановления выше.
+            if (m_awaitedAnchor.armed && this->model() && this->model()->rowCount() > 0)
+                QTimer::singleShot(0, this, [this]() {
+                    if (m_awaitedAnchor.armed)
+                        placeAwaitedAnchor();
+                });
         });
 
         // При вставке строк В СЕРЕДИНУ (слияние нескольких файлов по времени)
@@ -342,6 +394,8 @@ void LogListView::setModel(QAbstractItemModel *model) {
         m_modelConnections << connect(model, &QAbstractItemModel::rowsInserted, this,
                 [this](const QModelIndex&, int first, int last) {
                     handleRowsInserted(first, last);
+                    if (m_awaitedAnchor.armed)
+                        placeAwaitedAnchor();
                 });
 
         // При удалении строк номера строк ниже точки удаления сдвигаются
@@ -1480,6 +1534,7 @@ void LogListView::goToRow(int row, NavKind kind)
 {
     if (!model() || row < 0 || row >= model()->rowCount())
         return;
+    noteUserAction();
     const QModelIndex index = model()->index(row, 0);
     // История переходов: откуда ушли — выбор пользователя (инвариант 10), а
     // без него — первая строка экрана. Пишется ДО перехода.
@@ -1495,11 +1550,21 @@ void LogListView::goToRow(int row, NavKind kind)
     // программная прокрутка его сама не снимает (только ползунок и колесо).
     if (m_followTail && row < model()->rowCount() - 1)
         setFollowTail(false);
+    selectAsUserChoice(row);
+    scrollTo(index, QAbstractItemView::PositionAtCenter);
+    // Строку из последних полэкрана отцентрировать нельзя — вид встаёт у
+    // самого низа, и «прилипание» к хвосту увело бы его на первой же
+    // дозаписи. Переход к самой последней строке — это переход к хвосту.
+    m_holdAfterGoTo = row < model()->rowCount() - 1;
+}
+
+void LogListView::selectAsUserChoice(int row)
+{
     // setCurrentIndex выделяет строку (ClearAndSelect) и через currentChanged
     // обновляет m_persistentSelection. Но если строка уже текущая (её мог
     // назначить Qt по фокусу, без выделения и без якоря), currentChanged не
     // придёт — якорь ставим сами.
-    setCurrentIndex(index);
+    setCurrentIndex(model()->index(row, 0));
     if (auto* logModel = qobject_cast<LogModel*>(model())) {
         const LogModel::EntryKey key = logModel->keyForRow(row);
         if (key.logicalEntryId >= 0) {
@@ -1507,11 +1572,107 @@ void LogListView::goToRow(int row, NavKind kind)
             m_persistentSelection.sourceFile = key.sourceFile;
         }
     }
-    scrollTo(index, QAbstractItemView::PositionAtCenter);
-    // Строку из последних полэкрана отцентрировать нельзя — вид встаёт у
-    // самого низа, и «прилипание» к хвосту увело бы его на первой же
-    // дозаписи. Переход к самой последней строке — это переход к хвосту.
-    m_holdAfterGoTo = row < model()->rowCount() - 1;
+}
+
+bool LogListView::placeAwaitedAnchor()
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    // Пользователь уже смотрит сам или вид идёт за хвостом — ждать нечего.
+    if (!logModel || m_userActions != m_awaitedAnchor.userActions || m_followTail) {
+        m_awaitedAnchor = {};
+        return true;
+    }
+    const int row = logModel->rowForKey(m_awaitedAnchor.key);
+    if (row < 0)
+        return false; // строка ещё не пришла (или скрыта фильтром — settleAwaitedAnchor)
+    const AwaitedAnchor anchor = std::exchange(m_awaitedAnchor, {});
+    ++m_positionEpoch;
+    if (anchor.selected) {
+        selectAsUserChoice(row);
+        m_selection.anchorRow = m_selection.activeRow = row;
+    }
+    if (refineHeightsAbove(row))
+        updateScrollbar();
+    const int offset = anchor.centered // как после reset — по центру
+        ? qMax(0, (viewport()->height() - getRowHeight(row)) / 2) : anchor.offset;
+    verticalScrollBar()->setValue(targetScrollValueForRowOffset(row, offset));
+    viewport()->update();
+    return true;
+}
+
+void LogListView::settleAwaitedAnchor()
+{
+    // Пустая модель — данных ещё нет (конверсия только началась): ждём.
+    if (!m_awaitedAnchor.armed || !model() || model()->rowCount() == 0 || placeAwaitedAnchor())
+        return;
+    auto* logModel = qobject_cast<LogModel*>(model());
+    const AwaitedAnchor anchor = std::exchange(m_awaitedAnchor, {});
+    const int row = logModel ? logModel->nearestRowForKey(anchor.key) : -1;
+    if (row < 0)
+        return;
+    ++m_positionEpoch;
+    if (refineHeightsAbove(row))
+        updateScrollbar();
+    verticalScrollBar()->setValue(targetScrollValueForRow(row, QAbstractItemView::PositionAtCenter));
+    viewport()->update();
+}
+
+void LogListView::noteUserAction()
+{
+    ++m_userActions;
+    ++m_positionEpoch;
+    m_holdRestoredOffset = false;
+}
+
+LogListView::ViewAnchor LogListView::viewAnchor() const
+{
+    ViewAnchor anchor;
+    const int rows = model() ? model()->rowCount() : 0;
+    if (rows <= 0)
+        return anchor;
+    const qint64 scrollY = scrollContentY();
+    const int selected = userSelectedRow();
+    if (selected >= 0) {
+        anchor.row = selected;
+        anchor.selected = true;
+        // Выбранная строка вне экрана: смещение — «по центру», как её
+        // поставил бы goToRow (разность координат могла бы не влезть в int).
+        if (!captureVisibleRowOffset(selected, anchor.offset))
+            anchor.offset = qMax(0, (viewport()->height() - getRowHeight(selected)) / 2);
+        return anchor;
+    }
+    anchor.row = qBound(0, rowAtY(scrollY), rows - 1);
+    anchor.offset = int(rowYOffset(anchor.row) - scrollY);
+    return anchor;
+}
+
+void LogListView::setViewAnchor(const ViewAnchor& anchor)
+{
+    if (!model() || anchor.row < 0 || anchor.row >= model()->rowCount())
+        return;
+    const int rows = model()->rowCount();
+    m_awaitedAnchor = {};
+    ++m_positionEpoch;
+    if (m_followTail && anchor.row < rows - 1)
+        setFollowTail(false);
+    if (anchor.selected)
+        selectAsUserChoice(anchor.row);
+    // Как scrollTo: точные высоты строки и тех, что окажутся над ней.
+    if (refineHeightsAbove(anchor.row))
+        updateScrollbar();
+    // Выбранная строка — на экране: место, снятое в окне выше нынешнего,
+    // прижимается к низу (вьюпорт ещё не разложен — как есть).
+    int offset = anchor.offset;
+    const int rowH = getRowHeight(anchor.row);
+    if (anchor.selected && viewport()->height() > rowH)
+        offset = qBound(0, offset, viewport()->height() - rowH);
+    const int target = targetScrollValueForRowOffset(anchor.row, offset);
+    if (target != verticalScrollBar()->value())
+        verticalScrollBar()->setValue(target);
+    viewport()->update();
+    m_holdAfterGoTo = anchor.row < rows - 1;
+    m_holdRestoredOffset = anchor.selected;
+    m_restoredOffset = offset;
 }
 
 int LogListView::userSelectedRow() const
@@ -2209,6 +2370,7 @@ void LogListView::updateScrollbar() {
 
 // Обработка нажатия мыши для выделения текста
 void LogListView::mousePressEvent(QMouseEvent *event) {
+    noteUserAction();
     // Боковые кнопки мыши — история переходов (R-7); выделение не трогаем.
     if (event->button() == Qt::BackButton || event->button() == Qt::ForwardButton) {
         emit historyNavigationRequested(event->button() == Qt::ForwardButton);
@@ -2671,10 +2833,22 @@ void LogListView::wheelEvent(QWheelEvent *event)
     if (m_followTail && event->angleDelta().y() > 0)
         setFollowTail(false);
     m_holdAfterGoTo = false;   // пользователь сам выбирает позицию
+    noteUserAction();
     QListView::wheelEvent(event);
 }
 
 void LogListView::keyPressEvent(QKeyEvent *event) {
+    // Действие с видом — не модификатор сам по себе (начало Shift+F3,
+    // Alt+Tab) и не копирование.
+    switch (event->key()) {
+    case Qt::Key_Shift: case Qt::Key_Control: case Qt::Key_Alt: case Qt::Key_Meta:
+    case Qt::Key_AltGr: case Qt::Key_CapsLock: case Qt::Key_NumLock: case Qt::Key_ScrollLock:
+        break;
+    default:
+        if (!event->matches(QKeySequence::Copy))
+            noteUserAction();
+        break;
+    }
     // Навигация вниз — пользователь сам идёт к хвосту: позиция после
     // перехода (goToRow) больше не удерживается.
     switch (event->key()) {

@@ -16,6 +16,7 @@
 #include "LogListView.h"
 #include "filechangedetector.h"
 #include "bookmarkstore.h"
+#include "documentstate.h"
 
 class QuickSearch;
 
@@ -37,8 +38,46 @@ public:
     // применяется выбор пользователя из initial (если он есть).
     void addLogFile(const QString &filePath, const FileEncoding& initial);
     // Объединение вкладок: файлы other добавляются сюда со своими состояниями
-    // кодировки (выбор пользователя и решение автоматики не теряются).
+    // кодировки (выбор пользователя и решение автоматики не теряются), а его
+    // закладки — до файлов (BookmarkStore::restore): строки находятся по ходу
+    // загрузки, заметки не теряются.
     void addFilesFrom(const LogViewWidget& other);
+
+    // ---- Состояние вкладки вне вкладки (R-4, documentstate.h) ------------------
+    // Снимок: файлы (идентичность по концу прочитанного, ручной выбор
+    // кодировки), закладки, фильтры и маркеры модели, текущая строка и её
+    // место на экране (LogListView::viewAnchor), follow-tail, авто-обновление.
+    // Спул stdin (Ephemeral) в снимок не попадает — ни файлом, ни закладками,
+    // ни текущей строкой. Предложенные и не принятые фильтры (Offer) —
+    // снимаются вместо пустых: отказ от щелчка их не теряет.
+    TabState captureState() const;
+    // Как применять фильтры состояния: Apply — сразу (сессия, Ctrl+Shift+T);
+    // Offer — не трогать вид, а предложить «вернуть одним щелчком» (память
+    // файла, docs/design/R-5.md, «Решения за автором»). Маркеры, закладки,
+    // позиция, follow-tail и авто-обновление ставятся в обоих режимах.
+    enum class StateFilters { Apply, Offer };
+    struct StateApplyReport {
+        QStringList missingSources;  // файла нет — не открыт, закладки ждут его
+        QStringList changedSources;  // переписан — открыт чистым, закладки серые
+    };
+    // Применить снимок к вкладке. Звать на новой вкладке ДО загрузки: закладки
+    // и позиция ищутся по ходу загрузки (RecordLocator), фильтры стоят в модели
+    // до первой порции, файлы открываются с выбором кодировки. Можно и на
+    // вкладке с файлами (посреди загрузки) — поздним проходом.
+    // Пропавший источник пропускается, переписанный открывается, но его
+    // закладки и позиция получают отказ: «строка не найдена», вид не двигается.
+    // Позиция ставится, когда локатор найдёт строку, и только если пользователь
+    // к тому времени не выбрал строку и не прокрутил вид сам (инвариант 10).
+    StateApplyReport applyState(const TabState& state, StateFilters filters = StateFilters::Apply);
+    // Фильтры, предложенные applyState(…, Offer) и ещё не принятые.
+    bool hasOfferedFilters() const { return m_offeredFilters.has_value(); }
+    const std::optional<ViewState>& offeredFilters() const { return m_offeredFilters; }
+    // «Вернуть фильтры прошлого раза» / отказ.
+    void applyOfferedFilters();
+    void dismissOfferedFilters();
+    // Ждёт ли восстановленная позиция ответа локатора.
+    bool isPositionPending() const
+    { return m_pendingPosition.token != 0 || m_pendingPosition.waitingRow; }
     // Сообщение для строки статуса, почему файл не загрузился
     // (fileParsingFailed): понятная причина — UTF-16/32 во вкладке с
     // несколькими файлами (индексный путь его не читает, а откат в
@@ -204,6 +243,11 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // пересмотр, выбор пользователя, «авто», перечитывание переписанного
     // файла) — индикатор кодировки перечитывает fileEncoding.
     void fileEncodingChanged(const LogFilePtr& logFile);
+    // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
+    void offeredFiltersChanged(bool available);
+    // Восстановленная позиция поставлена (true) или не будет поставлена:
+    // строка не найдена, пользователь успел выбрать строку или прокрутить.
+    void positionRestoreFinished(bool applied);
     // Пункт контекстного меню «заметка к закладке»: закладка уже стоит,
     // заметку спрашивает окно. created — закладку поставил сам этот пункт:
     // отказ от заметки её снимает.
@@ -394,6 +438,31 @@ private:
 
     // Кэш агрегата loadInFlight по всем файлам вкладки (см. updateLoadingState).
     bool m_loading = false;
+
+    // ---- Состояние вкладки (R-4) ---------------------------------------------------
+    // Фильтры снимка с привязкой к схеме вкладки (bindFields).
+    void setStateFilters(const ViewState& view);
+    std::optional<ViewState> m_offeredFilters;
+    // Позиция из снимка ждёт строку от RecordLocator.
+    struct PendingPosition {
+        int token = 0;
+        int offset = 0;
+        bool selected = false;
+        quint64 userActions = 0; // LogListView::userActionCount на момент применения
+        // Строка найдена, но ещё не показана (фоновый фильтр, загрузка):
+        // ждёт конца фильтра или загрузки (retryPendingPosition).
+        bool waitingRow = false;
+        RecordKey key;
+        // Что искать заново, если ключ пропал (строки файла сброшены:
+        // конверсия, перезагрузка) — не больше kPositionRequests запросов.
+        SourceIdentity source;
+        RecordId record;
+        int requests = 0;
+    };
+    static constexpr int kPositionRequests = 3;
+    PendingPosition m_pendingPosition;
+    void finishPendingPosition(const RecordKey* key);
+    void retryPendingPosition();
 };
 
 #endif // LOGVIEWWIDGET_H

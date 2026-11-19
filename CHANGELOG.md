@@ -77,6 +77,12 @@ All notable changes to DendroLog are documented here. The format follows
   Settings is kept.
 
 ### Fixed
+- Merging tabs (dragging one tab onto another, **Merge All Tabs**) no longer
+  loses the bookmarks of the merged tab: they move to the receiving tab with
+  their notes and find their lines as the files load.
+- When a growing log crosses the large-file threshold, the selected line and
+  its place on screen (or, without a selection, the top of the view) are kept.
+  Before, the selection was dropped and the view jumped to the top of the file.
 - A UTF-16 or UTF-32 file added to a tab with other files (or to a large-file
   tab) now says why it is not shown and what to do — open it in a tab of its
   own — instead of a bare "Failed to parse".

@@ -193,6 +193,11 @@ public:
     // ---- Текстовая фильтрация (Include/Exclude + AND/OR + колонки) ----------
     void setFilterRules(const FilterRuleSet& rules);
     const FilterRuleSet& filterRules() const { return m_filterRules; }
+    // Уровни, время и текстовые правила разом — одна перефильтрация вместо
+    // трёх (применение сохранённого состояния вкладки, R-4). rules уже
+    // привязаны к схеме (bindFields).
+    void setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
+                    const QDateTime& end, const FilterRuleSet& rules);
 
     // ---- Недеструктивные row-маркеры ----------------------------------------
     void setRowMarkers(const QVector<HighlightPattern>& markers);

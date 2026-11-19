@@ -32,10 +32,17 @@
 //       зазоров и наложений — в том числе с переносом строк (разные высоты);
 //   G2  Down / PageDown / End / Up / Home двигают текущую строку, она
 //       выделена и видна.
+//
+// И восстановление позиции из сохранённого состояния вкладки (R-4,
+// LogViewWidget::applyState): позиция ставится, когда RecordLocator найдёт
+// строку, — и НЕ ставится, если пользователь до того выбрал строку или
+// прокрутил вид сам (инвариант 10); без его действий — ставится.
 // ============================================================================
 
 #include "LogListView.h"
+#include "appsettings.h"
 #include "bookmarkstore.h"
+#include "logviewwidget.h"
 #include "testdocuments.h"
 
 #include <QApplication>
@@ -743,6 +750,128 @@ static void checkKeyboard(const QString& name, LogListView& view)
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Восстановленная позиция против выбора пользователя (R-4)
+// ---------------------------------------------------------------------------
+
+static int lineRow(const LogModel& model, qint64 line)
+{
+    for (int row = 0; row < model.rowCount(); ++row)
+        if (model.keyAt(row).line == line)
+            return row;
+    return -1;
+}
+
+static bool tabSettled(LogViewWidget& tab)
+{
+    const bool ok = waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); })
+        && settle(*tab.model());
+    waitFor([&] { return !tab.view()->hasPendingLayout(); }, 5000);
+    pump(30);
+    return ok;
+}
+
+static void runRestoreVsUser(const QString& path, const QString& schema, bool indexed)
+{
+    AppSettings::instance().setIndexedThresholdMB(indexed ? 0 : 512);
+    const QString name = indexed ? QStringLiteral("индексный") : QStringLiteral("резидентный");
+    const auto makeTab = [&]() {
+        auto tab = std::make_unique<LogViewWidget>();
+        tab->setParserPattern(schema);
+        tab->resize(kViewWidth, kViewHeight);
+        tab->show();
+        return tab;
+    };
+    // Снимок: выбрана строка 900.
+    TabState state;
+    {
+        auto tab = makeTab();
+        tab->addLogFile(path);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        tab->view()->goToRow(lineRow(*tab->model(), 900));
+        pump(20);
+        state = tab->captureState();
+    }
+    setContext(name + QStringLiteral(" / восстановление: без действий пользователя"));
+    CHECK(state.view.hasCurrent() && state.view.current.line == 900, QStringLiteral("снимок со строкой"));
+    {
+        auto tab = makeTab();
+        tab->applyState(state);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        const int row = lineRow(*tab->model(), 900);
+        CHECK(row >= 0 && tab->view()->userSelectedRow() == row,
+              QStringLiteral("позиция поставлена: выбрана %1").arg(tab->view()->userSelectedRow()));
+    }
+
+    // Пользователь выбрал строку раньше, чем локатор ответил: вкладка уже
+    // загружена, ответ на применённое состояние — поздним проходом (позже).
+    setContext(name + QStringLiteral(" / восстановление: пользователь выбрал строку раньше"));
+    {
+        auto tab = makeTab();
+        tab->addLogFile(path);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        int finished = -1;
+        QObject::connect(tab.get(), &LogViewWidget::positionRestoreFinished,
+                         [&](bool applied) { finished = applied ? 1 : 0; });
+        tab->applyState(state);
+        CHECK(tab->isPositionPending(), QStringLiteral("сценарий: ответа ещё нет"));
+        const int userRow = lineRow(*tab->model(), 300);
+        tab->view()->goToRow(userRow);
+        CHECK(tabSettled(*tab), QStringLiteral("ответ локатора"));
+        CHECK(finished == 0, QStringLiteral("позиция не поставлена: %1").arg(finished));
+        CHECK(tab->view()->userSelectedRow() == userRow,
+              QStringLiteral("выбор пользователя на месте: %1, ждали %2")
+                  .arg(tab->view()->userSelectedRow()).arg(userRow));
+        CHECK(rowFullyVisible(*tab->view(), userRow), QStringLiteral("строка пользователя видна"));
+    }
+
+    // Пользователь прокрутил вид раньше ответа (ползунок).
+    setContext(name + QStringLiteral(" / восстановление: пользователь прокрутил раньше"));
+    {
+        auto tab = makeTab();
+        tab->addLogFile(path);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        tab->applyState(state);
+        QScrollBar* bar = tab->view()->verticalScrollBar();
+        bar->triggerAction(QAbstractSlider::SliderPageStepAdd);
+        bar->triggerAction(QAbstractSlider::SliderPageStepAdd);
+        const int value = bar->value();
+        CHECK(value > 0, QStringLiteral("сценарий: вид прокручен"));
+        CHECK(tabSettled(*tab), QStringLiteral("ответ локатора"));
+        CHECK(tab->view()->userSelectedRow() < 0 && bar->value() == value,
+              QStringLiteral("вид остался, где его оставил пользователь: %1 против %2, выбрана %3")
+                  .arg(bar->value()).arg(value).arg(tab->view()->userSelectedRow()));
+    }
+
+    // Пользователь действовал ещё до первых строк (новая вкладка, файл читается).
+    setContext(name + QStringLiteral(" / восстановление: действие до первых строк"));
+    {
+        auto tab = makeTab();
+        tab->applyState(state);
+        QKeyEvent down(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+        QApplication::sendEvent(tab->view(), &down);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        CHECK(tab->view()->userSelectedRow() != lineRow(*tab->model(), 900),
+              QStringLiteral("восстановленная строка не выбрана поверх действия пользователя"));
+    }
+
+    // Модификатор сам по себе (начало Shift+F3) и Ctrl+C — не действие с видом.
+    setContext(name + QStringLiteral(" / восстановление: модификатор и копирование не мешают"));
+    {
+        auto tab = makeTab();
+        tab->applyState(state);
+        QKeyEvent shift(QEvent::KeyPress, Qt::Key_Shift, Qt::ShiftModifier);
+        QApplication::sendEvent(tab->view(), &shift);
+        QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+        QApplication::sendEvent(tab->view(), &copy);
+        CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+        const int row = lineRow(*tab->model(), 900);
+        CHECK(row >= 0 && tab->view()->userSelectedRow() == row,
+              QStringLiteral("позиция поставлена: выбрана %1").arg(tab->view()->userSelectedRow()));
+    }
+    AppSettings::instance().setIndexedThresholdMB(512);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -842,6 +971,9 @@ int main(int argc, char** argv)
         checkGeometry(b.name + QStringLiteral(", перенос строк"), *view, kViewTimersMs);
         checkKeyboard(b.name + QStringLiteral(", перенос строк"), *view);
     }
+
+    runRestoreVsUser(smallLog, schema, false);
+    runRestoreVsUser(smallLog, schema, true);
 
     setContext(QStringLiteral("итог"));
     if (g_failures > 0) {
