@@ -513,10 +513,10 @@ void DirectoryScanner::queueFileScan(QTreeWidgetItem* item, const DirEntryInfo& 
     if (allowResume) {
         const auto known = m_scanState.constFind(info.path);
         if (known != m_scanState.cend() && known->stats.parseSuccess
-            && known->resume.offset > 0 && known->fingerprint != 0
+            && known->resume.offset > 0 && known->anchor.valid
             && info.size > known->resume.offset) {
             request.resume      = known->resume;
-            request.fingerprint = known->fingerprint;
+            request.anchor      = known->anchor;
             request.base        = known->complete;
         }
     }
@@ -575,8 +575,7 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         LogParser::StatsScan scan;
         bool resumed = false;
         if (request.resume.offset > 0) {
-            const FileChangeDetector::Anchor anchor{ request.resume.offset, request.fingerprint };
-            if (FileChangeDetector::classify(request.path, anchor)
+            if (FileChangeDetector::classify(request.path, request.anchor)
                 == FileChangeDetector::Change::Appended) {
                 scan = parser.analyzeFileForStats(request.path, request.resume);
                 if (scan.stats.parseSuccess) {
@@ -598,9 +597,9 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         if (scan.stats.parseSuccess && scan.next.offset > 0) {
             const FileChangeDetector::Anchor anchor =
                 FileChangeDetector::capture(request.path, scan.next.offset);
-            if (anchor.fingerprint != 0) {
-                result.state.resume      = scan.next;
-                result.state.fingerprint = anchor.fingerprint;
+            if (anchor.valid) {
+                result.state.resume = scan.next;
+                result.state.anchor = anchor;
             }
         }
         return result;

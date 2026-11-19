@@ -12,6 +12,8 @@
 #include <limits>
 #include <optional>
 
+class QFile;
+
 // ============================================================================
 // Идентификатор строки лога (R-1, docs/design/R-1.md).
 //
@@ -102,6 +104,16 @@ quint64 ofLineText(QStringView text);
 // Сырые байты строки без EOL в ASCII-совместимой кодировке (UTF-8,
 // однобайтные): равно ofLineText(текст строки в любой такой кодировке).
 quint64 ofLineBytes(QByteArrayView bytes);
+
+// Области файла (SourceIdentity, якорь FileChangeDetector) по концу
+// прочитанного size: начало [0, headRegionLength(size)) и конец
+// [tailRegionStart(size), size). При size <= 4 КБ это одна область.
+inline constexpr qint64 kFileRegionBytes = 4096;
+inline qint64 headRegionLength(qint64 size) { return qMin(size, kFileRegionBytes); }
+inline qint64 tailRegionStart(qint64 size) { return size - qMin(size, kFileRegionBytes); }
+// Отпечаток сырых байтов [from, from + len) открытого файла (ofBytes);
+// nullopt — не прочитались целиком. Одно чтение.
+std::optional<quint64> ofFileRegion(QFile& file, qint64 from, qint64 len);
 
 QString toHex(quint64 fingerprint);
 // Ровно 16 шестнадцатеричных цифр; иначе nullopt.
@@ -201,7 +213,7 @@ bool same(const QString& a, const QString& b);
 // прохода по файлу.
 struct SourceIdentity {
     static constexpr int    kFormatVersion = 1;
-    static constexpr qint64 kRegionBytes = 4096;
+    static constexpr qint64 kRegionBytes = RecordFingerprint::kFileRegionBytes;
 
     enum class State {
         Valid,     // файл есть, не короче сохранённого, оба отпечатка совпали

@@ -3,6 +3,11 @@
 //   • дозапись многострочной записи по частям, в том числе строки, дописанной
 //     в два приёма (без '\n' между ними), — на обоих бэкендах;
 //   • файл переписан заново (ротация) — полная перезагрузка;
+//   • переписано только НАЧАЛО файла — той же длины или с ростом, хвост тот
+//     же (Q-19): полная перезагрузка на обоих бэкендах, в слитой вкладке и
+//     после перехода порога; авто-обновление и F5; новый текст и номера
+//     строк, закладка на переписанной строке — «не найдена», на уцелевшей —
+//     на месте;
 //   • растущий файл пересёк порог индексного бэкенда — вкладка на лету
 //     становится индексной, строки те же;
 //   • вкладку закрыли посреди загрузки — без падения;
@@ -45,6 +50,7 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QDateTime>
 #include <QFocusEvent>
 #include <QPointer>
 #include <QScrollBar>
@@ -2074,6 +2080,140 @@ static void checkReopenClosedTab(const QDir& dir, const QString& name, const QSt
     }
 }
 
+// ---------------------------------------------------------------------------
+// Q-19: переписано только начало файла (та же длина или рост, хвост тот же)
+// ---------------------------------------------------------------------------
+
+// Файл с узнаваемыми строками: строка 3 (в первых 4 КБ) переписывается,
+// строка 200 (между областями отпечатка) и последняя остаются.
+static QByteArray headFixture(const QByteArray& tag, const QByteArray& third)
+{
+    QByteArray out;
+    for (int i = 1; i <= 300; ++i)
+        out += record(i, "INFO", tag + " line " + QByteArray::number(i).rightJustified(4, '0')
+                                     + (i == 3 ? " " + third : QByteArray(" steady")));
+    return out;
+}
+
+// Переписать файл и сдвинуть mtime явно: настоящая запись всегда её меняет,
+// а грубые часы файловой системы могли бы оставить прежнюю (предел, который
+// закреплён в record_identity).
+static bool rewriteLater(const QString& path, const QByteArray& bytes)
+{
+    const qint64 before = QFileInfo(path).lastModified().toMSecsSinceEpoch();
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate) || f.write(bytes) != bytes.size())
+        return false;
+    return f.setFileTime(QDateTime::fromMSecsSinceEpoch(before + 2000), QFileDevice::FileModificationTime);
+}
+
+enum class HeadScenario { Single, Merged, CrossedThreshold };
+
+static void checkHeadRewrite(const QDir& dir, const QString& name, const QString& schema,
+                             HeadScenario scenario)
+{
+    AppSettings& settings = AppSettings::instance();
+    const int savedThreshold = settings.indexedThresholdMB();
+    for (const bool grow : { false, true }) {
+        for (const bool f5 : { false, true }) {
+            const QString label = QStringLiteral("head rewrite/%1/%2/%3")
+                .arg(name, grow ? QStringLiteral("grown") : QStringLiteral("same length"),
+                     f5 ? QStringLiteral("F5") : QStringLiteral("timer"));
+            const QString file = QStringLiteral("head-%1-%2-%3.log").arg(name).arg(int(grow)).arg(int(f5));
+            const QByteArray original = headFixture("old", "alpha");
+            const QString path = testdocs::writeFile(dir, file, original);
+            QString other;
+            if (scenario == HeadScenario::Merged) {
+                QByteArray bytes;
+                for (int i = 1; i <= 50; ++i)
+                    bytes += record(i * 6, "WARN", "other " + QByteArray::number(i));
+                other = testdocs::writeFile(dir, QStringLiteral("other-") + file, bytes);
+            }
+
+            LogViewWidget tab;
+            tab.setParserPattern(schema);
+            tab.setExtractionEnabled(true);
+            tab.setAutoReload(true);
+            tab.addLogFile(path);
+            if (!other.isEmpty())
+                tab.addLogFile(other);
+            CHECK(settled(tab), label + ": load");
+            LogModel& model = *tab.model();
+
+            if (scenario == HeadScenario::CrossedThreshold) {
+                // Резидентная вкладка дорастает за порог и становится индексной.
+                CHECK(!model.isIndexedBackend(), label + ": starts resident");
+                settings.setIndexedThresholdMB(1);
+                QByteArray more;
+                for (int i = 301; i <= 30000; ++i)
+                    more += record(300 + i / 100, "INFO", "old line " + QByteArray::number(i) + " steady");
+                CHECK(testdocs::appendToFile(path, more), label + ": grow past threshold");
+                tab.reloadChangedFiles(true);
+                CHECK(settled(tab) && model.isIndexedBackend(), label + ": converted to indexed");
+            }
+
+            QByteArray current;
+            {
+                QFile f(path);
+                CHECK(f.open(QIODevice::ReadOnly), label + ": read back");
+                current = f.readAll();
+            }
+            const int rowsBefore = model.rowCount();
+            const int markRewritten = tab.bookmarks().add(rowOfPathLine(model, path, 3));
+            const int markSteady = tab.bookmarks().add(rowOfPathLine(model, path, 200));
+            CHECK(markRewritten >= 0 && markSteady >= 0, label + ": bookmarks");
+
+            // Начало переписано той же длиной: «alpha» → «omega», хвост прежний.
+            QByteArray rewritten = current;
+            const qsizetype at = rewritten.indexOf("old line 0003 alpha");
+            CHECK(at >= 0 && at < 4096, label + ": the rewritten line is in the head region");
+            rewritten.replace(at, 19, "old line 0003 omega");
+            CHECK(rewritten.size() == current.size(), label + ": same length");
+            if (grow)
+                rewritten += record(3000, "ERROR", "grown after rewrite");
+            CHECK(rewriteLater(path, rewritten), label + ": rewrite");
+
+            tab.reloadChangedFiles(f5);
+            CHECK(settled(tab), label + ": reload settles");
+            testdocs::pump(5);
+
+            const int row3 = rowOfPathLine(model, path, 3);
+            CHECK(row3 >= 0 && model.messageAt(row3).endsWith("old line 0003 omega"),
+                  label + ": the new text of the rewritten line is shown: "
+                      + (row3 >= 0 ? model.messageAt(row3) : QStringLiteral("<no row>")));
+            const int row200 = rowOfPathLine(model, path, 200);
+            CHECK(row200 >= 0 && model.messageAt(row200).endsWith("old line 0200 steady"),
+                  label + ": line numbers follow the file");
+            CHECK(model.rowCount() == rowsBefore + (grow ? 1 : 0),
+                  QStringLiteral("%1: %2 rows, expected %3 (no stale or duplicated lines)")
+                      .arg(label).arg(model.rowCount()).arg(rowsBefore + (grow ? 1 : 0)));
+            if (grow) {
+                const int last = rowOfPathLine(model, path, (scenario == HeadScenario::CrossedThreshold ? 30000 : 300) + 1);
+                CHECK(last >= 0 && model.messageAt(last).endsWith("grown after rewrite"),
+                      label + ": the grown tail is read once, after the new head");
+            }
+            if (!other.isEmpty())
+                CHECK(rowOfPathLine(model, other, 50) >= 0, label + ": the other file of the merged tab stays");
+            CHECK(tab.bookmarks().status(markRewritten) == BookmarkStore::Status::Missing,
+                  QStringLiteral("%1: bookmark on the rewritten line — not found (%2)")
+                      .arg(label).arg(int(tab.bookmarks().status(markRewritten))));
+            CHECK(tab.bookmarks().status(markSteady) == BookmarkStore::Status::Visible
+                      && tab.bookmarks().idAtRow(row200) == markSteady,
+                  QStringLiteral("%1: bookmark on a surviving line — in place (%2)")
+                      .arg(label).arg(int(tab.bookmarks().status(markSteady))));
+
+            // Дальше файл снова дописывается как обычно — якорь новый.
+            CHECK(testdocs::appendToFile(path, record(3001, "INFO", "after the reload")),
+                  label + ": append after reload");
+            tab.reloadChangedFiles(f5);
+            CHECK(settled(tab) && model.rowCount() == rowsBefore + (grow ? 2 : 1)
+                      && model.messageAt(model.rowCount() - 1).endsWith("after the reload"),
+                  label + ": appends follow the reloaded file");
+            settings.setIndexedThresholdMB(savedThreshold);
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2088,6 +2228,9 @@ int main(int argc, char** argv)
 
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
+    checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
+    checkHeadRewrite(dir, QStringLiteral("resident merged"), schema, HeadScenario::Merged);
+    checkHeadRewrite(dir, QStringLiteral("crossed threshold"), schema, HeadScenario::CrossedThreshold);
     checkLineNumbers(dir, QStringLiteral("resident"), schema);
     checkJumps(dir, QStringLiteral("resident"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("resident"), schema);
@@ -2110,6 +2253,8 @@ int main(int argc, char** argv)
     checkProvisionalNoExtraWork(dir, QStringLiteral("indexed"), schema);
     checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
+    checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
+    checkHeadRewrite(dir, QStringLiteral("indexed merged"), schema, HeadScenario::Merged);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);
     checkJumps(dir, QStringLiteral("indexed"), schema);
     checkNewLinesIndicator(dir, QStringLiteral("indexed"), schema);

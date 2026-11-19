@@ -11,6 +11,11 @@
 //     с отпечатком сырых байтов строки, не меняется от кодировки, которой
 //     прочитан файл (setFileEncoding на индексном, выбор пользователя на
 //     резидентном), различает строки с разным ASCII-текстом;
+//   • якорь дочитывания FileChangeDetector (Q-19): таблица случаев —
+//     не изменился, дописан, усечён, переписано начало той же длины и с
+//     ростом, переписан хвост, правка в середине, файл короче 4 КБ, пустой,
+//     исчез; согласованность с SourceIdentity на тех же случаях (Valid ⇔ не
+//     Replaced, те же отпечатки) и цена проверки (открытия и чтения);
 //   • JSON: круговой проход, отказ на чужой версии, алгоритме и битых данных;
 //   • сохранённые пути (R-8, SavedPath): разбор одинаков на любой ОС — путь
 //     Windows с диском, UNC, «\\?\», POSIX абсолютны; нормализация,
@@ -18,6 +23,7 @@
 //     совпадает с локальным файлом «<текущий каталог>/C:/…».
 // ============================================================================
 
+#include "filechangedetector.h"
 #include "recordid.h"
 #include "recordlocator.h"
 #include "stdinspooler.h"
@@ -25,6 +31,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -241,6 +248,228 @@ static void testSmallFiles(const QDir& dir)
         expectState(*b, State::Changed, "файл без BOM вместо файла с BOM");
         CHECK(rewrite(bom, "\xFF\xFE"), "BOM UTF-16");
         expectState(*b, State::Changed, "BOM UTF-16 вместо BOM UTF-8");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileChangeDetector (Q-19): якорь дочитывания вкладки
+// ---------------------------------------------------------------------------
+
+using Change = FileChangeDetector::Change;
+
+static const char* changeName(Change c)
+{
+    switch (c) {
+    case Change::Unchanged: return "Unchanged";
+    case Change::Appended:  return "Appended";
+    case Change::Replaced:  return "Replaced";
+    }
+    return "?";
+}
+
+// mtime файла — явно: случаи таблицы не должны зависеть от того, успели ли
+// часы файловой системы сдвинуться между записями.
+static bool setMtime(const QString& path, qint64 ms)
+{
+    QFile f(path);
+    return f.open(QIODevice::ReadWrite)
+        && f.setFileTime(QDateTime::fromMSecsSinceEpoch(ms), QFileDevice::FileModificationTime);
+}
+
+static void testFileChangeDetector(const QDir& dir)
+{
+    const QByteArray big = filler(20000, 'a');     // начало и конец — разные области
+    const QByteArray small = filler(1500, 's');    // короче 4 КБ: одна область
+
+    struct Case {
+        const char* name;
+        QByteArray before;
+        // Что стало с файлом; пустой optional — файл удалён.
+        std::optional<QByteArray> after;
+        Change expected;
+    };
+    const auto edited = [](QByteArray bytes, int at) {
+        bytes[at] = bytes[at] == 'X' ? 'Y' : 'X';
+        return bytes;
+    };
+    const QByteArray more = "2026-03-05 10:00:09.000 [w] INFO - appended\n";
+    const QVector<Case> cases = {
+        { "не изменился",                         big,   big,                          Change::Unchanged },
+        { "дописан",                              big,   big + more,                   Change::Appended },
+        { "дописан хвост без перевода строки",    big,   big + "partial",              Change::Appended },
+        { "усечён на байт",                       big,   big.left(big.size() - 1),     Change::Replaced },
+        { "усечён до нуля",                       big,   QByteArray(),                 Change::Replaced },
+        { "переписано начало той же длины",       big,   edited(big, 5),               Change::Replaced },
+        { "переписано начало, файл вырос",        big,   edited(big, 5) + more,        Change::Replaced },
+        { "переписано начало за первым КБ",       big,   edited(big, 4000),            Change::Replaced },
+        { "переписан хвост той же длины",         big,   edited(big, big.size() - 10), Change::Replaced },
+        { "переписан хвост, файл вырос",          big,   edited(big, big.size() - 10) + more, Change::Replaced },
+        { "переписан другим содержимым длиннее",  big,   filler(30000, 'b'),           Change::Replaced },
+        // Предел (заголовок filechangedetector.h): правку только в середине
+        // при тех же длине, начале и хвосте не видит ни якорь, ни SourceIdentity.
+        { "правка в середине (не ловится)",       big,   edited(big, 10000),           Change::Unchanged },
+        { "короче 4 КБ: не изменился",            small, small,                        Change::Unchanged },
+        { "короче 4 КБ: дописан",                 small, small + more,                 Change::Appended },
+        { "короче 4 КБ: дорос за 4 КБ",           small, small + filler(9000, 'd'),    Change::Appended },
+        { "короче 4 КБ: переписано начало",       small, edited(small, 3),             Change::Replaced },
+        { "короче 4 КБ: переписано начало с ростом", small, edited(small, 3) + more,   Change::Replaced },
+        { "пустой: остался пустым",               QByteArray(), QByteArray(),          Change::Unchanged },
+        { "пустой: дописан",                      QByteArray(), more,                  Change::Appended },
+        { "исчез",                                big,   std::nullopt,                 Change::Replaced },
+        { "пустой исчез",                         QByteArray(), std::nullopt,          Change::Replaced },
+    };
+
+    int n = 0;
+    for (const Case& c : cases) {
+        const QString what = QStringLiteral("детектор: %1").arg(QString::fromUtf8(c.name));
+        const QString path = writeFile(dir, QStringLiteral("detector-%1.log").arg(n++), c.before);
+        const FileChangeDetector::Anchor anchor = FileChangeDetector::capture(path, c.before.size());
+        const std::optional<SourceIdentity> id = SourceIdentity::capture(path);
+        CHECK(anchor.valid && id, what + ": снятие");
+        if (!anchor.valid || !id)
+            continue;
+        // Те же области и тот же хеш, что у SourceIdentity.
+        CHECK(anchor.head == id->head && anchor.tail == id->tail,
+              what + ": отпечатки якоря и SourceIdentity совпадают");
+
+        if (c.after) {
+            CHECK(rewrite(path, *c.after), what + ": запись");
+            // Другая mtime, как у любой настоящей записи.
+            CHECK(setMtime(path, anchor.stampMtimeMs + 5000), what + ": mtime");
+        } else {
+            CHECK(QFile::remove(path), what + ": удаление");
+        }
+        const Change got = FileChangeDetector::classify(path, anchor);
+        CHECK(got == c.expected, QStringLiteral("%1: ожидалось %2, получено %3")
+                                     .arg(what, QLatin1String(changeName(c.expected)),
+                                          QLatin1String(changeName(got))));
+        // Согласованность: вкладка дочитывает (не Replaced) ⇔ закладки и
+        // память файла считают источник тем же (Valid).
+        const State state = id->check();
+        CHECK((got != Change::Replaced) == (state == State::Valid),
+              QStringLiteral("%1: детектор %2, SourceIdentity %3 — расходятся")
+                  .arg(what, QLatin1String(changeName(got)), QLatin1String(stateName(state))));
+    }
+
+    // Якорь на префиксе (дочитывание остановилось раньше конца файла): правка
+    // начала и правка за концом прочитанного.
+    {
+        const QString path = writeFile(dir, QStringLiteral("detector-prefix.log"), big);
+        const auto anchor = FileChangeDetector::capture(path, 8000);
+        CHECK(anchor.valid && anchor.consumedBytes == 8000 && anchor.stampSize == big.size(),
+              "детектор: якорь на префиксе");
+        CHECK(setMtime(path, anchor.stampMtimeMs + 1000), "детектор: префикс, mtime");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Appended,
+              "детектор: за прочитанным есть байты — дозапись");
+        CHECK(rewrite(path, edited(big, 9000)) && setMtime(path, anchor.stampMtimeMs + 2000),
+              "детектор: правка за префиксом");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Appended,
+              "детектор: правка за концом прочитанного — всё ещё дозапись");
+        CHECK(rewrite(path, edited(big, 100)) && setMtime(path, anchor.stampMtimeMs + 3000),
+              "детектор: правка начала");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Replaced,
+              "детектор: префикс, переписано начало — Replaced");
+        CHECK(FileChangeDetector::classify(path, FileChangeDetector::capture(path, big.size() + 1))
+                  == Change::Replaced,
+              "детектор: якорь длиннее файла недействителен — Replaced");
+        CHECK(!FileChangeDetector::capture(dir.filePath(QStringLiteral("nope.log")), 0).valid,
+              "детектор: якорь несуществующего файла недействителен");
+    }
+
+    // Цена проверки (check — как у вкладки): чтение начала — только когда
+    // файл трогали или его mtime слишком свежая, чтобы за него ручаться.
+    const qint64 longAgo = QDateTime::currentMSecsSinceEpoch() - 600000;
+    {
+        const QString path = writeFile(dir, QStringLiteral("detector-cost.log"), big);
+        CHECK(setMtime(path, longAgo), "детектор, цена: старая mtime");
+        auto anchor = FileChangeDetector::capture(path, big.size());
+        CHECK(!anchor.stampRacy, "детектор, цена: старая mtime — не «racy»");
+        const auto cost = [&](const char* what, Change expected, quint64 opens, quint64 reads) {
+            const auto before = FileChangeDetector::ioCounts();
+            const Change got = FileChangeDetector::check(path, anchor);
+            const auto after = FileChangeDetector::ioCounts();
+            CHECK(got == expected && after.opens - before.opens == opens
+                      && after.reads - before.reads == reads,
+                  QStringLiteral("детектор, цена: %1 — %2, открытий %3 (ждали %4), чтений %5 (ждали %6)")
+                      .arg(QLatin1String(what), QLatin1String(changeName(got)))
+                      .arg(after.opens - before.opens).arg(opens)
+                      .arg(after.reads - before.reads).arg(reads));
+        };
+        // Не тронут: как до Q-19 — одно открытие, одно чтение (хвост).
+        cost("не изменился", Change::Unchanged, 1, 1);
+        cost("не изменился, второй тик", Change::Unchanged, 1, 1);
+        // touch: mtime другой — начало читается один раз, перезагрузки нет;
+        // проверенная подпись становится новой, следующий тик — снова одно чтение.
+        CHECK(setMtime(path, longAgo + 1000), "детектор, цена: touch");
+        cost("touch", Change::Unchanged, 1, 2);
+        cost("тик после touch", Change::Unchanged, 1, 1);
+        // Дописан: то же открытие, второе чтение — начало.
+        CHECK(appendToFile(path, more), "детектор, цена: дозапись");
+        cost("дописан", Change::Appended, 1, 2);
+        const auto before = FileChangeDetector::ioCounts();
+        FileChangeDetector::capture(path, big.size() + more.size());
+        const auto after = FileChangeDetector::ioCounts();
+        CHECK(after.opens - before.opens == 1 && after.reads - before.reads == 2,
+              "детектор, цена: снятие якоря — одно открытие, два чтения");
+        // Файл короче 4 КБ: начало и хвост — одно чтение даже при дозаписи.
+        const QString tiny = writeFile(dir, QStringLiteral("detector-cost-small.log"), small);
+        const auto smallAnchor = FileChangeDetector::capture(tiny, small.size());
+        // Свежая mtime («racy»): начало читается на каждой проверке, пока
+        // подпись не состарится; состарилась — одно чтение.
+        {
+            const QString fresh = writeFile(dir, QStringLiteral("detector-cost-racy.log"), big);
+            auto racy = FileChangeDetector::capture(fresh, big.size());
+            CHECK(racy.stampRacy, "детектор, цена: свежая mtime — «racy»");
+            for (int tick = 0; tick < 2; ++tick) {
+                const auto b = FileChangeDetector::ioCounts();
+                CHECK(FileChangeDetector::check(fresh, racy) == Change::Unchanged,
+                      "детектор, цена: racy, не изменился");
+                const auto a = FileChangeDetector::ioCounts();
+                CHECK(a.reads - b.reads == 2, "детектор, цена: racy — начало читается каждый тик");
+            }
+            CHECK(setMtime(fresh, longAgo), "детектор, цена: mtime состарилась");
+            CHECK(FileChangeDetector::check(fresh, racy) == Change::Unchanged && !racy.stampRacy,
+                  "детектор, цена: проверка состарившейся подписи снимает «racy»");
+            const auto b = FileChangeDetector::ioCounts();
+            CHECK(FileChangeDetector::check(fresh, racy) == Change::Unchanged,
+                  "детектор, цена: после «racy» не изменился");
+            const auto a = FileChangeDetector::ioCounts();
+            CHECK(a.reads - b.reads == 1, "детектор, цена: после «racy» — одно чтение");
+        }
+        CHECK(appendToFile(tiny, more), "детектор, цена: дозапись короткого");
+        const auto b2 = FileChangeDetector::ioCounts();
+        CHECK(FileChangeDetector::classify(tiny, smallAnchor) == Change::Appended,
+              "детектор, цена: короткий дописан");
+        const auto a2 = FileChangeDetector::ioCounts();
+        CHECK(a2.opens - b2.opens == 1 && a2.reads - b2.reads == 1,
+              "детектор, цена: короткий файл — одно чтение");
+    }
+
+    // Предел, закреплённый явно (заголовок filechangedetector.h): начало
+    // переписано той же длиной, а размер и давняя mtime — как при снятии (копия
+    // с сохранением времени). Якорь начало не перечитывает — Unchanged, хотя
+    // SourceIdentity видит Changed. Стоит mtime сдвинуться — Replaced.
+    {
+        const QString path = writeFile(dir, QStringLiteral("detector-same-stamp.log"), big);
+        CHECK(setMtime(path, longAgo), "детектор: давняя mtime");
+        const auto anchor = FileChangeDetector::capture(path, big.size());
+        CHECK(rewrite(path, edited(big, 5)) && setMtime(path, anchor.stampMtimeMs),
+              "детектор: перезапись с прежней mtime");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Unchanged,
+              "детектор: перезапись начала при тех же размере и mtime не видна (предел)");
+        CHECK(setMtime(path, anchor.stampMtimeMs + 1), "детектор: mtime сдвинута");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Replaced,
+              "детектор: после сдвига mtime перезапись начала видна");
+    }
+    // Та же перезапись при СВЕЖЕЙ mtime (запись в тот же тик часов, что и
+    // снятие якоря): подпись «racy», начало читается — Replaced.
+    {
+        const QString path = writeFile(dir, QStringLiteral("detector-same-tick.log"), big);
+        const auto anchor = FileChangeDetector::capture(path, big.size());
+        CHECK(rewrite(path, edited(big, 5)) && setMtime(path, anchor.stampMtimeMs),
+              "детектор: перезапись в тот же тик");
+        CHECK(FileChangeDetector::classify(path, anchor) == Change::Replaced,
+              "детектор: перезапись начала в тот же тик часов видна (racy)");
     }
 }
 
@@ -1334,6 +1563,7 @@ int main(int argc, char** argv)
 
     testSourceIdentity(dir);
     testSmallFiles(dir);
+    testFileChangeDetector(dir);
     testEphemeral(dir);
     testJson(dir);
     testSavedPaths(dir);

@@ -47,20 +47,6 @@ quint64 skeletonFingerprint(const Unit* data, qsizetype len)
     return first8(hash.result());
 }
 
-// Область [from, from + len) файла; nullopt — не прочиталась целиком.
-std::optional<quint64> regionFingerprint(QFile& file, qint64 from, qint64 len)
-{
-    if (!file.seek(from))
-        return std::nullopt;
-    const QByteArray bytes = file.read(len);
-    if (bytes.size() != len)
-        return std::nullopt;
-    return RecordFingerprint::ofBytes(bytes);
-}
-
-qint64 headLength(qint64 size) { return qMin(size, SourceIdentity::kRegionBytes); }
-qint64 tailStart(qint64 size) { return size - qMin(size, SourceIdentity::kRegionBytes); }
-
 void setError(QString* error, const QString& text)
 {
     if (error)
@@ -115,6 +101,16 @@ std::optional<quint64> hexField(const QJsonObject& json, const char* key)
 quint64 RecordFingerprint::ofBytes(QByteArrayView bytes)
 {
     return first8(QCryptographicHash::hash(bytes, QCryptographicHash::Sha1));
+}
+
+std::optional<quint64> RecordFingerprint::ofFileRegion(QFile& file, qint64 from, qint64 len)
+{
+    if (from < 0 || len < 0 || !file.seek(from))
+        return std::nullopt;
+    const QByteArray bytes = file.read(len);
+    if (bytes.size() != len)
+        return std::nullopt;
+    return ofBytes(bytes);
 }
 
 quint64 RecordFingerprint::ofLineText(QStringView text)
@@ -350,9 +346,9 @@ std::optional<SourceIdentity> SourceIdentity::capture(const QString& filePath, q
     if (size > fileSize)
         return std::nullopt;
     // Файл не длиннее 4 КБ: начало и конец — одна область, читается раз.
-    const std::optional<quint64> head = regionFingerprint(file, 0, headLength(size));
-    const std::optional<quint64> tail = tailStart(size) == 0
-        ? head : regionFingerprint(file, tailStart(size), size - tailStart(size));
+    const std::optional<quint64> head = RecordFingerprint::ofFileRegion(file, 0, RecordFingerprint::headRegionLength(size));
+    const std::optional<quint64> tail = RecordFingerprint::tailRegionStart(size) == 0
+        ? head : RecordFingerprint::ofFileRegion(file, RecordFingerprint::tailRegionStart(size), size - RecordFingerprint::tailRegionStart(size));
     if (!head || !tail)
         return std::nullopt;
     id.size = size;
@@ -374,11 +370,11 @@ SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
         return State::Missing;
     if (size < 0 || file.size() < size)
         return State::Changed;
-    const std::optional<quint64> h = regionFingerprint(file, 0, headLength(size));
+    const std::optional<quint64> h = RecordFingerprint::ofFileRegion(file, 0, RecordFingerprint::headRegionLength(size));
     if (!h || *h != head)
         return State::Changed;
-    const std::optional<quint64> t = tailStart(size) == 0
-        ? h : regionFingerprint(file, tailStart(size), size - tailStart(size));
+    const std::optional<quint64> t = RecordFingerprint::tailRegionStart(size) == 0
+        ? h : RecordFingerprint::ofFileRegion(file, RecordFingerprint::tailRegionStart(size), size - RecordFingerprint::tailRegionStart(size));
     if (!t || *t != tail)
         return State::Changed;
     return State::Valid;
