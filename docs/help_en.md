@@ -128,6 +128,7 @@ The **Regular expression** checkbox treats the rule text as a **Perl/PCRE-style 
 
 - `*` repeats the previous character — it does **not** mean “any characters”. For “any characters”, write `.*`.
 - `.` is any single character; `\d` is a digit; `\d+` is one or more digits.
+- Classes work for **every alphabet**: `\w` is a letter, digit or `_` (Cyrillic too — `пользовател\w+`), `\b` is a word boundary (`\bошибка\b`), `\s` is any space; ignoring case works for Cyrillic as well. `\d` also accepts non-Latin digits (such as Arabic-Indic `٣`); accented letters (`é`) are letters, so `\W` does not match them. The same rules hold in the toolbar find box, Row Highlighters and the Directory Scanner content filter.
 - A rule matches if the expression is found **anywhere** in the line (no anchor needed).
 - Examples: `entry number \d+` matches “entry number 42”; `Log entry number .*` matches any such entry; `(WARN|ERROR)` matches lines with either level.
 - An **invalid expression** is flagged: the field gets a red border and the error (with position) appears beneath it. While invalid, the rule takes no part in filtering or search.

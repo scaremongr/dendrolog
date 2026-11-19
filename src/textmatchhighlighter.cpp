@@ -1,4 +1,5 @@
 #include "textmatchhighlighter.h"
+#include "userregex.h"
 
 #include <QJsonObject>
 
@@ -48,10 +49,7 @@ void TextMatchHighlighter::setPatterns(const QVector<HighlightPattern>& patterns
         const auto& p = m_patterns[i];
         if (!p.isRegex || p.text.isEmpty())
             continue;
-        QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
-        if (p.caseSensitivity == Qt::CaseInsensitive)
-            options |= QRegularExpression::CaseInsensitiveOption;
-        m_regexes[i] = QRegularExpression(p.text, options);
+        m_regexes[i] = UserRegex::compile(p.text, p.caseSensitivity);
     }
 
     m_hasActive = false;

@@ -130,6 +130,8 @@ set(DENDROLOG_CORE_SOURCES
     src/textencoding.cpp
     src/filecontentsearch.h
     src/filecontentsearch.cpp
+    src/userregex.h
+    src/userregex.cpp
 )
 
 set(DENDROLOG_WIDGETS_SOURCES

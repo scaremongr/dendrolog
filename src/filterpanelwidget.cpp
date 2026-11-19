@@ -1,6 +1,7 @@
 #include "filterpanelwidget.h"
 #include "apptheme.h"
 #include "highlightpalette.h"
+#include "userregex.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -230,7 +231,7 @@ void FilterRuleCard::updateRegexValidity()
     QString error;
     QString note; // не ошибка, но правило работает не так, как видно в карточке
     if (m_regexCheckBox->isChecked() && !m_textEdit->text().isEmpty()) {
-        const QRegularExpression re(m_textEdit->text());
+        const QRegularExpression re = UserRegex::compile(m_textEdit->text(), Qt::CaseSensitive);
         if (!re.isValid()) {
             error = re.patternErrorOffset() >= 0
                 ? tr("Invalid regular expression at position %1: %2")

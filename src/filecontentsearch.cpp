@@ -1,5 +1,7 @@
 #include "filecontentsearch.h"
 
+#include "userregex.h"
+
 #include <QFile>
 #include <QList>
 #include <QStringDecoder>
@@ -12,10 +14,7 @@ ContentQuery::ContentQuery(const QString& text, bool isRegex, Qt::CaseSensitivit
     : m_text(text), m_isRegex(isRegex), m_cs(cs)
 {
     if (m_isRegex) {
-        QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
-        if (cs == Qt::CaseInsensitive)
-            opts |= QRegularExpression::CaseInsensitiveOption;
-        m_re = QRegularExpression(text, opts);
+        m_re = UserRegex::compile(text, cs);
         m_re.optimize();
     }
 }
