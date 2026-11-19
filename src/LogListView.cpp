@@ -1536,16 +1536,7 @@ void LogListView::goToRow(int row, NavKind kind)
         return;
     noteUserAction();
     const QModelIndex index = model()->index(row, 0);
-    // История переходов: откуда ушли — выбор пользователя (инвариант 10), а
-    // без него — первая строка экрана. Пишется ДО перехода.
-    if (kind != NavKind::History) {
-        if (auto* logModel = qobject_cast<LogModel*>(model())) {
-            int fromRow = userSelectedRow();
-            if (fromRow < 0 && model()->rowCount() > 0)
-                fromRow = qBound(0, rowAtY(scrollContentY()), model()->rowCount() - 1);
-            logModel->navHistory().recordJump(fromRow, row, kind);
-        }
-    }
+    recordNavJump(-1, row, kind);
     // Follow-tail вернул бы вид к хвосту на следующей же дописанной порции:
     // программная прокрутка его сама не снимает (только ползунок и колесо).
     if (m_followTail && row < model()->rowCount() - 1)
@@ -1556,6 +1547,34 @@ void LogListView::goToRow(int row, NavKind kind)
     // самого низа, и «прилипание» к хвосту увело бы его на первой же
     // дозаписи. Переход к самой последней строке — это переход к хвосту.
     m_holdAfterGoTo = row < model()->rowCount() - 1;
+}
+
+void LogListView::recordNavJump(int fromRow, int row, NavKind kind)
+{
+    // История переходов: откуда ушли — выбор пользователя (инвариант 10), а
+    // без него — первая строка экрана. Пишется ДО перехода.
+    if (kind == NavKind::History)
+        return;
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel)
+        return;
+    const int rows = model()->rowCount();
+    if (fromRow < 0 || fromRow >= rows)
+        fromRow = userSelectedRow();
+    if (fromRow < 0 && rows > 0)
+        fromRow = qBound(0, rowAtY(scrollContentY()), rows - 1);
+    logModel->navHistory().recordJump(fromRow, row, kind);
+}
+
+void LogListView::goToRowAt(int row, int offset, NavKind kind, int fromRow)
+{
+    if (!model() || row < 0 || row >= model()->rowCount())
+        return;
+    noteUserAction();
+    recordNavJump(fromRow, row, kind);
+    // Выбор пользователя, место на экране и снятие follow-tail — как у
+    // восстановленного якоря.
+    setViewAnchor({ row, offset, true });
 }
 
 void LogListView::selectAsUserChoice(int row)
@@ -3069,6 +3088,29 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
                                                   : tr("Add Bookmark with Note…"));
         connect(note, &QAction::triggered, this,
                 [this, row]() { emit bookmarkActionRequested(row, BookmarkAction::EditNote); });
+    }
+
+    // Полный лог (R-3): показать строку под курсором без фильтров вкладки
+    // либо вернуться к отфильтрованному виду.
+    if (m_fullLogAction && model()) {
+        auto* logModel = qobject_cast<LogModel*>(model());
+        if (m_fullLogShown) {
+            menu.addSeparator();
+            QAction* back = menu.addAction(tr("Return to Filtered View"));
+            connect(back, &QAction::triggered, this, [this]() { emit fullLogToggleRequested(-1); });
+        } else if (haveRow && logModel && logModel->hasFilters()) {
+            menu.addSeparator();
+            QAction* show = menu.addAction(tr("Show in Full Log"));
+            // Пока меню открыто, строки могли сдвинуться (дозапись слитой
+            // вкладки, конец фонового фильтра): строка — по ключу записи.
+            const RecordKey key = logModel->keyAt(row);
+            connect(show, &QAction::triggered, this, [this, key]() {
+                auto* m = qobject_cast<LogModel*>(model());
+                const int now = m && key.isValid() ? m->rowForKey(key) : -1;
+                if (now >= 0)
+                    emit fullLogToggleRequested(now);
+            });
+        }
     }
 
     if (haveRow && rowHasWrapToggle(row) && !hugeRowMode()) {

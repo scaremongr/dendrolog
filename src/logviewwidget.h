@@ -20,6 +20,7 @@
 
 class QuickSearch;
 class FileMemoryStore;
+class FullLogController;
 class QFrame;
 class QLabel;
 class QPushButton;
@@ -247,6 +248,25 @@ public:
     // Вкладка не больше стольких видимых строк ищется синхронно.
     void setLevelJumpSyncRows(int rows) { m_levelJumpSyncRows = rows; }
 
+    // ---- Полный лог (R-3, fulllogcontroller.h) -----------------------------------
+    // «Show in Full Log»: фильтры вкладки, скрывающие строки (уровни, время,
+    // текстовые правила), приостановлены, выбранная строка — на том же месте
+    // экрана; над логом плашка «Return to Filtered View». Возврат — ровно
+    // прежние фильтры. Правка фильтра пользователем показ заканчивает.
+    // Состояние — вкладки (инвариант 7): переживает смену вкладки, дозапись,
+    // перезагрузку, добавление файла и переход порога.
+    FullLogController& fullLog() const { return *m_fullLog; }
+    bool isFullLogShown() const;
+    // Одна команда (Ctrl+Shift+L, меню, контекстное меню, кнопка плашки):
+    // показ идёт — возврат, иначе показ. row >= 0 — строка под курсором.
+    // Сразу после перехода к закладке, скрытой фильтром (пользователь вид с
+    // тех пор не трогал), показ ставит выбранной саму закладку. false —
+    // показывать нечего: фильтров, скрывающих строки, нет.
+    bool toggleFullLog(int row = -1);
+    // Reset всех фильтров во время показа: полный лог остаётся, приостановленные
+    // фильтры отбрасываются.
+    void discardFullLogView();
+
     // ---- История переходов (R-7) ------------------------------------------------
     // Хранилище — у модели (NavHistory); пишет LogListView::goToRow.
     NavHistory& navHistory() const { return m_model->navHistory(); }
@@ -294,6 +314,9 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void statusMessage(const QString& text);
     // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
     void offeredFiltersChanged(bool available);
+    // Показ полного лога (R-3) начался или закончился — индикаторы фильтров
+    // окна и пункт меню перечитывают состояние вкладки.
+    void fullLogViewChanged(bool shown);
     // Восстановленная позиция поставлена (true) или не будет поставлена:
     // строка не найдена, пользователь успел выбрать строку или прокрутить.
     void positionRestoreFinished(bool applied);
@@ -535,6 +558,19 @@ private:
     QFrame* m_filtersOfferBar = nullptr;
     QLabel* m_filtersOfferText = nullptr;
     bool m_filtersOfferDismissed = false;
+
+    // ---- Полный лог (R-3) ---------------------------------------------------------
+    FullLogController* m_fullLog = nullptr;
+    QFrame* m_fullLogBar = nullptr;
+    QLabel* m_fullLogText = nullptr;
+    void updateFullLogBar();
+    // Закладка, к которой только что перешли, скрыта фильтром: следующий
+    // показ полного лога выбирает её, если пользователь вид не трогал.
+    struct HiddenTarget {
+        RecordKey key;
+        quint64 userActions = 0;
+    };
+    HiddenTarget m_hiddenTarget;
 };
 
 #endif // LOGVIEWWIDGET_H

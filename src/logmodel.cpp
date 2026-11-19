@@ -465,6 +465,7 @@ QModelIndex LogModel::findPreviousOccurrence(const QString& text, int startRow,
 void LogModel::setLogLevelFilter(const QSet<LogLevel>& levels)
 {
     m_activeLogLevels = levels;
+    emit filterSettingsChanged();
     applyFilter();
 }
 
@@ -472,12 +473,14 @@ void LogModel::setTimeRangeFilter(const QDateTime& start, const QDateTime& end)
 {
     m_filterStartTime = start;
     m_filterEndTime = end;
+    emit filterSettingsChanged();
     applyFilter();
 }
 
 void LogModel::setFilterRules(const FilterRuleSet& rules)
 {
     m_filterRules = rules;
+    emit filterSettingsChanged();
     applyFilter();
 }
 
@@ -488,7 +491,16 @@ void LogModel::setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
     m_filterStartTime = start;
     m_filterEndTime = end;
     m_filterRules = rules;
+    emit filterSettingsChanged();
     applyFilter();
+}
+
+bool LogModel::hasFilters() const
+{
+    // Правила, из которых ни одно не действует (невалидный регекс, колонки
+    // нет в схеме), строк не скрывают.
+    return !m_activeLogLevels.isEmpty() || m_filterStartTime.isValid()
+        || m_filterEndTime.isValid() || m_filterRules.usableRuleCount() > 0;
 }
 
 void LogModel::applyFilter()

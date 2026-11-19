@@ -39,7 +39,9 @@
   from a sample line or import a **Grok** expression.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
-  to show only, hide, highlight or find lines with it.
+  to show only, hide, highlight or find lines with it. **Show in Full Log**
+  (`Ctrl+Shift+L`) pauses the filters around the selected line and returns to
+  the filtered view with one action.
 - **Quick find** — whole word, regular expression and recent searches right
   in the toolbar box; **All** lists every match in the Search panel.
 - **Go to line or time** — `Ctrl+G` jumps to a line number of the file or to a

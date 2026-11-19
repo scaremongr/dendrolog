@@ -1,5 +1,6 @@
 // logviewwidget.cpp
 #include "logviewwidget.h"
+#include "fulllogcontroller.h"
 #include "appsettings.h"
 #include "filememorystore.h"
 #include "indexedlogstore.h"
@@ -72,6 +73,39 @@ LogViewWidget::LogViewWidget(QWidget *parent)
         updateFiltersOfferBar();
     });
     connect(this, &LogViewWidget::offeredFiltersChanged, this, &LogViewWidget::updateFiltersOfferBar);
+
+    // Плашка показа полного лога (R-3): фильтры вкладки приостановлены.
+    // Тот же вид, что у предложения фильтров, — роли палитры, без своего стиля.
+    m_fullLogBar = new QFrame(this);
+    m_fullLogBar->setObjectName(QStringLiteral("fullLogBar"));
+    m_fullLogBar->setFrameShape(QFrame::StyledPanel);
+    m_fullLogBar->setAutoFillBackground(true);
+    m_fullLogBar->setBackgroundRole(QPalette::ToolTipBase);
+    m_fullLogBar->setForegroundRole(QPalette::ToolTipText);
+    auto* fullLogLayout = new QHBoxLayout(m_fullLogBar);
+    m_fullLogText = new QLabel(m_fullLogBar);
+    m_fullLogText->setObjectName(QStringLiteral("fullLogText"));
+    m_fullLogText->setWordWrap(true);
+    fullLogLayout->addWidget(m_fullLogText, 1);
+    auto* returnButton = new QPushButton(tr("Return to Filtered View"), m_fullLogBar);
+    returnButton->setObjectName(QStringLiteral("returnToFilteredButton"));
+    returnButton->setToolTip(tr("Apply the paused filters of this tab again"));
+    fullLogLayout->addWidget(returnButton);
+    m_fullLogBar->hide();
+    layout->addWidget(m_fullLogBar);
+    m_fullLog = new FullLogController(*m_model, *m_view, this);
+    // Схема могла смениться, пока фильтры приостановлены: правила — к нынешней.
+    m_fullLog->setRuleBinder([this](FilterRuleSet& rules) {
+        rules.bindFields(parserFieldNames(), m_extractionEnabled);
+    });
+    m_view->setFullLogActionEnabled(true);
+    connect(returnButton, &QPushButton::clicked, this, [this]() { m_fullLog->returnToFiltered(); });
+    connect(m_view, &LogListView::fullLogToggleRequested, this, [this](int row) { toggleFullLog(row); });
+    connect(m_fullLog, &FullLogController::activeChanged, this, [this](bool shown) {
+        m_view->setFullLogShown(shown);
+        updateFullLogBar();
+        emit fullLogViewChanged(shown);
+    });
 
     layout->addWidget(m_view);
 
@@ -189,6 +223,9 @@ LogViewWidget::LogViewWidget(QWidget *parent)
 
 LogViewWidget::~LogViewWidget()
 {
+    // Контроллер держит ссылки на модель и view — уходит раньше них.
+    delete m_fullLog;
+    m_fullLog = nullptr;
     // m_logParser будет удален автоматически, т.к. его parent - this (LogViewWidget)
     // Если бы он не был дочерним QObject, нужно было бы delete m_logParser;
 }
@@ -1381,7 +1418,60 @@ bool LogViewWidget::goToBookmarkId(int id)
     if (row < 0)
         return false;
     m_view->goToRow(row, NavKind::Bookmark);
+    // Строка закладки скрыта фильтром — пришли к ближайшей видимой. Следующий
+    // «Show in Full Log» покажет саму закладку (R-3), если вид не трогали.
+    m_hiddenTarget = {};
+    const Bookmark* b = bookmarks().find(id);
+    if (b && b->key.isValid() && m_model->rowForKey(b->key) < 0 && m_fullLog->canShow()) {
+        m_hiddenTarget.key = b->key;
+        m_hiddenTarget.userActions = m_view->userActionCount();
+        emit statusMessage(tr("This bookmark is hidden by the filters of this tab; the nearest "
+                              "visible line is selected. Show in Full Log shows the bookmark itself."));
+    }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Полный лог (R-3)
+// ---------------------------------------------------------------------------
+
+bool LogViewWidget::isFullLogShown() const
+{
+    return m_fullLog->isActive();
+}
+
+bool LogViewWidget::toggleFullLog(int row)
+{
+    if (m_fullLog->isActive())
+        return m_fullLog->returnToFiltered();
+    const HiddenTarget target = std::exchange(m_hiddenTarget, {});
+    if (row < 0 && target.key.isValid() && m_view->userActionCount() == target.userActions
+        && m_fullLog->showRecord(target.key))
+        return true;
+    return m_fullLog->show(row);
+}
+
+void LogViewWidget::discardFullLogView()
+{
+    m_fullLog->discard();
+}
+
+void LogViewWidget::updateFullLogBar()
+{
+    const auto& filters = m_fullLog->suspendedFilters();
+    if (filters) {
+        QStringList parts;
+        if (!filters->levels.isEmpty())
+            parts << tr("levels");
+        if (filters->from.isValid() || filters->to.isValid())
+            parts << tr("time range");
+        if (filters->rules.usableRuleCount() > 0)
+            parts << tr("text rules");
+        m_fullLogText->setText(
+            tr("Showing the full log: the filters of this tab (%1) are paused.")
+                .arg(parts.join(QStringLiteral(", "))));
+    }
+    m_fullLogBar->setVisible(filters.has_value());
 }
 
 void LogViewWidget::handleQuickSearchFinished(int row)
@@ -1427,7 +1517,15 @@ TabState LogViewWidget::captureState() const
             state.bookmarks.append(b);
 
     ViewState& view = state.view;
-    if (m_offeredFilters && m_model->filterRules().rules.isEmpty()
+    if (const auto& paused = m_fullLog->suspendedFilters()) {
+        // Полный лог показан (R-3): настоящие фильтры вкладки — приостановленные.
+        // Закрытие вкладки или выход в этом режиме их не теряет; вкладка из
+        // снимка открывается отфильтрованной.
+        view.levels = paused->levels;
+        view.timeFrom = paused->from;
+        view.timeTo = paused->to;
+        view.textRules = paused->rules;
+    } else if (m_offeredFilters && m_model->filterRules().rules.isEmpty()
         && m_model->logLevelFilter().isEmpty() && !m_model->startTimeFilter().isValid()
         && !m_model->endTimeFilter().isValid()) {
         // Предложенные фильтры не приняты, своих нет — не теряем их.
@@ -1495,6 +1593,9 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
 
     m_model->setRowMarkers(view.markers);
     if (filters == StateFilters::Apply) {
+        // Фильтры снимка — правда: показ полного лога (R-3) кончается, даже
+        // если они совпали с нынешними и перефильтрации не будет.
+        m_fullLog->discard();
         setStateFilters(view);
         dismissOfferedFilters();
     } else if (view.hasFilters()) {

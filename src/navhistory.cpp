@@ -166,6 +166,7 @@ bool NavHistory::isStepKind(NavKind kind)
     case NavKind::GoTo:
     case NavKind::Timeline:
     case NavKind::Statistics:
+    case NavKind::FullLog:
         break;
     }
     return false;

@@ -194,11 +194,24 @@ public:
     // первая на экране), и цель. kind — вид перехода для склейки серий;
     // NavKind::History (возврат по истории) не пишется.
     void goToRow(int row, NavKind kind = NavKind::Other);
+    // То же, но строка встаёт верхом на offset от верха экрана (как
+    // setViewAnchor, место держится при следующих reset), а место, откуда
+    // ушли, задано явно: fromRow — видимая строка или -1 (как у goToRow).
+    // Возврат из полного лога к исходной строке (R-3, FullLogController):
+    // строка контекста, с которой уходят, к этому моменту скрыта фильтром,
+    // и «откуда» — ближайшая к ней видимая.
+    void goToRowAt(int row, int offset, NavKind kind, int fromRow = -1);
     void clearSearchMatch();
 
     // Пункты закладок в контекстном меню строки. Включает вкладка
     // (LogViewWidget), которая их исполняет; у view результатов Search их нет.
     void setBookmarkActionsEnabled(bool enabled) { m_bookmarkActions = enabled; }
+    // Пункт «Show in Full Log» / «Return to Filtered View» в контекстном меню
+    // строки (R-3). Включает вкладка; показ — по fullLogShown, иначе пункт
+    // есть, только пока фильтры модели скрывают строки. Исполняет вкладка
+    // (fullLogToggleRequested).
+    void setFullLogActionEnabled(bool enabled) { m_fullLogAction = enabled; }
+    void setFullLogShown(bool shown) { m_fullLogShown = shown; }
 
     // ---- Отметки на полосе прокрутки (R-6, docs/design/R-6.md) -------------
     // Расчёт отметок по модели view; поиск подключает окно (setSearch).
@@ -346,6 +359,11 @@ signals:
     // Только если включено setBookmarkActionsEnabled (view вкладки).
     void bookmarkActionRequested(int row, LogListView::BookmarkAction action);
 
+    // Пункт контекстного меню «Show in Full Log» (row — строка под курсором)
+    // либо «Return to Filtered View» (row == -1). Только если включено
+    // setFullLogActionEnabled.
+    void fullLogToggleRequested(int row);
+
     // Ctrl+колесо: крупнее (steps > 0) или мельче шрифт. Размер шрифта —
     // общая настройка, поэтому меняет его окно, а не сам view.
     void fontZoomRequested(int steps);
@@ -413,6 +431,8 @@ private:
     // а не пользователь (см. focusInEvent).
     bool m_inFocusIn = false;
     bool m_bookmarkActions = false; // см. setBookmarkActionsEnabled
+    bool m_fullLogAction = false;   // см. setFullLogActionEnabled
+    bool m_fullLogShown = false;
     ScrollbarMarks* m_scrollbarMarks = nullptr;               // child, R-6
     ScrollbarMarksOverlay* m_scrollbarMarksOverlay = nullptr; // child скроллбара
 
@@ -690,6 +710,9 @@ private:
     // Строка становится выбором пользователя: текущая, выделенная и якорь
     // восстановления (goToRow, setViewAnchor).
     void selectAsUserChoice(int row);
+    // Запись перехода в историю (NavHistory модели): fromRow < 0 — выбор
+    // пользователя, без него — первая строка экрана.
+    void recordNavJump(int fromRow, int row, NavKind kind);
     // Недобранная до целого шага дельта Ctrl+колеса (у тачпадов тики мелкие).
     int m_zoomWheelAccum = 0;
     void scrollToBottomFollow();

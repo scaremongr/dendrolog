@@ -598,6 +598,27 @@ MainWindow::MainWindow(QWidget *parent)
         m_shortcutActions.insert(QStringLiteral("goToNewLines"), action);
     }
 
+    // Полный лог (R-3): фильтры вкладки приостановлены, выбранная строка — на
+    // месте; та же команда возвращает отфильтрованный вид. Пункт отмечен,
+    // пока показ идёт (updateFullLogAction).
+    {
+        m_fullLogAction = new QAction(tr("Show in Full Log"), this);
+        m_fullLogAction->setCheckable(true);
+        connect(m_fullLogAction, &QAction::triggered, this, [this]() {
+            if (!m_activeLogView) {
+                updateFullLogAction();
+                return;
+            }
+            if (!m_activeLogView->toggleFullLog())
+                m_statusLabel->setText(tr("No level, time or text filter hides lines in this tab: "
+                                          "the full log is already shown"));
+            updateFullLogAction();
+        });
+        ui->menuView->insertAction(ui->actionWordWrap, m_fullLogAction);
+        ui->menuView->insertSeparator(ui->actionWordWrap);
+        m_shortcutActions.insert(QStringLiteral("fullLog"), m_fullLogAction);
+    }
+
     // Replace static dock-toggle actions with QDockWidget::toggleViewAction()
     // so checkmarks automatically reflect actual dock visibility
     {
@@ -798,6 +819,19 @@ void MainWindow::updateWelcomeVisibility()
 }
 
 // ---------------------------------------------------------------------------
+void MainWindow::updateFullLogAction()
+{
+    if (!m_fullLogAction)
+        return;
+    const bool shown = m_activeLogView && m_activeLogView->isFullLogShown();
+    m_fullLogAction->setChecked(shown);
+    m_fullLogAction->setText(shown ? tr("Return to Filtered View") : tr("Show in Full Log"));
+    m_fullLogAction->setToolTip(shown
+        ? tr("Apply the paused filters of this tab again")
+        : tr("Show the selected line in the log without the filters of this tab"));
+}
+
+// ---------------------------------------------------------------------------
 void MainWindow::updateNavHistoryActions()
 {
     if (!m_navBackAction || !m_navForwardAction)
@@ -837,6 +871,9 @@ void MainWindow::resetAllFiltersOnActiveView()
     LogModel* model = m_activeLogView ? m_activeLogView->model() : nullptr;
     if (!model)
         return;
+    // Полный лог (R-3): приостановленные фильтры тоже сбрасываются — вкладка
+    // остаётся без фильтров.
+    m_activeLogView->discardFullLogView();
     // Только включённое: каждый сброс — отдельная перефильтрация.
     if (!model->logLevelFilter().isEmpty())
         showAllLevels();
@@ -1837,6 +1874,18 @@ LogViewWidget* MainWindow::createLogViewWidget()
             seedTimeFilterEditors();
         }
     });
+    // Показ полного лога (R-3) начался или кончился: кнопки уровней, поля
+    // времени, индикаторы тулбара Filters и пункт меню — по вкладке.
+    connect(view, &LogViewWidget::fullLogViewChanged, this, [this, view](bool shown) {
+        if (view != m_activeLogView)
+            return;
+        updateLogLevelFilterButtons();
+        updateFilterInputsFromModel();
+        updateFilterStatusButtons();
+        refreshMainViewHighlights(view);
+        if (shown)
+            m_statusLabel->setText(tr("Full log: the filters of this tab are paused"));
+    });
     connect(view, &LogViewWidget::autoReloadChanged, this, [this, view]() {
         if (view == m_activeLogView)
             syncReloadButton();
@@ -2413,6 +2462,7 @@ void MainWindow::updateFilterStatusButtons()
             ? tr("Row highlighters: %n marker(s) applied\nClick to clear", nullptr, markerCount)
             : tr("Row highlighters are off\nClick to apply markers from the Row Highlighters panel"));
     }
+    updateFullLogAction();
 }
 
 void MainWindow::setupDirectoryScanner()

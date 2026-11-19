@@ -77,6 +77,7 @@ enum class NavKind : quint8 {
     LevelJump,    // F8 / F7
     Bookmark,     // F2 / Shift+F2, панель Bookmarks
     NewLines,     // «↓ N новых строк»
+    FullLog,      // возврат из полного лога к строке, с которой ушли (R-3)
 };
 
 struct NavEntry {

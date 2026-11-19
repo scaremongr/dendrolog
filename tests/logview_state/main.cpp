@@ -42,11 +42,16 @@
 #include "LogListView.h"
 #include "appsettings.h"
 #include "bookmarkstore.h"
+#include "fulllogcontroller.h"
+#include "indexedlogstore.h"
 #include "logviewwidget.h"
+#include "navhistory.h"
 #include "testdocuments.h"
 
 #include <QApplication>
+#include <QFrame>
 #include <QItemSelectionModel>
+#include <QPushButton>
 #include <QKeyEvent>
 #include <QScrollBar>
 #include <QStandardPaths>
@@ -187,6 +192,32 @@ struct Backend {
     QString  schema;
     // Второй файл для триггера «файл добавлен в документ».
     std::function<void(Backend&, const QString&)> addFile;
+    // View сценария и показ полного лога над ним (триггеры R-3): контроллер
+    // живёт, пока жив view, — сценарий снимает его по окончании.
+    LogListView* view = nullptr;
+    std::unique_ptr<FullLogController> fullLog;
+};
+
+static FullLogController& fullLogOf(Backend& b)
+{
+    if (!b.fullLog)
+        b.fullLog = std::make_unique<FullLogController>(*b.doc.model, *b.view);
+    return *b.fullLog;
+}
+
+// Сценарий кончился — view уходит, контроллер с ним.
+struct ScenarioView {
+    Backend& b;
+    ScenarioView(Backend& backend, LogListView* view) : b(backend)
+    {
+        b.fullLog.reset();
+        b.view = view;
+    }
+    ~ScenarioView()
+    {
+        b.fullLog.reset();
+        b.view = nullptr;
+    }
 };
 
 struct EntryInfo {
@@ -446,6 +477,58 @@ static QVector<Trigger> triggers()
         list.append(t);
     }
 
+    // Полный лог (R-3): фильтр вкладки приостановлен и возвращён. Видимый
+    // набор меняется дважды (фильтр, затем без фильтра), запись в полном логе
+    // видна всегда.
+    list.append({ QStringLiteral("полный лог: показать из фильтра уровней (запись видна)"),
+                  [](Backend& b, const EntryInfo& e) {
+                      b.doc.model->setLogLevelFilter({ e.level, LogLevel::Error });
+                      settle(*b.doc.model);
+                      fullLogOf(b).show();
+                  },
+                  [](Backend& b) {
+                      fullLogOf(b).returnToFiltered();
+                      settle(*b.doc.model);
+                      b.doc.model->setLogLevelFilter({});
+                  } });
+
+    // Без выделения верхняя строка экрана после фильтра — уже соседняя с
+    // записью; показ держит на месте её, запись встаёт рядом (multiStep).
+    {
+        Trigger t{ QStringLiteral("полный лог: показать, когда запись скрыта (Exclude)"),
+                   [](Backend& b, const EntryInfo& e) {
+                       b.doc.model->setFilterRules(singleRule(FilterRule::Action::Exclude, e.text));
+                       settle(*b.doc.model);
+                       fullLogOf(b).show();
+                   },
+                   [](Backend& b) {
+                       fullLogOf(b).returnToFiltered();
+                       settle(*b.doc.model);
+                       b.doc.model->setFilterRules(FilterRuleSet());
+                   } };
+        t.multiStep = true;
+        list.append(t);
+    }
+
+    // Нажатия подряд, не дожидаясь фонового фильтра: показ, возврат, показ.
+    {
+        Trigger t{ QStringLiteral("полный лог: показ, возврат и показ до конца фильтра"),
+                   [](Backend& b, const EntryInfo& e) {
+                       b.doc.model->setLogLevelFilter({ e.level, LogLevel::Warn });
+                       settle(*b.doc.model);
+                       FullLogController& fl = fullLogOf(b);
+                       fl.show();
+                       fl.returnToFiltered();
+                       fl.show();
+                   },
+                   [](Backend& b) {
+                       fullLogOf(b).returnToFiltered();
+                       b.doc.model->setLogLevelFilter({});
+                   } };
+        t.multiStep = true;
+        list.append(t);
+    }
+
     return list;
 }
 
@@ -523,6 +606,7 @@ static void runSelectionScenario(Backend& b, LogListView& view, const Trigger& t
     setContext(QStringLiteral("%1 / %2 / позиция %3%")
                    .arg(b.name, t.name).arg(int(position * 100)));
     LogModel& model = *b.doc.model;
+    const ScenarioView scenarioView(b, &view);
 
     clearFilters(model);
     const int start = pickRow(model, position);
@@ -577,6 +661,7 @@ static void runViewportScenario(Backend& b, const Trigger& t, double position)
 
     clearFilters(model);
     const auto view = makeView(model);
+    const ScenarioView scenarioView(b, view.get());
     const int start = pickRow(model, position);
     if (start < 0)
         return;
@@ -749,6 +834,390 @@ static void checkKeyboard(const QString& name, LogListView& view)
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Полный лог (R-3): та же запись на том же месте экрана в обе стороны
+// ---------------------------------------------------------------------------
+
+static bool tabSettled(LogViewWidget& tab);
+
+static int entryRow(const LogModel& model, const EntryInfo& e)
+{
+    return model.rowForEntry(e.key.logicalEntryId, e.key.sourceFile);
+}
+
+// Строка рядом с row — первая строка другой записи, чей уровень не из levels:
+// контекст, скрытый фильтром.
+static int contextRowNear(const LogModel& model, int row, const QSet<LogLevel>& levels)
+{
+    const int entry = model.keyForRow(row).logicalEntryId;
+    for (int d = 1; d < 400; ++d)
+        for (const int r : { row + d, row - d }) {
+            if (r < 0 || r >= model.rowCount())
+                continue;
+            const LogModel::EntryKey key = model.keyForRow(r);
+            const LogLevel level = model.visibleLevelAt(r);
+            if (key.logicalEntryId != entry && level != LogLevel::Unknown && !levels.contains(level)
+                && model.rowForEntry(key.logicalEntryId, key.sourceFile) == r)
+                return r;
+        }
+    return -1;
+}
+
+static void settleView(LogModel& model, LogListView& view)
+{
+    settleChecked(model);
+    waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    pump(30);
+}
+
+// Выбранная запись e и верх её строки на экране.
+static QString placeText(const LogListView& view, const LogModel& model, const EntryInfo& e)
+{
+    const int row = entryRow(model, e);
+    return QStringLiteral("запись %1: строка %2, выбрана %3, верх %4 %5")
+        .arg(keyText(e.key)).arg(row).arg(view.userSelectedRow())
+        .arg(row >= 0 ? rowRect(view, row).top() : -1).arg(viewState(view));
+}
+
+static bool atPlace(const LogListView& view, const LogModel& model, const EntryInfo& e, int top)
+{
+    const int row = entryRow(model, e);
+    return row >= 0 && view.userSelectedRow() == row && rowRect(view, row).top() == top;
+}
+
+static void runFullLogChecks(Backend& b, double position)
+{
+    LogModel& model = *b.doc.model;
+    const QString prefix = QStringLiteral("%1 / полный лог / позиция %2% / ")
+                               .arg(b.name).arg(int(position * 100));
+    clearFilters(model);
+    const int allRows = model.rowCount();
+    const auto view = makeView(model);
+    FullLogController fl(model, *view);
+    const int start = pickRow(model, position);
+    if (start < 0)
+        return;
+    const EntryInfo e = infoAt(model, start);
+    const QSet<LogLevel> levels = { e.level, LogLevel::Error };
+    const int rowH = rowRect(*view, start).height();
+
+    // 1. Запись выбрана не по центру экрана; показ и возврат держат её на месте.
+    setContext(prefix + QStringLiteral("туда и обратно — то же место"));
+    model.setLogLevelFilter(levels);
+    settleView(model, *view);
+    CHECK(fl.canShow(), QStringLiteral("фильтр скрывает строки — показывать есть что"));
+    view->goToRow(entryRow(model, e));
+    view->verticalScrollBar()->setValue(view->verticalScrollBar()->value() + 3 * rowH);
+    pump(30);
+    const int top0 = rowRect(*view, entryRow(model, e)).top();
+    CHECK(view->userSelectedRow() == entryRow(model, e) && top0 >= 0
+              && top0 + rowH <= view->viewport()->height(),
+          QStringLiteral("предусловие: %1").arg(placeText(*view, model, e)));
+    CHECK(fl.show(), QStringLiteral("показ начат"));
+    settleView(model, *view);
+    CHECK(fl.isActive() && !model.hasFilters() && model.rowCount() == allRows,
+          QStringLiteral("полный лог: %1 строк из %2, фильтры %3")
+              .arg(model.rowCount()).arg(allRows).arg(model.hasFilters()));
+    CHECK(atPlace(*view, model, e, top0),
+          QStringLiteral("показ: запись выбрана на прежнем месте (верх %1) — %2")
+              .arg(top0).arg(placeText(*view, model, e)));
+    CHECK(!fl.canShow() && !fl.show(), QStringLiteral("повторный показ во время показа — нет"));
+    CHECK(fl.returnToFiltered(), QStringLiteral("возврат"));
+    settleView(model, *view);
+    CHECK(!fl.isActive() && model.logLevelFilter() == levels,
+          QStringLiteral("возврат вернул ровно прежние фильтры"));
+    CHECK(atPlace(*view, model, e, top0),
+          QStringLiteral("возврат: запись выбрана на прежнем месте (верх %1) — %2")
+              .arg(top0).arg(placeText(*view, model, e)));
+
+    // 2. В полном логе выбрана строка контекста (её фильтр скрывает): возврат —
+    //    к записи, с которой уходили, на её прежнее место; это переход
+    //    истории, Alt+← — к ближайшей видимой к строке контекста.
+    setContext(prefix + QStringLiteral("возврат со строки контекста"));
+    fl.show();
+    settleView(model, *view);
+    const int ctx = contextRowNear(model, entryRow(model, e), levels);
+    CHECK(ctx >= 0, QStringLiteral("предусловие: есть строка контекста"));
+    if (ctx >= 0) {
+        const RecordKey ctxKey = model.keyAt(ctx);
+        view->goToRow(ctx);
+        pump(30);
+        fl.returnToFiltered();
+        settleView(model, *view);
+        CHECK(model.logLevelFilter() == levels, QStringLiteral("фильтры вернулись"));
+        CHECK(atPlace(*view, model, e, top0),
+              QStringLiteral("выбрана исходная запись на прежнем месте (верх %1) — %2")
+                  .arg(top0).arg(placeText(*view, model, e)));
+        const NavHistory& history = model.navHistory();
+        CHECK(!history.entries().isEmpty() && history.entries().last().kind == NavKind::FullLog,
+              QStringLiteral("возврат к исходной записи — переход FullLog"));
+        const int back = model.navHistory().back(view->userSelectedRow());
+        CHECK(back >= 0 && back == model.nearestRowForKey(ctxKey),
+              QStringLiteral("Alt+← — к ближайшей видимой к строке контекста: %1, ждали %2")
+                  .arg(back).arg(model.nearestRowForKey(ctxKey)));
+        // Не уходили со строки — восстановление места, не переход.
+        const qsizetype entries = history.entries().size();
+        view->goToRow(entryRow(model, e));
+        pump(30);
+        const qsizetype afterGo = history.entries().size();
+        fl.show();
+        settleView(model, *view);
+        fl.returnToFiltered();
+        settleView(model, *view);
+        CHECK(history.entries().size() == afterGo,
+              QStringLiteral("показ и возврат без смены строки историю не пишут (%1 → %2, до %3)")
+                  .arg(afterGo).arg(history.entries().size()).arg(entries));
+    }
+
+    // 3. Правка фильтра во время показа: новый фильтр — правда.
+    setContext(prefix + QStringLiteral("правка фильтра во время показа"));
+    {
+        int changes = 0;
+        const auto c = QObject::connect(&fl, &FullLogController::activeChanged,
+                                        [&](bool) { ++changes; });
+        fl.show();
+        settleView(model, *view);
+        model.setLogLevelFilter({ LogLevel::Warn });
+        settleView(model, *view);
+        CHECK(!fl.isActive() && model.logLevelFilter() == QSet<LogLevel>{ LogLevel::Warn },
+              QStringLiteral("показ закончен, фильтр — новый"));
+        CHECK(changes == 2, QStringLiteral("activeChanged: показ и конец (%1)").arg(changes));
+        CHECK(!fl.returnToFiltered() && !fl.suspendedFilters(),
+              QStringLiteral("приостановленные фильтры отброшены"));
+        QObject::disconnect(c);
+        // Reset всех фильтров во время показа: полный лог остаётся.
+        fl.show();
+        settleView(model, *view);
+        fl.discard();
+        CHECK(!fl.isActive() && !model.hasFilters(), QStringLiteral("discard оставляет полный лог"));
+    }
+
+    // 4. Показ посреди фонового фильтра: запись остаётся выбранной там, где
+    //    пользователь её видел.
+    setContext(prefix + QStringLiteral("показ посреди фильтра"));
+    {
+        clearFilters(model);
+        view->goToRow(entryRow(model, e));
+        view->verticalScrollBar()->setValue(view->verticalScrollBar()->value() - 2 * rowH);
+        pump(30);
+        int top1 = rowRect(*view, entryRow(model, e)).top();
+        model.setLogLevelFilter(levels);
+        const bool filtering = model.isFiltering();
+        if (!filtering) {
+            // Синхронный фильтр уже применён, а место строки view ставит
+            // отложенно: момента «посреди фильтра» у него нет — пользователь
+            // видит отфильтрованный вид.
+            settleView(model, *view);
+            top1 = rowRect(*view, entryRow(model, e)).top();
+        }
+        CHECK(fl.show(), QStringLiteral("показ начат посреди фильтра (фоновый: %1)").arg(filtering));
+        settleView(model, *view);
+        CHECK(fl.isActive() && !model.hasFilters(), QStringLiteral("полный лог"));
+        CHECK(atPlace(*view, model, e, top1),
+              QStringLiteral("запись на месте (верх %1) — %2").arg(top1).arg(placeText(*view, model, e)));
+        // Возврат и снова показ, не дожидаясь фильтров.
+        fl.returnToFiltered();
+        fl.show();
+        fl.returnToFiltered();
+        settleView(model, *view);
+        CHECK(!fl.isActive() && model.logLevelFilter() == levels,
+              QStringLiteral("нечётное число нажатий — отфильтрованный вид"));
+        CHECK(atPlace(*view, model, e, top1),
+              QStringLiteral("запись на месте после серии нажатий (верх %1) — %2")
+                  .arg(top1).arg(placeText(*view, model, e)));
+    }
+
+    // 5. Пользователь прокрутил, пока фильтр в фоне: позиция не ставится.
+    setContext(prefix + QStringLiteral("пользователь прокрутил раньше"));
+    {
+        fl.show();
+        if (fl.isPlacementPending()) {
+            QScrollBar* bar = view->verticalScrollBar();
+            bar->triggerAction(QAbstractSlider::SliderPageStepAdd);
+            settleView(model, *view);
+            const int value = bar->value();
+            pump(50);
+            CHECK(!fl.isPlacementPending() && bar->value() == value,
+                  QStringLiteral("вид остался, где его оставил пользователь: %1 против %2")
+                      .arg(bar->value()).arg(value));
+        } else {
+            settleView(model, *view);
+        }
+        fl.returnToFiltered();
+        settleView(model, *view);
+    }
+
+    // 5а. Follow-tail включён, строка выбрана: показ снимает follow-tail и
+    //     показывает её, а не хвост полного лога.
+    setContext(prefix + QStringLiteral("follow-tail и выбранная строка"));
+    {
+        model.setLogLevelFilter(levels);
+        settleView(model, *view);
+        view->goToRow(entryRow(model, e));
+        view->setFollowTail(true);
+        pump(30);
+        CHECK(view->followTail() && view->userSelectedRow() == entryRow(model, e),
+              QStringLiteral("предусловие: follow-tail, запись выбрана"));
+        fl.show();
+        settleView(model, *view);
+        const int row = entryRow(model, e);
+        CHECK(!view->followTail() && view->userSelectedRow() == row && rowFullyVisible(*view, row),
+              QStringLiteral("запись выбрана и видна, follow-tail снят: %1").arg(placeText(*view, model, e)));
+        fl.returnToFiltered();
+        settleView(model, *view);
+    }
+
+    // 6. Выделения нет: на месте остаётся верхняя строка экрана.
+    setContext(prefix + QStringLiteral("без выделения — верхняя строка"));
+    {
+        auto plain = makeView(model);
+        FullLogController fl2(model, *plain);
+        activateWindowFocus(*plain);
+        plain->scrollTo(model.index(qMin(entryRow(model, e), model.rowCount() - 1), 0),
+                        QAbstractItemView::PositionAtTop);
+        pump(30);
+        const int top = topVisibleRow(*plain);
+        const EntryInfo t = infoAt(model, top);
+        const int topY = rowRect(*plain, top).top();
+        CHECK(plain->userSelectedRow() < 0, QStringLiteral("предусловие: выделения нет"));
+        fl2.show();
+        settleView(model, *plain);
+        const int row = entryRow(model, t);
+        CHECK(row >= 0 && rowRect(*plain, row).top() == topY && plain->userSelectedRow() < 0,
+              QStringLiteral("верхняя строка на месте: %1, верх %2 против %3, выбрана %4")
+                  .arg(row).arg(row >= 0 ? rowRect(*plain, row).top() : -1).arg(topY)
+                  .arg(plain->userSelectedRow()));
+        fl2.returnToFiltered();
+        settleView(model, *plain);
+        const int back = entryRow(model, t);
+        CHECK(back >= 0 && rowRect(*plain, back).top() == topY,
+              QStringLiteral("возврат: верхняя строка на месте: %1, верх %2 против %3")
+                  .arg(back).arg(back >= 0 ? rowRect(*plain, back).top() : -1).arg(topY));
+    }
+    clearFilters(model);
+}
+
+// Вкладка (LogViewWidget): плашка, снимок состояния, дозапись, переход порога,
+// возврат кнопкой плашки, закладка, скрытая фильтром.
+static void runFullLogTab(const QDir& dir, const QString& schema, bool indexed)
+{
+    AppSettings::instance().setIndexedThresholdMB(indexed ? 0 : 512);
+    const QString name = indexed ? QStringLiteral("индексный") : QStringLiteral("резидентный");
+    const QDateTime base = fixtureBaseTime();
+    const QString path = writeFile(dir, QStringLiteral("fulllog-%1.log").arg(indexed ? 1 : 0),
+        makeLogBytes(2400, 21u, "\n", base, false, true, true));
+    auto tab = std::make_unique<LogViewWidget>();
+    tab->setParserPattern(schema);
+    tab->resize(kViewWidth, kViewHeight);
+    tab->show();
+    tab->addLogFile(path);
+    setContext(name + QStringLiteral(" / вкладка: полный лог"));
+    CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab->model();
+    auto* bar = tab->findChild<QFrame*>(QStringLiteral("fullLogBar"));
+    auto* returnButton = tab->findChild<QPushButton*>(QStringLiteral("returnToFilteredButton"));
+    CHECK(bar && returnButton && !bar->isVisible(), QStringLiteral("плашка есть и скрыта"));
+    if (!bar || !returnButton)
+        return;
+
+    CHECK(!tab->toggleFullLog(), QStringLiteral("без фильтров показывать нечего"));
+    const QSet<LogLevel> levels = { LogLevel::Error, LogLevel::Fatal };
+    model.setLogLevelFilter(levels);
+    CHECK(tabSettled(*tab), QStringLiteral("фильтр"));
+    const int row = model.rowCount() / 2;
+    tab->view()->goToRow(row);
+    pump(30);
+    const RecordKey e = model.keyAt(row);
+    const auto selectedLine = [&]() {
+        const int r = tab->view()->userSelectedRow();
+        return r >= 0 ? model.keyAt(r).line : -1;
+    };
+
+    int signals_ = 0;
+    QObject::connect(tab.get(), &LogViewWidget::fullLogViewChanged, [&](bool) { ++signals_; });
+    CHECK(tab->toggleFullLog(), QStringLiteral("показ"));
+    CHECK(tabSettled(*tab), QStringLiteral("показ: фильтр"));
+    CHECK(tab->isFullLogShown() && bar->isVisible() && signals_ == 1 && !model.hasFilters(),
+          QStringLiteral("показ идёт, плашка видна (%1 сигналов)").arg(signals_));
+    CHECK(selectedLine() == e.line, QStringLiteral("запись выбрана: %1 против %2").arg(selectedLine()).arg(e.line));
+
+    // Снимок во время показа — настоящие фильтры.
+    const TabState state = tab->captureState();
+    CHECK(state.view.levels == levels, QStringLiteral("captureState снимает приостановленные фильтры"));
+
+    // Дозапись во время показа.
+    setContext(name + QStringLiteral(" / вкладка: дозапись во время показа"));
+    CHECK(appendToFile(path, makeLogBytes(40, 77u, "\n", base.addSecs(86400), false, true, true)),
+          QStringLiteral("дозапись в файл"));
+    const qint64 before = model.totalLineCount();
+    tab->reloadChangedFiles(true);
+    CHECK(waitFor([&] { return model.totalLineCount() > before; }) && tabSettled(*tab),
+          QStringLiteral("хвост дочитан"));
+    CHECK(tab->isFullLogShown() && bar->isVisible() && !model.hasFilters(),
+          QStringLiteral("показ пережил дозапись"));
+    CHECK(selectedLine() == e.line, QStringLiteral("запись выбрана после дозаписи: %1").arg(selectedLine()));
+
+    // Переход порога во время показа (резидентная вкладка → индексная).
+    if (!indexed) {
+        setContext(name + QStringLiteral(" / вкладка: переход порога во время показа"));
+        AppSettings::instance().setIndexedThresholdMB(0);
+        CHECK(appendToFile(path, makeLogBytes(20, 78u, "\n", base.addSecs(2 * 86400), false, true, true)),
+              QStringLiteral("дозапись в файл"));
+        tab->reloadChangedFiles(true);
+        CHECK(waitFor([&] { return model.isIndexedBackend(); }) && tabSettled(*tab),
+              QStringLiteral("вкладка стала индексной"));
+        CHECK(tab->isFullLogShown() && bar->isVisible() && !model.hasFilters(),
+              QStringLiteral("показ пережил переход порога"));
+        CHECK(selectedLine() == e.line,
+              QStringLiteral("запись выбрана после перехода: %1").arg(selectedLine()));
+        AppSettings::instance().setIndexedThresholdMB(512);
+    }
+
+    // Возврат кнопкой плашки.
+    setContext(name + QStringLiteral(" / вкладка: кнопка плашки"));
+    returnButton->click();
+    CHECK(tabSettled(*tab), QStringLiteral("возврат: фильтр"));
+    CHECK(!tab->isFullLogShown() && !bar->isVisible() && model.logLevelFilter() == levels,
+          QStringLiteral("возврат вернул фильтры, плашка ушла"));
+    CHECK(selectedLine() == e.line, QStringLiteral("запись выбрана после возврата: %1").arg(selectedLine()));
+
+    // applyState во время показа заканчивает его.
+    setContext(name + QStringLiteral(" / вкладка: applyState во время показа"));
+    tab->toggleFullLog();
+    CHECK(tabSettled(*tab), QStringLiteral("показ"));
+    tab->applyState(state);
+    CHECK(tabSettled(*tab), QStringLiteral("applyState"));
+    CHECK(!tab->isFullLogShown() && !bar->isVisible() && model.logLevelFilter() == levels,
+          QStringLiteral("снимок применён, показ закончен"));
+
+    // Закладка, скрытая фильтром: переход к ней — к ближайшей видимой, и
+    // следующий показ выбирает её саму.
+    setContext(name + QStringLiteral(" / вкладка: закладка, скрытая фильтром"));
+    tab->toggleFullLog();
+    CHECK(tabSettled(*tab), QStringLiteral("показ"));
+    int hidden = -1;
+    for (int r = model.rowCount() / 3; r < model.rowCount() && hidden < 0; ++r)
+        if (!levels.contains(model.visibleLevelAt(r)))
+            hidden = r;
+    CHECK(hidden >= 0 && tab->toggleBookmark(hidden), QStringLiteral("закладка на скрываемой строке"));
+    const qint64 hiddenLine = hidden >= 0 ? model.keyAt(hidden).line : -1;
+    tab->toggleFullLog();
+    CHECK(tabSettled(*tab), QStringLiteral("возврат"));
+    const int id = tab->bookmarks().bookmarks().isEmpty() ? -1 : tab->bookmarks().bookmarks().last().id;
+    QString message;
+    QObject::connect(tab.get(), &LogViewWidget::statusMessage, [&](const QString& m) { message = m; });
+    CHECK(tab->goToBookmarkId(id), QStringLiteral("переход к закладке"));
+    CHECK(selectedLine() != hiddenLine && message.contains(QStringLiteral("Show in Full Log")),
+          QStringLiteral("к ближайшей видимой, с подсказкой: «%1»").arg(message));
+    CHECK(tab->toggleFullLog(), QStringLiteral("показ"));
+    CHECK(tabSettled(*tab), QStringLiteral("показ: фильтр"));
+    CHECK(selectedLine() == hiddenLine,
+          QStringLiteral("выбрана сама закладка: %1 против %2").arg(selectedLine()).arg(hiddenLine));
+    tab->toggleFullLog();
+    CHECK(tabSettled(*tab), QStringLiteral("возврат"));
+    AppSettings::instance().setIndexedThresholdMB(512);
+}
 
 // ---------------------------------------------------------------------------
 // Восстановленная позиция против выбора пользователя (R-4)
@@ -948,6 +1417,8 @@ int main(int argc, char** argv)
         }
 
         runAddFileScenario(b, *view, second);
+        for (const double position : kPositions)
+            runFullLogChecks(b, position);
     }
 
     // Перенос строк даёт разные высоты — геометрия обязана оставаться
@@ -974,6 +1445,8 @@ int main(int argc, char** argv)
 
     runRestoreVsUser(smallLog, schema, false);
     runRestoreVsUser(smallLog, schema, true);
+    runFullLogTab(dir, schema, false);
+    runFullLogTab(dir, schema, true);
 
     setContext(QStringLiteral("итог"));
     if (g_failures > 0) {

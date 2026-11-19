@@ -882,6 +882,125 @@ void scenarioTabSwitch(MainWindow& win, const Fixtures& fx)
     check(testdocs::settle(*a->model()), QStringLiteral("show all settles"));
 }
 
+QAction* filtersToolBarAction(MainWindow& win, const QString& text);
+
+// Полный лог (R-3): команда сочетанием и из меню, плашка и её кнопка,
+// контекстное меню строки, кнопки уровней и пункт меню до / во время / после,
+// смена вкладки; правка фильтра и Reset заканчивают показ.
+void scenarioFullLog(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("full log"));
+    const int ia = tabIndexForFile(win, fx.a);
+    const int ib = tabIndexForFile(win, fx.b);
+    LogViewWidget* a = tabAt(win, ia);
+    LogModel* model = a->model();
+    QAction* fullLog = command(win, QStringLiteral("fullLog"));
+    QAction* levelError = command(win, QStringLiteral("levelError"));
+    if (!fullLog || !levelError)
+        return;
+    auto* bar = a->findChild<QFrame*>(QStringLiteral("fullLogBar"));
+    auto* returnButton = a->findChild<QPushButton*>(QStringLiteral("returnToFilteredButton"));
+    check(bar && returnButton, QStringLiteral("full log bar exists"));
+    if (!bar || !returnButton)
+        return;
+    tabs(win)->setCurrentIndex(ia);
+    a->view()->setFocus();
+    const int allRows = model->rowCount();
+
+    // Без фильтров — объяснение в строке статуса.
+    pressCommand(win, QStringLiteral("fullLog"));
+    check(!a->isFullLogShown() && statusText(win).contains(QStringLiteral("already shown")),
+          QStringLiteral("no filters: status explains (%1)").arg(statusText(win)));
+
+    pressCommand(win, QStringLiteral("levelError"));
+    check(testdocs::settle(*model), QStringLiteral("level filter settles"));
+    const int row = model->rowCount() / 2;
+    a->view()->goToRow(row);
+    const qint64 line = model->keyAt(row).line;
+    const auto selectedLine = [&]() {
+        const int r = a->view()->userSelectedRow();
+        return r >= 0 ? model->keyAt(r).line : -1;
+    };
+    check(!fullLog->isChecked() && plainText(fullLog->text()) == QStringLiteral("Show in Full Log"),
+          QStringLiteral("before: menu item offers the full log"));
+
+    // Сочетание.
+    pressCommand(win, QStringLiteral("fullLog"));
+    check(testdocs::settle(*model), QStringLiteral("full log settles"));
+    check(a->isFullLogShown() && model->rowCount() == allRows && bar->isVisible(),
+          QStringLiteral("Ctrl+Shift+L shows the full log with the bar (%1 of %2 rows)")
+              .arg(model->rowCount()).arg(allRows));
+    check(selectedLine() == line, QStringLiteral("selected line kept: %1 vs %2").arg(selectedLine()).arg(line));
+    check(!levelError->isChecked(), QStringLiteral("during: Error level button shows the effective state"));
+    check(fullLog->isChecked() && plainText(fullLog->text()) == QStringLiteral("Return to Filtered View"),
+          QStringLiteral("during: menu item returns"));
+    check(!filtersToolBarAction(win, QStringLiteral("Text"))->isChecked(),
+          QStringLiteral("during: no text filter indicator"));
+
+    // Смена вкладки: индикаторы — по вкладке.
+    tabs(win)->setCurrentIndex(ib);
+    check(!fullLog->isChecked() && !levelError->isChecked(), QStringLiteral("beta: no full log, no level filter"));
+    tabs(win)->setCurrentIndex(ia);
+    check(fullLog->isChecked() && !levelError->isChecked() && a->isFullLogShown(),
+          QStringLiteral("alpha again: full log still shown"));
+
+    // Кнопка плашки.
+    returnButton->click();
+    check(testdocs::settle(*model), QStringLiteral("return settles"));
+    check(!a->isFullLogShown() && !bar->isVisible() && model->logLevelFilter().contains(LogLevel::Error),
+          QStringLiteral("bar button returns the filters"));
+    check(levelError->isChecked() && !fullLog->isChecked(), QStringLiteral("after: Error button checked again"));
+    check(selectedLine() == line, QStringLiteral("selected line kept after return: %1").arg(selectedLine()));
+
+    // Пункт меню — туда и обратно.
+    if (QAction* item = menuAction(win, QStringLiteral("Show in Full Log")))
+        item->trigger();
+    check(testdocs::settle(*model) && a->isFullLogShown(), QStringLiteral("menu item shows the full log"));
+    if (QAction* item = menuAction(win, QStringLiteral("Return to Filtered View")))
+        item->trigger();
+    check(testdocs::settle(*model) && !a->isFullLogShown() && levelError->isChecked(),
+          QStringLiteral("menu item returns"));
+
+    // Контекстное меню строки.
+    bool picked = false;
+    g_driver->expect([&](QWidget* w) {
+        auto* menu = qobject_cast<QMenu*>(w);
+        for (QAction* act : menu ? menu->actions() : QList<QAction*>())
+            if (plainText(act->text()) == QStringLiteral("Show in Full Log")) {
+                picked = true;
+                menu->setActiveAction(act);
+                QTest::keyClick(menu, Qt::Key_Return);
+                return;
+            }
+        DialogDriver::close(w);
+    });
+    {
+        const QRect rect = a->view()->visualRect(model->index(a->view()->userSelectedRow(), 0));
+        const QPoint at = rect.center();
+        QContextMenuEvent menuEvent(QContextMenuEvent::Mouse, at, a->view()->viewport()->mapToGlobal(at));
+        QApplication::sendEvent(a->view()->viewport(), &menuEvent);
+    }
+    check(waitFor([&]() { return picked && a->isFullLogShown(); }, 10000),
+          QStringLiteral("row context menu shows the full log"));
+    check(testdocs::settle(*model) && selectedLine() == line,
+          QStringLiteral("context menu keeps the line: %1").arg(selectedLine()));
+
+    // Правка фильтра во время показа заканчивает его: новый фильтр — правда.
+    pressCommand(win, QStringLiteral("levelWarn"));
+    check(testdocs::settle(*model), QStringLiteral("level filter settles"));
+    check(!a->isFullLogShown() && !bar->isVisible() && !fullLog->isChecked()
+              && model->logLevelFilter() == QSet<LogLevel>{ LogLevel::Warn },
+          QStringLiteral("level button during the full log ends it"));
+
+    // Reset всех фильтров во время показа: полный лог, без приостановленных.
+    pressCommand(win, QStringLiteral("fullLog"));
+    check(testdocs::settle(*model) && a->isFullLogShown(), QStringLiteral("full log again"));
+    pressCommand(win, QStringLiteral("resetFilters"));
+    check(testdocs::settle(*model), QStringLiteral("reset settles"));
+    check(!a->isFullLogShown() && !model->hasFilters() && !bar->isVisible() && !fullLog->isChecked(),
+          QStringLiteral("Reset Filters during the full log drops the paused filters"));
+}
+
 QAction* filtersToolBarAction(MainWindow& win, const QString& text)
 {
     auto* tb = win.findChild<QToolBar*>(QStringLiteral("filtersToolBar"));
@@ -1434,6 +1553,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         checkShortcutAmbiguity(win, QStringLiteral("with tabs"));
         scenarioNavigate(win, fx);
         scenarioTabSwitch(win, fx);
+        scenarioFullLog(win, fx);
         scenarioGlue(win, fx, dir);
         scenarioSearchFollowsTab(win, fx);
         scenarioEncoding(win, fx);

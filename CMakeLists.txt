@@ -149,6 +149,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/scrollbarmarksoverlay.cpp
     src/logviewwidget.h
     src/logviewwidget.cpp
+    src/fulllogcontroller.h
+    src/fulllogcontroller.cpp
     src/gotodialog.h
     src/gotodialog.cpp
     src/quicksearchfield.h

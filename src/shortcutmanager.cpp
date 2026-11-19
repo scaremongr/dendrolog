@@ -43,6 +43,8 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("nextBookmark"),   tr("Next bookmark"),          QKeySequence(Qt::Key_F2) },
         { QStringLiteral("prevBookmark"),   tr("Previous bookmark"),      QKeySequence(Qt::SHIFT | Qt::Key_F2) },
         { QStringLiteral("goToNewLines"), tr("Go to new lines (below the screen)"), QKeySequence(Qt::ALT | Qt::Key_End) },
+        // Полный лог (R-3): фильтры вкладки приостановлены и обратно.
+        { QStringLiteral("fullLog"),     tr("Show in full log / return to filtered view"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },

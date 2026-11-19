@@ -198,6 +198,9 @@ public:
     // привязаны к схеме (bindFields).
     void setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
                     const QDateTime& end, const FilterRuleSet& rules);
+    // Есть ли фильтр, способный скрывать строки: уровни, граница времени,
+    // действующие текстовые правила (маркеры строк не скрывают).
+    bool hasFilters() const;
 
     // ---- Недеструктивные row-маркеры ----------------------------------------
     void setRowMarkers(const QVector<HighlightPattern>& markers);
@@ -241,6 +244,10 @@ public:
 
 signals:
     void modelFiltered(int totalRowsAfterFilter);
+    // Настройки фильтров (уровни, время, текстовые правила) заданы заново —
+    // любым из сеттеров, ДО перефильтрации. Маркеры строк сюда не входят.
+    // Показ полного лога (FullLogController) по нему узнаёт о правке фильтра.
+    void filterSettingsChanged();
     // Прогресс асинхронной фильтрации индексного бэкенда (он читает диск и
     // может занимать секунды); 100 — фильтр применён.
     void filterProgress(int progressPercentage);

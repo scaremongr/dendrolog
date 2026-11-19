@@ -288,6 +288,7 @@ private:
     QAction*     m_findAllAction = nullptr;
     QAction*     m_goToAction = nullptr;
     QAction*     m_navBackAction = nullptr;     // Alt+←, история переходов (R-7)
+    QAction*     m_fullLogAction = nullptr;     // Ctrl+Shift+L, показ полного лога (R-3)
     QAction*     m_navForwardAction = nullptr;  // Alt+→
     // Next / Previous Error и Warning (F8, F7).
     QVector<QAction*> m_levelJumpActions;
@@ -378,6 +379,8 @@ private:
     void updateWelcomeVisibility();
     // Пункты Navigate Back / Forward — по истории активной вкладки.
     void updateNavHistoryActions();
+    // Пункт «Show in Full Log» / «Return to Filtered View» — по активной вкладке.
+    void updateFullLogAction();
     void clearRecentFiles();
     // Размер шрифта лога: steps > 0 крупнее, < 0 мельче, 0 — по умолчанию.
     void changeFontSize(int steps);

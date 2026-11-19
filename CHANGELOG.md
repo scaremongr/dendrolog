@@ -7,6 +7,19 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Show in Full Log.** On a filtered tab, **View → Show in Full Log**, the
+  line's context menu or **`Ctrl+Shift+L`** pauses the tab's level, time and
+  text filters (row highlighters stay) and keeps the selected line selected at
+  the same place on screen, so you can read what happened around it. A bar
+  above the log says the filters are paused; **Return to Filtered View** (or
+  the same command) brings back exactly the same filters — the line selected
+  now stays put if it passes them, otherwise the line you left from is
+  selected again at its old place, and `Alt+←` goes back near the context
+  line. Changing a filter meanwhile ends the full log; **Reset Filters of This
+  Tab** drops the paused filters. Each tab keeps its own state; sessions,
+  closed tabs and file memory save the paused filters, not empty ones. After
+  jumping to a bookmark hidden by the filters, Show in Full Log selects the
+  bookmark itself.
 - **Previous session and closed tabs.** On a normal exit the main window
   remembers its tabs (`last-session.json` in the settings folder; a window
   closed without tabs keeps the previous one). **Settings → General → Sessions
