@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>A fast desktop viewer for log files</b> — multi-file tabs, structured field
-  extraction, filtering, highlighting and live reload. For Windows and Linux.
+  extraction, filtering, highlighting, live reload, bookmarks and sessions.
+  For Windows and Linux.
 </p>
 
 <p align="center">
@@ -73,6 +74,7 @@
 - **Encodings** — UTF-8, Windows-1251, IBM866, KOI8-R and Windows-1252 are
   detected per file; the status bar shows the encoding and changes it with a
   click (no re-indexing, you keep your place); `--encoding` on the command line.
+  The Directory Scanner searches file contents in the same encodings.
 - **Smart text handling** — syntax highlighting, token-aware double-click
   selection, open URLs/paths from the log, per-line word wrap.
 - **Save View As** — export exactly what you see (filters + field selection).
@@ -111,8 +113,9 @@ DendroLog stores settings in the user profile
 If a file named `portable` (or an existing `DendroLog.ini`) sits next to the
 executable, settings are kept there instead.
 The file memory (bookmarks, markers, position and filters of each opened log)
-lives in the `memory` subfolder of the same folder, so it travels with a
-portable copy; it can be turned off or cleared in Settings.
+lives in the `memory` subfolder of the same folder and the previous session in
+`last-session.json` next to it, so both travel with a portable copy; the file
+memory can be turned off or cleared in Settings.
 
 ## Feedback
 

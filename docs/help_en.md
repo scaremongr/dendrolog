@@ -266,9 +266,9 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 - Names sort **case-insensitively** and naturally: `log2` comes before `log10`. Clicking a column header re-sorts (name ascending, numeric columns largest-first).
 - **The ⟳ button refreshes.** It re-reads the directory but not the files: only new and modified ones are analysed again, and a log that merely grew is read from where the previous scan stopped (unless it was rewritten). Deleted files leave the tree.
 - **Right-click ⟳** to pick the refresh mode:
-  - **Manual** (default) — the tree never changes on its own, but the button lights up when something changed on disk.
-  - **Automatic** — changes are pulled in by themselves; the period is set from “Auto-refresh interval…” in the same menu. While the panel is hidden the refresh is deferred until it reappears.
-  - **Off** — nothing is watched; the button still refreshes on demand.
+  - **Refresh manually** (default) — the tree never changes on its own, but the button lights up when something changed on disk.
+  - **Refresh automatically** — changes are pulled in by themselves; the period is set from “Auto-refresh interval…” in the same menu. While the panel is hidden the refresh is deferred until it reappears.
+  - **Refresh off** — nothing is watched; the button still refreshes on demand.
 - **⚙ opens the filters.** The content filter reads files in the background and reports progress **in bytes**, so the bar tracks the real work even when one file dwarfs the rest. Re-applying the same query is served from cache (instant), and an active date filter narrows down which files are read at all. A file's encoding is detected the way a tab detects it (see "Encodings"): Cyrillic in Windows-1251, IBM866 and KOI8-R and text in UTF-16 are found, case-sensitive or not, as plain text or a regular expression; an appended or rotated file is checked again in its own encoding.
 
 ## Panels & layout
