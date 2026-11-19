@@ -11,6 +11,12 @@
 namespace {
 // Единственное место, где зашит адрес репозитория.
 const QLatin1String kOwnerRepo("scaremongr/dendrolog");
+bool g_networkDisabled = false;
+}
+
+void UpdateChecker::disableNetworkForTesting()
+{
+    g_networkDisabled = true;
 }
 
 UpdateChecker::UpdateChecker(QObject* parent)
@@ -36,6 +42,14 @@ void UpdateChecker::check()
     if (m_busy)
         return;
     m_busy = true;
+
+    if (g_networkDisabled) {
+        QMetaObject::invokeMethod(this, [this]() {
+            m_busy = false;
+            emit checkFailed(QStringLiteral("network disabled for testing"));
+        }, Qt::QueuedConnection);
+        return;
+    }
 
     QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/") +
                              kOwnerRepo + QStringLiteral("/releases/latest")));

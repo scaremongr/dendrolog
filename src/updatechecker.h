@@ -31,6 +31,11 @@ public:
     // Повторный вызов во время активной проверки игнорируется.
     void check();
 
+    // Шов для тестов (tests/mainwindow_smoke): без сети. check() тогда не
+    // ходит на GitHub, а отвечает checkFailed (асинхронно, как настоящий
+    // ответ). Программа его не вызывает.
+    static void disableNetworkForTesting();
+
 signals:
     void updateAvailable(const QString& newVersion, const QString& releaseUrl);
     void upToDate();

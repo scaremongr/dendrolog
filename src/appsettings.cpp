@@ -22,8 +22,25 @@ AppSettings& AppSettings::instance()
 }
 
 // ---------------------------------------------------------------------------
+namespace {
+QString& configDirOverride()
+{
+    static QString dir;
+    return dir;
+}
+}
+
+void AppSettings::overrideConfigDirForTesting(const QString& dir)
+{
+    QDir().mkpath(dir);
+    configDirOverride() = QDir(dir).absolutePath();
+}
+
+// ---------------------------------------------------------------------------
 QString AppSettings::configDir()
 {
+    if (!configDirOverride().isEmpty())
+        return configDirOverride();
     static const QString dir = []() -> QString {
         const QDir exeDir(QApplication::applicationDirPath());
         // Portable mode: явный маркер или ini, уже живущий рядом с exe.
