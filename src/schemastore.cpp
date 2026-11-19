@@ -313,6 +313,15 @@ bool sync(const SchemaList& list, QString* errorMessage)
         }
     }
 
+    // A file that did not parse (a schema of a newer format, a file broken by
+    // a manual edit) is not ours: it is neither deleted below nor overwritten
+    // by a fresh file of pass 3. An entry can still claim it by its fileName
+    // (pass 1) — then it was rewritten above as that entry's file.
+    for (const Existing& ex : std::as_const(existing)) {
+        if (!ex.parsed)
+            usedLower.insert(ex.basename.toLower());
+    }
+
     // Pass 3 — a fresh file for every entry still without one.
     for (int e = 0; e < list.size(); ++e) {
         if (!basenameForEntry[e].isEmpty())
@@ -335,7 +344,8 @@ bool sync(const SchemaList& list, QString* errorMessage)
         }
     }
 
-    // Delete files that no longer back any entry.
+    // Delete files of schemas that no longer back any entry (unparsed files
+    // are in usedLower and stay).
     for (const QString& file : files) {
         if (!usedLower.contains(file.toLower()))
             dir.remove(file);

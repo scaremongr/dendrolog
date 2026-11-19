@@ -230,6 +230,52 @@ void testNoDescription()
     check(schemaFiles().isEmpty(), "removed schema removes its file");
 }
 
+// ---------------------------------------------------------------- 2а
+
+// Файл, который каталог не разобрал (схема формата новее, файл, испорченный
+// правкой руками), — не наш: sync его не удаляет и не занимает его имя.
+// Раньше любая правка каталога (OK в редакторе схем, открытие сессии с новой
+// схемой) молча стирала такой файл.
+void testUnparsedFilesSurvive()
+{
+    clearPatterns();
+    const QByteArray broken = "{ this is not a schema";
+    QJsonObject futureObj = QJsonDocument::fromJson(handWrittenSchema(QStringLiteral("Future"), QString())).object();
+    futureObj.insert(QStringLiteral("version"), 99);
+    const QByteArray future = QJsonDocument(futureObj).toJson(QJsonDocument::Indented);
+    const QString brokenPath = patterns().filePath(QStringLiteral("Broken.json"));
+    const QString futurePath = patterns().filePath(QStringLiteral("future.json"));
+    check(writeBytes(brokenPath, broken), "write a broken file");
+    check(writeBytes(futurePath, future), "write a file of a newer format");
+    check(SchemaStore::loadAll().isEmpty(), "unparsed files are not schemas");
+
+    // Новая схема, из названия которой выводится имя занятого файла.
+    SchemaStore::SchemaEntry entry;
+    check(SchemaStore::parseEntry(handWrittenSchema(QStringLiteral("Broken"), QString()), QString(), &entry),
+          "parse the new schema");
+    entry.name = QStringLiteral("Broken");
+    entry.fileName.clear();
+    check(SchemaStore::sync({entry}), "sync with unparsed files in the folder");
+    check(readBytes(brokenPath) == broken, "a broken file is neither deleted nor overwritten");
+    check(readBytes(futurePath) == future, "a file of a newer format is neither deleted nor overwritten");
+    SchemaStore::SchemaList list = SchemaStore::loadAll();
+    check(list.size() == 1 && list[0].name == QLatin1String("Broken")
+              && list[0].fileName.compare(QLatin1String("Broken.json"), Qt::CaseInsensitive) != 0,
+          QStringLiteral("the new schema gets a file of its own: %1")
+              .arg(list.isEmpty() ? QStringLiteral("<none>") : list[0].fileName));
+
+    // Правка и удаление схемы трогают только её файл.
+    if (!list.isEmpty()) {
+        list[0].setDescription(QStringLiteral("edited"));
+        check(SchemaStore::sync(list), "sync an edit");
+    }
+    check(readBytes(brokenPath) == broken && readBytes(futurePath) == future, "an edit leaves unparsed files alone");
+    check(SchemaStore::sync({}), "sync empty with unparsed files");
+    check(schemaFiles() == (QStringList{QStringLiteral("Broken.json"), QStringLiteral("future.json")}),
+          QStringLiteral("a removed schema removes only its own file: %1").arg(schemaFiles().join(QLatin1Char(','))));
+    check(readBytes(brokenPath) == broken && readBytes(futurePath) == future, "unparsed files are byte-identical");
+}
+
 // ---------------------------------------------------------------- 3
 
 void testImportExport(const QDir& tmp)
@@ -515,6 +561,7 @@ int main(int argc, char** argv)
 
     testStoreRoundTrip();
     testNoDescription();
+    testUnparsedFilesSurvive();
     testImportExport(tmp);
 
     const QString fixed = makeFixedBuiltins(tmp);

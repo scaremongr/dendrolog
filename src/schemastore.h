@@ -86,6 +86,8 @@ SchemaList loadAll(const QStringList& orderNames = QStringList());
 ///     the new name, as before.
 ///   • An entry without a usable fileName reuses a file with the same content,
 ///     otherwise gets a fresh file named after it.
+///   • A file that does not parse as a schema (a newer format, a file broken
+///     by hand) is left alone: not deleted, and no new schema takes its name.
 /// Returns false and sets \a errorMessage if any file operation failed.
 bool sync(const SchemaList& list, QString* errorMessage = nullptr);
 
