@@ -629,6 +629,56 @@ static void checkOpenPanels(const QDir& dir)
         return panel;
     });
 
+    // Переключатель переноса (U-23): «+N» у длинных строк и «−» с рейкой у
+    // развёрнутой — приглушённые цвета AppTheme из палитры; вид, переживший
+    // смену темы, — как созданный в новой.
+    {
+        QByteArray bytes;
+        for (int i = 0; i < 12; ++i) {
+            bytes += "2026-03-05 10:00:" + QByteArray::number(10 + i) + ".000 [w] INFO - row "
+                   + QByteArray::number(i) + ' ';
+            bytes += QByteArray(i % 3 == 0 ? 400 : 10, 'w') + '\n';
+        }
+        const QString path = testdocs::writeFile(dir, QStringLiteral("wrap-toggles.log"), bytes);
+        auto doc = std::make_shared<testdocs::Document>(testdocs::buildResident({path}, testdocs::buildSchema()));
+        const auto makeView = [doc](bool wrap) {
+            return [doc, wrap]() -> std::unique_ptr<QWidget> {
+                auto view = std::make_unique<LogListView>();
+                view->setModel(doc->model.get());
+                view->setWordWrap(wrap);   // перенос: «−» и рейка; без — «+N»
+                return view;
+            };
+        };
+        checkRepaintsOnThemeChange("Log view, +N toggles", makeView(false));
+        checkRepaintsOnThemeChange("Log view, wrapped rows with rails", makeView(true));
+        for (const bool wrap : {false, true}) {
+            AppSettings::instance().setThemeMode(ThemeMode::Dark);
+            testdocs::pump(20);
+            std::unique_ptr<QWidget> w = shown(makeView(wrap));
+            auto* view = static_cast<LogListView*>(w.get());
+            testdocs::waitFor([&] { return !view->hasPendingLayout(); }, 5000);
+            const QImage image = grabOf(*view->viewport());
+            const LogListView::RowWrapInfo info = view->rowWrapInfo(3);
+            CHECK(info.hasToggle && info.expanded == wrap
+                      && info.toggleText == (wrap ? QString(QChar(0x2212)) : QStringLiteral("+")
+                                                       + QString::number(info.hiddenChars)),
+                  QStringLiteral("row 3 toggle: %1 (rows %2, len %3, vp %4)").arg(info.toggleText).arg(view->model()->rowCount()).arg(info.length).arg(view->viewport()->width()));
+            const QColor toggleBg = AppTheme::wrapToggleBg(view->viewport()->palette());
+            int toggled = 0;
+            int saturated = 0;
+            const QRect r = info.toggleRect.intersected(image.rect());
+            for (int y = r.top(); y <= r.bottom(); ++y)
+                for (int x = r.left(); x <= r.right(); ++x) {
+                    const QColor c = image.pixelColor(x, y);
+                    toggled += c == toggleBg;
+                    saturated += c == AppTheme::instance().badgeBg;
+                }
+            CHECK(toggled > 20, QStringLiteral("wrap toggle uses AppTheme::wrapToggleBg (%1 px)").arg(toggled));
+            CHECK(saturated == 0, QStringLiteral("no saturated badge fill on the wrap toggle (%1 px)").arg(saturated));
+        }
+        AppSettings::instance().setThemeMode(ThemeMode::System);
+    }
+
     checkRepaintsOnThemeChange("Statistics placeholder", []() -> std::unique_ptr<QWidget> {
         return std::make_unique<StatisticsPanel>();
     });

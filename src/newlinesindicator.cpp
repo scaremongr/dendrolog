@@ -1,4 +1,5 @@
 #include "newlinesindicator.h"
+#include "shortcount.h"
 
 #include <QApplication>
 #include <QLocale>
@@ -29,20 +30,7 @@ static QLocale numberLocale()
 
 QString NewLinesIndicator::label(qint64 count)
 {
-    const QLocale c = numberLocale();
-    QString number;
-    if (count < 100000) {
-        number = c.toString(count);
-    } else if (count < 1000000) {
-        number = c.toString(count / 1000) + QLatin1Char('K');
-    } else if (count < 10000000) {
-        // Одна цифра после точки, без округления вверх: 9 999 999 — «9.9M».
-        const qint64 tenths = count / 100000;
-        number = c.toString(tenths / 10) + QLatin1Char('.') + c.toString(tenths % 10)
-               + QLatin1Char('M');
-    } else {
-        number = c.toString(count / 1000000) + QLatin1Char('M');
-    }
+    const QString number = ShortCount::format(count, 100000, /*groupDigits=*/true);
     return QStringLiteral("↓ %1 new %2").arg(number, count == 1 ? tr("line") : tr("lines"));
 }
 

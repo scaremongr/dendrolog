@@ -102,3 +102,18 @@ QColor AppTheme::searchNotFoundBackground(const QPalette& palette)
 {
     return CardFrame::mixedColor(instance().logError, palette.color(QPalette::Base), 0.72);
 }
+
+QColor AppTheme::wrapToggleFg(const QPalette& palette)
+{
+    return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.45);
+}
+
+QColor AppTheme::wrapToggleBg(const QPalette& palette)
+{
+    return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.90);
+}
+
+QColor AppTheme::wrapRail(const QPalette& palette)
+{
+    return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.70);
+}

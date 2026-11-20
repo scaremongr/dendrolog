@@ -1516,6 +1516,64 @@ void scenarioDocks(MainWindow& win)
     }
 }
 
+// Перенос одной строки (U-23): Пробел в фокусе лога — команда
+// toggleLineWrap; на индексной вкладке переноса нет, и Пробел показывает
+// полный текст строки в доке Entry Details. В поле ввода Пробел — текст.
+void scenarioLineWrap(MainWindow& win, const QDir& dir, bool indexed)
+{
+    section(QStringLiteral("wrap current line"));
+    QByteArray bytes;
+    for (int i = 0; i < 6; ++i) {
+        bytes += "2026-03-05 10:00:1" + QByteArray::number(i) + ".000 [w] INFO - line " + QByteArray::number(i) + ' ';
+        bytes += QByteArray(i == 2 ? 6000 : 8, 'z') + '\n';
+    }
+    const QString path = testdocs::writeFile(dir, QStringLiteral("long-line.log"), bytes);
+    const int before = tabs(win)->count();
+    win.openCommandLine(OpenRouting::parseCommandLine({path}));
+    check(waitFor([&]() { return tabIndexForFile(win, path) >= 0; }), QStringLiteral("long-line log opens"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, path));
+    LogViewWidget* tab = currentTab(win);
+    check(waitLoaded(tab, 6), QStringLiteral("long-line log loads"));
+    QAction* wrapLine = command(win, QStringLiteral("toggleLineWrap"));
+    check(wrapLine && menuAction(win, QStringLiteral("Wrap / Unwrap Current Line")) == wrapLine,
+          QStringLiteral("View menu has Wrap / Unwrap Current Line"));
+    auto* detailsDock = win.findChild<QDockWidget*>(QStringLiteral("entryDetailsDockWidget"));
+    detailsDock->hide();
+    tab->view()->goToRow(2);
+    tab->view()->setFocus(Qt::MouseFocusReason);
+    check(tab->view()->rowWrapInfo(2).hasToggle, QStringLiteral("the long line has a wrap toggle"));
+    press(win, QKeySequence(Qt::Key_Space));
+    if (indexed) {
+        check(waitFor([&]() { return detailsDock->isVisible(); }, 5000),
+              QStringLiteral("Space on an indexed tab shows Entry Details"));
+        check(!tab->view()->rowWrapInfo(2).expanded, QStringLiteral("the indexed row stays one line"));
+        detailsDock->hide();
+    } else {
+        // Перенос всего вида мог остаться включённым прежними сценариями.
+        const bool wrapped = tab->view()->isWordWrap();
+        check(waitFor([&]() { return tab->view()->rowWrapInfo(2).expanded != wrapped; }, 5000),
+              QStringLiteral("Space wraps / unwraps the current line"));
+        press(win, QKeySequence(Qt::Key_Space));
+        check(waitFor([&]() { return tab->view()->rowWrapInfo(2).expanded == wrapped; }, 5000),
+              QStringLiteral("Space again returns it"));
+        check(!detailsDock->isVisible(), QStringLiteral("Entry Details stays hidden on a resident tab"));
+    }
+    // Пробел в поле быстрого поиска — пробел, а не команда.
+    auto* field = win.findChild<QLineEdit*>(QStringLiteral("searchLineEdit"));
+    if (field && wrapLine) {
+        field->setFocus(Qt::MouseFocusReason);
+        field->clear();
+        QSignalSpy spy(wrapLine, &QAction::triggered);
+        QTest::keyClick(field, Qt::Key_Space);
+        check(spy.isEmpty() && field->text() == QStringLiteral(" "),
+              QStringLiteral("Space in the search field types a space"));
+        field->clear();
+    }
+    if (QAction* close = command(win, QStringLiteral("closeTab")))
+        close->trigger();
+    check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("long-line tab closes"));
+}
+
 // Каждое действие меню вызывается хотя бы раз (модальные закрывает драйвер).
 void scenarioMenuSweep(MainWindow& win)
 {
@@ -1665,7 +1723,7 @@ void checkHelpShortcutTable()
           QStringLiteral("panelStatistics"), QStringLiteral("panelBookmarks")}},
         // Клавиши самого view, не команды ShortcutManager.
         {QStringLiteral("Copy selection"), {}},
-        {QStringLiteral("Expand/collapse current line"), {}},
+        {QStringLiteral("Wrap / unwrap current line"), {QStringLiteral("toggleLineWrap")}},
         {QStringLiteral("Extend selection by character"), {}},
         {QStringLiteral("Extend selection by token"), {}},
     };
@@ -1909,6 +1967,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioMerge(win, fx);
         scenarioSession(win, fx);
         scenarioDocks(win);
+        scenarioLineWrap(win, dir, indexed);
         section(QStringLiteral("shortcuts: every one fires"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars shown"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars hidden"), /*hideToolBars=*/true);

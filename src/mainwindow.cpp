@@ -508,6 +508,36 @@ MainWindow::MainWindow(QWidget *parent)
         });
     }
 
+    // Перенос текущей строки (U-23): пункт под Word Wrap. Сочетание (Пробел)
+    // действует, только пока фокус в логе — у каждого view вкладки и у
+    // выдачи Search (attachLineWrapAction): в полях ввода и на кнопках
+    // панелей Пробел остаётся своим.
+    {
+        m_toggleLineWrapAction = new QAction(tr("Wrap / Unwrap Current Line"), this);
+        m_toggleLineWrapAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        connect(m_toggleLineWrapAction, &QAction::triggered, this, [this]() {
+            LogListView* target = nullptr;
+            for (QWidget* w = QApplication::focusWidget(); w && !target; w = w->parentWidget())
+                target = qobject_cast<LogListView*>(w);
+            if (!target && m_activeLogView)
+                target = m_activeLogView->view();
+            if (target && !target->toggleCurrentLineWrap())
+                m_statusLabel->setText(tr("The current line fits the window: nothing to wrap"));
+        });
+        const QList<QAction*> viewActions = ui->menuView->actions();
+        const int wrapAt = viewActions.indexOf(ui->actionWordWrap);
+        QAction* after = wrapAt >= 0 && wrapAt + 1 < viewActions.size() ? viewActions[wrapAt + 1] : nullptr;
+        if (after)
+            ui->menuView->insertAction(after, m_toggleLineWrapAction);
+        else
+            ui->menuView->addAction(m_toggleLineWrapAction);
+        m_shortcutActions.insert(QStringLiteral("toggleLineWrap"), m_toggleLineWrapAction);
+        attachLineWrapAction(m_searchResultsView);
+        for (int i = 0; ui->tabWidget && i < ui->tabWidget->count(); ++i)
+            if (auto* tab = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
+                attachLineWrapAction(tab->view());
+    }
+
     // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.
     m_goToAction = new QAction(tr("Go to Line / Time…"), this);
     connect(m_goToAction, &QAction::triggered, this, &MainWindow::showGoToDialog);
@@ -808,7 +838,7 @@ void MainWindow::updateWelcomeVisibility()
     // Команды над вкладкой без вкладок ничего не делали бы — гасим их.
     for (QAction* a : { ui->actionCloseTab, ui->actionReloadFile, ui->actionFollowTail,
                         ui->actionSearchNext, ui->actionSearchPrevious, m_findAllAction,
-                        m_goToAction,
+                        m_goToAction, m_toggleLineWrapAction,
                         ui->actionShowAllLevels, ui->actionResetAllFilters,
                         ui->actionFatal, ui->actionError, ui->actionWarn,
                         ui->actionInfo, ui->actionDebug, ui->actionTrace })
@@ -1863,6 +1893,7 @@ LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
     view->setParserPattern(m_conversionPattern);
+    attachLineWrapAction(view->view());
     // Память файла (R-4): вкладка читает и пишет её сама; окну — сообщения
     // и флаг авто-обновления, который могла поставить память.
     view->setFileMemory(m_fileMemory.get());
@@ -2258,6 +2289,27 @@ void MainWindow::setupEntryDetailsDock()
             ui->menuView->addAction(toggle);
         m_shortcutActions.insert(QStringLiteral("panelEntryDetails"), toggle);
     }
+}
+
+// Действие переноса строки и запрос полного текста (U-23) — у каждого view
+// лога окна. Повторный вызов для того же view ничего не добавляет.
+void MainWindow::attachLineWrapAction(LogListView* view)
+{
+    if (!view || !m_toggleLineWrapAction || view->actions().contains(m_toggleLineWrapAction))
+        return;
+    view->addAction(m_toggleLineWrapAction);
+    connect(view, &LogListView::fullTextRequested, this, &MainWindow::showEntryDetailsForFullText,
+            Qt::UniqueConnection);
+}
+
+// «+N» и Пробел на индексной вкладке (переноса нет): полный текст строки —
+// в доке Entry Details, строку view уже выбрал.
+void MainWindow::showEntryDetailsForFullText()
+{
+    if (!m_detailsDockWidget)
+        return;
+    m_detailsDockWidget->show();
+    m_detailsDockWidget->raise();
 }
 
 void MainWindow::setupBookmarksDock()

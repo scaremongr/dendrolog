@@ -46,6 +46,9 @@ ShortcutManager::ShortcutManager()
         // Полный лог (R-3): фильтры вкладки приостановлены и обратно.
         { QStringLiteral("fullLog"),     tr("Show in full log / return to filtered view"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L) },
         { QStringLiteral("wordWrap"),    tr("Toggle word wrap"),          QKeySequence(Qt::ALT | Qt::Key_Z) },
+        // Перенос одной строки (U-23): действует, пока фокус в логе, — Пробел
+        // в полях ввода и на кнопках панелей не перехватывается.
+        { QStringLiteral("toggleLineWrap"), tr("Wrap / unwrap current line"), QKeySequence(Qt::Key_Space) },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },
         { QStringLiteral("zoomReset"),   tr("Default font size"),         QKeySequence(Qt::CTRL | Qt::Key_0) },

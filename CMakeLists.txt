@@ -74,6 +74,7 @@ set(DENDROLOG_CORE_SOURCES
     src/logmodel.cpp
     src/logstore.h
     src/recordid.h
+    src/shortcount.h
     src/recordid.cpp
     src/recordlocator.h
     src/recordlocator.cpp

@@ -1,4 +1,5 @@
 #include "LogListView.h"
+#include "shortcount.h"
 #include "logmodel.h"
 #include "apptheme.h"
 #include "appsettings.h"
@@ -7,6 +8,9 @@
 #include "newlinesindicator.h"
 #include "scrollbarmarks.h"
 #include "scrollbarmarksoverlay.h"
+#include "shortcutmanager.h"
+#include <QHelpEvent>
+#include <QToolTip>
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -27,6 +31,9 @@
 #include <cmath>
 #include <limits>
 #include "texttoken.h"
+
+// Знак развёрнутой строки на переключателе переноса (U-23).
+static constexpr QChar kCollapseGlyph(0x2212);
 
 // Кастомный виджет для отображения логов с подсветкой синтаксиса и поддержкой выделения текста
 LogListView::LogListView(QWidget *parent)
@@ -249,6 +256,7 @@ void LogListView::setModel(QAbstractItemModel *model) {
 
         m_modelConnections << connect(model, &QAbstractItemModel::modelReset, this, [this]() {
             m_toggledRows.clear();
+            m_pendingChromeClick = {};
             // Набор строк другой (фильтр, перезагрузка, конверсия бэкенда):
             // прежний счёт новых строк к нему не относится.
             clearNewLines();
@@ -511,6 +519,10 @@ void LogListView::shiftRowKeyedState(int first, int count)
 {
     if (count <= 0)
         return;
+    // Нажатие на переключатель — по номеру строки; строки сдвинулись до
+    // отпускания — щелчок не засчитывается (иначе развернулась бы чужая).
+    if (m_pendingChromeClick.row >= first)
+        m_pendingChromeClick = {};
 
     // Кэши строк (RowState, высоты, длины текстов) не сдвигаем — их целиком
     // инвалидирует общий обработчик rowsInserted сразу после этого сдвига.
@@ -550,6 +562,8 @@ void LogListView::removeRowKeyedState(int first, int count)
 {
     if (count <= 0)
         return;
+    if (m_pendingChromeClick.row >= first)
+        m_pendingChromeClick = {};
     const int lastRemoved = first + count - 1;
 
     // row < first — не задет; row в [first, lastRemoved] — удалён (-1); дальше — сдвиг.
@@ -698,8 +712,13 @@ void LogListView::updateFontMetricsCache() {
     m_lineHeight = fm.height();
     // Ширины служебных бейджей зависят только от шрифта — меряем один раз,
     // а не QFontMetrics'ом на каждую строку в горячих путях.
-    m_collapseBadgeWidth = fm.horizontalAdvance(QStringLiteral("-")) + kBadgeHPadding + kBadgeGap;
-    m_hiddenToggleBadgeWidth = fm.horizontalAdvance(QStringLiteral("+9999")) + kBadgeHPadding + kBadgeGap;
+    m_collapseBadgeWidth = fm.horizontalAdvance(QString(kCollapseGlyph)) + kBadgeHPadding + kBadgeGap;
+    // Резерв «+N» — по самой широкой из возможных подписей ShortCount: в
+    // пропорциональном шрифте буквы K/M/G шире цифр.
+    int widestCount = 0;
+    for (const char* label : {"+9999", "+999K", "+9.9M", "+999M", "+9.9G"})
+        widestCount = qMax(widestCount, fm.horizontalAdvance(QLatin1String(label)));
+    m_hiddenToggleBadgeWidth = widestCount + kBadgeHPadding + kBadgeGap;
 
     // Инвалидируем кэши при смене шрифта
     invalidateRowState(-1, /*preserveTextLengths=*/true);
@@ -890,41 +909,40 @@ RowState LogListView::computeRowState(int row) const {
     if (fileBadgeVar.isValid()) {
         fileBadgeWidth = fontMetrics().horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + kBadgeHPadding + kBadgeGap;
     }
-    const int collapseBadgeWidth = m_collapseBadgeWidth;
-    const int hiddenToggleBadgeWidth = m_hiddenToggleBadgeWidth; // максимальная оценка для HiddenToggle
     const int baseAvailableTextWidth = effectiveVpWidth - fileBadgeWidth - kTextBadgeGap;
     const int fullTextWidth = calculateWidth(QStringView(state.text));
 
     state.showCollapseBadge = expandedRow && (forceCollapseBadge ||
         (baseAvailableTextWidth > 0 && fullTextWidth > baseAvailableTextWidth));
 
-    int estimatedBadgesWidth = fileBadgeWidth;
-    if (state.showCollapseBadge) {
-        estimatedBadgesWidth += collapseBadgeWidth;
-    } else if (!expandedRow) {
-        estimatedBadgesWidth += hiddenToggleBadgeWidth;
-    }
-
-    int availableTextWidth = effectiveVpWidth - estimatedBadgesWidth - kTextBadgeGap;
+    // Столбец переключателя переноса — постоянной ширины: у свёрнутой строки
+    // резерв «+9999» (сокращённое «+N» в него помещается всегда, число
+    // скрытых символов считается по той же ширине, что и обрезка текста), у
+    // развёрнутой — «−». Короткая строка столбца не получает.
+    const int toggleColumn = state.showCollapseBadge ? m_collapseBadgeWidth
+                           : (!expandedRow ? m_hiddenToggleBadgeWidth : 0);
+    const int availableTextWidth = effectiveVpWidth - fileBadgeWidth - toggleColumn - kTextBadgeGap;
     state.multiLine = expandedRow && availableTextWidth > 0 && fullTextWidth > availableTextWidth;
-    
+
     // Шаг 2: Вычисляем высоту с учётом реальной доступной ширины
     state.height = computeRowHeight(state.text, state.multiLine, availableTextWidth);
-    
+
     // Шаг 3: Собираем плашки с точным расчётом скрытых символов
-    QList<BadgeSpec> badgeSpecs = collectBadgeSpecs(row, state.text, 
+    QList<BadgeSpec> badgeSpecs = collectBadgeSpecs(row, state.text,
         availableTextWidth, state.multiLine, state.showCollapseBadge, state.hiddenChars);
-    state.badges = layoutBadges(badgeSpecs, state.height);
-    
-    // Шаг 4: Вычисляем реальную ширину плашек
-    state.badgesWidth = 0;
-    for (const auto& b : state.badges) {
-        state.badgesWidth += b.rect.width() + 4;
-    }
-    
+    state.badges = layoutBadges(badgeSpecs);
+    for (int i = 0; i < state.badges.size(); ++i)
+        if (state.badges[i].spec.type == BadgeType::HiddenToggle)
+            state.toggleIndex = i;
+
+    // Шаг 4: Ширина, зарезервированная справа: метка файла и столбец
+    // переключателя целиком (а не по ширине самой плашки) — текст обрывается
+    // ровно там, где кончаются посчитанные видимые символы.
+    state.badgesWidth = fileBadgeWidth + (state.toggleIndex >= 0 ? toggleColumn : 0);
+
     // Шаг 5: Область для текста (с зазором перед плашками)
     state.textRect = QRect(0, 0, effectiveVpWidth - state.badgesWidth - kTextBadgeGap, state.height);
-    
+
     // Шаг 6: Вычисляем видимые символы для однострочного режима
     if (!state.multiLine) {
         state.visibleChars = state.text.length() - state.hiddenChars;
@@ -937,11 +955,8 @@ RowState LogListView::computeRowState(int row) const {
         state.fragments = splitTextIntoLines(state.text, state.textRect);
         // Пересчитываем высоту по фактическому количеству фрагментов
         int actualHeight = qMax(1, state.fragments.size()) * fontMetrics().height() + 2;
-        if (actualHeight != state.height) {
-            state.height = actualHeight;
-            // Пересчитываем позиции плашек с новой высотой
-            state.badges = layoutBadges(badgeSpecs, state.height);
-        }
+        if (actualHeight != state.height)
+            state.height = actualHeight;  // Y плашек от высоты строки не зависит
     }
     
     return state;
@@ -1344,12 +1359,15 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
     }
 
     // Плашка скрытых символов для однострочного режима
+    // Переключатель переноса — приглушённый (AppTheme::wrapToggle*): яркой
+    // остаётся только информация (метка файла).
+    const QPalette& pal = viewport()->palette();
     if (showCollapseBadge) {
         BadgeSpec b;
         b.type = BadgeType::HiddenToggle;
-        b.text = QStringLiteral("-");
-        b.bg = theme.badgeBg;
-        b.fg = theme.badgeFg;
+        b.text = QString(kCollapseGlyph);
+        b.bg = AppTheme::wrapToggleBg(pal);
+        b.fg = AppTheme::wrapToggleFg(pal);
         specs.prepend(b);
     } else if (!multiLine) {
         // Ширина и точка обрезки считаются с учётом раскрытия табуляции.
@@ -1363,9 +1381,11 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
             if (hiddenCount > 0) {
                 BadgeSpec b;
                 b.type = BadgeType::HiddenToggle;
-                b.text = QStringLiteral("+") + QString::number(hiddenCount);
-                b.bg = theme.badgeBg;
-                b.fg = theme.badgeFg;
+                // До 9 999 — точно, дальше «12K», «3.4M»: всегда в резерве
+                // «+9999»; точное число — в подсказке.
+                b.text = QStringLiteral("+") + ShortCount::format(hiddenCount, 10000, false);
+                b.bg = AppTheme::wrapToggleBg(pal);
+                b.fg = AppTheme::wrapToggleFg(pal);
                 specs.prepend(b);
             }
         }
@@ -1374,23 +1394,50 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
     return specs;
 }
 
-QList<BadgeLayout> LogListView::layoutBadges(const QList<BadgeSpec>& specs, int rowHeight) const {
+QList<BadgeLayout> LogListView::layoutBadges(const QList<BadgeSpec>& specs) const {
     QList<BadgeLayout> layouts;
     if (specs.isEmpty()) return layouts;
 
     QFontMetrics fm(font());
     int vpWidth = viewport()->width();
     int x = vpWidth - kBadgeGap;
-    
+    // Y — внутри слота первой визуальной линии (высота singleRowHeight):
+    // на экране слот прилипает к верху вьюпорта (badgeScreenRect).
+    const int h = fm.height() - 2;
+    const int top = (singleRowHeight() - h) / 2;
+
     for (int i = specs.size() - 1; i >= 0; --i) {
         const auto& spec = specs[i];
         int w = fm.horizontalAdvance(spec.text) + kBadgeHPadding;
-        int h = fm.height() - 2;
-        QRect r(x - w + 1, rowHeight / 2 - h / 2, w, h);
+        QRect r(x - w + 1, top, w, h);
         x = r.left() - kBadgeGap;
         layouts.prepend({spec, r});
     }
     return layouts;
+}
+
+int LogListView::stickyTop(qint64 rowTop, int rowHeight, int itemHeight)
+{
+    // clamp(0, rowTop, rowTop + rowHeight − itemHeight): элемент у верха
+    // строки, пока он на экране; строка ушла верхом за экран — элемент у
+    // верха вьюпорта; дальше он уходит вместе с низом строки. Строка ниже
+    // элемента — у её верха.
+    const qint64 lo = rowTop;
+    const qint64 hi = rowTop + rowHeight - itemHeight;
+    qint64 y = 0;
+    if (hi < lo || y < lo)
+        y = lo;
+    else if (y > hi)
+        y = hi;
+    constexpr qint64 kLimit = std::numeric_limits<int>::max() / 2;
+    return int(std::clamp<qint64>(y, -kLimit, kLimit));
+}
+
+QRect LogListView::badgeScreenRect(const BadgeLayout& badge, qint64 rowTop, int rowHeight) const
+{
+    QRect r = badge.rect;
+    r.moveTop(stickyTop(rowTop, rowHeight, singleRowHeight()) + badge.rect.top());
+    return r;
 }
 
 // ============================================================================
@@ -2121,8 +2168,15 @@ void LogListView::toggleRowMultiLine(int row) {
     // потребовали бы плотного массива высот на весь файл.
     if (hugeRowMode()) return;
 
+    const bool wasExpanded = isRowMultiLine(row);
     int preservedViewportOffset = 0;
     const bool keepRowAnchor = captureVisibleRowOffset(row, preservedViewportOffset);
+    // Сворачивание строки, верх которой выше экрана (читали середину
+    // гигантской строки): с прежним смещением свёрнутая строка оказалась бы
+    // над экраном — она встаёт у верха вьюпорта. Верх был на экране — строка
+    // остаётся на своём месте; разворачивание — тоже на месте.
+    if (keepRowAnchor && wasExpanded && preservedViewportOffset < 0)
+        preservedViewportOffset = 0;
 
     if (m_toggledRows.contains(row)) {
         m_toggledRows.remove(row);
@@ -2159,16 +2213,6 @@ void LogListView::toggleRowMultiLine(int row) {
     }
 
     viewport()->update();
-}
-
-bool LogListView::hitTestBadge(const QList<BadgeLayout>& layouts, const QPoint& pos, int& badgeIndex) const {
-    for (int i = 0; i < layouts.size(); ++i) {
-        if (layouts[i].rect.contains(pos)) {
-            badgeIndex = i;
-            return true;
-        }
-    }
-    return false;
 }
 
 // Основная отрисовка виджета
@@ -2266,10 +2310,25 @@ void LogListView::paintEvent(QPaintEvent *event) {
             if (m_bracketMatch.isValid() && m_bracketMatch.row == row)
                 drawBracketHighlight(painter, textRect, state);
 
-            // Рисуем плашки поверх (корректируем Y координаты относительно currentY)
+            // Служебные элементы справа (U-23). Рейка развёрнутой строки — на
+            // всю её высоту в столбце «−»: видно, где строка кончается, и
+            // свернуть её можно из любой точки. Плашки — на первой линии,
+            // прилипая к верху экрана (stickyTop), пока строка его пересекает.
+            if (state.toggleIndex >= 0 && state.showCollapseBadge) {
+                const QRect toggle = state.badges[state.toggleIndex].rect;
+                const int x = toggle.left() + toggle.width() / 2;
+                const int top = qMax(currentY + 2, visibleRect.top());
+                const int bottom = qMin(currentY + rowHeight - 3, visibleRect.bottom());
+                if (bottom > top) {
+                    painter.save();
+                    painter.setRenderHint(QPainter::Antialiasing, false);
+                    painter.setPen(QPen(AppTheme::wrapRail(viewport()->palette()), 1));
+                    painter.drawLine(x, top, x, bottom);
+                    painter.restore();
+                }
+            }
             for (const auto& bl : state.badges) {
-                QRect badgeRect = bl.rect;
-                badgeRect.moveTop(badgeRect.top() + currentY);
+                const QRect badgeRect = badgeScreenRect(bl, currentY, rowHeight);
                 painter.save();
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(bl.spec.bg);
@@ -2390,6 +2449,9 @@ void LogListView::updateScrollbar() {
 // Обработка нажатия мыши для выделения текста
 void LogListView::mousePressEvent(QMouseEvent *event) {
     noteUserAction();
+    // Отпускание прежнего нажатия на переключатель могло уйти другому
+    // виджету (всплывающее окно, смена окна) — новое нажатие его отменяет.
+    m_pendingChromeClick = {};
     // Боковые кнопки мыши — история переходов (R-7); выделение не трогаем.
     if (event->button() == Qt::BackButton || event->button() == Qt::ForwardButton) {
         emit historyNavigationRequested(event->button() == Qt::ForwardButton);
@@ -2425,24 +2487,6 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
         return info;
     };
 
-    // Обработка клика по плашке — возвращает true если клик обработан
-    // localPos - координаты относительно начала строки (Y от 0 до rowHeight)
-    auto handleBadgeClick = [this](int row, const QPoint& localPos) -> bool {
-        const auto& state = getRowState(row);
-        
-        int badgeIndex = -1;
-        if (hitTestBadge(state.badges, localPos, badgeIndex)) {
-            const auto& spec = state.badges[badgeIndex].spec;
-            if (spec.type == BadgeType::HiddenToggle) {
-                toggleRowMultiLine(row);
-            }
-            emit badgeClicked(row, spec.type, spec.text);
-            viewport()->update();
-            return true;
-        }
-        return false;
-    };
-
     // Начало выделения текста: устанавливаем якорь ДО вызова setCurrentIndex,
     // чтобы currentChanged не сбросил только что созданное выделение.
     auto startTextSelection = [this](int row, const QPoint& localPos) {
@@ -2470,8 +2514,13 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
         return;
     }
 
-    // 3. Проверяем клик по плашке (передаём локальные координаты)
-    if (handleBadgeClick(hitInfo.row, hitInfo.localPos)) {
+    // 3. Служебный элемент строки (U-23): переключатель и рейка действуют по
+    // отпусканию без протяжки (mouseReleaseEvent); метка файла — без
+    // действия. Выделение текста здесь не начинается.
+    const RowChromeHit chrome = rowChromeAt(event->pos());
+    if (chrome.kind != RowChrome::None) {
+        m_pendingChromeClick = {chrome.row, chrome.kind, event->pos()};
+        event->accept();
         return;
     }
 
@@ -2532,6 +2581,19 @@ void LogListView::mouseMoveEvent(QMouseEvent *event) {
 
 // Завершение выделения при отпускании кнопки мыши
 void LogListView::mouseReleaseEvent(QMouseEvent *event) {
+    if (m_pendingChromeClick.row >= 0) {
+        const PendingChromeClick pending = m_pendingChromeClick;
+        m_pendingChromeClick = {};
+        if (event->button() == Qt::LeftButton
+            && (event->pos() - pending.pressPos).manhattanLength() < QApplication::startDragDistance()) {
+            const RowChromeHit hit = rowChromeAt(event->pos());
+            if (hit.row == pending.row
+                && (hit.kind == RowChrome::WrapToggle || hit.kind == RowChrome::WrapRail))
+                activateRowChrome(hit.row, hit.kind);
+        }
+        event->accept();
+        return;
+    }
     if (m_selection.isDragging) {
         m_selection.finish();
         updateBracketMatch();
@@ -2552,6 +2614,13 @@ void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
     }
     if (event->button() != Qt::LeftButton) {
         QListView::mouseDoubleClickEvent(event);
+        return;
+    }
+    // Двойной щелчок по переключателю или рейке — второй щелчок по ним (по
+    // отпусканию), а не выделение слова у края строки.
+    if (const RowChromeHit chrome = rowChromeAt(event->pos()); chrome.kind != RowChrome::None) {
+        m_pendingChromeClick = {chrome.row, chrome.kind, event->pos()};
+        event->accept();
         return;
     }
 
@@ -2680,17 +2749,125 @@ void LogListView::extendSelectionByKeyboard(int direction, bool byToken) {
         scrollTo(model()->index(row, 0), EnsureVisible);
 }
 
+// ---------------------------------------------------------------------------
+// Служебные элементы строки (U-23): hit-test, подсказки, действие.
+// ---------------------------------------------------------------------------
+LogListView::RowChromeHit LogListView::rowChromeAt(const QPoint& pos) const
+{
+    RowChromeHit hit;
+    if (!model() || !viewport()->rect().contains(pos))
+        return hit;
+    const qint64 scrollY = scrollContentY();
+    int row = -1;
+    qint64 rowTopContent = 0;
+    if (!getRowAtContentY(pos.y() + scrollY, row, rowTopContent))
+        return hit;
+    const RowState state = getRowState(row);
+    const qint64 rowTop = rowTopContent - scrollY;
+    for (int i = 0; i < state.badges.size(); ++i) {
+        const QRect r = badgeScreenRect(state.badges[i], rowTop, state.height);
+        if (!r.contains(pos))
+            continue;
+        hit.row = row;
+        hit.rect = r;
+        if (i == state.toggleIndex) {
+            hit.kind = RowChrome::WrapToggle;
+            hit.toolTip = wrapToggleToolTip(state);
+        } else {
+            hit.kind = RowChrome::FileLabel;
+            hit.toolTip = state.badges[i].spec.text;
+        }
+        return hit;
+    }
+    // Рейка: столбец «−» на всю высоту развёрнутой строки.
+    if (state.toggleIndex >= 0 && state.showCollapseBadge) {
+        const QRect toggle = state.badges[state.toggleIndex].rect;
+        if (pos.x() >= toggle.left() && pos.x() <= toggle.right()) {
+            const qint64 top = qMax<qint64>(0, rowTop);
+            const qint64 bottom = qMin<qint64>(viewport()->height(), rowTop + state.height);
+            hit.kind = RowChrome::WrapRail;
+            hit.row = row;
+            hit.rect = QRect(toggle.left(), int(top), toggle.width(), int(qMax<qint64>(0, bottom - top)));
+            hit.toolTip = wrapToggleToolTip(state);
+        }
+    }
+    return hit;
+}
+
+QString LogListView::wrapToggleToolTip(const RowState& state) const
+{
+    const QKeySequence key = ShortcutManager::instance().sequence(QStringLiteral("toggleLineWrap"));
+    const QString orKey = key.isEmpty() ? QString()
+        : tr(" or %1").arg(key.toString(QKeySequence::NativeText));
+    if (state.showCollapseBadge)
+        return tr("Click%1 to collapse this line").arg(orKey);
+    QLocale c = QLocale::c();
+    c.setNumberOptions(QLocale::DefaultNumberOptions);
+    const QString hidden = c.toString(state.hiddenChars);
+    if (hugeRowMode())
+        return tr("%1 characters hidden \u2014 click%2 to show the full line in Entry Details "
+                  "(lines are not wrapped in this tab)").arg(hidden, orKey);
+    return tr("%1 characters hidden \u2014 click%2 to wrap this line").arg(hidden, orKey);
+}
+
+void LogListView::activateRowChrome(int row, RowChrome kind)
+{
+    if (!model() || row < 0 || row >= model()->rowCount())
+        return;
+    if (kind != RowChrome::WrapToggle && kind != RowChrome::WrapRail)
+        return;
+    if (hugeRowMode()) {
+        // Переноса нет: полный текст строки — в Entry Details. Строка
+        // становится выбором пользователя, высоты не меняются.
+        selectAsUserChoice(row);
+        viewport()->update();
+        emit fullTextRequested(row);
+        return;
+    }
+    toggleRowMultiLine(row);
+}
+
+bool LogListView::toggleCurrentLineWrap()
+{
+    // Строка, ВЫБРАННАЯ пользователем (инвариант 10): текущую без выделения
+    // назначает Qt по фокусу, и развернуть её с прокруткой к ней нельзя.
+    const int row = userSelectedRow();
+    if (row < 0 || !rowHasWrapToggle(row))
+        return false;
+    noteUserAction();
+    activateRowChrome(row, RowChrome::WrapToggle);
+    return true;
+}
+
+LogListView::RowWrapInfo LogListView::rowWrapInfo(int row) const
+{
+    RowWrapInfo info;
+    if (!model() || row < 0 || row >= model()->rowCount())
+        return info;
+    const RowState state = getRowState(row);
+    const qint64 rowTop = rowYOffset(row) - scrollContentY();
+    info.length = int(state.text.length());
+    info.visibleChars = state.visibleChars;
+    info.hiddenChars = state.multiLine ? 0 : state.hiddenChars;
+    info.expanded = state.showCollapseBadge;
+    info.textRect = textAreaScreenRect(int(std::clamp<qint64>(rowTop, -(qint64(1) << 30), qint64(1) << 30)),
+                                       state.height, state.badgesWidth);
+    if (state.toggleIndex >= 0) {
+        const BadgeLayout& toggle = state.badges[state.toggleIndex];
+        info.hasToggle = true;
+        info.toggleText = toggle.spec.text;
+        info.toggleRect = badgeScreenRect(toggle, rowTop, state.height);
+        info.toggleReserve = state.showCollapseBadge ? m_collapseBadgeWidth : m_hiddenToggleBadgeWidth;
+    }
+    return info;
+}
+
 // True если у строки есть плашка-переключатель раскрытия (она длиннее видимой
 // области либо уже развёрнута на несколько визуальных строк).
 bool LogListView::rowHasWrapToggle(int row) const {
     if (row < 0 || !model() || row >= model()->rowCount())
         return false;
-    const RowState state = getRowState(row);
-    for (const BadgeLayout& b : state.badges) {
-        if (b.spec.type == BadgeType::HiddenToggle)
-            return true;
-    }
-    return false;
+    return getRowState(row).toggleIndex >= 0;
 }
 
 // Обработка нажатия клавиш (копирование выделенного текста; пробел —
@@ -2910,12 +3087,10 @@ void LogListView::keyPressEvent(QKeyEvent *event) {
     }
 
     if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier) {
-        // Toggle wrap only for rows that can expand/collapse; for any other row
-        // do nothing (and consume the event) so the default QListView Space
-        // handling does not jump the selection.
-        const QModelIndex cur = currentIndex();
-        if (cur.isValid() && rowHasWrapToggle(cur.row()))
-            toggleRowMultiLine(cur.row());
+        // Перенос текущей строки — команда окна toggleLineWrap (по умолчанию
+        // Пробел, переназначается; toggleCurrentLineWrap). Сюда Пробел
+        // доходит, только если команде дана другая клавиша: событие гасится,
+        // чтобы обработка QListView не двигала выделение.
         return;
     }
 
@@ -3314,8 +3489,18 @@ bool LogListView::viewportEvent(QEvent *event)
         case QEvent::HoverEnter:
         case QEvent::HoverLeave:
         case QEvent::HoverMove:
-        case QEvent::ToolTip:
             return true;
+        case QEvent::ToolTip: {
+            // Подсказка — только над служебным элементом строки (U-23); в
+            // остальной области событие гасится, как прежде.
+            auto* help = static_cast<QHelpEvent*>(event);
+            const RowChromeHit hit = rowChromeAt(help->pos());
+            if (hit.kind != RowChrome::None && !hit.toolTip.isEmpty())
+                QToolTip::showText(help->globalPos(), hit.toolTip, viewport(), hit.rect);
+            else
+                QToolTip::hideText();
+            return true;
+        }
         case QEvent::Resize:
             // Вьюпорт меняет размер и без resize самого view (появился или
             // исчез горизонтальный скроллбар) — плашка держится у его низа.

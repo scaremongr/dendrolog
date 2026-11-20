@@ -128,6 +128,15 @@ public:
     // применения и заново на PaletteChange, а не один раз.
     static QColor searchNotFoundBackground(const QPalette& palette);
 
+    // Переключатель переноса строки в LogListView (U-23): «+N» у свёрнутой
+    // строки, «−» и рейка у развёрнутой. Приглушённо — текст между цветом
+    // текста и фоном палитры, подложка чуть темнее (светлее) фона, рейка —
+    // тонкая линия между ними: служебный элемент не спорит с цветами уровней.
+    // Из палитры — светлая и тёмная темы получаются сами.
+    static QColor wrapToggleFg(const QPalette& palette);
+    static QColor wrapToggleBg(const QPalette& palette);
+    static QColor wrapRail(const QPalette& palette);
+
     // Persistence — called from AppSettings::load() / save().
     // The [Theme] group in the INI file is owned by these methods.
     void load(QSettings& s);

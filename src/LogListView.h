@@ -63,9 +63,14 @@ struct RowState {
     int hiddenChars = 0;        // Количество скрытых символов (для однострочного)
     int visibleChars = 0;       // Количество видимых символов (для ограничения выделения)
     
-    // Плашки
+    // Плашки. У BadgeLayout::rect только X и ширина зависят от строки; Y —
+    // смещение внутри первой визуальной линии (слота высотой singleRowHeight):
+    // на экране слот прилипает к верху вьюпорта (LogListView::stickyTop), и
+    // экранный Y считается в момент отрисовки и hit-test — от прокрутки
+    // кэшированное состояние не зависит.
     QList<BadgeLayout> badges;
-    int badgesWidth = 0;        // Суммарная ширина плашек + gaps
+    int badgesWidth = 0;        // Ширина, зарезервированная справа под плашки (столбец переключателя — целиком)
+    int toggleIndex = -1;       // Индекс плашки-переключателя переноса в badges (-1 — нет)
     
     // Область для текста (относительно начала строки, y=0)
     QRect textRect;
@@ -183,6 +188,45 @@ public:
     // (TextQuery::highlightPattern). Предыдущая поисковая подсветка
     // снимается автоматически.
     void showSearchMatch(int row, const TextQuery& query);
+
+    // ---- Служебные элементы строки (U-23, docs/design/U-23.md) --------------
+    // Всё, что привязано к строке и должно быть видно, стоит на её первой
+    // визуальной линии и прилипает к верху вьюпорта, пока строка его
+    // пересекает: Y слота = stickyTop(верх строки во вьюпорте, высота строки,
+    // высота слота). Одна функция для отрисовки и hit-test.
+    static int stickyTop(qint64 rowTop, int rowHeight, int itemHeight);
+    enum class RowChrome {
+        None,
+        WrapToggle,   // «+N» у свёрнутой строки, «−» у развёрнутой
+        WrapRail,     // рейка развёрнутой строки: столбец «−» на всю её высоту
+        FileLabel,    // метка файла строки
+    };
+    struct RowChromeHit {
+        RowChrome kind = RowChrome::None;
+        int row = -1;
+        QRect rect;       // экранный прямоугольник элемента (у рейки — столбец в пределах вьюпорта)
+        QString toolTip;
+    };
+    // Служебный элемент под точкой вьюпорта (подсказки, щелчок, тесты).
+    RowChromeHit rowChromeAt(const QPoint& viewportPos) const;
+    // Переключатель переноса строки: что показано и где (тестам и подсказке).
+    struct RowWrapInfo {
+        bool hasToggle = false;
+        bool expanded = false;   // строка развёрнута: «−» и рейка
+        QString toggleText;      // «+N» (N сокращённое) или «−»
+        QRect toggleRect;        // экранный, с прилипанием
+        int toggleReserve = 0;   // ширина столбца переключателя (плашка + отступы)
+        int length = 0;          // длина текста строки
+        int visibleChars = 0;
+        int hiddenChars = 0;
+        QRect textRect;          // экранная текстовая область строки
+    };
+    RowWrapInfo rowWrapInfo(int row) const;
+    // Команда «Wrap / Unwrap Current Line» (Пробел в фокусе лога): текущая
+    // строка разворачивается или сворачивается; в hugeRowMode переноса нет —
+    // строка выбирается и запрашивается полный текст (fullTextRequested).
+    // false — у текущей строки нет переключателя (короткая или её нет).
+    bool toggleCurrentLineWrap();
     // Переход к строке как выбор пользователя (Go to Line / Time, таймлайн,
     // статистика, Search, быстрый поиск, F8 — общий путь всех переходов): строка
     // становится текущей и выделенной — значит, и якорем восстановления
@@ -338,7 +382,9 @@ public:
     Q_ENUM(BookmarkAction)
 
 signals:
-    void badgeClicked(int row, BadgeType type, const QString& text);
+    // Полный текст строки (U-23): «+N» и Пробел в hugeRowMode, где перенос
+    // недоступен, — строка выбрана, окно показывает док Entry Details.
+    void fullTextRequested(int row);
     // Боковые кнопки мыши «назад» / «вперёд» над видом (R-7): вкладка ведёт
     // по истории переходов.
     void historyNavigationRequested(bool forward);
@@ -420,6 +466,19 @@ private:
 
     QSet<int> m_toggledRows; // строки, состояние которых инвертировано относительно m_wordWrapEnabled
     TextSelection m_selection;  // всё состояние текстового выделения
+    // Нажатие на служебный элемент строки (переключатель, рейка): действие —
+    // по отпусканию над тем же элементом без протяжки, чтобы щелчок не мешал
+    // выделению текста, дотянутому до края.
+    struct PendingChromeClick {
+        int row = -1;
+        RowChrome kind = RowChrome::None;
+        QPoint pressPos;
+    };
+    PendingChromeClick m_pendingChromeClick;
+    void activateRowChrome(int row, RowChrome kind);
+    // Экранный прямоугольник плашки строки rowTop/rowHeight (с прилипанием).
+    QRect badgeScreenRect(const BadgeLayout& badge, qint64 rowTop, int rowHeight) const;
+    QString wrapToggleToolTip(const RowState& state) const;
 
     // Соединения с текущей моделью. connect(model, ..., this, ...) живёт, пока
     // живы ОБА объекта — при замене модели соединения нужно рвать явно, иначе
@@ -631,7 +690,7 @@ private:
     QList<TextFragment> splitTextIntoLines(const QString& text, const QRect& rect) const;
     int computeRowHeight(const QString& text, bool multiLine, int availableWidth = 0) const;
     QList<BadgeSpec> collectBadgeSpecs(int row, const QString& text, int availableWidth, bool multiLine, bool showCollapseBadge, int& hiddenCount) const;
-    QList<BadgeLayout> layoutBadges(const QList<BadgeSpec>& specs, int rowHeight) const;
+    QList<BadgeLayout> layoutBadges(const QList<BadgeSpec>& specs) const;
     
     // ========== Inline-подсветка совпадений ==========
     TextMatchHighlighter m_textHighlighter;
@@ -659,8 +718,6 @@ private:
     // Кэширование растров строк
     QPixmap getRowPixmap(int row, const RowState& state);
     
-    // Hit-testing
-    bool hitTestBadge(const QList<BadgeLayout>& layouts, const QPoint& pos, int& badgeIndex) const;
     
     // ---- Follow-tail ---------------------------------------------------------
     bool m_followTail = false;

@@ -6,6 +6,33 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Wrap / Unwrap Current Line** in the `View` menu (`Space` while the log
+  has the focus, can be reassigned in Settings). In a field or on a panel
+  button `Space` keeps its usual meaning.
+
+### Changed
+- **Collapsing a long line works from anywhere in it.** The `−` of a wrapped
+  line stays at the top of the screen while the line crosses it, and a thin
+  rail runs down the whole line: click the `−` or the rail to collapse the
+  line, even from the middle of a huge one. The collapsed line stays on the
+  screen (at its top if it started above) instead of jumping out of view. A
+  click counts on release without dragging, so a text selection that ends at
+  the edge collapses nothing.
+- The `+N` of a long line is shortened from 10 000 (`12K`, `3.4M`) and always
+  fits; the exact number of hidden characters is in its tooltip. The wrap
+  toggle is drawn muted, so it no longer competes with the level colours.
+- On a large (indexed) tab, where lines are not wrapped, `+N` and `Space`
+  select the line and show its full text in the **Entry Details** panel
+  instead of doing nothing.
+
+### Fixed
+- Lines over 10 000 hidden characters lost a few characters at the edge
+  that `+N` did not count.
+- A line with a very long word (a base64 blob, a dump without spaces) could
+  freeze the window while it was drawn: highlighting looked for a URL from
+  every letter of the word.
+
 ## [0.6.0] — 2026-11-19
 
 **An investigation can be put aside and picked up again.** Bookmarks with

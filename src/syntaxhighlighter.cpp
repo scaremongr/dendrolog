@@ -63,7 +63,10 @@ int ruleQuotedString(const QString& text, int pos, const RuleColors& colors, QCo
 // ── URL: произвольная схема вида  scheme://… ─────────────────────────────────
 int ruleUrl(const QString& text, int pos, const RuleColors& colors, QColor& outColor)
 {
-    if (!text[pos].isLetter()) return pos;
+    // Схема начинается с границы токена: внутри слова её не ищем, иначе
+    // длинная серия букв (base64, гигантская строка) сканировалась бы
+    // заново с каждой позиции — O(n²).
+    if (!text[pos].isLetter() || !isTokenStart(text, pos)) return pos;
     const int len = text.length();
 
     // Scheme: [a-zA-Z][a-zA-Z0-9+\-.]*

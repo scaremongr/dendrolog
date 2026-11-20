@@ -289,6 +289,10 @@ private:
     QAction*     m_goToAction = nullptr;
     QAction*     m_navBackAction = nullptr;     // Alt+←, история переходов (R-7)
     QAction*     m_fullLogAction = nullptr;     // Ctrl+Shift+L, показ полного лога (R-3)
+    // «Wrap / Unwrap Current Line» (U-23): Пробел, пока фокус в логе.
+    QAction*     m_toggleLineWrapAction = nullptr;
+    void attachLineWrapAction(LogListView* view);
+    void showEntryDetailsForFullText();
     QAction*     m_navForwardAction = nullptr;  // Alt+→
     // Next / Previous Error и Warning (F8, F7).
     QVector<QAction*> m_levelJumpActions;

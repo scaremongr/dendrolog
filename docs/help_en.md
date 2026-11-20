@@ -27,7 +27,10 @@ filtering, highlighting and live reload.
 - **Gutter marker `›`** — start of a logical entry (without a schema: a line that opens with a timestamp, or a line with a timestamp and a level word); painted green for lines added by the last auto-reload.
 - **Badges on the right:**
   - File badge — colour-coded source file (only when a tab holds several files).
-  - `+N` / `−` — the line is longer than the visible width; click to expand/collapse it.
+  - `+N` — the line is longer than the visible width: N characters are hidden (shortened from 10 000: `12K`, `3.4M`; the exact number is in the tooltip). Click it, or press `Space` with the line selected, to wrap the line.
+  - `−` with a thin **rail** below it — the line is wrapped. The `−` stays at the top of the screen while the line crosses it, and the rail runs down the whole line: click the `−` or anywhere on the rail to collapse the line — even from the middle of a huge one. After collapsing, the line stays on the screen (at its top if it started above). A click counts on release without dragging, so selecting text up to the edge does not collapse anything.
+  - On a large (indexed) tab lines are not wrapped: `+N` and `Space` select the line and show its full text in the **Entry Details** panel.
+  - The wrap toggle is muted on purpose; hover it for a hint.
 - **Marks on the scrollbar** — short strokes on the vertical scrollbar show where the shown lines are: errors (Error and Fatal, red) and warnings (yellow) in the right half, bookmarks in the middle, matches of the running Search panel query on the left (on the tab it searches). A level mark stands for the first line of an entry, the same line `F8` goes to. When a line is on screen, its mark is inside the scrollbar handle, so dragging the handle to a mark brings that place into view. Marks follow filters, tail updates, reloads and added files; on a very large log they appear a moment after loading, computed in the background.
 - **Syntax highlighting** — strings, numbers, hex, URLs, file paths, GUIDs, timestamps, matching brackets.
 - **Word wrap** — toolbar button, `View → Word Wrap`, or `Alt+Z` (global default in **Settings → Appearance**).
@@ -40,7 +43,7 @@ filtering, highlighting and live reload.
 - **Double-click recognises:** quoted strings, timestamps, URLs, file paths, hex literals, IP addresses, filenames, numbers, words. Consecutive separators are selected as a group; clicking whitespace selects only the whitespace (no jump to the next word).
 - **Extend selection with the keyboard:** `Shift+←/→` by character, `Ctrl+Shift+←/→` by token/block.
 - **Copy** — `Ctrl+C`.
-- **`Space`** — expand/collapse the current line (same as the right-hand badge).
+- **`Space`** (while the log has the focus) — wrap / unwrap the current line, the same as `View → Wrap / Unwrap Current Line` and the `+N` / `−` toggle; the key can be reassigned in Settings.
 - **Right-click → context menu:**
   - **Copy** the selection; **Copy Whole Line** under the cursor.
   - With a short piece of text selected on one line:
@@ -319,7 +322,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 | Reset filters of this tab | `Ctrl+Shift+R` |
 | Show in full log / return to filtered view | `Ctrl+Shift+L` |
 | Copy selection | `Ctrl+C` |
-| Expand/collapse current line | `Space` |
+| Wrap / unwrap current line | `Space` |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
 | Show/Hide panels | `Ctrl+F1`, `Ctrl+F3…F11` |
