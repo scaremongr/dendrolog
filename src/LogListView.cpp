@@ -2322,18 +2322,23 @@ void LogListView::paintEvent(QPaintEvent *event) {
                 if (bottom > top) {
                     painter.save();
                     painter.setRenderHint(QPainter::Antialiasing, false);
-                    painter.setPen(QPen(AppTheme::wrapRail(viewport()->palette()), 1));
+                    painter.setPen(QPen(AppTheme::wrapRail(palette()), 1));
                     painter.drawLine(x, top, x, bottom);
                     painter.restore();
                 }
             }
             for (const auto& bl : state.badges) {
                 const QRect badgeRect = badgeScreenRect(bl, currentY, rowHeight);
+                // Цвета переключателя — из палитры в момент отрисовки, а не из
+                // кэша состояния строки: порядок PaletteChange у view и его
+                // вьюпорта зависит от платформы, и кэш мог успеть заполниться
+                // цветами прежней темы.
+                const bool toggle = bl.spec.type == BadgeType::HiddenToggle;
                 painter.save();
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(bl.spec.bg);
+                painter.setBrush(toggle ? AppTheme::wrapToggleBg(palette()) : bl.spec.bg);
                 painter.drawRect(badgeRect);
-                painter.setPen(bl.spec.fg);
+                painter.setPen(toggle ? AppTheme::wrapToggleFg(palette()) : bl.spec.fg);
                 painter.drawText(badgeRect.adjusted(kBadgeHPadding/2, 0, -kBadgeHPadding/2, 0), Qt::AlignVCenter | Qt::AlignLeft, bl.spec.text);
                 painter.restore();
             }
