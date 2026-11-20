@@ -8,6 +8,7 @@
 #include "quicksearch.h"
 #include "recordlocator.h"
 #include <QVBoxLayout>
+#include "filelegend.h"
 #include <QHBoxLayout>
 #include <QFrame>
 #include <QLabel>
@@ -106,6 +107,15 @@ LogViewWidget::LogViewWidget(QWidget *parent)
         updateFullLogBar();
         emit fullLogViewChanged(shown);
     });
+
+    // Легенда файлов слитой вкладки (U-23): над логом, видна при двух
+    // файлах и больше в режимах меток Name и Color Only.
+    m_fileLegend = new FileLegend(this);
+    m_fileLegend->setView(m_view);
+    m_fileLegend->hide();
+    connect(m_fileLegend, &FileLegend::visibilityWanted, m_fileLegend, &QWidget::setVisible);
+    m_fileLegend->setModel(m_model);
+    layout->addWidget(m_fileLegend);
 
     layout->addWidget(m_view);
 

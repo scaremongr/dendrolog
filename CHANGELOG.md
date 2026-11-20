@@ -7,11 +7,25 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **File labels on the left.** In a tab with several files, the source file
+  of a line is shown in a column left of the text: a stripe in the file's
+  colour down the whole line and a short label that tells the files apart
+  (the common start and end of the names are cut off). On a tall wrapped
+  line the label stays at the top of the screen. `View → File Labels`
+  switches between Name, Color Only and Hidden.
+- **File legend** above a tab with several files: colour, name and line
+  count of each file; its context menu goes to the next / previous line of
+  the file, copies the path or shows the file in its folder.
 - **Wrap / Unwrap Current Line** in the `View` menu (`Space` while the log
   has the focus, can be reassigned in Settings). In a field or on a panel
   button `Space` keeps its usual meaning.
 
 ### Changed
+- The file badge no longer sits at the right of every line of a merged tab:
+  long file names no longer eat the width, and the text of all files now
+  starts and ends on the same vertical. File colours were reworked to read
+  well in the light and the dark theme.
+- On a merged tab the encoding indicator names the file of the current line.
 - **Collapsing a long line works from anywhere in it.** The `−` of a wrapped
   line stays at the top of the screen while the line crosses it, and a thin
   rail runs down the whole line: click the `−` or the rail to collapse the
@@ -27,6 +41,7 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- File colours were missing (all grey) on a merged tab of large files.
 - Lines over 10 000 hidden characters lost a few characters at the edge
   that `+N` did not count.
 - A line with a very long word (a base64 blob, a dump without spaces) could

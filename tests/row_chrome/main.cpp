@@ -18,16 +18,36 @@
 //     проглочено, подсказки нет;
 //   • отрисовка после прокрутки (блит базового scrollContentsBy): вид,
 //     прокрученный по шагам, выглядит как свежий вид в той же позиции.
+// PR 2, метка файла слитой вкладки:
+//   • FileLabels::build — таблица и случайные наборы (метки попарно разные);
+//   • вкладка на обоих бэкендах: один файл — ни колонки, ни легенды; второй
+//     файл — колонка и легенда (порядок добавления, цвета полос = цвета
+//     чипов = AppTheme::fileColor); левый край и ширина текста у строк всех
+//     файлов одни; режимы Name / Color Only / Hidden и ini; число строк на
+//     чипе против строк файла — после загрузки, дозаписи, полной
+//     перезагрузки и удаления файла (колонка и легенда уходят); переход к
+//     следующей / предыдущей строке файла против перебора и в историю;
+//   • высокая строка: полоса цвета — в любой видимой части, метка — у верха
+//     вьюпорта с путём в подсказке;
+//   • hit-test: выделение мышью попадает в те же символы с колонкой и без.
 // ============================================================================
 
 #include "LogListView.h"
 #include "appsettings.h"
+#include "apptheme.h"
+#include "filelabels.h"
+#include "filelegend.h"
+#include "logviewwidget.h"
+#include "navhistory.h"
 #include "logmodel.h"
 #include "shortcount.h"
 #include "shortcutmanager.h"
 #include "testdocuments.h"
 
 #include <QApplication>
+#include <QClipboard>
+#include <QRandomGenerator>
+#include <QSettings>
 #include <QHelpEvent>
 #include <QMouseEvent>
 #include <QScreen>
@@ -36,6 +56,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolTip>
+#include <QFile>
 #include <cstdio>
 
 static int failures = 0;
@@ -474,6 +495,348 @@ static void checkScrollRepaint(const QDir& dir)
                               .arg(differing).arg(first.x()).arg(first.y()));
 }
 
+
+// ---------------------------------------------------------------------------
+// PR 2: метки файлов
+// ---------------------------------------------------------------------------
+static void checkFileLabelsTable()
+{
+    section("FileLabels::build");
+    const QChar e(0x2026);
+    const struct { QStringList names; int max; QStringList expected; const char* what; } cases[] = {
+        {{"app.log", "db.log"}, 16, {"app.log", "db.log"}, "short names stay"},
+        {{"app.log.1", "app.log.2"}, 16, {"app.log.1", "app.log.2"}, "rotated names fit"},
+        {{"payment-service-prod-eu-1.log", "payment-service-prod-us-1.log"}, 12,
+         {QString(e) + "eu" + e, QString(e) + "us" + e}, "common prefix and suffix"},
+        {{"payment-service-prod-eu-1.log", "payment-service-prod-us-1.log", "auth.log"}, 12,
+         {"payment…1.log", "payment…1.log~2", "auth.log"}, "nothing common: middle elided, repeats tagged"},
+        {{"server.log", "server.log"}, 16, {"server.log", "server.log~2"}, "same names from different folders"},
+        {{"журнал-сервера-основной.log", "журнал-сервера-резервный.log"}, 12,
+         {QString(e) + "основной" + e, QString(e) + "резервный" + e}, "cyrillic"},
+        {{"a-very-long-single-file-name.log"}, 16, {"a-very-l…ame.log"}, "one file: elided to the limit"},
+        {{"x-aaaaaaaaaaaaaaaaaaaa-1.log", "x-bbbbbbbbbbbbbbbbbbbb-1.log"}, 10,
+         {QString(e) + "aaaa…aaa" + e, QString(e) + "bbbb…bbb" + e}, "limit below the distinct part"},
+        {{"app.log", "app.log.1", "app.log.2", "very-long-name-of-a-log.log"}, 8,
+         {"app.log", "app.log.1", "app.log.2", "very…log"}, "a name that is a prefix of another"},
+    };
+    for (const auto& c : cases) {
+        const QStringList got = FileLabels::build(c.names, c.max);
+        CHECK(got.size() == c.names.size(), QStringLiteral("%1: one label per name").arg(QLatin1String(c.what)));
+        for (const QString& l : got)
+            CHECK(l.size() <= c.max, QStringLiteral("%1: '%2' fits %3").arg(QLatin1String(c.what), l).arg(c.max));
+        CHECK(QSet<QString>(got.begin(), got.end()).size() == got.size(),
+              QStringLiteral("%1: labels differ: %2").arg(QLatin1String(c.what), got.join(QLatin1String(" | "))));
+        if (c.what != std::string_view("nothing common: middle elided, repeats tagged")
+            && c.what != std::string_view("a name that is a prefix of another"))
+            CHECK(got == c.expected, QStringLiteral("%1: %2 (expected %3)")
+                                         .arg(QLatin1String(c.what), got.join(QLatin1String(" | ")),
+                                              c.expected.join(QLatin1String(" | "))));
+    }
+    // Случайные наборы: метки попарно разные и в пределе.
+    QRandomGenerator rng(2311);
+    const QStringList parts = {"app", "srv", "prod", "eu", "us", "1", "2", "log", "worker", "db", "x"};
+    const QStringList seps = {"-", "_", ".", " "};
+    for (int round = 0; round < 400; ++round) {
+        QStringList names;
+        const int n = 2 + int(rng.bounded(8));
+        for (int i = 0; i < n; ++i) {
+            QString name = parts[rng.bounded(parts.size())];
+            const int k = 1 + int(rng.bounded(6));
+            for (int j = 0; j < k; ++j)
+                name += seps[rng.bounded(seps.size())] + parts[rng.bounded(parts.size())];
+            names << name;
+        }
+        const int max = 3 + int(rng.bounded(16));
+        const QStringList got = FileLabels::build(names, max);
+        bool ok = got.size() == names.size() && QSet<QString>(got.begin(), got.end()).size() == got.size();
+        for (const QString& l : got)
+            ok = ok && l.size() <= max && !l.isEmpty();
+        CHECK(ok, QStringLiteral("random set %1 (max %2): %3 -> %4").arg(round).arg(max)
+                      .arg(names.join(QLatin1String(" | ")), got.join(QLatin1String(" | "))));
+        if (!ok)
+            break;
+    }
+    CHECK(FileLabels::modeFromName(FileLabels::modeName(FileLabelMode::ColorOnly)) == FileLabelMode::ColorOnly
+              && FileLabels::modeFromName(QStringLiteral("junk")) == FileLabelMode::Name,
+          "mode names round-trip");
+}
+
+static QByteArray fileLines(const QString& tag, int count, int secondBase, int longAt = -1)
+{
+    QByteArray out;
+    for (int i = 0; i < count; ++i) {
+        const int sec = secondBase + 2 * i;
+        out += QStringLiteral("2026-03-05 10:%1:%2.000 [w] INFO - %3 line %4 ")
+                   .arg(sec / 60 % 60, 2, 10, QLatin1Char('0')).arg(sec % 60, 2, 10, QLatin1Char('0'))
+                   .arg(tag).arg(i).toUtf8();
+        out += (i == longAt ? words(30000) : QStringLiteral("payload")).toUtf8() + '\n';
+    }
+    return out;
+}
+
+static bool settledTab(LogViewWidget& tab)
+{
+    return testdocs::waitFor([&] { return !tab.isLoading(); })
+        && testdocs::settle(*tab.model())
+        && testdocs::waitFor([&] { return !tab.view()->hasPendingLayout(); }, 10000);
+}
+
+// Строк каждого файла среди видимых (без фильтра — все строки вкладки).
+static QHash<const LogFile*, int> countRows(LogModel& model)
+{
+    QHash<const LogFile*, int> n;
+    for (int r = 0; r < model.rowCount(); ++r)
+        ++n[model.keyAt(r).file.get()];
+    return n;
+}
+
+static void checkLegendCounts(LogViewWidget& tab, const QString& label)
+{
+    FileLegend* legend = tab.fileLegend();
+    const QHash<const LogFile*, int> rows = countRows(*tab.model());
+    for (int i = 0; i < legend->chipCount(); ++i) {
+        const int expected = rows.value(legend->chipFile(i));
+        CHECK(legend->chipText(i).endsWith(QLatin1Char(' ') + QString::number(expected)),
+              QStringLiteral("%1: chip %2 '%3' counts %4 lines").arg(label).arg(i).arg(legend->chipText(i)).arg(expected));
+    }
+}
+
+static void checkMergedTab(const QDir& dir, bool indexed)
+{
+    const QString label = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
+    section(indexed ? "merged tab, indexed: file column and legend" : "merged tab, resident: file column and legend");
+    AppSettings& settings = AppSettings::instance();
+    settings.setIndexedThresholdMB(indexed ? 0 : 512);
+    settings.setFileLabelMode(FileLabelMode::Name);
+    const QString a = testdocs::writeFile(dir, QStringLiteral("payment-service-prod-eu-1-%1.log").arg(label),
+                                          fileLines(QStringLiteral("eu"), 60, 0));
+    const QString b = testdocs::writeFile(dir, QStringLiteral("payment-service-prod-us-1-%1.log").arg(label),
+                                          fileLines(QStringLiteral("us"), 40, 1, /*longAt=*/20));
+    LogViewWidget tab;
+    tab.setParserPattern(testdocs::buildSchema());
+    tab.resize(900, 500);
+    tab.show();
+    tab.addLogFile(a);
+    CHECK(settledTab(tab), label + ": first file loads");
+    LogListView& view = *tab.view();
+    LogModel& model = *tab.model();
+    CHECK(model.isIndexedBackend() == indexed, label + ": backend");
+    CHECK(view.fileColumnWidth() == 0 && tab.fileLegend()->isHidden(),
+          label + ": one file — no column, no legend");
+    const int plainLeft = view.textLeft();
+
+    view.goToRow(10);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const RecordKey selectedKey = model.keyAt(10);
+
+    tab.addLogFile(b);
+    CHECK(settledTab(tab), label + ": second file loads");
+    CHECK(model.rowCount() == 100, QStringLiteral("%1: 100 rows (%2)").arg(label).arg(model.rowCount()));
+    CHECK(view.fileColumnWidth() > 0 && view.textLeft() == plainLeft + view.fileColumnWidth(),
+          QStringLiteral("%1: second file adds the column (%2 px)").arg(label).arg(view.fileColumnWidth()));
+    const int selRow = view.userSelectedRow();
+    CHECK(selRow >= 0 && model.keyAt(selRow).file == selectedKey.file
+              && model.keyAt(selRow).line == selectedKey.line,
+          label + ": the selected line stays selected");
+
+    // Легенда: порядок добавления, цвета полос = цвета чипов.
+    FileLegend* legend = tab.fileLegend();
+    CHECK(legend->isVisible() && legend->chipCount() == 2, label + ": legend shows two chips");
+    CHECK(legend->chipFile(0) && legend->chipFile(0)->filePath == a && legend->chipFile(1)->filePath == b,
+          label + ": chips in the order files were added");
+    checkLegendCounts(tab, label + " loaded");
+    const QVector<LogModel::LabeledFile>& files = model.labeledFiles();
+    CHECK(files.size() == 2 && files[0].label != files[1].label
+              && files[0].label.contains(QStringLiteral("eu")) && files[1].label.contains(QStringLiteral("us")),
+          QStringLiteral("%1: distinguishing labels: %2 / %3").arg(label, files.value(0).label, files.value(1).label));
+
+    // Текст всех строк — с одной вертикали и одной ширины.
+    int left = -1, rightEdge = -1;
+    bool sameColumn = true;
+    for (int r = 0; r < qMin(model.rowCount(), 30); ++r) {
+        const LogListView::RowWrapInfo info = view.rowWrapInfo(r);
+        if (left < 0) left = info.textRect.left();
+        sameColumn = sameColumn && info.textRect.left() == left;
+        if (!info.hasToggle) {
+            if (rightEdge < 0) rightEdge = info.textRect.right();
+            sameColumn = sameColumn && info.textRect.right() == rightEdge;
+        }
+    }
+    CHECK(sameColumn && left == view.textLeft(), label + ": every file's text starts and ends on the same vertical");
+
+    // Цвет полосы строки — цвет её файла.
+    {
+        view.verticalScrollBar()->setValue(0);
+        testdocs::pump(40);
+        const QImage image = view.viewport()->grab().toImage();
+        const QPalette& pal = view.viewport()->palette();
+        bool colors = true;
+        for (int r = 0; r < 8; ++r) {
+            const QRect vr = view.visualRect(model.index(r, 0));
+            const LogModel::LabeledFile* f = model.labeledFile(model.keyAt(r).file.get());
+            const QColor expected = AppTheme::fileColor(f ? f->colorOrdinal : -1, pal);
+            colors = colors && f && image.pixelColor(view.textLeft() - view.fileColumnWidth() + 1,
+                                                     vr.top() + vr.height() / 2) == expected;
+        }
+        CHECK(colors, label + ": stripes are painted in the file colours");
+    }
+
+    // Колонка появляется и уходит — текущая строка и её место на экране
+    // остаются (тот же пересчёт, что при смене ширины вьюпорта).
+    {
+        view.goToRow(40);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const int top = view.visualRect(model.index(40, 0)).top();
+        for (FileLabelMode m : {FileLabelMode::Hidden, FileLabelMode::Name}) {
+            settings.setFileLabelMode(m);
+            testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+            testdocs::pump(20);
+            CHECK(view.userSelectedRow() == 40 && view.visualRect(model.index(40, 0)).top() == top,
+                  QStringLiteral("%1: column %2 — the selected line keeps its place (%3 vs %4)")
+                      .arg(label, m == FileLabelMode::Hidden ? QStringLiteral("removed") : QStringLiteral("added"))
+                      .arg(view.visualRect(model.index(40, 0)).top()).arg(top));
+        }
+    }
+
+    // Режимы.
+    settings.setFileLabelMode(FileLabelMode::ColorOnly);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const int colorOnly = view.fileColumnWidth();
+    CHECK(colorOnly > 0 && colorOnly < 12 && legend->isVisible(),
+          QStringLiteral("%1: Color Only — a stripe (%2 px) and the legend").arg(label).arg(colorOnly));
+    settings.setFileLabelMode(FileLabelMode::Hidden);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    CHECK(view.fileColumnWidth() == 0 && view.textLeft() == plainLeft && legend->isHidden(),
+          label + ": Hidden — no column, no legend");
+    settings.setFileLabelMode(FileLabelMode::Name);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    CHECK(view.fileColumnWidth() > colorOnly && legend->isVisible(), label + ": back to Name");
+
+    // Переход к следующей / предыдущей строке файла.
+    {
+        view.goToRow(5);
+        const LogFile* fileB = legend->chipFile(1);
+        int expectedNext = -1;
+        for (int r = 6; r < model.rowCount() && expectedNext < 0; ++r)
+            if (model.keyAt(r).file.get() == fileB)
+                expectedNext = r;
+        const bool hadBack = tab.navHistory().canGoBack();
+        CHECK(legend->goToFileLine(1, true) && view.userSelectedRow() == expectedNext,
+              QStringLiteral("%1: next line of file B (%2, expected %3)").arg(label).arg(view.userSelectedRow()).arg(expectedNext));
+        CHECK(tab.navHistory().canGoBack() || hadBack, label + ": the jump is in the navigation history");
+        int expectedPrev = -1;
+        for (int r = expectedNext - 1; r >= 0 && expectedPrev < 0; --r)
+            if (model.keyAt(r).file.get() == fileB)
+                expectedPrev = r;
+        if (expectedPrev < 0)
+            for (int r = model.rowCount() - 1; r > expectedNext && expectedPrev < 0; --r)
+                if (model.keyAt(r).file.get() == fileB)
+                    expectedPrev = r;
+        CHECK(legend->goToFileLine(1, false) && view.userSelectedRow() == expectedPrev,
+              QStringLiteral("%1: previous line of file B (%2, expected %3)").arg(label).arg(view.userSelectedRow()).arg(expectedPrev));
+    }
+
+    // Высокая строка (резидентный бэкенд, перенос): полоса в любой части,
+    // метка у верха вьюпорта.
+    if (!indexed) {
+        view.setWordWrap(true);
+        int tall = -1;
+        for (int r = 0; r < model.rowCount() && tall < 0; ++r)
+            if (model.keyAt(r).file.get() == legend->chipFile(1) && model.keyAt(r).line == 21)
+                tall = r;
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const int h = view.visualRect(model.index(tall, 0)).height();
+        const int vpH = view.viewport()->height();
+        CHECK(h > 3 * vpH, QStringLiteral("resident: the long line is tall (%1 px)").arg(h));
+        placeRowTop(view, tall, -h / 2);
+        const QImage image = view.viewport()->grab().toImage();
+        const QColor color = AppTheme::fileColor(model.labeledFile(legend->chipFile(1))->colorOrdinal,
+                                                 view.viewport()->palette());
+        const int stripeX = view.textLeft() - view.fileColumnWidth() + 1;
+        CHECK(image.pixelColor(stripeX, 3) == color && image.pixelColor(stripeX, vpH / 2) == color
+                  && image.pixelColor(stripeX, vpH - 3) == color,
+              "resident: the file stripe runs through every visible part of the tall line");
+        const LogListView::RowChromeHit hit = view.rowChromeAt(QPoint(stripeX + 8, 6));
+        CHECK(hit.kind == LogListView::RowChrome::FileLabel && hit.row == tall
+                  && hit.toolTip == legend->chipFile(1)->displayPath(),
+              QStringLiteral("resident: the label sticks to the top, its tooltip is the path (%1)").arg(hit.toolTip));
+        view.setWordWrap(false);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    }
+
+    // Hit-test: выделение мышью попадает в те же символы с колонкой и без.
+    {
+        const auto selectedChars = [&](int row) {
+            view.verticalScrollBar()->setValue(0);
+            testdocs::pump(30);
+            const QRect vr = view.visualRect(model.index(row, 0));
+            const qreal cw = QFontMetricsF(view.font()).horizontalAdvance(QLatin1Char('M'));
+            const int y = vr.top() + vr.height() / 2;
+            const QPoint from(view.textLeft() + 4 + int(cw * 3.5), y);
+            const QPoint to(view.textLeft() + 4 + int(cw * 11.5), y);
+            QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, from);
+            QMouseEvent move(QEvent::MouseMove, QPointF(to), QPointF(view.viewport()->mapToGlobal(to)),
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(view.viewport(), &move);
+            QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, to);
+            QApplication::clipboard()->clear();
+            QTest::keyClick(view.viewport(), Qt::Key_C, Qt::ControlModifier);
+            QApplication::sendEvent(&view, new QKeyEvent(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier));
+            return QApplication::clipboard()->text();
+        };
+        const QString withColumn = selectedChars(2);
+        settings.setFileLabelMode(FileLabelMode::Hidden);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const QString without = selectedChars(2);
+        settings.setFileLabelMode(FileLabelMode::Name);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        CHECK(withColumn.size() == 8 && withColumn == without,
+              QStringLiteral("%1: mouse selection hits the same characters ('%2' vs '%3')").arg(label, withColumn, without));
+    }
+
+    // Дозапись в B: число строк на чипе растёт.
+    testdocs::appendToFile(b, fileLines(QStringLiteral("us-tail"), 15, 200));
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return model.rowCount() == 115; }, 10000),
+          QStringLiteral("%1: appended lines arrive (%2)").arg(label).arg(model.rowCount()));
+    checkLegendCounts(tab, label + " appended");
+
+    // Полная перезагрузка: B переписан короче.
+    {
+        QFile f(b);
+        f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        f.write(fileLines(QStringLiteral("rewritten"), 12, 3));
+    }
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return model.rowCount() == 72; }, 10000),
+          QStringLiteral("%1: full reload (%2 rows)").arg(label).arg(model.rowCount()));
+    checkLegendCounts(tab, label + " reloaded");
+
+    // Файл удалён: его строки уходят, файл остаётся во вкладке — чип с
+    // нулём строк, колонка не мигает (как и на полной перезагрузке).
+    const int columnBefore = view.fileColumnWidth();
+    QFile::remove(b);
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return model.rowCount() == 60; }, 10000),
+          QStringLiteral("%1: removed file's rows go (%2)").arg(label).arg(model.rowCount()));
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    CHECK(view.fileColumnWidth() == columnBefore && legend->isVisible() && legend->chipCount() == 2
+              && legend->chipText(1).endsWith(QStringLiteral(" 0")),
+          QStringLiteral("%1: the missing file keeps its chip with 0 lines (%2)").arg(label, legend->chipText(1)));
+
+    // ini: режим сохраняется в [View] fileLabels.
+    settings.setFileLabelMode(FileLabelMode::ColorOnly);
+    settings.save();
+    {
+        QSettings ini(AppSettings::iniFilePath(), QSettings::IniFormat);
+        CHECK(ini.value(QStringLiteral("View/fileLabels")).toString() == QStringLiteral("colorOnly"),
+              "the mode is stored in [View] fileLabels");
+    }
+    settings.setFileLabelMode(FileLabelMode::Name);
+    settings.save();
+    settings.setIndexedThresholdMB(512);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -489,6 +852,9 @@ int main(int argc, char** argv)
     checkHiddenCounts(dir);
     checkHugeRowMode(dir);
     checkScrollRepaint(dir);
+    checkFileLabelsTable();
+    checkMergedTab(dir, false);
+    checkMergedTab(dir, true);
 
     if (failures) {
         std::fprintf(stderr, "row_chrome: %d failure(s)\n", failures);

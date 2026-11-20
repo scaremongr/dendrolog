@@ -117,8 +117,12 @@ void EncodingIndicator::refresh()
     const TextEncoding stream = tab->fileStreamEncoding(file);
     const bool choosable = TextEncodings::isDecodable(stream);
     const QString text = label(encoding, stream);
-    if (this->text() != text)
-        setText(text);
+    // Слитая вкладка: подпись называет файл текущей строки (U-23) — чья
+    // строка, видно при любом режиме меток файлов.
+    const QString shown = tab->fileCount() > 1
+        ? file->shortName() + QStringLiteral(": ") + text : text;
+    if (this->text() != shown)
+        setText(shown);
 
     QString tip;
     if (!choosable) {

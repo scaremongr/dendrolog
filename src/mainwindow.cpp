@@ -55,6 +55,7 @@
 #include <QFutureWatcher>
 #include <QInputDialog>
 #include <QMenu>
+#include <QActionGroup>
 #include <QApplication>
 #include <QToolTip>
 #include <QFormLayout>
@@ -536,6 +537,41 @@ MainWindow::MainWindow(QWidget *parent)
         for (int i = 0; ui->tabWidget && i < ui->tabWidget->count(); ++i)
             if (auto* tab = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)))
                 attachLineWrapAction(tab->view());
+    }
+
+    // Метка файла слитой вкладки (U-23): View → File Labels, настройка
+    // глобальная — view и легенды вкладок следуют за AppSettings сами.
+    {
+        QMenu* labels = new QMenu(tr("File Labels"), this);
+        labels->setObjectName(QStringLiteral("menuFileLabels"));
+        auto* group = new QActionGroup(labels);
+        const struct { FileLabelMode mode; const char* text; const char* id; } modes[] = {
+            {FileLabelMode::Name, QT_TR_NOOP("Name"), "fileLabelsName"},
+            {FileLabelMode::ColorOnly, QT_TR_NOOP("Color Only"), "fileLabelsColorOnly"},
+            {FileLabelMode::Hidden, QT_TR_NOOP("Hidden"), "fileLabelsHidden"},
+        };
+        for (const auto& m : modes) {
+            QAction* a = labels->addAction(tr(m.text));
+            a->setCheckable(true);
+            a->setActionGroup(group);
+            a->setChecked(AppSettings::instance().fileLabelMode() == m.mode);
+            const FileLabelMode mode = m.mode;
+            connect(a, &QAction::triggered, this, [mode]() {
+                AppSettings::instance().setFileLabelMode(mode);
+                AppSettings::instance().save();
+            });
+            connect(&AppSettings::instance(), &AppSettings::settingsChanged, a, [a, mode]() {
+                a->setChecked(AppSettings::instance().fileLabelMode() == mode);
+            });
+            m_shortcutActions.insert(QString::fromLatin1(m.id), a);
+        }
+        const QList<QAction*> viewActions = ui->menuView->actions();
+        const int wrapAt = viewActions.indexOf(m_toggleLineWrapAction);
+        QAction* after = wrapAt >= 0 && wrapAt + 1 < viewActions.size() ? viewActions[wrapAt + 1] : nullptr;
+        if (after)
+            ui->menuView->insertMenu(after, labels);
+        else
+            ui->menuView->addMenu(labels);
     }
 
     // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.

@@ -17,7 +17,7 @@ public:
     explicit ResidentLogStore(LogModel& model) : LogStore(model) {}
     // Search base, shared by COW; applyFilter publishes the matching rows.
     ResidentLogStore(LogModel& model, const QVector<std::shared_ptr<LogEntry>>& entries)
-        : LogStore(model), m_allEntries(entries) {}
+        : LogStore(model), m_allEntries(entries) { recountFileLines(); }
 
     Backend backend() const override { return Backend::Resident; }
 
@@ -25,6 +25,7 @@ public:
     qint64 allCount() const override { return m_allEntries.size(); }
     int visibleCount() const override { return int(m_filteredEntries.size()); }
     int uniqueSourceFileCount() const override;
+    QVector<FileLines> fileLineCounts() const override { return m_fileLines; }
     std::shared_ptr<LogEntry> entryAt(int visibleRow) const override;
     LogEntryMeta visibleMetaAt(int row) const override;
     QDateTime visibleTimestampAt(int row) const override;
@@ -95,7 +96,13 @@ private:
     QVector<std::shared_ptr<LogEntry>> m_allEntries;
     QVector<std::shared_ptr<LogEntry>> m_filteredEntries;
 
-    mutable int m_cachedUniqueSourceFileCount = -1;
+    // Строк каждого файла (U-23) в порядке появления файла: ведётся при
+    // вставке и удалении записей — O(батча); uniqueSourceFileCount и
+    // fileLineCounts — O(числа файлов), а не проход по всем записям.
+    QVector<FileLines> m_fileLines;
+    void countFileLines(const QVector<std::shared_ptr<LogEntry>>& entries, int sign);
+    void zeroFileLines(const QString& filePath);
+    void recountFileLines();
 
     // Записи из последнего батча appendEntries() — подсвечиваются зелёным
     // маркером в гаттере (IsNewRole). Идентичность — по адресу LogEntry:

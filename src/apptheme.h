@@ -137,6 +137,13 @@ public:
     static QColor wrapToggleBg(const QPalette& palette);
     static QColor wrapRail(const QPalette& palette);
 
+    // Цвета файлов слитой вкладки (U-23): по кругу в порядке добавления
+    // файлов (ordinal — LogModel::LabeledFile::colorOrdinal). Цвет читается и
+    // как полоса на фоне лога, и как подложка метки с текстом badgeFg; на
+    // тёмной теме палитра светлее. Тема — по яркости Base палитры.
+    static QColor fileColor(int ordinal, const QPalette& palette);
+    static int fileColorCount();
+
     // Persistence — called from AppSettings::load() / save().
     // The [Theme] group in the INI file is owned by these methods.
     void load(QSettings& s);

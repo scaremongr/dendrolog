@@ -29,6 +29,7 @@
 #include "newlinesindicator.h"
 #include "directoryscannerpanel.h"
 #include "entrydetailspanel.h"
+#include "filelegend.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
 #include "bookmarkpanelwidget.h"
@@ -680,6 +681,29 @@ static void checkOpenPanels(const QDir& dir)
             CHECK(saturated == 0, QStringLiteral("no saturated badge fill on the wrap toggle (%1 px)").arg(saturated));
         }
         AppSettings::instance().setThemeMode(ThemeMode::System);
+    }
+
+    // Метки файлов слитой вкладки (U-23): полоса и метка — AppTheme::fileColor
+    // из палитры; вид и легенда после смены темы — как созданные в новой.
+    {
+        QByteArray a, b;
+        for (int i = 0; i < 5; ++i) {   // без прокрутки, как у переключателей выше
+            a += "2026-03-05 10:01:" + QByteArray::number(10 + 2 * i) + ".000 [w] INFO - alpha " + QByteArray::number(i) + '\n';
+            b += "2026-03-05 10:01:" + QByteArray::number(11 + 2 * i) + ".000 [w] WARN - beta " + QByteArray::number(i) + '\n';
+        }
+        const QString pa = testdocs::writeFile(dir, QStringLiteral("labels-alpha.log"), a);
+        const QString pb = testdocs::writeFile(dir, QStringLiteral("labels-beta.log"), b);
+        auto doc = std::make_shared<testdocs::Document>(testdocs::buildResident({pa, pb}, testdocs::buildSchema()));
+        checkRepaintsOnThemeChange("Log view, file labels", [doc]() -> std::unique_ptr<QWidget> {
+            auto view = std::make_unique<LogListView>();
+            view->setModel(doc->model.get());
+            return view;
+        });
+        checkRepaintsOnThemeChange("File legend", [doc]() -> std::unique_ptr<QWidget> {
+            auto legend = std::make_unique<FileLegend>();
+            legend->setModel(doc->model.get());
+            return legend;
+        });
     }
 
     checkRepaintsOnThemeChange("Statistics placeholder", []() -> std::unique_ptr<QWidget> {

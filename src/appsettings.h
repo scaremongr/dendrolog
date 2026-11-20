@@ -4,6 +4,7 @@
 #include <QStringList>
 
 #include "textencoding.h"
+#include "filelabels.h"
 
 #include <optional>
 
@@ -98,6 +99,10 @@ public:
     // Whether word-wrap is enabled by default (and remembered across sessions).
     bool wordWrap() const;
     void setWordWrap(bool enabled);
+    // Метка файла слитой вкладки (U-23): Name / Color Only / Hidden,
+    // [View] fileLabels.
+    FileLabelMode fileLabelMode() const { return m_fileLabelMode; }
+    void setFileLabelMode(FileLabelMode mode);
 
     // ---- Theme ---------------------------------------------------------- //
 
@@ -220,6 +225,7 @@ private:
     int         m_scanRefreshMode { 0 };   // Manual
     int         m_scanRefreshIntervalSecs { 30 };
     bool        m_wordWrap        { true };
+    FileLabelMode m_fileLabelMode { FileLabelMode::Name };
     ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };

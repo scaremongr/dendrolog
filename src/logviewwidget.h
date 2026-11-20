@@ -21,6 +21,7 @@
 class QuickSearch;
 class FileMemoryStore;
 class FullLogController;
+class FileLegend;
 class QFrame;
 class QLabel;
 class QPushButton;
@@ -35,6 +36,8 @@ public:
 
     LogModel*    model()    const { return m_model; }
     LogListView* view()     const { return m_view;  }
+    // Легенда файлов над логом (U-23).
+    FileLegend* fileLegend() const { return m_fileLegend; }
 
     // Добавляет файл в текущий view
     void addLogFile(const QString &filePath);
@@ -400,6 +403,7 @@ private:
     void bookmarksFileLoaded(const LogFilePtr& logFile, bool fullLoad);
 
     LogListView *m_view;
+    FileLegend* m_fileLegend = nullptr;
     LogModel    *m_model;
     QVector<LogFilePtr> m_loadedFiles;  // Список загруженных файлов
 

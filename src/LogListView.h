@@ -15,6 +15,8 @@
 #include "tabexpander.h"
 #include "linewrapper.h"
 #include "navhistory.h"
+#include "filelabels.h"
+#include "logmodel.h"
 
 struct LogFile;
 
@@ -227,6 +229,17 @@ public:
     // строка выбирается и запрашивается полный текст (fullTextRequested).
     // false — у текущей строки нет переключателя (короткая или её нет).
     bool toggleCurrentLineWrap();
+
+    // ---- Метка файла слитой вкладки (U-23, часть 2) --------------------------
+    // Колонка между жёлобом и текстом: полоса цвета файла на всю высоту
+    // строки и (Name) метка FileLabels на первой линии, прилипающая к верху
+    // экрана. Ширина одна на вид — по самой длинной метке; меньше двух
+    // файлов или Hidden — колонки нет. Цвет — AppTheme::fileColor.
+    void setFileLabelMode(FileLabelMode mode);
+    FileLabelMode fileLabelMode() const { return m_fileLabelMode; }
+    // Ширина колонки (0 — нет) и левый край текста — тестам.
+    int fileColumnWidth() const { return m_fileColumnWidth; }
+    int textLeft() const { return textAreaLeft(); }
     // Переход к строке как выбор пользователя (Go to Line / Time, таймлайн,
     // статистика, Search, быстрый поиск, F8 — общий путь всех переходов): строка
     // становится текущей и выделенной — значит, и якорем восстановления
@@ -497,6 +510,17 @@ private:
 
     // ========== Левый отступ для маркера начала элемента ==========
     static constexpr int kLeftMarginWidth = 12; // Ширина полоски слева, где рисуется "›"
+    // Колонка метки файла (U-23): полоса, зазор до метки, зазор до текста.
+    static constexpr int kFileStripeWidth = 3;
+    static constexpr int kFileLabelGap = 3;
+    static constexpr int kFileStripeGap = 5;
+    FileLabelMode m_fileLabelMode = FileLabelMode::Name;
+    int m_fileColumnWidth = 0;
+    int computeFileColumnWidth() const;
+    void updateFileColumn();
+    const LogModel::LabeledFile* rowFile(int row) const;
+    QRect fileLabelScreenRect(int row, const QString& label, qint64 rowTop, int rowHeight) const;
+    void paintFileColumn(QPainter& painter, int row, int rowTop, int rowHeight);
 
     // ========== Константы геометрии и отрисовки ==========
     // Именование устраняет magic numbers и делает связи между функциями явными.

@@ -113,6 +113,10 @@ void AppSettings::load()
         s.endGroup();
     }
 
+    s.beginGroup(QStringLiteral("View"));
+    m_fileLabelMode = FileLabels::modeFromName(s.value(QStringLiteral("fileLabels")).toString());
+    s.endGroup();
+
     s.beginGroup(QStringLiteral("QuickSearch"));
     m_quickSearchMatchCase = s.value(QStringLiteral("matchCase"), false).toBool();
     m_quickSearchWholeWord = s.value(QStringLiteral("wholeWord"), false).toBool();
@@ -162,6 +166,10 @@ void AppSettings::save()
     s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
     s.setValue(QStringLiteral("rememberFileState"),      m_rememberFileState);
     s.setValue(QStringLiteral("restoreSessionOnStartup"), m_restoreSessionOnStartup);
+    s.endGroup();
+
+    s.beginGroup(QStringLiteral("View"));
+    s.setValue(QStringLiteral("fileLabels"), FileLabels::modeName(m_fileLabelMode));
     s.endGroup();
 
     writeQuickSearch(s);
@@ -289,6 +297,14 @@ void AppSettings::setQuickSearchHistory(const QStringList& entries)
 bool AppSettings::wordWrap() const
 {
     return m_wordWrap;
+}
+
+void AppSettings::setFileLabelMode(FileLabelMode mode)
+{
+    if (m_fileLabelMode == mode)
+        return;
+    m_fileLabelMode = mode;
+    emit settingsChanged();
 }
 
 void AppSettings::setWordWrap(bool enabled)

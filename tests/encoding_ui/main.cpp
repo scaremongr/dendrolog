@@ -283,12 +283,16 @@ static void checkMergedTab(const QDir& dir, const QString& name, const QString& 
     const int rowA = rowOfFile(model, a, 40);
     const int rowB = rowOfFile(model, b, 40);
     CHECK(rowA >= 0 && rowB >= 0, QStringLiteral("строки обоих файлов"));
+    // У слитой вкладки подпись называет файл текущей строки (U-23): при
+    // скрытых метках файлов чья строка — видно здесь.
+    const QString nameA = QFileInfo(a).fileName() + QStringLiteral(": ");
+    const QString nameB = QFileInfo(b).fileName() + QStringLiteral(": ");
     tab->view()->goToRow(rowA);
-    CHECK(indicator.text() == QStringLiteral("UTF-8 (auto)") && indicator.file()
+    CHECK(indicator.text() == nameA + QStringLiteral("UTF-8 (auto)") && indicator.file()
               && indicator.file()->filePath == a,
           QStringLiteral("строка файла A: ") + indicator.text());
     tab->view()->goToRow(rowB);
-    CHECK(indicator.text() == QStringLiteral("Windows-1251 (auto)") && indicator.file()
+    CHECK(indicator.text() == nameB + QStringLiteral("Windows-1251 (auto)") && indicator.file()
               && indicator.file()->filePath == b,
           QStringLiteral("строка файла B: ") + indicator.text());
     // Выбор в меню — для файла текущей строки, второй не трогается.
@@ -301,7 +305,7 @@ static void checkMergedTab(const QDir& dir, const QString& name, const QString& 
               && tab->fileEncoding(fileA).source == FileEncoding::Source::Auto,
           QStringLiteral("выбор — только для файла текущей строки"));
     tab->view()->goToRow(rowOfFile(model, a, 40));
-    CHECK(indicator.text() == QStringLiteral("UTF-8 (auto)"), indicator.text());
+    CHECK(indicator.text() == nameA + QStringLiteral("UTF-8 (auto)"), indicator.text());
 }
 
 // --encoding с самого начала, затем «авто»; уже открытый файл; растущий файл.

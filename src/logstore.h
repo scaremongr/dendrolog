@@ -43,6 +43,15 @@ public:
     virtual qint64 allCount() const = 0;
     virtual int visibleCount() const = 0;
     virtual int uniqueSourceFileCount() const = 0;
+    // Строк каждого файла во вкладке (U-23: легенда, колонка меток, ширина
+    // номеров) — O(числа файлов), без прохода по строкам: резидентный ведёт
+    // счётчик при вставке и удалении записей, индексный — число показанных
+    // строк индекса. Файлы без строк тоже перечислены (lines == 0).
+    struct FileLines {
+        LogFilePtr file;
+        qint64 lines = 0;
+    };
+    virtual QVector<FileLines> fileLineCounts() const = 0;
 
     // ---- Точечный доступ к видимым строкам ------------------------------------
     // Запись строки; индексный бэкенд материализует её по требованию.

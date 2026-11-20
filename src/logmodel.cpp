@@ -1,4 +1,5 @@
 #include "logmodel.h"
+#include "filelabels.h"
 #include "bookmarkstore.h"
 #include "navhistory.h"
 #include "recordlocator.h"
@@ -23,18 +24,12 @@ LogModel::LogModel(QObject* parent)
     // Локатор — раньше закладок: они подписываются на его ответы.
     m_locator = new RecordLocator(*this);
     m_bookmarks = new BookmarkStore(*this);
-    // Палитра цветов для плашек файлов (при загрузке нескольких файлов в таб).
-    m_predefinedFileColors << QColor(Qt::cyan).darker(220)
-                           << QColor(Qt::magenta).darker(220)
-                           << QColor(Qt::yellow).darker(250)
-                           << QColor(Qt::green).darker(220)
-                           << QColor(Qt::blue).darker(220)
-                           << QColor(Qt::darkCyan).darker(220)
-                           << QColor(Qt::darkMagenta).darker(220)
-                           << QColor(Qt::darkYellow).darker(220)
-                           << QColor(Qt::darkGreen).darker(220)
-                           << QColor(Qt::darkBlue).darker(220)
-                           << QColor(Qt::darkRed).darker(220);
+    // Метки и число строк файлов (U-23) — на события модели, O(числа файлов).
+    // Подписка раньше любого view: на rowsInserted view уже видит набор.
+    connect(this, &QAbstractItemModel::rowsInserted, this, &LogModel::refreshFileSet);
+    connect(this, &QAbstractItemModel::rowsRemoved, this, &LogModel::refreshFileSet);
+    connect(this, &QAbstractItemModel::modelReset, this, &LogModel::refreshFileSet);
+    connect(this, &LogModel::modelFiltered, this, &LogModel::refreshFileSet);
 }
 
 LogModel::~LogModel()
@@ -127,21 +122,92 @@ void LogModel::removeEntry(const std::shared_ptr<LogEntry>& entry)
 
 void LogModel::ensureFileColor(const QString& filePath)
 {
-    if (m_fileColors.contains(filePath))
+    if (m_fileOrdinals.contains(filePath))
         return;
-    m_fileColors[filePath] = m_predefinedFileColors[m_nextColorIndex];
-    m_nextColorIndex = (m_nextColorIndex + 1) % m_predefinedFileColors.size();
+    m_fileOrdinals.insert(filePath, m_nextColorIndex++);
 }
 
 void LogModel::resetFileColors()
 {
-    m_fileColors.clear();
+    m_fileOrdinals.clear();
     m_nextColorIndex = 0;
 }
 
-QColor LogModel::getColorForFile(const QString& filePath) const
+void LogModel::setFileLabelMaxChars(int maxChars)
 {
-    return m_fileColors.value(filePath, Qt::darkGray);
+    if (maxChars == m_fileLabelMaxChars)
+        return;
+    m_fileLabelMaxChars = maxChars;
+    m_labeledFiles.clear();   // метки пересчитать
+    refreshFileSet();
+}
+
+const LogModel::LabeledFile* LogModel::labeledFile(const LogFile* file) const
+{
+    const auto it = m_labeledIndex.constFind(file);
+    return it == m_labeledIndex.constEnd() ? nullptr : &m_labeledFiles[it.value()];
+}
+
+int LogModel::findRowOfFile(const LogFile* file, int from, bool forward) const
+{
+    const int n = m_store->visibleCount();
+    if (!file || n == 0)
+        return -1;
+    if (from < 0 || from >= n)
+        from = forward ? -1 : n;
+    for (int step = 1; step <= n; ++step) {
+        int row = forward ? from + step : from - step;
+        row = ((row % n) + n) % n;
+        if (m_store->visibleMetaAt(row).sourceFile == file)
+            return row;
+    }
+    return -1;
+}
+
+void LogModel::refreshFileSet()
+{
+    QVector<LogStore::FileLines> files = m_store->fileLineCounts();
+    // Файл в наборе, пока подключён к вкладке (у резидентной — с первой
+    // порции), даже без строк: полная перезагрузка сбрасывает его строки, и
+    // колонка с легендой не должны мигать на каждую ротацию.
+    files.erase(std::remove_if(files.begin(), files.end(),
+                               [](const LogStore::FileLines& f) { return !f.file; }),
+                files.end());
+    for (const LogStore::FileLines& f : std::as_const(files))
+        ensureFileColor(f.file->filePath);
+    std::stable_sort(files.begin(), files.end(),
+                     [this](const LogStore::FileLines& a, const LogStore::FileLines& b) {
+                         return m_fileOrdinals.value(a.file->filePath) < m_fileOrdinals.value(b.file->filePath);
+                     });
+    bool sameSet = files.size() == m_labeledFiles.size();
+    for (int i = 0; sameSet && i < files.size(); ++i)
+        sameSet = files[i].file == m_labeledFiles[i].file
+            && m_fileOrdinals.value(files[i].file->filePath) == m_labeledFiles[i].colorOrdinal;
+    if (sameSet) {
+        bool linesChanged = false;
+        for (int i = 0; i < files.size(); ++i) {
+            if (m_labeledFiles[i].lines != files[i].lines) {
+                m_labeledFiles[i].lines = files[i].lines;
+                linesChanged = true;
+            }
+        }
+        if (linesChanged)
+            emit fileLinesChanged();
+        return;
+    }
+    QStringList names;
+    for (const LogStore::FileLines& f : std::as_const(files))
+        names << f.file->shortName();
+    const QStringList labels = FileLabels::build(names, m_fileLabelMaxChars);
+    m_labeledFiles.clear();
+    m_labeledIndex.clear();
+    for (int i = 0; i < files.size(); ++i) {
+        m_labeledFiles.append({files[i].file, labels.value(i),
+                               m_fileOrdinals.value(files[i].file->filePath), files[i].lines});
+        m_labeledIndex.insert(files[i].file.get(), i);
+    }
+    emit fileSetChanged();
+    emit fileLinesChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -164,18 +230,8 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
         const auto entry = m_store->entryAt(index.row());
         return entry ? QVariant(formatDisplayMessage(*entry)) : QVariant();
     }
-    case FileBadgeRole: {
-        // Плашка показывается только если загружено несколько файлов.
-        if (m_store->uniqueSourceFileCount() <= 1)
-            return QVariant();
-        const LogEntryMeta meta = m_store->visibleMetaAt(index.row());
-        if (!meta.sourceFile)
-            return QVariant();
-        QVariantMap badge;
-        badge["text"]  = meta.sourceFile->shortName();
-        badge["color"] = getColorForFile(meta.sourceFile->filePath);
-        return badge;
-    }
+    case SourceFileRole:
+        return QVariant::fromValue(quintptr(m_store->visibleMetaAt(index.row()).sourceFile));
     case IsNewRole:
         return m_store->isNewAt(index.row());
     case RowMarkerColorRole: {
@@ -287,7 +343,9 @@ void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
     m_availableFieldNames = source.m_availableFieldNames;
     m_visibleFieldIndexes = source.m_visibleFieldIndexes;
     m_fieldFilterEnabled = source.m_fieldFilterEnabled;
-    m_fileColors = source.m_fileColors;
+    m_fileOrdinals = source.m_fileOrdinals;
+    m_nextColorIndex = source.m_nextColorIndex;
+    m_fileLabelMaxChars = source.m_fileLabelMaxChars;
     endResetModel();
     applyFilter();
 }

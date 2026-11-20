@@ -1,6 +1,7 @@
 #include "apptheme.h"
 #include "cardframe.h"
 #include <QSettings>
+#include <iterator>
 
 // ---------------------------------------------------------------------------
 // Helper: read a color stored as "#aarrggbb" (hex-argb) with a fallback.
@@ -116,4 +117,35 @@ QColor AppTheme::wrapToggleBg(const QPalette& palette)
 QColor AppTheme::wrapRail(const QPalette& palette)
 {
     return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.70);
+}
+
+namespace {
+// Средние тона: белый текст метки читается, полоса видна на белом и на
+// тёмном фоне лога; соседние по кругу различаются оттенком.
+const QColor kFileColors[] = {
+    QColor(0x1f, 0x6f, 0xb2), // синий
+    QColor(0xb0, 0x45, 0x2a), // кирпичный
+    QColor(0x2e, 0x8b, 0x57), // зелёный
+    QColor(0x8e, 0x44, 0xad), // фиолетовый
+    QColor(0xa6, 0x7c, 0x00), // охра
+    QColor(0x00, 0x83, 0x8f), // бирюзовый
+    QColor(0xc2, 0x18, 0x5b), // малиновый
+    QColor(0x5d, 0x6d, 0x7e), // сланцевый
+    QColor(0x6a, 0x8f, 0x1a), // оливковый
+    QColor(0x3f, 0x51, 0xb5), // индиго
+    QColor(0x8d, 0x5a, 0x3b), // коричневый
+};
+} // namespace
+
+int AppTheme::fileColorCount()
+{
+    return int(std::size(kFileColors));
+}
+
+QColor AppTheme::fileColor(int ordinal, const QPalette& palette)
+{
+    const int n = fileColorCount();
+    const QColor base = kFileColors[((ordinal % n) + n) % n];
+    const bool dark = palette.color(QPalette::Base).lightness() < 128;
+    return dark ? base.lighter(125) : base;
 }

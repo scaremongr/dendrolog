@@ -1574,6 +1574,33 @@ void scenarioLineWrap(MainWindow& win, const QDir& dir, bool indexed)
     check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("long-line tab closes"));
 }
 
+// View → File Labels (U-23): режим меток — на всех вкладках и в выдаче Search.
+void scenarioFileLabels(MainWindow& win)
+{
+    section(QStringLiteral("file labels"));
+    const struct { const char* id; FileLabelMode mode; } modes[] = {
+        {"fileLabelsColorOnly", FileLabelMode::ColorOnly},
+        {"fileLabelsHidden", FileLabelMode::Hidden},
+        {"fileLabelsName", FileLabelMode::Name},
+    };
+    for (const auto& m : modes) {
+        QAction* a = command(win, QString::fromLatin1(m.id));
+        if (!a)
+            continue;
+        a->trigger();
+        check(a->isChecked() && AppSettings::instance().fileLabelMode() == m.mode,
+              QStringLiteral("%1 sets the mode").arg(QLatin1String(m.id)));
+        bool all = tabs(win)->count() > 0;
+        for (int i = 0; i < tabs(win)->count(); ++i)
+            all = all && tabAt(win, i)->view()->fileLabelMode() == m.mode;
+        for (LogListView* v : win.findChildren<LogListView*>())
+            all = all && v->fileLabelMode() == m.mode;
+        check(all, QStringLiteral("%1 reaches every log view").arg(QLatin1String(m.id)));
+    }
+    check(menuAction(win, QStringLiteral("Color Only")) == command(win, QStringLiteral("fileLabelsColorOnly")),
+          QStringLiteral("View → File Labels → Color Only"));
+}
+
 // Каждое действие меню вызывается хотя бы раз (модальные закрывает драйвер).
 void scenarioMenuSweep(MainWindow& win)
 {
@@ -1724,6 +1751,8 @@ void checkHelpShortcutTable()
         // Клавиши самого view, не команды ShortcutManager.
         {QStringLiteral("Copy selection"), {}},
         {QStringLiteral("Wrap / unwrap current line"), {QStringLiteral("toggleLineWrap")}},
+        {QStringLiteral("File labels: Name / Color Only / Hidden"),
+         {QStringLiteral("fileLabelsName"), QStringLiteral("fileLabelsColorOnly"), QStringLiteral("fileLabelsHidden")}},
         {QStringLiteral("Extend selection by character"), {}},
         {QStringLiteral("Extend selection by token"), {}},
     };
@@ -1755,9 +1784,10 @@ void checkHelpShortcutTable()
         QSet<QString> expected;
         for (const QString& id : row->second) {
             ++covered[id];
+            // Команда без сочетания по умолчанию — строка справки с «—».
             const QKeySequence seq = sm.defaultSequence(id);
-            check(!seq.isEmpty(), QStringLiteral("command %1 has a default shortcut").arg(id));
-            expected.insert(seq.toString(QKeySequence::PortableText));
+            if (!seq.isEmpty())
+                expected.insert(seq.toString(QKeySequence::PortableText));
         }
         const QSet<QString> shown = helpKeys(e[1]);
         check(shown == expected, QStringLiteral("help row \"%1\": shows {%2}, defaults are {%3}")
@@ -1968,6 +1998,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioSession(win, fx);
         scenarioDocks(win);
         scenarioLineWrap(win, dir, indexed);
+        scenarioFileLabels(win);
         section(QStringLiteral("shortcuts: every one fires"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars shown"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars hidden"), /*hideToolBars=*/true);

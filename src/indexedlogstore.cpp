@@ -212,6 +212,15 @@ void IndexedLogStore::reevaluateVisibleRef(RowRef ref)
 // Подключение файлов и приём батчей индексатора
 // ---------------------------------------------------------------------------
 
+QVector<LogStore::FileLines> IndexedLogStore::fileLineCounts() const
+{
+    QVector<FileLines> out;
+    out.reserve(m_files.size());
+    for (const IndexedFile& f : m_files)
+        out.append({f.logFile, f.shownLines});
+    return out;
+}
+
 int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index)
 {
     // Переход «один файл → несколько»: тождество больше не работает,
@@ -235,6 +244,8 @@ int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineI
         materializeAllRefs(reorder);
     }
 
+    // Цвет файла — в порядке подключения (U-23: колонка меток, легенда).
+    m_model.ensureFileColor(logFile->filePath);
     IndexedFile f;
     f.logFile = logFile;
     f.index = std::move(index);
@@ -366,6 +377,8 @@ void IndexedLogStore::appendIndexedRows(const LogFilePtr& logFile, qint64 firstL
     const qint64 freshCount = firstLine + count - freshFirst;
     if (freshCount <= 0)
         return;
+    // До вставки: модель на rowsInserted уже видит число строк файла.
+    m_files[fileId].shownLines = qMax(m_files[fileId].shownLines, firstLine + count);
 
     // Общий порядок (мульти-файл): батч приходит в порядке файла, а слияние
     // требует порядка lessRef (как резидентный путь сортирует батч перед
@@ -453,6 +466,7 @@ void IndexedLogStore::resetFileIndex(const LogFilePtr& logFile,
     m_model.beginResetModel();
     if (const int fileId = fileIdOf(logFile.get()); fileId >= 0) {
         m_files[fileId].index = std::move(fresh);
+        m_files[fileId].shownLines = 0;
         m_textCache.invalidateFile(m_files[fileId].cacheFileId);
         // Переписанный файл — новый текст: автоматика решает заново, выбор
         // пользователя остаётся.

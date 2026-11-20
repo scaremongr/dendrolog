@@ -49,6 +49,10 @@ ShortcutManager::ShortcutManager()
         // Перенос одной строки (U-23): действует, пока фокус в логе, — Пробел
         // в полях ввода и на кнопках панелей не перехватывается.
         { QStringLiteral("toggleLineWrap"), tr("Wrap / unwrap current line"), QKeySequence(Qt::Key_Space) },
+        // Метка файла слитой вкладки (U-23): режимы View → File Labels.
+        { QStringLiteral("fileLabelsName"),      tr("File labels: name"),       QKeySequence() },
+        { QStringLiteral("fileLabelsColorOnly"), tr("File labels: colour only"), QKeySequence() },
+        { QStringLiteral("fileLabelsHidden"),    tr("File labels: hidden"),     QKeySequence() },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },
         { QStringLiteral("zoomReset"),   tr("Default font size"),         QKeySequence(Qt::CTRL | Qt::Key_0) },

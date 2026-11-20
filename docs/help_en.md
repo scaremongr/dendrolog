@@ -25,8 +25,11 @@ filtering, highlighting and live reload.
 
 - **Tabs** — each tab is an independent view; filters/markers are per-tab.
 - **Gutter marker `›`** — start of a logical entry (without a schema: a line that opens with a timestamp, or a line with a timestamp and a level word); painted green for lines added by the last auto-reload.
-- **Badges on the right:**
-  - File badge — colour-coded source file (only when a tab holds several files).
+- **Source file of a line** (a tab with several files): a column left of the text — a stripe in the file's colour down the whole line and a short label that tells the files apart (`…eu…` / `…us…` for `payment-service-prod-eu-1.log` / `payment-service-prod-us-1.log`; up to 16 characters, hover for the full path). On a tall wrapped line the label stays at the top of the screen and the stripe runs through every part, so you always see whose line it is. The text of all files starts and ends on the same vertical.
+  - `View → File Labels`: **Name** (default) — stripe and label; **Color Only** — just the stripe; **Hidden** — nothing. The setting applies to every tab and to the Search panel.
+  - **Legend** above the log (Name and Color Only): a chip per file — colour, name and how many lines the file has in the tab (shortened from 100 000: `120K`; exact number and path in the tooltip). Right-click a chip: **Go to Next / Previous Line of This File** (from the selected line; it goes into the navigation history), **Copy Path**, **Show in Folder**.
+  - The encoding indicator in the status bar names the file of the current line on such a tab.
+- **Wrap toggle on the right:**
   - `+N` — the line is longer than the visible width: N characters are hidden (shortened from 10 000: `12K`, `3.4M`; the exact number is in the tooltip). Click it, or press `Space` with the line selected, to wrap the line.
   - `−` with a thin **rail** below it — the line is wrapped. The `−` stays at the top of the screen while the line crosses it, and the rail runs down the whole line: click the `−` or anywhere on the rail to collapse the line — even from the middle of a huge one. After collapsing, the line stays on the screen (at its top if it started above). A click counts on release without dragging, so selecting text up to the edge does not collapse anything.
   - On a large (indexed) tab lines are not wrapped: `+N` and `Space` select the line and show its full text in the **Entry Details** panel.
@@ -323,6 +326,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 | Show in full log / return to filtered view | `Ctrl+Shift+L` |
 | Copy selection | `Ctrl+C` |
 | Wrap / unwrap current line | `Space` |
+| File labels: Name / Color Only / Hidden | — (menu View → File Labels) |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
 | Show/Hide panels | `Ctrl+F1`, `Ctrl+F3…F11` |

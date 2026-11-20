@@ -143,9 +143,9 @@ public:
     int displayTextLength(int row) const;
 
     enum Roles {
-        // Возвращает QVariantMap{"text": QString, "color": QColor} для Info-плашки.
-        // Возвращает QVariant() (invalid) если загружен только один файл.
-        FileBadgeRole = Qt::UserRole + 1,
+        // Файл строки: quintptr указателя LogFile (visibleMetaAt, O(1) на обоих
+        // бэкендах). Метку и цвет view берёт у labeledFile (U-23).
+        SourceFileRole = Qt::UserRole + 1,
         // true для записей из последнего батча appendEntries(); подсветка живёт
         // до следующего батча или до полного reset.
         IsNewRole,
@@ -242,8 +242,37 @@ public:
     // Фоновый фильтр в полёте: rowCount() ещё не итоговый.
     bool isFiltering() const;
 
+    // ---- Файлы вкладки: метки и цвета (U-23) ---------------------------------
+    // Файлы, у которых во вкладке есть строки, — в порядке назначения цвета
+    // (порядок добавления файлов): метка FileLabels, порядковый номер цвета
+    // (AppTheme::fileColor), строк во вкладке. Пересчитывается O(числа
+    // файлов) на события модели; набор или метки сменились — fileSetChanged.
+    struct LabeledFile {
+        LogFilePtr file;
+        QString label;
+        int colorOrdinal = 0;
+        qint64 lines = 0;
+    };
+    const QVector<LabeledFile>& labeledFiles() const { return m_labeledFiles; }
+    // Файл строки среди labeledFiles или nullptr. O(1).
+    const LabeledFile* labeledFile(const LogFile* file) const;
+    // Порядковый номер цвета файла (по пути); -1 — файла не было.
+    int fileColorOrdinal(const QString& filePath) const { return m_fileOrdinals.value(filePath, -1); }
+    // Предел длины метки (FileLabels::kDefaultMaxChars).
+    void setFileLabelMaxChars(int maxChars);
+    // Ближайшая видимая строка файла после (forward) или до строки from, по
+    // кругу; from вне диапазона — с начала (с конца). -1 — у файла нет
+    // видимых строк. Проход по видимым строкам (visibleMetaAt, O(1) на
+    // строку) — команда легенды, не горячий путь.
+    int findRowOfFile(const LogFile* file, int from, bool forward) const;
+
 signals:
     void modelFiltered(int totalRowsAfterFilter);
+    // Набор файлов со строками или их метки сменились (U-23): view меняет
+    // ширину колонки меток, легенда — чипы.
+    void fileSetChanged();
+    // Число строк файлов могло смениться (легенда).
+    void fileLinesChanged();
     // Настройки фильтров (уровни, время, текстовые правила) заданы заново —
     // любым из сеттеров, ДО перефильтрации. Маркеры строк сюда не входят.
     // Показ полного лога (FullLogController) по нему узнаёт о правке фильтра.
@@ -269,7 +298,7 @@ private:
     void applyFilter();
     void ensureFileColor(const QString& filePath);
     void resetFileColors();
-    QColor getColorForFile(const QString& filePath) const;
+    void refreshFileSet();
     // Отбрасывает индексы вне диапазона схемы и дубликаты, сохраняя порядок.
     QVector<int> sanitizeFieldIndexes(const QVector<int>& indexes) const;
     // Уведомляет view о смене отображаемого текста всех строк.
@@ -295,9 +324,13 @@ private:
     FilterRuleSet m_filterRules;
     TextMatchHighlighter m_rowMarkers;
 
-    QHash<QString, QColor> m_fileColors;
-    QVector<QColor> m_predefinedFileColors;
+    // Порядковый номер цвета файла (по пути) в порядке назначения; цвет —
+    // AppTheme::fileColor(ordinal): модель — ядро, темы не знает.
+    QHash<QString, int> m_fileOrdinals;
     int m_nextColorIndex;
+    QVector<LabeledFile> m_labeledFiles;
+    QHash<const LogFile*, int> m_labeledIndex;
+    int m_fileLabelMaxChars = 16;
 
     QStringList m_availableFieldNames;
     QVector<int> m_visibleFieldIndexes;

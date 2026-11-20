@@ -111,6 +111,7 @@ public:
     qint64 allCount() const override;
     int visibleCount() const override;
     int uniqueSourceFileCount() const override { return int(m_files.size()); }
+    QVector<FileLines> fileLineCounts() const override;
     std::shared_ptr<LogEntry> entryAt(int visibleRow) const override;
     LogEntryMeta visibleMetaAt(int row) const override;
     QDateTime visibleTimestampAt(int row) const override;
@@ -143,6 +144,7 @@ private:
         std::shared_ptr<LineIndex> index;
         int cacheFileId = -1;
         FileEncoding encoding; // decoder — копией во все читатели текста
+        qint64 shownLines = 0; // строк файла, показанных модели (U-23, fileLineCounts)
     };
 
     static RowRef makeRef(int fileId, qint64 line)

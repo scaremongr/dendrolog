@@ -55,14 +55,11 @@ bool ResidentLogStore::appendSearchRows(const ResidentLogStore& source, int firs
 
 void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
 {
-    // До инвалидации кэша: нужен для детекции перехода «один файл → несколько»
-    const int oldUniqueFiles = uniqueSourceFileCount();
-
     for (const auto& entry : sortedBatch) {
         if (entry && entry->sourceFile())
             m_model.ensureFileColor(entry->sourceFile()->filePath);
     }
-    m_cachedUniqueSourceFileCount = -1;
+    countFileLines(sortedBatch, +1);
 
     // Полный список. Частый случай — батч целиком позже конца (загрузка одного
     // файла, tail-догрузка) — чистый append; иначе слияние отсортированного
@@ -100,14 +97,6 @@ void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>
         emit m_model.modelFiltered(int(m_filteredEntries.size()));
     }
 
-    // Появился второй файл — FileBadgeRole у ВСЕХ строк меняется с invalid на
-    // плашку имени файла. Явно уведомляем view: при инкрементальном append
-    // строки, закэшированные до этого батча, иначе остались бы без плашек.
-    if (oldUniqueFiles <= 1 && uniqueSourceFileCount() > 1 && !m_filteredEntries.isEmpty()) {
-        emit m_model.dataChanged(m_model.index(0, 0),
-                                 m_model.index(int(m_filteredEntries.size()) - 1, 0),
-                                 {LogModel::FileBadgeRole});
-    }
 
     // Фоновая перефильтрация (если шла) работала со снапшотом без этого
     // батча — перезапускаем её на актуальных данных.
@@ -178,8 +167,8 @@ void ResidentLogStore::removeEntriesForFile(const QString& filePath)
                 return e && e->sourceFile() && e->sourceFile()->filePath == filePath;
             }),
         m_allEntries.end());
+    zeroFileLines(filePath);
 
-    m_cachedUniqueSourceFileCount = -1;
     rebuildFilteredEntries();
     m_model.endResetModel();
     m_filteredListStale = false; // перестроено по текущим настройкам
@@ -213,11 +202,12 @@ void ResidentLogStore::replaceEntriesForFile(
     m_model.beginResetModel();
     m_allEntries.erase(std::remove_if(m_allEntries.begin(), m_allEntries.end(), ofFile),
                        m_allEntries.end());
+    zeroFileLines(filePath);
+    countFileLines(sortedEntries, +1);
     const qsizetype kept = m_allEntries.size();
     m_allEntries.append(sortedEntries);
     std::inplace_merge(m_allEntries.begin(), m_allEntries.begin() + kept,
                        m_allEntries.end(), logEntryPtrLess);
-    m_cachedUniqueSourceFileCount = -1;
     rebuildFilteredEntries();
     m_model.endResetModel();
     m_filteredListStale = false; // перестроено по текущим настройкам
@@ -238,7 +228,7 @@ void ResidentLogStore::removeEntry(const std::shared_ptr<LogEntry>& entry)
     if (all == m_allEntries.end())
         return;
     m_allEntries.erase(all);
-    m_cachedUniqueSourceFileCount = -1;
+    countFileLines({entry}, -1);
     m_newEntries.remove(entry.get());
 
     const auto visible = find(m_filteredEntries);
@@ -265,7 +255,7 @@ void ResidentLogStore::setEntries(const QVector<std::shared_ptr<LogEntry>>& entr
 
     m_model.beginResetModel();
     m_allEntries = entries;
-    m_cachedUniqueSourceFileCount = -1;
+    recountFileLines();
 
     // Полное обновление: цвета файлов назначаются заново в порядке появления.
     m_model.resetFileColors();
@@ -286,16 +276,48 @@ void ResidentLogStore::setEntries(const QVector<std::shared_ptr<LogEntry>>& entr
 
 int ResidentLogStore::uniqueSourceFileCount() const
 {
-    if (m_cachedUniqueSourceFileCount != -1)
-        return m_cachedUniqueSourceFileCount;
+    int n = 0;
+    for (const FileLines& f : m_fileLines)
+        n += f.lines > 0 ? 1 : 0;
+    return n;
+}
 
-    QSet<LogFilePtr> uniqueFiles;
-    for (const auto& entry : m_allEntries) {
-        if (entry && entry->sourceFile())
-            uniqueFiles.insert(entry->sourceFile());
+void ResidentLogStore::countFileLines(const QVector<std::shared_ptr<LogEntry>>& entries, int sign)
+{
+    // Записи батча идут сериями одного файла — последний найденный файл
+    // проверяется первым, поиск по списку файлов — редкость.
+    int last = -1;
+    for (const auto& e : entries) {
+        if (!e || !e->sourceFile())
+            continue;
+        const LogFile* file = e->sourceFile().get();
+        if (last < 0 || m_fileLines[last].file.get() != file) {
+            last = -1;
+            for (int i = 0; i < m_fileLines.size(); ++i)
+                if (m_fileLines[i].file.get() == file) {
+                    last = i;
+                    break;
+                }
+            if (last < 0) {
+                m_fileLines.append({e->sourceFile(), 0});
+                last = int(m_fileLines.size()) - 1;
+            }
+        }
+        m_fileLines[last].lines += sign;
     }
-    m_cachedUniqueSourceFileCount = uniqueFiles.size();
-    return m_cachedUniqueSourceFileCount;
+}
+
+void ResidentLogStore::zeroFileLines(const QString& filePath)
+{
+    for (FileLines& f : m_fileLines)
+        if (f.file && f.file->filePath == filePath)
+            f.lines = 0;
+}
+
+void ResidentLogStore::recountFileLines()
+{
+    m_fileLines.clear();
+    countFileLines(m_allEntries, +1);
 }
 
 std::shared_ptr<LogEntry> ResidentLogStore::entryAt(int visibleRow) const

@@ -75,6 +75,8 @@ set(DENDROLOG_CORE_SOURCES
     src/logstore.h
     src/recordid.h
     src/shortcount.h
+    src/filelabels.h
+    src/filelabels.cpp
     src/recordid.cpp
     src/recordlocator.h
     src/recordlocator.cpp
@@ -151,6 +153,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/LogListView.cpp
     src/newlinesindicator.h
     src/newlinesindicator.cpp
+    src/filelegend.h
+    src/filelegend.cpp
     src/encodingindicator.h
     src/encodingindicator.cpp
     src/scrollbarmarksoverlay.h

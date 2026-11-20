@@ -56,6 +56,13 @@ LogListView::LogListView(QWidget *parent)
     // changeEvent(FontChange) тоже вызовет updateFontMetricsCache(), но если
     // шрифт из настроек совпал с текущим, событие не придёт — инициализируем явно.
     updateFontMetricsCache();
+
+    // Режим метки файла (U-23) — общая настройка: меняет её окно (View →
+    // File Labels), все view, включая выдачу Search, следуют сами.
+    m_fileLabelMode = AppSettings::instance().fileLabelMode();
+    connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
+        setFileLabelMode(AppSettings::instance().fileLabelMode());
+    });
     
     // Отметки на полосе прокрутки (R-6): расчёт по модели и оверлей поверх
     // скроллбара; сам скроллбар не подменяется.
@@ -216,6 +223,10 @@ void LogListView::setModel(QAbstractItemModel *model) {
         auto* logModel = qobject_cast<LogModel*>(model);
         m_indexedBackendModel = logModel && logModel->isIndexedBackend();
         m_scrollbarMarks->setModel(logModel);
+        m_fileColumnWidth = computeFileColumnWidth();
+        if (logModel)
+            m_modelConnections << connect(logModel, &LogModel::fileSetChanged,
+                                          this, &LogListView::updateFileColumn);
     }
     invalidateRowState();
     if (model) {
@@ -427,9 +438,7 @@ void LogListView::setModel(QAbstractItemModel *model) {
                 // желобке, RowMarkerColorRole — фон), рисуются напрямую из
                 // модели на каждый кадр: кэши валидны, достаточно перерисовать.
                 // Пустой список ролей по конвенции Qt = «изменилось всё».
-                if (!roles.isEmpty()
-                    && !roles.contains(Qt::DisplayRole)
-                    && !roles.contains(int(LogModel::FileBadgeRole))) {
+                if (!roles.isEmpty() && !roles.contains(Qt::DisplayRole)) {
                     viewport()->update();
                     return;
                 }
@@ -736,6 +745,8 @@ void LogListView::changeEvent(QEvent* event)
     QListView::changeEvent(event);
     if (event->type() == QEvent::FontChange) {
         updateFontMetricsCache();  // сам инвалидирует кэши строк
+        if (m_resizeDebounceTimer)
+            updateFileColumn();     // ширина меток — от шрифта
         if (m_heightUpdateTimer) {  // null during constructor — timer not yet created
             m_heightUpdateTimer->start(0);
             viewport()->update();
@@ -833,7 +844,94 @@ int LogListView::getRowHeight(int row) const {
 // Суммарная ширина всех левых желобков. Чтобы добавить второй желобок —
 // достаточно изменить это значение и добавить отрисовку в paintGutter().
 int LogListView::textAreaLeft() const {
-    return kLeftMarginWidth;
+    return kLeftMarginWidth + m_fileColumnWidth;
+}
+
+// ---------------------------------------------------------------------------
+// Колонка метки файла (U-23, часть 2): между жёлобом и текстом, одной ширины
+// на вид — текст всех строк слитой вкладки на одной вертикали.
+// ---------------------------------------------------------------------------
+void LogListView::setFileLabelMode(FileLabelMode mode)
+{
+    if (m_fileLabelMode == mode)
+        return;
+    m_fileLabelMode = mode;
+    updateFileColumn();
+}
+
+int LogListView::computeFileColumnWidth() const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || m_fileLabelMode == FileLabelMode::Hidden
+        || logModel->labeledFiles().size() < 2)
+        return 0;
+    if (m_fileLabelMode == FileLabelMode::ColorOnly)
+        return kFileStripeWidth + kFileStripeGap;
+    const QFontMetrics fm(font());
+    int widest = 0;
+    for (const LogModel::LabeledFile& f : logModel->labeledFiles())
+        widest = qMax(widest, fm.horizontalAdvance(f.label));
+    return kFileStripeWidth + kFileLabelGap + widest + kBadgeHPadding + kFileStripeGap;
+}
+
+void LogListView::updateFileColumn()
+{
+    const int width = computeFileColumnWidth();
+    if (width == m_fileColumnWidth) {
+        viewport()->update();   // метки могли смениться при той же ширине
+        return;
+    }
+    // Ширина текста сменилась — как смена ширины вьюпорта: состояния и
+    // высоты строк заново, вид держит якорь (первую видимую строку).
+    if (m_anchorRow < 0)
+        captureResizeAnchor();
+    m_fileColumnWidth = width;
+    invalidateRowState(-1, /*preserveTextLengths=*/true);
+    m_resizeDebounceTimer->start(0);
+    viewport()->update();
+}
+
+const LogModel::LabeledFile* LogListView::rowFile(int row) const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || m_fileColumnWidth <= 0)
+        return nullptr;
+    const auto ptr = logModel->data(logModel->index(row, 0), LogModel::SourceFileRole).value<quintptr>();
+    return logModel->labeledFile(reinterpret_cast<const LogFile*>(ptr));
+}
+
+QRect LogListView::fileLabelScreenRect(int row, const QString& label, qint64 rowTop, int rowHeight) const
+{
+    Q_UNUSED(row);
+    const QFontMetrics fm(font());
+    const int h = fm.height() - 2;
+    const int x = kLeftMarginWidth + kFileStripeWidth + kFileLabelGap;
+    const int w = qMin(fm.horizontalAdvance(label) + kBadgeHPadding,
+                       m_fileColumnWidth - kFileStripeWidth - kFileLabelGap - kFileStripeGap);
+    const int top = stickyTop(rowTop, rowHeight, singleRowHeight()) + (singleRowHeight() - h) / 2;
+    return QRect(x, top, w, h);
+}
+
+void LogListView::paintFileColumn(QPainter& painter, int row, int rowTop, int rowHeight)
+{
+    const LogModel::LabeledFile* file = rowFile(row);
+    if (!file)
+        return;
+    const QColor color = AppTheme::fileColor(file->colorOrdinal, viewport()->palette());
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    // Полоса — на всю высоту строки: цвет файла виден в любой её части.
+    painter.fillRect(QRect(kLeftMarginWidth, rowTop, kFileStripeWidth, rowHeight), color);
+    if (m_fileLabelMode == FileLabelMode::Name) {
+        const QRect r = fileLabelScreenRect(row, file->label, rowTop, rowHeight);
+        painter.fillRect(r, color);
+        painter.setPen(AppTheme::instance().badgeFg);
+        painter.drawText(r.adjusted(kBadgeHPadding / 2, 0, -kBadgeHPadding / 2, 0),
+                         Qt::AlignVCenter | Qt::AlignLeft,
+                         QFontMetrics(font()).elidedText(file->label, Qt::ElideMiddle,
+                                                         r.width() - kBadgeHPadding));
+    }
+    painter.restore();
 }
 
 // Высота одной строки в пикселях (единственный источник — используется вместо повсеместного m_lineHeight + 2)
@@ -904,11 +1002,8 @@ RowState LogListView::computeRowState(int row) const {
     // Шаг 1: Определяем, нужен ли вообще бейдж сворачивания.
     // Для auto-wrap в глобальном режиме WordWrap короткие строки не должны получать "-".
     // Для строк, раскрытых вручную из режима +N, бейдж сворачивания сохраняем всегда.
-    int fileBadgeWidth = 0;
-    QVariant fileBadgeVar = model()->data(model()->index(row, 0), LogModel::FileBadgeRole);
-    if (fileBadgeVar.isValid()) {
-        fileBadgeWidth = fontMetrics().horizontalAdvance(fileBadgeVar.toMap()["text"].toString()) + kBadgeHPadding + kBadgeGap;
-    }
+    // Метка файла — колонкой слева (textAreaLeft), справа только переключатель.
+    const int fileBadgeWidth = 0;
     const int baseAvailableTextWidth = effectiveVpWidth - fileBadgeWidth - kTextBadgeGap;
     const int fullTextWidth = calculateWidth(QStringView(state.text));
 
@@ -1342,22 +1437,6 @@ QList<BadgeSpec> LogListView::collectBadgeSpecs(int row, const QString& text,
     
     QList<BadgeSpec> specs;
     hiddenCount = 0;
-    const AppTheme& theme = AppTheme::instance();
-
-    // Информационная плашка файла.
-    // Модель возвращает QVariant() если файл один — показывать нечего.
-    // Там же хранится цвет, привязанный к файлу.
-    QVariant badgeVar = model()->data(model()->index(row, 0), LogModel::FileBadgeRole);
-    if (badgeVar.isValid()) {
-        QVariantMap map = badgeVar.toMap();
-        BadgeSpec b;
-        b.type = BadgeType::Info;
-        b.text  = map["text"].toString();
-        b.bg    = map["color"].value<QColor>();
-        b.fg    = theme.badgeFg;
-        specs.append(b);
-    }
-
     // Плашка скрытых символов для однострочного режима
     // Переключатель переноса — приглушённый (AppTheme::wrapToggle*): яркой
     // остаётся только информация (метка файла).
@@ -2279,7 +2358,8 @@ void LogListView::paintEvent(QPaintEvent *event) {
             }
 
             // Левый желобок: маркер начала записи и любые будущие индикаторы
-            paintGutter(painter, row, QRect(0, currentY, textAreaLeft(), rowHeight));
+            paintGutter(painter, row, QRect(0, currentY, kLeftMarginWidth, rowHeight));
+            paintFileColumn(painter, row, currentY, rowHeight);
 
             // Кэшированный растр ИЛИ прямая отрисовка — клипаем к textRect, чтобы текст не залезал на плашки
             QPixmap rowPixmap = getRowPixmap(row, state);
@@ -2769,6 +2849,18 @@ LogListView::RowChromeHit LogListView::rowChromeAt(const QPoint& pos) const
         return hit;
     const RowState state = getRowState(row);
     const qint64 rowTop = rowTopContent - scrollY;
+    // Колонка метки файла: полоса и метка — путь в подсказке; щелчка нет.
+    if (pos.x() >= kLeftMarginWidth && pos.x() < textAreaLeft()) {
+        if (const LogModel::LabeledFile* file = rowFile(row)) {
+            hit.kind = RowChrome::FileLabel;
+            hit.row = row;
+            hit.rect = QRect(kLeftMarginWidth, int(qMax<qint64>(0, rowTop)), m_fileColumnWidth,
+                             int(qMin<qint64>(viewport()->height(), rowTop + state.height)
+                                 - qMax<qint64>(0, rowTop)));
+            hit.toolTip = file->file->displayPath();
+        }
+        return hit;
+    }
     for (int i = 0; i < state.badges.size(); ++i) {
         const QRect r = badgeScreenRect(state.badges[i], rowTop, state.height);
         if (!r.contains(pos))
