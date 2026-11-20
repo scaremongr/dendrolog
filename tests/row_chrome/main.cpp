@@ -781,7 +781,8 @@ static void checkMergedTab(const QDir& dir, bool indexed)
             QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, to);
             QApplication::clipboard()->clear();
             QTest::keyClick(view.viewport(), Qt::Key_C, Qt::ControlModifier);
-            QApplication::sendEvent(&view, new QKeyEvent(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier));
+            QKeyEvent copyKey(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+            QApplication::sendEvent(&view, &copyKey);
             return QApplication::clipboard()->text();
         };
         const QString withColumn = selectedChars(2);
