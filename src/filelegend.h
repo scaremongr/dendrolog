@@ -61,6 +61,7 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
@@ -92,4 +93,5 @@ private:
     QMetaObject::Connection m_setConnection;
     QMetaObject::Connection m_linesConnection;
     QMetaObject::Connection m_filterConnection;
+    QString m_pressedFile;   // чип под нажатием (щелчок — на том же)
 };

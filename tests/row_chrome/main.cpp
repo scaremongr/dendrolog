@@ -47,6 +47,8 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QElapsedTimer>
+#include <QLabel>
 #include <QRandomGenerator>
 #include <QSettings>
 #include <QHelpEvent>
@@ -1099,8 +1101,39 @@ static void checkFileFilter(const QDir& dir, bool indexed)
               .arg(counter->shown(legend->chipFile(chipB))));
     CHECK(legend->chipText(chipA).endsWith(QStringLiteral("%1 / 300").arg(expected.value(legend->chipFile(chipA)))),
           QStringLiteral("%1: chip A says shown / total: %2").arg(label, legend->chipText(chipA)));
+    // Фильтр, скрывший все строки: «0 / всего», а не прежние числа.
+    model.setLogLevelFilter({LogLevel::Error});
+    CHECK(settledTab(tab) && model.rowCount() == 0
+              && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
+          label + ": ERROR filter hides everything");
+    CHECK(legend->chipText(chipA).endsWith(QStringLiteral("0 / 300"))
+              && legend->chipText(chipB).endsWith(QStringLiteral("0 / 200")),
+          QStringLiteral("%1: nothing shown reads 0 / total: '%2', '%3'").arg(label, legend->chipText(chipA),
+                                                                             legend->chipText(chipB)));
+    model.setLogLevelFilter({LogLevel::Warn});
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
+          label + ": back to WARN");
     CHECK(legend->toggleFile(chipA, true) && settledTab(tab) && model.hiddenFiles().isEmpty(),
           label + ": Ctrl+click again shows all");
+
+    // Показ полного лога, когда действует только фильтр по файлу: плашка
+    // называет его.
+    {
+        model.setLogLevelFilter({});
+        CHECK(legend->toggleFile(chipB, false) && settledTab(tab), label + ": only the file filter");
+        CHECK(tab.toggleFullLog() && settledTab(tab) && model.rowCount() == 500, label + ": full log shown");
+        QString barText;
+        for (QLabel* l : tab.findChildren<QLabel*>())
+            if (l->text().startsWith(QStringLiteral("Showing the full log")))
+                barText = l->text();
+        CHECK(barText.contains(QStringLiteral("(files)")),
+              QStringLiteral("%1: the full log bar names the file filter: '%2'").arg(label, barText));
+        CHECK(tab.toggleFullLog() && settledTab(tab) && model.hiddenFiles() == QSet<QString>{b},
+              label + ": full log off, B hidden again");
+        model.setHiddenFiles({});
+        model.setLogLevelFilter({LogLevel::Warn});
+        CHECK(settledTab(tab), label + ": WARN again");
+    }
 
     // Дозапись: числа — по перебору.
     testdocs::appendToFile(a, numberedLines(300, 20));
@@ -1110,6 +1143,24 @@ static void checkFileFilter(const QDir& dir, bool indexed)
     CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
               && counter->shown(legend->chipFile(chipB)) == expected.value(legend->chipFile(chipB)),
           label + ": counts after an append match the shown rows");
+
+    // Поток дозаписи чаще дебаунса: счёт идёт и посреди потока, а не после.
+    {
+        const int launches = counter->launchCount();
+        QElapsedTimer stream;
+        stream.start();
+        int line = 320;
+        while (stream.elapsed() < 1500) {
+            testdocs::appendToFile(a, numberedLines(line++, 1));
+            tab.reloadChangedFiles(true);
+            testdocs::pump(40);
+        }
+        CHECK(counter->launchCount() > launches,
+              QStringLiteral("%1: counting runs during a stream of appends (%2 runs)").arg(label)
+                  .arg(counter->launchCount() - launches));
+        CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
+              label + ": stream settles");
+    }
 
     // Reset посреди расчёта: результат отброшен, итог — по новому набору.
     model.setLogLevelFilter({LogLevel::Info});
@@ -1127,19 +1178,21 @@ static void checkFileFilter(const QDir& dir, bool indexed)
         const QString big = testdocs::writeFile(dir, QStringLiteral("ff-big-%1.log").arg(indexed),
                                                 numberedLines(0, 300000));
         const int launches = counter->launchCount();
+        QElapsedTimer loading;
+        loading.start();
         int batches = 0;
         auto c = QObject::connect(&model, &LogModel::fileLinesChanged, [&batches]() { ++batches; });
         tab.addLogFile(big);
         CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 30000),
               label + ": the big file loads");
         QObject::disconnect(c);
-        // Не по порции: дебаунс склеивает порции, пришедшие быстрее 150 мс.
-        // (Индексатор публикует порции по ~600 тыс. строк — у индексного
-        // бэкенда порция здесь одна-две.)
+        // Не по порции: дебаунс (150 мс, не перезапускается порцией) склеивает
+        // порции — запусков не больше одного на окно дебаунса плюс конец.
         const int runs = counter->launchCount() - launches;
-        CHECK(batches >= 8 ? runs * 4 <= batches : runs <= 2,
-              QStringLiteral("%1: %2 counting runs for %3 batches").arg(label)
-                  .arg(counter->launchCount() - launches).arg(batches));
+        const qint64 windows = loading.elapsed() / 150;
+        CHECK(runs <= windows + 2 && (batches < 8 || runs < batches),
+              QStringLiteral("%1: %2 counting runs for %3 batches in %4 ms").arg(label)
+                  .arg(runs).arg(batches).arg(loading.elapsed()));
     }
 
     // Режим Hidden: легенды нет, фильтр по файлу остаётся.

@@ -33,6 +33,7 @@ void FileShownCounter::setModel(LogModel* model)
     m_connections.clear();
     m_model = model;
     m_counts.clear();
+    m_hasResult = false;
     if (model) {
         m_connections << connect(model, &QAbstractItemModel::rowsInserted, this, [this]() { markDirty(false); });
         m_connections << connect(model, &QAbstractItemModel::rowsRemoved, this, [this]() { markDirty(false); });
@@ -51,6 +52,11 @@ void FileShownCounter::setActive(bool active)
         m_debounce->start(0);
 }
 
+bool FileShownCounter::knows(const LogFile* file) const
+{
+    return m_hasResult && (m_counts.contains(file) || isUpToDate());
+}
+
 bool FileShownCounter::isUpToDate() const
 {
     return !m_dirty && !m_running && !m_debounce->isActive();
@@ -66,7 +72,9 @@ void FileShownCounter::markDirty(bool reset)
             m_cancel->store(true);
         m_running = false;
     }
-    if (m_active && !m_running)
+    // Не перезапускать идущий дебаунс: поток порций чаще 150 мс иначе
+    // откладывал бы счёт до паузы в потоке.
+    if (m_active && !m_running && !m_debounce->isActive())
         m_debounce->start();
 }
 
@@ -83,6 +91,10 @@ void FileShownCounter::start()
     const int generation = m_generation;
 
     using Counts = QHash<const LogFile*, qint64>;
+    // Файлы вкладки — с нулём: «ни одной показанной строки» тоже ответ.
+    Counts seed;
+    for (const LogModel::LabeledFile& f : m_model->labeledFiles())
+        seed.insert(f.file.get(), 0);
     auto* watcher = new QFutureWatcher<Counts>(this);
     connect(watcher, &QFutureWatcher<Counts>::finished, this, [this, watcher, generation]() {
         watcher->deleteLater();
@@ -90,12 +102,13 @@ void FileShownCounter::start()
             return; // reset посреди расчёта — результат устарел
         m_running = false;
         m_counts = watcher->result();
-        if (m_dirty && m_active)
+        m_hasResult = true;
+        if (m_dirty && m_active && !m_debounce->isActive())
             m_debounce->start();
         emit countsChanged();   // и при тех же числах: расчёт закончен
     });
-    watcher->setFuture(QtConcurrent::run([snapshot, cancel]() -> Counts {
-        Counts counts;
+    watcher->setFuture(QtConcurrent::run([snapshot, cancel, seed]() -> Counts {
+        Counts counts = seed;
         const LogFile* last = nullptr;
         qint64* lastCount = nullptr;
         snapshot.forEachMeta(0, [&](qint64 row, const LogEntryMeta& meta) {

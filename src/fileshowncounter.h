@@ -36,6 +36,11 @@ public:
 
     // Показанных строк файла; файла нет в ответе — 0.
     qint64 shown(const LogFile* file) const { return m_counts.value(file, 0); }
+    // Известно ли число файла: он есть в последнем ответе (файлы вкладки —
+    // и с нулём), либо ответ свежий. Новый файл до следующего расчёта и
+    // всё до первого расчёта — не известно.
+    bool knows(const LogFile* file) const;
+    bool hasResult() const { return m_hasResult; }
     const QHash<const LogFile*, qint64>& counts() const { return m_counts; }
     // Числа соответствуют модели: не ждут расчёта и он не идёт.
     bool isUpToDate() const;
@@ -55,6 +60,7 @@ private:
     bool m_active = false;
     bool m_dirty = false;
     bool m_running = false;
+    bool m_hasResult = false;
     int m_generation = 0;
     int m_launches = 0;
     std::shared_ptr<std::atomic_bool> m_cancel;

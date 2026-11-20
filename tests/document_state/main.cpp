@@ -794,6 +794,32 @@ static void checkHiddenFiles(const QDir& dir, const QString& name, const QString
     for (int r = 0; r < model.rowCount(); r += 7)
         CHECK(model.keyAt(r).file && model.keyAt(r).file->filePath == a, QStringLiteral("строки только из a"));
 
+    // Видимый файл пропал: скрытый — единственный открывшийся, вкладка не
+    // пустеет (легенды у одного файла нет, вернуть было бы нечем).
+    {
+        TabState missing = state;
+        missing.sources[0].source.path = dir.filePath(QStringLiteral("%1-hidden-gone.log").arg(name));
+        if (missing.view.currentSource)
+            missing.view.currentSource->path = missing.sources[0].source.path;
+        auto alone = makeTab(schema);
+        alone->applyState(missing);
+        CHECK(settled(*alone) && alone->model()->hiddenFiles().isEmpty() && alone->model()->rowCount() > 0,
+              QStringLiteral("видимый пропал — скрытый показан: %1 строк, скрыто %2")
+                  .arg(alone->model()->rowCount()).arg(alone->model()->hiddenFiles().size()));
+    }
+    // Предложение (память файла): фильтр по файлу не предлагается — плашки
+    // «Restore Filters», которая ничего не вернёт, нет.
+    {
+        TabState onlyFiles = state;
+        onlyFiles.view.levels.clear();
+        onlyFiles.view.timeFrom = onlyFiles.view.timeTo = QDateTime();
+        onlyFiles.view.textRules = FilterRuleSet();
+        auto offered = makeTab(schema);
+        offered->applyState(onlyFiles, LogViewWidget::StateFilters::Offer);
+        CHECK(settled(*offered) && !offered->hasOfferedFilters() && offered->model()->hiddenFiles().isEmpty(),
+              QStringLiteral("только фильтр по файлу — не предлагается"));
+    }
+
     // Без поля (снимок версии 1 прежних версий) — ничего не скрыто.
     QJsonObject json = state.toJson();
     QJsonObject view = json.value(QLatin1String("view")).toObject();

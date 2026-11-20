@@ -2563,7 +2563,11 @@ void MainWindow::updateFilterStatusButtons()
 
     // Files (пер-вкладочный, U-23): скрытые щелчком по легенде файлы.
     {
-        const int hidden = model ? int(model->hiddenFiles().size()) : 0;
+        // Только файлы вкладки: путь пропавшего источника снимка не в счёт.
+        int hidden = 0;
+        if (model && !model->hiddenFiles().isEmpty())
+            for (const LogModel::LabeledFile& f : model->labeledFiles())
+                hidden += model->hiddenFiles().contains(f.file->filePath) ? 1 : 0;
         m_fileFilterStatusAction->setEnabled(model != nullptr && hidden > 0);
         m_fileFilterStatusAction->setChecked(hidden > 0);
         m_fileFilterStatusAction->setToolTip(hidden > 0

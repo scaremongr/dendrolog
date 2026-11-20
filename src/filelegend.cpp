@@ -7,6 +7,7 @@
 #include "shortcount.h"
 #include "fileshowncounter.h"
 
+#include <utility>
 #include <QApplication>
 #include <QClipboard>
 #include <QContextMenuEvent>
@@ -109,9 +110,9 @@ void FileLegend::updateCounts()
 QString FileLegend::countText(const Chip& chip) const
 {
     // «показано / всего», когда фильтр вкладки скрывает часть строк файла;
-    // пока фоновый счёт не готов — прежние числа.
+    // пока числа файла нет (первый счёт, новый файл) — только «всего».
     const QString total = ShortCount::format(chip.lines, 100000, true);
-    if (!m_model || !m_model->hasFilters() || m_counter->counts().isEmpty())
+    if (!m_model || !m_model->hasFilters() || !m_counter->knows(chip.file))
         return total;
     const qint64 shown = m_counter->shown(chip.file);
     if (shown == chip.lines)
@@ -133,7 +134,10 @@ bool FileLegend::toggleFile(int chip, bool only)
     QSet<QString> all;
     for (const Chip& c : std::as_const(m_chips))
         all.insert(c.filePath);
-    QSet<QString> hidden = m_model->hiddenFiles();
+    // Скрытые пути без чипа (файл ещё не прислал строк — восстановленный
+    // снимок посреди загрузки) щелчок по другому чипу не трогает.
+    const QSet<QString> unchipped = m_model->hiddenFiles() - all;
+    QSet<QString> hidden = m_model->hiddenFiles() & all;
     if (only) {
         QSet<QString> others = all;
         others.remove(path);
@@ -142,14 +146,19 @@ bool FileLegend::toggleFile(int chip, bool only)
     } else if (hidden.contains(path)) {
         hidden.remove(path);
     } else {
-        QSet<QString> visible = all - hidden;
-        visible.remove(path);
-        if (visible.isEmpty())
-            return false; // последний видимый файл не скрывается
+        // Последний файл, у которого есть строки, не скрывается: файл без
+        // строк (удалён, усечён — чип остаётся) вид не держит.
+        if (m_chips[chip].lines > 0) {
+            bool otherVisible = false;
+            for (const Chip& c : std::as_const(m_chips))
+                if (c.filePath != path && c.lines > 0 && !hidden.contains(c.filePath))
+                    otherVisible = true;
+            if (!otherVisible)
+                return false;
+        }
         hidden.insert(path);
     }
-    // Пути файлов, которых во вкладке уже нет, в наборе не держим.
-    hidden &= all;
+    hidden |= unchipped;
     if (hidden == m_model->hiddenFiles())
         return false;
     m_model->setHiddenFiles(hidden);
@@ -157,11 +166,24 @@ bool FileLegend::toggleFile(int chip, bool only)
     return true;
 }
 
-void FileLegend::mouseReleaseEvent(QMouseEvent* event)
+void FileLegend::mousePressEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton) {
         const int i = chipAt(event->pos());
-        if (i >= 0 && toggleFile(i, event->modifiers() & Qt::ControlModifier))
+        m_pressedFile = i >= 0 ? m_chips[i].filePath : QString();
+        return;
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void FileLegend::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton) {
+        // Щелчок — нажатие и отпускание на одном чипе.
+        const int i = chipAt(event->pos());
+        const QString pressed = std::exchange(m_pressedFile, QString());
+        if (i >= 0 && m_chips[i].filePath == pressed
+            && toggleFile(i, event->modifiers() & Qt::ControlModifier))
             event->accept();
         return;
     }
@@ -299,12 +321,17 @@ bool FileLegend::event(QEvent* event)
             QLocale c = QLocale::c();
             c.setNumberOptions(QLocale::DefaultNumberOptions);
             const Chip& chip = m_chips[i];
+            const bool filtered = m_model && m_model->hasFilters();
+            const QString lines = !filtered
+                ? tr("%1 line(s) in this tab").arg(c.toString(chip.lines))
+                : m_counter->knows(chip.file)
+                    ? tr("%1 line(s) in this tab, %2 shown")
+                          .arg(c.toString(chip.lines), c.toString(m_counter->shown(chip.file)))
+                    : tr("%1 line(s) in this tab, counting shown lines…").arg(c.toString(chip.lines));
             QToolTip::showText(help->globalPos(),
-                               tr("%1\n%2 line(s) in this tab, %3 shown\nClick to hide or show this file; "
+                               tr("%1\n%2\nClick to hide or show this file; "
                                   "Ctrl+click to show only this file")
-                                   .arg(chip.path, c.toString(chip.lines),
-                                        c.toString(m_model && m_model->hasFilters()
-                                                       ? m_counter->shown(chip.file) : chip.lines)),
+                                   .arg(chip.path, lines),
                                this, chip.rect);
         } else {
             QToolTip::hideText();

@@ -1475,6 +1475,8 @@ void LogViewWidget::updateFullLogBar()
             parts << tr("time range");
         if (filters->rules.usableRuleCount() > 0)
             parts << tr("text rules");
+        if (!filters->hiddenFiles.isEmpty())
+            parts << tr("files");
         m_fullLogText->setText(
             tr("Showing the full log: the filters of this tab (%1) are paused.")
                 .arg(parts.join(QStringLiteral(", "))));
@@ -1611,24 +1613,6 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
     for (const BookmarkState& b : state.bookmarks)
         bookmarks().restore(b);
 
-    m_model->setRowMarkers(view.markers);
-    if (filters == StateFilters::Apply) {
-        // Фильтры снимка — правда: показ полного лога (R-3) кончается, даже
-        // если они совпали с нынешними и перефильтрации не будет.
-        m_fullLog->discard();
-        // Скрытые файлы снимка — по индексам источников (U-23).
-        QSet<QString> hidden;
-        for (int i : view.hiddenSources)
-            if (i >= 0 && i < state.sources.size())
-                hidden.insert(state.sources[i].source.path);
-        setStateFilters(view, &hidden);
-        dismissOfferedFilters();
-    } else if (view.hasFilters()) {
-        m_offeredFilters = view;
-        emit offeredFiltersChanged(true);
-    }
-    setAutoReload(view.autoReload);
-
     // Проверка источников — по разу на файл (два чтения по 4 КБ).
     QHash<QString, SourceIdentity::State> checks;
     for (const TabSource& source : state.sources)
@@ -1637,6 +1621,41 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         const auto it = checks.constFind(source.path);
         return it != checks.constEnd() ? *it : source.check();
     };
+
+    m_model->setRowMarkers(view.markers);
+    if (filters == StateFilters::Apply) {
+        // Фильтры снимка — правда: показ полного лога (R-3) кончается, даже
+        // если они совпали с нынешними и перефильтрации не будет.
+        m_fullLog->discard();
+        // Скрытые файлы снимка — по индексам источников (U-23). Пропавший
+        // файл не откроется: его в наборе не держим, а если скрыты все
+        // открывающиеся — не скрываем ничего (вкладка не пустеет без легенды).
+        QSet<QString> hidden;
+        int opening = 0;
+        for (int i = 0; i < state.sources.size(); ++i) {
+            const SourceIdentity& source = state.sources[i].source;
+            if (checkOf(source) == SourceIdentity::State::Missing)
+                continue;
+            ++opening;
+            if (view.hiddenSources.contains(i))
+                hidden.insert(source.path);
+        }
+        if (hidden.size() >= opening)
+            hidden.clear();
+        setStateFilters(view, &hidden);
+        dismissOfferedFilters();
+    } else {
+        // Предложение — для памяти файла (вкладка одного файла): скрывать в
+        // ней нечего, фильтр по файлу не предлагается.
+        ViewState offered = view;
+        offered.hiddenSources.clear();
+        if (offered.hasFilters()) {
+            m_offeredFilters = offered;
+            emit offeredFiltersChanged(true);
+        }
+    }
+    setAutoReload(view.autoReload);
+
 
     // Позиция: follow-tail главнее — вид у хвоста, строка не ставится.
     if (m_pendingPosition.token)
