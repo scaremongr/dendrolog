@@ -574,6 +574,30 @@ MainWindow::MainWindow(QWidget *parent)
             ui->menuView->addMenu(labels);
     }
 
+    // Номера строк (U-23, часть 3): View → Line Numbers, общая настройка.
+    {
+        QAction* numbers = new QAction(tr("Line Numbers"), this);
+        numbers->setCheckable(true);
+        numbers->setChecked(AppSettings::instance().lineNumbers());
+        connect(numbers, &QAction::toggled, this, [](bool on) {
+            if (AppSettings::instance().lineNumbers() == on)
+                return;
+            AppSettings::instance().setLineNumbers(on);
+            AppSettings::instance().save();
+        });
+        connect(&AppSettings::instance(), &AppSettings::settingsChanged, numbers, [numbers]() {
+            numbers->setChecked(AppSettings::instance().lineNumbers());
+        });
+        const QList<QAction*> viewActions = ui->menuView->actions();
+        const int wrapAt = viewActions.indexOf(m_toggleLineWrapAction);
+        QAction* after = wrapAt >= 0 && wrapAt + 2 < viewActions.size() ? viewActions[wrapAt + 2] : nullptr;
+        if (after)
+            ui->menuView->insertAction(after, numbers);
+        else
+            ui->menuView->addAction(numbers);
+        m_shortcutActions.insert(QStringLiteral("lineNumbers"), numbers);
+    }
+
     // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.
     m_goToAction = new QAction(tr("Go to Line / Time…"), this);
     connect(m_goToAction, &QAction::triggered, this, &MainWindow::showGoToDialog);

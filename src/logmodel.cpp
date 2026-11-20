@@ -186,8 +186,9 @@ void LogModel::refreshFileSet()
     if (sameSet) {
         bool linesChanged = false;
         for (int i = 0; i < files.size(); ++i) {
-            if (m_labeledFiles[i].lines != files[i].lines) {
+            if (m_labeledFiles[i].lines != files[i].lines || m_labeledFiles[i].maxLine != files[i].maxLine) {
                 m_labeledFiles[i].lines = files[i].lines;
+                m_labeledFiles[i].maxLine = files[i].maxLine;
                 linesChanged = true;
             }
         }
@@ -203,7 +204,8 @@ void LogModel::refreshFileSet()
     m_labeledIndex.clear();
     for (int i = 0; i < files.size(); ++i) {
         m_labeledFiles.append({files[i].file, labels.value(i),
-                               m_fileOrdinals.value(files[i].file->filePath), files[i].lines});
+                               m_fileOrdinals.value(files[i].file->filePath), files[i].lines,
+                               files[i].maxLine});
         m_labeledIndex.insert(files[i].file.get(), i);
     }
     emit fileSetChanged();

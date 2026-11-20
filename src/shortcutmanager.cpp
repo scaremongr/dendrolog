@@ -53,6 +53,8 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("fileLabelsName"),      tr("File labels: name"),       QKeySequence() },
         { QStringLiteral("fileLabelsColorOnly"), tr("File labels: colour only"), QKeySequence() },
         { QStringLiteral("fileLabelsHidden"),    tr("File labels: hidden"),     QKeySequence() },
+        // Номера строк (U-23, часть 3): View → Line Numbers, без сочетания.
+        { QStringLiteral("lineNumbers"), tr("Show / hide line numbers"), QKeySequence() },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },
         { QStringLiteral("zoomReset"),   tr("Default font size"),         QKeySequence(Qt::CTRL | Qt::Key_0) },

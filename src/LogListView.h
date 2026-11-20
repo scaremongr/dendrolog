@@ -202,6 +202,7 @@ public:
         WrapToggle,   // «+N» у свёрнутой строки, «−» у развёрнутой
         WrapRail,     // рейка развёрнутой строки: столбец «−» на всю её высоту
         FileLabel,    // метка файла строки
+        LineNumber,   // номер строки (U-23, часть 3)
     };
     struct RowChromeHit {
         RowChrome kind = RowChrome::None;
@@ -240,6 +241,19 @@ public:
     // Ширина колонки (0 — нет) и левый край текста — тестам.
     int fileColumnWidth() const { return m_fileColumnWidth; }
     int textLeft() const { return textAreaLeft(); }
+
+    // ---- Номера строк (U-23, часть 3) ------------------------------------------
+    // Колонка сразу за жёлобом: физический номер строки в файле
+    // (RecordKey::line), на первой линии с прилипанием; по умолчанию
+    // выключена ([View] lineNumbers). Номера не выделяются и не копируются.
+    void setLineNumbersVisible(bool visible);
+    bool lineNumbersVisible() const { return m_lineNumbersVisible; }
+    int lineNumberWidth() const { return m_lineNumberWidth; }
+    QString lineNumberText(int row) const;
+    QRect lineNumberRect(int row) const;   // экранный, с прилипанием; пусто — колонки нет
+    // Пересчётов раскладки левых колонок (смена ширины номеров или меток) —
+    // тестам: поток батчей без смены разрядности их не даёт.
+    int leftColumnRelayouts() const { return m_leftColumnRelayouts; }
     // Переход к строке как выбор пользователя (Go to Line / Time, таймлайн,
     // статистика, Search, быстрый поиск, F8 — общий путь всех переходов): строка
     // становится текущей и выделенной — значит, и якорем восстановления
@@ -516,8 +530,22 @@ private:
     static constexpr int kFileStripeGap = 5;
     FileLabelMode m_fileLabelMode = FileLabelMode::Name;
     int m_fileColumnWidth = 0;
+    static constexpr int kLineNumberPadX = 4;
+    bool m_lineNumbersVisible = false;
+    int m_lineNumberWidth = 0;
+    int m_leftColumnRelayouts = 0;
+    int fileColumnLeft() const { return kLeftMarginWidth + m_lineNumberWidth; }
+    int lineNumberDigits() const;
+    int computeLineNumberWidth() const;
+    void onFileLinesChanged();
+    QRect lineNumberScreenRect(qint64 rowTop, int rowHeight) const;
+    void paintLineNumber(QPainter& painter, int row, int rowTop, int rowHeight, bool selected);
     int computeFileColumnWidth() const;
     void updateFileColumn();
+    void applyLeftColumns();
+    void scheduleLeftColumns();
+    mutable qint64 m_lineNumberHighWater = 0;
+    QTimer* m_leftColumnsTimer = nullptr;
     const LogModel::LabeledFile* rowFile(int row) const;
     QRect fileLabelScreenRect(int row, const QString& label, qint64 rowTop, int rowHeight) const;
     void paintFileColumn(QPainter& painter, int row, int rowTop, int rowHeight);

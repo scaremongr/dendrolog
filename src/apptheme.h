@@ -136,6 +136,8 @@ public:
     static QColor wrapToggleFg(const QPalette& palette);
     static QColor wrapToggleBg(const QPalette& palette);
     static QColor wrapRail(const QPalette& palette);
+    // Номер строки в колонке номеров (U-23, часть 3) — приглушённый.
+    static QColor lineNumberFg(const QPalette& palette);
 
     // Цвета файлов слитой вкладки (U-23): по кругу в порядке добавления
     // файлов (ordinal — LogModel::LabeledFile::colorOrdinal). Цвет читается и

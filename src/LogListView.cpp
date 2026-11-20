@@ -60,8 +60,10 @@ LogListView::LogListView(QWidget *parent)
     // Режим метки файла (U-23) — общая настройка: меняет её окно (View →
     // File Labels), все view, включая выдачу Search, следуют сами.
     m_fileLabelMode = AppSettings::instance().fileLabelMode();
+    m_lineNumbersVisible = AppSettings::instance().lineNumbers();
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
         setFileLabelMode(AppSettings::instance().fileLabelMode());
+        setLineNumbersVisible(AppSettings::instance().lineNumbers());
     });
     
     // Отметки на полосе прокрутки (R-6): расчёт по модели и оверлей поверх
@@ -223,10 +225,17 @@ void LogListView::setModel(QAbstractItemModel *model) {
         auto* logModel = qobject_cast<LogModel*>(model);
         m_indexedBackendModel = logModel && logModel->isIndexedBackend();
         m_scrollbarMarks->setModel(logModel);
+        m_lineNumberHighWater = 0;
         m_fileColumnWidth = computeFileColumnWidth();
-        if (logModel)
-            m_modelConnections << connect(logModel, &LogModel::fileSetChanged,
-                                          this, &LogListView::updateFileColumn);
+        m_lineNumberWidth = computeLineNumberWidth();
+        if (logModel) {
+            m_modelConnections << connect(logModel, &LogModel::fileSetChanged, this, [this]() {
+                m_lineNumberHighWater = 0;   // другой набор файлов — ширина заново
+                scheduleLeftColumns();
+            });
+            m_modelConnections << connect(logModel, &LogModel::fileLinesChanged,
+                                          this, &LogListView::onFileLinesChanged);
+        }
     }
     invalidateRowState();
     if (model) {
@@ -844,7 +853,7 @@ int LogListView::getRowHeight(int row) const {
 // Суммарная ширина всех левых желобков. Чтобы добавить второй желобок —
 // достаточно изменить это значение и добавить отрисовку в paintGutter().
 int LogListView::textAreaLeft() const {
-    return kLeftMarginWidth + m_fileColumnWidth;
+    return fileColumnLeft() + m_fileColumnWidth;
 }
 
 // ---------------------------------------------------------------------------
@@ -876,8 +885,29 @@ int LogListView::computeFileColumnWidth() const
 
 void LogListView::updateFileColumn()
 {
+    applyLeftColumns();
+}
+
+void LogListView::scheduleLeftColumns()
+{
+    // Отложенно: сигналы набора файлов и числа строк приходят изнутри
+    // rowsInserted / modelReset модели — раньше, чем view обработал вставку;
+    // якорь вида, снятый в этот момент, считался бы по устаревшей геометрии.
+    // Смена настроек и шрифта применяется сразу (updateFileColumn).
+    if (!m_leftColumnsTimer) {
+        m_leftColumnsTimer = new QTimer(this);
+        m_leftColumnsTimer->setSingleShot(true);
+        m_leftColumnsTimer->setInterval(0);
+        connect(m_leftColumnsTimer, &QTimer::timeout, this, &LogListView::applyLeftColumns);
+    }
+    m_leftColumnsTimer->start();
+}
+
+void LogListView::applyLeftColumns()
+{
     const int width = computeFileColumnWidth();
-    if (width == m_fileColumnWidth) {
+    const int numbers = computeLineNumberWidth();
+    if (width == m_fileColumnWidth && numbers == m_lineNumberWidth) {
         viewport()->update();   // метки могли смениться при той же ширине
         return;
     }
@@ -886,9 +916,94 @@ void LogListView::updateFileColumn()
     if (m_anchorRow < 0)
         captureResizeAnchor();
     m_fileColumnWidth = width;
+    m_lineNumberWidth = numbers;
+    ++m_leftColumnRelayouts;
     invalidateRowState(-1, /*preserveTextLengths=*/true);
     m_resizeDebounceTimer->start(0);
     viewport()->update();
+}
+
+// ---------------------------------------------------------------------------
+// Колонка номеров строк (U-23, часть 3): сразу за жёлобом, левее метки
+// файла. Номер — физическая строка файла (RecordKey::line), на первой линии
+// строки с прилипанием к верху экрана; ширина — по разрядности наибольшего
+// числа строк файла вкладки, не меньше четырёх цифр.
+// ---------------------------------------------------------------------------
+void LogListView::setLineNumbersVisible(bool visible)
+{
+    if (m_lineNumbersVisible == visible)
+        return;
+    m_lineNumbersVisible = visible;
+    updateFileColumn();
+}
+
+int LogListView::lineNumberDigits() const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    // Наибольший номер строки (у выдачи Search строк мало, а номера — из
+    // глубины файла); не уже прежней, пока набор файлов тот же: полная
+    // перезагрузка сбрасывает строки файла, и колонка не должна дёргаться.
+    qint64 most = m_lineNumberHighWater;
+    if (logModel)
+        for (const LogModel::LabeledFile& f : logModel->labeledFiles())
+            most = qMax(most, f.maxLine);
+    m_lineNumberHighWater = most;
+    int digits = 1;
+    for (qint64 n = most; n >= 10; n /= 10)
+        ++digits;
+    return qMax(4, digits);
+}
+
+int LogListView::computeLineNumberWidth() const
+{
+    if (!m_lineNumbersVisible || !model())
+        return 0;
+    return int(std::ceil(lineNumberDigits() * m_charWidth)) + 2 * kLineNumberPadX;
+}
+
+void LogListView::onFileLinesChanged()
+{
+    // На событие батча — одно сравнение разрядности (инвариант 3); пересчёт
+    // раскладки — только при её смене.
+    if (m_lineNumbersVisible && computeLineNumberWidth() != m_lineNumberWidth)
+        scheduleLeftColumns();
+}
+
+QString LogListView::lineNumberText(int row) const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || row < 0 || row >= logModel->rowCount())
+        return QString();
+    const RecordKey key = logModel->keyAt(row);
+    return key.isValid() ? QString::number(key.line) : QString();
+}
+
+QRect LogListView::lineNumberScreenRect(qint64 rowTop, int rowHeight) const
+{
+    const int top = stickyTop(rowTop, rowHeight, singleRowHeight());
+    return QRect(kLeftMarginWidth, top, m_lineNumberWidth, singleRowHeight());
+}
+
+QRect LogListView::lineNumberRect(int row) const
+{
+    if (m_lineNumberWidth <= 0 || !model() || row < 0 || row >= model()->rowCount())
+        return QRect();
+    return lineNumberScreenRect(rowYOffset(row) - scrollContentY(), getRowHeight(row));
+}
+
+void LogListView::paintLineNumber(QPainter& painter, int row, int rowTop, int rowHeight, bool selected)
+{
+    if (m_lineNumberWidth <= 0)
+        return;
+    const QString text = lineNumberText(row);
+    if (text.isEmpty())
+        return;
+    const QRect r = lineNumberScreenRect(rowTop, rowHeight).adjusted(0, 0, -kLineNumberPadX, 0);
+    painter.save();
+    painter.setPen(selected ? palette().color(QPalette::Text) : AppTheme::lineNumberFg(palette()));
+    painter.setClipRect(QRect(kLeftMarginWidth, r.top(), m_lineNumberWidth, r.height()));
+    painter.drawText(r, Qt::AlignVCenter | Qt::AlignRight, text);
+    painter.restore();
 }
 
 const LogModel::LabeledFile* LogListView::rowFile(int row) const
@@ -905,7 +1020,7 @@ QRect LogListView::fileLabelScreenRect(int row, const QString& label, qint64 row
     Q_UNUSED(row);
     const QFontMetrics fm(font());
     const int h = fm.height() - 2;
-    const int x = kLeftMarginWidth + kFileStripeWidth + kFileLabelGap;
+    const int x = fileColumnLeft() + kFileStripeWidth + kFileLabelGap;
     const int w = qMin(fm.horizontalAdvance(label) + kBadgeHPadding,
                        m_fileColumnWidth - kFileStripeWidth - kFileLabelGap - kFileStripeGap);
     const int top = stickyTop(rowTop, rowHeight, singleRowHeight()) + (singleRowHeight() - h) / 2;
@@ -921,7 +1036,7 @@ void LogListView::paintFileColumn(QPainter& painter, int row, int rowTop, int ro
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     // Полоса — на всю высоту строки: цвет файла виден в любой её части.
-    painter.fillRect(QRect(kLeftMarginWidth, rowTop, kFileStripeWidth, rowHeight), color);
+    painter.fillRect(QRect(fileColumnLeft(), rowTop, kFileStripeWidth, rowHeight), color);
     if (m_fileLabelMode == FileLabelMode::Name) {
         const QRect r = fileLabelScreenRect(row, file->label, rowTop, rowHeight);
         painter.fillRect(r, color);
@@ -2359,6 +2474,8 @@ void LogListView::paintEvent(QPaintEvent *event) {
 
             // Левый желобок: маркер начала записи и любые будущие индикаторы
             paintGutter(painter, row, QRect(0, currentY, kLeftMarginWidth, rowHeight));
+            paintLineNumber(painter, row, currentY, rowHeight,
+                            selectionModel() && selectionModel()->isSelected(idx));
             paintFileColumn(painter, row, currentY, rowHeight);
 
             // Кэшированный растр ИЛИ прямая отрисовка — клипаем к textRect, чтобы текст не залезал на плашки
@@ -2603,6 +2720,15 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
     // отпусканию без протяжки (mouseReleaseEvent); метка файла — без
     // действия. Выделение текста здесь не начинается.
     const RowChromeHit chrome = rowChromeAt(event->pos());
+    if ((chrome.kind == RowChrome::LineNumber || chrome.kind == RowChrome::FileLabel)
+        && event->pos().x() < textAreaLeft()) {
+        // Номер и метка файла не выделяются: щелчок выбирает строку.
+        m_selection.clear();
+        selectAsUserChoice(chrome.row);
+        viewport()->update();
+        event->accept();
+        return;
+    }
     if (chrome.kind != RowChrome::None) {
         m_pendingChromeClick = {chrome.row, chrome.kind, event->pos()};
         event->accept();
@@ -2849,12 +2975,20 @@ LogListView::RowChromeHit LogListView::rowChromeAt(const QPoint& pos) const
         return hit;
     const RowState state = getRowState(row);
     const qint64 rowTop = rowTopContent - scrollY;
+    // Колонка номеров строк: номер на первой линии, без действия по щелчку
+    // (кроме выбора строки).
+    if (m_lineNumberWidth > 0 && pos.x() >= kLeftMarginWidth && pos.x() < fileColumnLeft()) {
+        hit.kind = RowChrome::LineNumber;
+        hit.row = row;
+        hit.rect = lineNumberScreenRect(rowTop, state.height);
+        return hit;
+    }
     // Колонка метки файла: полоса и метка — путь в подсказке; щелчка нет.
-    if (pos.x() >= kLeftMarginWidth && pos.x() < textAreaLeft()) {
+    if (pos.x() >= fileColumnLeft() && pos.x() < textAreaLeft()) {
         if (const LogModel::LabeledFile* file = rowFile(row)) {
             hit.kind = RowChrome::FileLabel;
             hit.row = row;
-            hit.rect = QRect(kLeftMarginWidth, int(qMax<qint64>(0, rowTop)), m_fileColumnWidth,
+            hit.rect = QRect(fileColumnLeft(), int(qMax<qint64>(0, rowTop)), m_fileColumnWidth,
                              int(qMin<qint64>(viewport()->height(), rowTop + state.height)
                                  - qMax<qint64>(0, rowTop)));
             hit.toolTip = file->file->displayPath();
@@ -3104,7 +3238,8 @@ void LogListView::goToNewLines()
 
 bool LogListView::hasPendingLayout() const
 {
-    return m_resizeDebounceTimer->isActive() || m_heightUpdateTimer->isActive();
+    return m_resizeDebounceTimer->isActive() || m_heightUpdateTimer->isActive()
+        || (m_leftColumnsTimer && m_leftColumnsTimer->isActive());
 }
 
 void LogListView::wheelEvent(QWheelEvent *event)

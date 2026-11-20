@@ -1599,6 +1599,30 @@ void scenarioFileLabels(MainWindow& win)
     }
     check(menuAction(win, QStringLiteral("Color Only")) == command(win, QStringLiteral("fileLabelsColorOnly")),
           QStringLiteral("View → File Labels → Color Only"));
+
+    // View → Line Numbers (U-23, часть 3): по умолчанию выключены, пункт
+    // включает колонку номеров у всех view и пишет [View] lineNumbers.
+    QAction* numbers = command(win, QStringLiteral("lineNumbers"));
+    check(numbers, QStringLiteral("View → Line Numbers exists"));
+    const auto settledViews = [&win]() {
+        for (LogListView* v : win.findChildren<LogListView*>())
+            waitFor([v]() { return !v->hasPendingLayout(); }, 5000);
+    };
+    if (numbers) {
+        check(!numbers->isChecked() && !AppSettings::instance().lineNumbers(), QStringLiteral("line numbers are off by default"));
+        numbers->trigger();
+        settledViews();
+        bool all = true;
+        for (LogListView* v : win.findChildren<LogListView*>())
+            all = all && v->lineNumbersVisible();
+        check(numbers->isChecked() && all && tabs(win)->count() > 0
+                  && currentTab(win)->view()->lineNumberWidth() > 0,
+              QStringLiteral("View → Line Numbers shows the numbers in every log view"));
+        numbers->trigger();
+        settledViews();
+        check(!AppSettings::instance().lineNumbers() && currentTab(win)->view()->lineNumberWidth() == 0,
+              QStringLiteral("and hides them again"));
+    }
 }
 
 // Каждое действие меню вызывается хотя бы раз (модальные закрывает драйвер).
@@ -1753,6 +1777,7 @@ void checkHelpShortcutTable()
         {QStringLiteral("Wrap / unwrap current line"), {QStringLiteral("toggleLineWrap")}},
         {QStringLiteral("File labels: Name / Color Only / Hidden"),
          {QStringLiteral("fileLabelsName"), QStringLiteral("fileLabelsColorOnly"), QStringLiteral("fileLabelsHidden")}},
+        {QStringLiteral("Show / hide line numbers"), {QStringLiteral("lineNumbers")}},
         {QStringLiteral("Extend selection by character"), {}},
         {QStringLiteral("Extend selection by token"), {}},
     };

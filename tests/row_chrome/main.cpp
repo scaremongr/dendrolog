@@ -838,6 +838,171 @@ static void checkMergedTab(const QDir& dir, bool indexed)
     settings.setIndexedThresholdMB(512);
 }
 
+// ---------------------------------------------------------------------------
+// PR 3: номера строк
+// ---------------------------------------------------------------------------
+static QByteArray numberedLines(int first, int count)
+{
+    QByteArray out;
+    for (int i = first; i < first + count; ++i) {
+        const int sec = i;
+        out += QStringLiteral("2026-03-05 %1:%2:%3.000 [w] %4 - line %5 ")
+                   .arg(10 + sec / 3600, 2, 10, QLatin1Char('0')).arg(sec / 60 % 60, 2, 10, QLatin1Char('0'))
+                   .arg(sec % 60, 2, 10, QLatin1Char('0'))
+                   .arg(i % 5 == 0 ? QStringLiteral("WARN") : QStringLiteral("INFO")).arg(i + 1).toUtf8();
+        out += (i == 7 ? words(20000) : QStringLiteral("x")).toUtf8() + '\n';
+    }
+    return out;
+}
+
+static void checkLineNumbers(const QDir& dir, bool indexed)
+{
+    const QString label = indexed ? QStringLiteral("numbers, indexed") : QStringLiteral("numbers, resident");
+    section(indexed ? "line numbers, indexed" : "line numbers, resident");
+    AppSettings& settings = AppSettings::instance();
+    settings.setIndexedThresholdMB(indexed ? 0 : 512);
+    settings.setFileLabelMode(FileLabelMode::Name);
+    CHECK(!settings.lineNumbers(), label + ": line numbers are off by default");
+    const QString a = testdocs::writeFile(dir, QStringLiteral("numbers-a-%1.log").arg(indexed), numberedLines(0, 9998));
+    LogViewWidget tab;
+    tab.setParserPattern(testdocs::buildSchema());
+    tab.resize(900, 500);
+    tab.show();
+    tab.addLogFile(a);
+    CHECK(settledTab(tab), label + ": loads");
+    LogListView& view = *tab.view();
+    LogModel& model = *tab.model();
+    CHECK(view.lineNumberWidth() == 0 && view.lineNumberText(0) == QStringLiteral("1"), label + ": no column while off");
+    const int leftOff = view.textLeft();
+
+    settings.setLineNumbers(true);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const int width4 = view.lineNumberWidth();
+    CHECK(width4 > 0 && view.textLeft() == leftOff + width4,
+          QStringLiteral("%1: the column appears, text moves by its width (%2)").arg(label).arg(width4));
+    bool same = true;
+    for (int r = 0; r < model.rowCount(); r += 97)
+        same = same && view.lineNumberText(r) == QString::number(r + 1)
+                    && view.lineNumberText(r) == QString::number(model.keyAt(r).line);
+    CHECK(same, label + ": row numbers are the lines of the file");
+
+    // Фильтр: номера с пропусками — строки WARN (каждая пятая).
+    model.setLogLevelFilter({LogLevel::Warn});
+    CHECK(testdocs::settle(model) && model.rowCount() == 2000, QStringLiteral("%1: WARN filter (%2)").arg(label).arg(model.rowCount()));
+    same = true;
+    for (int r = 0; r < model.rowCount(); r += 37)
+        same = same && view.lineNumberText(r) == QString::number(5 * r + 1);
+    CHECK(same, label + ": under a filter the numbers skip");
+    model.setLogLevelFilter({});
+    testdocs::settle(model);
+
+    // Поток батчей без смены разрядности раскладку не трогает; переход
+    // 9 999 → 10 000 строк — один пересчёт, выбранная строка на месте.
+    view.goToRow(400);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const int topBefore = view.visualRect(model.index(400, 0)).top();
+    int relayouts = view.leftColumnRelayouts();
+    testdocs::appendToFile(a, numberedLines(9998, 1));
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && model.rowCount() == 9999, label + ": 9 999 lines");
+    CHECK(view.leftColumnRelayouts() == relayouts && view.lineNumberWidth() == width4,
+          label + ": appends without a new digit do not relayout");
+    testdocs::appendToFile(a, numberedLines(9999, 2));
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && model.rowCount() == 10001, label + ": 10 001 lines");
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    CHECK(view.leftColumnRelayouts() == relayouts + 1 && view.lineNumberWidth() > width4,
+          QStringLiteral("%1: the fifth digit relayouts once (%2 -> %3, width %4 -> %5)").arg(label)
+              .arg(relayouts).arg(view.leftColumnRelayouts()).arg(width4).arg(view.lineNumberWidth()));
+    CHECK(view.userSelectedRow() == 400 && view.visualRect(model.index(400, 0)).top() == topBefore,
+          QStringLiteral("%1: the selected line keeps its place (%2 vs %3)").arg(label)
+              .arg(view.visualRect(model.index(400, 0)).top()).arg(topBefore));
+
+    // Номер — не текст: выделение мышью попадает в те же символы, Ctrl+C без номера.
+    {
+        const auto selectedChars = [&](int row) {
+            view.goToRow(row);
+            testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+            const QRect vr = view.visualRect(model.index(row, 0));
+            const qreal cw = QFontMetricsF(view.font()).horizontalAdvance(QLatin1Char('M'));
+            const int y = vr.top() + vr.height() / 2;
+            const QPoint from(view.textLeft() - 2, y);          // от края текста (в колонке номера — выбор строки)
+            const QPoint start(view.textLeft() + 4 + int(cw * 0.5), y);
+            const QPoint to(view.textLeft() + 4 + int(cw * 10.5), y);
+            Q_UNUSED(from);
+            QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, start);
+            QMouseEvent move(QEvent::MouseMove, QPointF(to), QPointF(view.viewport()->mapToGlobal(to)),
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(view.viewport(), &move);
+            QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, to);
+            QApplication::clipboard()->clear();
+            QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+            QApplication::sendEvent(&view, &copy);
+            return QApplication::clipboard()->text();
+        };
+        const QString on = selectedChars(3);
+        settings.setLineNumbers(false);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        CHECK(view.lineNumberWidth() == 0 && view.textLeft() == leftOff, label + ": off — the text returns");
+        const QString off = selectedChars(3);
+        settings.setLineNumbers(true);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        CHECK(on.size() == 10 && on == off && on.startsWith(QStringLiteral("2026")),
+              QStringLiteral("%1: selection hits the same characters with and without numbers ('%2' / '%3')").arg(label, on, off));
+        // Щелчок по номеру выбирает строку и ничего не выделяет.
+        const QRect nr = view.lineNumberRect(5);
+        QTest::mouseClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, nr.center());
+        QApplication::clipboard()->clear();
+        QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+        QApplication::sendEvent(&view, &copy);
+        CHECK(view.userSelectedRow() == 5, label + ": a click on the number selects the line");
+    }
+
+    // Высокая строка (резидентный, перенос): номер у верха вьюпорта.
+    if (!indexed) {
+        view.setWordWrap(true);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const int tall = 7;
+        const int h = view.visualRect(model.index(tall, 0)).height();
+        CHECK(h > 3 * view.viewport()->height(), QStringLiteral("%1: line 8 is tall (%2)").arg(label).arg(h));
+        placeRowTop(view, tall, -h / 2);
+        const QRect nr = view.lineNumberRect(tall);
+        CHECK(nr.top() == 0 && nr.height() == view.visualRect(model.index(0, 0)).height(),
+              QStringLiteral("%1: the number sticks to the viewport top (%2)").arg(label).arg(nr.top()));
+        const LogListView::RowChromeHit hit = view.rowChromeAt(QPoint(nr.center().x(), view.viewport()->height() / 2));
+        CHECK(hit.kind == LogListView::RowChrome::LineNumber && hit.row == tall && hit.rect == nr
+                  && !hit.rect.contains(QPoint(nr.center().x(), view.viewport()->height() / 2)),
+              label + ": continuation lines show no number");
+        view.setWordWrap(false);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    }
+
+    // Слитая вкладка: номера по своим файлам.
+    const QString b = testdocs::writeFile(dir, QStringLiteral("numbers-b-%1.log").arg(indexed), numberedLines(0, 50));
+    tab.addLogFile(b);
+    CHECK(settledTab(tab) && model.rowCount() == 10051, label + ": merged");
+    same = true;
+    int bRows = 0;
+    for (int r = 0; r < model.rowCount(); ++r) {
+        const RecordKey key = model.keyAt(r);
+        if (key.file && key.file->filePath == b)
+            ++bRows;
+        if (r % 13 == 0 || (key.file && key.file->filePath == b))
+            same = same && view.lineNumberText(r) == QString::number(key.line);
+    }
+    CHECK(same && bRows == 50, label + ": in a merged tab every number is its file's line");
+
+    settings.setLineNumbers(true);
+    settings.save();
+    {
+        QSettings ini(AppSettings::iniFilePath(), QSettings::IniFormat);
+        CHECK(ini.value(QStringLiteral("View/lineNumbers")).toBool(), "line numbers are stored in [View] lineNumbers");
+    }
+    settings.setLineNumbers(false);
+    settings.save();
+    settings.setIndexedThresholdMB(512);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -856,6 +1021,8 @@ int main(int argc, char** argv)
     checkFileLabelsTable();
     checkMergedTab(dir, false);
     checkMergedTab(dir, true);
+    checkLineNumbers(dir, false);
+    checkLineNumbers(dir, true);
 
     if (failures) {
         std::fprintf(stderr, "row_chrome: %d failure(s)\n", failures);

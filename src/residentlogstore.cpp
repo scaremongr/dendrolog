@@ -304,14 +304,18 @@ void ResidentLogStore::countFileLines(const QVector<std::shared_ptr<LogEntry>>& 
             }
         }
         m_fileLines[last].lines += sign;
+        if (sign > 0)
+            m_fileLines[last].maxLine = qMax<qint64>(m_fileLines[last].maxLine, e->originalLineNumber());
     }
 }
 
 void ResidentLogStore::zeroFileLines(const QString& filePath)
 {
     for (FileLines& f : m_fileLines)
-        if (f.file && f.file->filePath == filePath)
+        if (f.file && f.file->filePath == filePath) {
             f.lines = 0;
+            f.maxLine = 0;
+        }
 }
 
 void ResidentLogStore::recountFileLines()

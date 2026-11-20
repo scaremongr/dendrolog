@@ -699,6 +699,14 @@ static void checkOpenPanels(const QDir& dir)
             view->setModel(doc->model.get());
             return view;
         });
+        // Номера строк — общая настройка: view следует ей и при смене темы.
+        AppSettings::instance().setLineNumbers(true);
+        checkRepaintsOnThemeChange("Log view, line numbers", [doc]() -> std::unique_ptr<QWidget> {
+            auto view = std::make_unique<LogListView>();
+            view->setModel(doc->model.get());
+            return view;
+        });
+        AppSettings::instance().setLineNumbers(false);
         checkRepaintsOnThemeChange("File legend", [doc]() -> std::unique_ptr<QWidget> {
             auto legend = std::make_unique<FileLegend>();
             legend->setModel(doc->model.get());

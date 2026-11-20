@@ -217,7 +217,7 @@ QVector<LogStore::FileLines> IndexedLogStore::fileLineCounts() const
     QVector<FileLines> out;
     out.reserve(m_files.size());
     for (const IndexedFile& f : m_files)
-        out.append({f.logFile, f.shownLines});
+        out.append({f.logFile, f.shownLines, f.shownLines});
     return out;
 }
 

@@ -103,6 +103,9 @@ public:
     // [View] fileLabels.
     FileLabelMode fileLabelMode() const { return m_fileLabelMode; }
     void setFileLabelMode(FileLabelMode mode);
+    // Номера строк в логе (U-23), [View] lineNumbers, по умолчанию выключены.
+    bool lineNumbers() const { return m_lineNumbers; }
+    void setLineNumbers(bool visible);
 
     // ---- Theme ---------------------------------------------------------- //
 
@@ -226,6 +229,7 @@ private:
     int         m_scanRefreshIntervalSecs { 30 };
     bool        m_wordWrap        { true };
     FileLabelMode m_fileLabelMode { FileLabelMode::Name };
+    bool        m_lineNumbers     { false };
     ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };

@@ -252,6 +252,7 @@ public:
         QString label;
         int colorOrdinal = 0;
         qint64 lines = 0;
+        qint64 maxLine = 0;   // наибольший номер строки файла во вкладке
     };
     const QVector<LabeledFile>& labeledFiles() const { return m_labeledFiles; }
     // Файл строки среди labeledFiles или nullptr. O(1).

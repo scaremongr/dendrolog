@@ -114,6 +114,11 @@ QColor AppTheme::wrapToggleBg(const QPalette& palette)
     return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.90);
 }
 
+QColor AppTheme::lineNumberFg(const QPalette& palette)
+{
+    return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.55);
+}
+
 QColor AppTheme::wrapRail(const QPalette& palette)
 {
     return CardFrame::mixedColor(palette.color(QPalette::Text), palette.color(QPalette::Base), 0.70);

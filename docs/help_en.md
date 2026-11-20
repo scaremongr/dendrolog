@@ -29,6 +29,7 @@ filtering, highlighting and live reload.
   - `View → File Labels`: **Name** (default) — stripe and label; **Color Only** — just the stripe; **Hidden** — nothing. The setting applies to every tab and to the Search panel.
   - **Legend** above the log (Name and Color Only): a chip per file — colour, name and how many lines the file has in the tab (shortened from 100 000: `120K`; exact number and path in the tooltip). Right-click a chip: **Go to Next / Previous Line of This File** (from the selected line; it goes into the navigation history), **Copy Path**, **Show in Folder**.
   - The encoding indicator in the status bar names the file of the current line on such a tab.
+- **Line numbers** — `View → Line Numbers` (off by default) shows, right after the margin, the number of each line in its file — the same number `Go to Line` takes. Under a filter the numbers skip; in a merged tab the numbers of different files interleave, and the stripe or label next to them says whose line it is. On a tall wrapped line the number stays at the top of the screen. Numbers are not selected or copied with the text.
 - **Wrap toggle on the right:**
   - `+N` — the line is longer than the visible width: N characters are hidden (shortened from 10 000: `12K`, `3.4M`; the exact number is in the tooltip). Click it, or press `Space` with the line selected, to wrap the line.
   - `−` with a thin **rail** below it — the line is wrapped. The `−` stays at the top of the screen while the line crosses it, and the rail runs down the whole line: click the `−` or anywhere on the rail to collapse the line — even from the middle of a huge one. After collapsing, the line stays on the screen (at its top if it started above). A click counts on release without dragging, so selecting text up to the edge does not collapse anything.
@@ -327,6 +328,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 | Copy selection | `Ctrl+C` |
 | Wrap / unwrap current line | `Space` |
 | File labels: Name / Color Only / Hidden | — (menu View → File Labels) |
+| Show / hide line numbers | — (menu View → Line Numbers) |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
 | Show/Hide panels | `Ctrl+F1`, `Ctrl+F3…F11` |

@@ -13,6 +13,11 @@ All notable changes to DendroLog are documented here. The format follows
   (the common start and end of the names are cut off). On a tall wrapped
   line the label stays at the top of the screen. `View → File Labels`
   switches between Name, Color Only and Hidden.
+- **Line numbers** — `View → Line Numbers` (off by default) shows the
+  number of each line in its file right after the margin, the same number
+  `Go to Line` takes; under a filter the numbers skip. On a tall wrapped
+  line the number stays at the top of the screen; numbers are not selected
+  or copied with the text.
 - **File legend** above a tab with several files: colour, name and line
   count of each file; its context menu goes to the next / previous line of
   the file, copies the path or shows the file in its folder.

@@ -115,6 +115,7 @@ void AppSettings::load()
 
     s.beginGroup(QStringLiteral("View"));
     m_fileLabelMode = FileLabels::modeFromName(s.value(QStringLiteral("fileLabels")).toString());
+    m_lineNumbers = s.value(QStringLiteral("lineNumbers"), false).toBool();
     s.endGroup();
 
     s.beginGroup(QStringLiteral("QuickSearch"));
@@ -170,6 +171,7 @@ void AppSettings::save()
 
     s.beginGroup(QStringLiteral("View"));
     s.setValue(QStringLiteral("fileLabels"), FileLabels::modeName(m_fileLabelMode));
+    s.setValue(QStringLiteral("lineNumbers"), m_lineNumbers);
     s.endGroup();
 
     writeQuickSearch(s);
@@ -297,6 +299,14 @@ void AppSettings::setQuickSearchHistory(const QStringList& entries)
 bool AppSettings::wordWrap() const
 {
     return m_wordWrap;
+}
+
+void AppSettings::setLineNumbers(bool visible)
+{
+    if (m_lineNumbers == visible)
+        return;
+    m_lineNumbers = visible;
+    emit settingsChanged();
 }
 
 void AppSettings::setFileLabelMode(FileLabelMode mode)

@@ -50,6 +50,7 @@ public:
     struct FileLines {
         LogFilePtr file;
         qint64 lines = 0;
+        qint64 maxLine = 0;  // наибольший номер строки файла среди них (ширина номеров)
     };
     virtual QVector<FileLines> fileLineCounts() const = 0;
 
