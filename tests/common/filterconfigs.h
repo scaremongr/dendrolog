@@ -4,7 +4,8 @@
 // ============================================================================
 // filterconfigs.h — набор конфигураций фильтров для табличных тестов
 // хранилища: 21 именованная (уровни, время, текст, колонки, маркеры,
-// комбинации) и случайные по фиксированному seed. Вместе — «33 конфигурации»
+// комбинации, фильтр по файлу) и случайные по фиксированному seed. Вместе —
+// «36 конфигураций»
 // logstore_equivalence; их же прогоняет tests/bookmarks (закладки переживают
 // каждую).
 // ============================================================================
@@ -30,6 +31,11 @@ struct FilterConfig {
     bool                      fieldFilterEnabled = false;
     QVector<int>              visibleFields;
     QVector<HighlightPattern> markers;
+    // Фильтр по файлу (U-23): индексы в отсортированном списке путей файлов
+    // вкладки; allButLast — скрыть все, кроме последнего. На вкладке с одним
+    // файлом не ставится (там скрывать нечего — легенды нет).
+    QVector<int> hiddenFiles;
+    bool hideAllButLast = false;
 };
 
 inline FilterRule rule(FilterRule::Action action, const QString& text,
@@ -211,6 +217,27 @@ inline QVector<FilterConfig> namedConfigs(const QDateTime& from, const QDateTime
         c.rules.rules << rule(FilterRule::Action::Exclude, QStringLiteral("Retrying"));
         cfgs << c;
     }
+    // Фильтр по файлу (U-23, часть 4).
+    {
+        FilterConfig c;
+        c.name = QStringLiteral("файл: один скрыт");
+        c.hiddenFiles = {0};
+        cfgs << c;
+    }
+    {
+        FilterConfig c;
+        c.name = QStringLiteral("файл: скрыт + текстовое правило");
+        c.hiddenFiles = {0};
+        c.rules.rules << rule(FilterRule::Action::Include, QStringLiteral("e"));
+        c.levels = { LogLevel::Info, LogLevel::Error };
+        cfgs << c;
+    }
+    {
+        FilterConfig c;
+        c.name = QStringLiteral("файл: скрыты все, кроме одного");
+        c.hideAllButLast = true;
+        cfgs << c;
+    }
 
     return cfgs;
 }
@@ -316,6 +343,20 @@ inline bool applyConfig(LogModel& model, const FilterConfig& cfg, const QStringL
     model.setTimeRangeFilter(cfg.start, cfg.end);
     model.setFilterRules(rules);
     model.setRowMarkers(cfg.markers);
+    QStringList paths;
+    for (const LogModel::LabeledFile& f : model.labeledFiles())
+        paths << f.file->filePath;
+    std::sort(paths.begin(), paths.end());
+    QSet<QString> hidden;
+    if (paths.size() >= 2) {
+        for (int i : cfg.hiddenFiles)
+            if (i < paths.size())
+                hidden.insert(paths[i]);
+        if (cfg.hideAllButLast)
+            for (int i = 0; i + 1 < paths.size(); ++i)
+                hidden.insert(paths[i]);
+    }
+    model.setHiddenFiles(hidden);
     return settle(model, quietMs);
 }
 

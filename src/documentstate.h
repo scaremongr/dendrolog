@@ -65,6 +65,10 @@ struct ViewState {
     QDateTime timeFrom, timeTo;     // невалидная — граница открыта
     FilterRuleSet textRules;        // привязка к колонкам — при применении (bindFields)
     QVector<HighlightPattern> markers;
+    // Скрытые файлы (фильтр по файлу, U-23): индексы в TabState::sources.
+    // Необязательное поле «hiddenFiles» — читатель версии 1 незнакомые ключи
+    // пропускает, поэтому версия формата не растёт; без поля — ничего не скрыто.
+    QVector<int> hiddenSources;
 
     // Текущая строка и её место на экране: смещение верха строки от верха
     // вьюпорта в пикселях. selected — строку выбрал пользователь (выделена,

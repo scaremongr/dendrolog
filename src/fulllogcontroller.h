@@ -63,6 +63,7 @@ public:
         QSet<LogLevel> levels;
         QDateTime from, to;
         FilterRuleSet rules;
+        QSet<QString> hiddenFiles;   // фильтр по файлу (U-23)
     };
 
     FullLogController(LogModel& model, LogListView& view, QObject* parent = nullptr);

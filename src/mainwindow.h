@@ -337,6 +337,9 @@ private:
     QAction* m_textFilterStatusAction = nullptr;
     QAction* m_fieldFilterStatusAction = nullptr;
     QAction* m_markerStatusAction = nullptr;
+    // Фильтр по файлу (U-23): зажата — у вкладки скрыт файл; отжать —
+    // показать все файлы. Зажать нечем: файлы скрывают чипы легенды.
+    QAction* m_fileFilterStatusAction = nullptr;
 
     // Directory Scanner related members
     QString m_lastOpenDir;

@@ -103,6 +103,11 @@ private:
     void countFileLines(const QVector<std::shared_ptr<LogEntry>>& entries, int sign);
     void zeroFileLines(const QString& filePath);
     void recountFileLines();
+    // Скрытые файлы (U-23) указателями, кэш по поколению набора в модели.
+    const QSet<const LogFile*>& hiddenFilePtrs() const;
+    mutable QSet<const LogFile*> m_hiddenPtrs;
+    mutable int m_hiddenPtrsGeneration = -1;
+    mutable int m_hiddenPtrsFiles = -1;
 
     // Записи из последнего батча appendEntries() — подсвечиваются зелёным
     // маркером в гаттере (IsNewRole). Идентичность — по адресу LogEntry:

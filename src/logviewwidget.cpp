@@ -1509,6 +1509,7 @@ TabState LogViewWidget::captureState() const
 {
     TabState state;
     const RecordLocator& locator = m_model->recordLocator();
+    QHash<QString, int> sourceIndex; // путь файла → индекс в state.sources
     for (const LogFilePtr& lf : m_loadedFiles) {
         const auto source = locator.sourceFor(lf);
         if (!source || source->ephemeral)
@@ -1518,6 +1519,7 @@ TabState LogViewWidget::captureState() const
         const FileEncoding encoding = fileEncoding(lf);
         if (encoding.source == FileEncoding::Source::User)
             ts.userEncoding = encoding.decoder.encoding();
+        sourceIndex.insert(lf->filePath, int(state.sources.size()));
         state.sources.append(ts);
     }
     for (const BookmarkState& b : bookmarks().states())
@@ -1533,7 +1535,11 @@ TabState LogViewWidget::captureState() const
         view.timeFrom = paused->from;
         view.timeTo = paused->to;
         view.textRules = paused->rules;
+        for (const QString& path : paused->hiddenFiles)
+            if (sourceIndex.contains(path))
+                view.hiddenSources.append(sourceIndex.value(path));
     } else if (m_offeredFilters && m_model->filterRules().rules.isEmpty()
+        && m_model->hiddenFiles().isEmpty()
         && m_model->logLevelFilter().isEmpty() && !m_model->startTimeFilter().isValid()
         && !m_model->endTimeFilter().isValid()) {
         // Предложенные фильтры не приняты, своих нет — не теряем их.
@@ -1546,7 +1552,11 @@ TabState LogViewWidget::captureState() const
         view.timeFrom = m_model->startTimeFilter();
         view.timeTo = m_model->endTimeFilter();
         view.textRules = m_model->filterRules();
+        for (const QString& path : m_model->hiddenFiles())
+            if (sourceIndex.contains(path))
+                view.hiddenSources.append(sourceIndex.value(path));
     }
+    std::sort(view.hiddenSources.begin(), view.hiddenSources.end());
     view.markers = m_model->rowMarkers();
     view.followTail = m_view->followTail();
     view.autoReload = m_autoReload;
@@ -1575,15 +1585,17 @@ TabState LogViewWidget::captureState() const
     return state;
 }
 
-void LogViewWidget::setStateFilters(const ViewState& view)
+void LogViewWidget::setStateFilters(const ViewState& view, const QSet<QString>* hiddenFiles)
 {
     FilterRuleSet rules = view.textRules;
     rules.bindFields(parserFieldNames(), m_extractionEnabled);
+    const QSet<QString> hidden = hiddenFiles ? *hiddenFiles : m_model->hiddenFiles();
     // Те же фильтры — без перефильтрации (и без reset вида).
     if (view.levels == m_model->logLevelFilter() && view.timeFrom == m_model->startTimeFilter()
-        && view.timeTo == m_model->endTimeFilter() && rules == m_model->filterRules())
+        && view.timeTo == m_model->endTimeFilter() && rules == m_model->filterRules()
+        && hidden == m_model->hiddenFiles())
         return;
-    m_model->setFilters(view.levels, view.timeFrom, view.timeTo, rules);
+    m_model->setFilters(view.levels, view.timeFrom, view.timeTo, rules, hidden);
 }
 
 LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state, StateFilters filters)
@@ -1604,7 +1616,12 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         // Фильтры снимка — правда: показ полного лога (R-3) кончается, даже
         // если они совпали с нынешними и перефильтрации не будет.
         m_fullLog->discard();
-        setStateFilters(view);
+        // Скрытые файлы снимка — по индексам источников (U-23).
+        QSet<QString> hidden;
+        for (int i : view.hiddenSources)
+            if (i >= 0 && i < state.sources.size())
+                hidden.insert(state.sources[i].source.path);
+        setStateFilters(view, &hidden);
         dismissOfferedFilters();
     } else if (view.hasFilters()) {
         m_offeredFilters = view;

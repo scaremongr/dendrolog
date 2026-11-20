@@ -692,7 +692,8 @@ bool IndexedLogStore::hasActiveFilterSettings() const
     return !m_model.logLevelFilter().isEmpty()
         || m_model.startTimeFilter().isValid()
         || m_model.endTimeFilter().isValid()
-        || m_model.filterRules().isActive();
+        || m_model.filterRules().isActive()
+        || !m_model.hiddenFiles().isEmpty();
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1339,10 @@ bool IndexedLogStore::refPassesFiltersNow(RowRef ref) const
     const IndexedFile& f = m_files[fileId];
     const LineIndex& index = *f.index;
 
+    // Скрытый файл (U-23) — первым.
+    if (m_model.hiddenFiles().contains(f.logFile->filePath))
+        return false;
+
     const QSet<LogLevel> levels = m_model.logLevelFilter();
     if (!levels.isEmpty() && !levels.contains(index.level(line)))
         return false;
@@ -1410,10 +1415,13 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
         LineIndexSnapshot index;
         QString path;
         TextDecoder decoder; // копия: смена кодировки отменяет джоб поколением
+        bool hidden = false; // файл скрыт фильтром по файлу (U-23)
     };
     auto filesIn = std::make_shared<QVector<FileInput>>();
+    const QSet<QString>& hiddenPaths = m_model.hiddenFiles();
     for (const auto& f : m_files)
-        filesIn->append({f.index->snapshot(), f.logFile->filePath, f.encoding.decoder});
+        filesIn->append({f.index->snapshot(), f.logFile->filePath, f.encoding.decoder,
+                         hiddenPaths.contains(f.logFile->filePath)});
 
     // Диапазон работы: весь документ, свежий батч одного файла или явный
     // список новых строк поисковой базы.
@@ -1474,7 +1482,11 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                     : workRefs.at(int(i));
                 const int fileId = int(ref >> kFileBits);
                 const qint64 line = qint64(ref & ((quint64(1) << kFileBits) - 1));
-                const LineIndexSnapshot& index = (*filesIn)[fileId].index;
+                const FileInput& input = (*filesIn)[fileId];
+                // Скрытый файл (U-23) — первым: ни метаданных, ни диска.
+                if (input.hidden)
+                    continue;
+                const LineIndexSnapshot& index = input.index;
 
                 // Дешёвый отсев по метаданным — без чтения диска.
                 const quint32 logical = index.logicalId(line);

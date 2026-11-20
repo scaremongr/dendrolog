@@ -13,6 +13,15 @@ All notable changes to DendroLog are documented here. The format follows
   (the common start and end of the names are cut off). On a tall wrapped
   line the label stays at the top of the screen. `View → File Labels`
   switches between Name, Color Only and Hidden.
+- **File filter.** Click a chip of the file legend to hide that file's lines
+  and click again to bring them back; `Ctrl`+click shows only that file
+  (again — all files). The last shown file cannot be hidden. A hidden file's
+  chip is dimmed and crossed out, and every chip shows "shown / total" while
+  a filter of the tab hides part of its lines. The **Files** button of the
+  Filters toolbar lights up while a file is hidden (click it to show all),
+  **Reset Filters of This Tab** shows them again, and **Show in Full Log**
+  pauses the file filter too. Hidden files are kept in sessions and with
+  `Ctrl+Shift+T`.
 - **Line numbers** — `View → Line Numbers` (off by default) shows the
   number of each line in its file right after the margin, the same number
   `Go to Line` takes; under a filter the numbers skip. On a tall wrapped

@@ -37,6 +37,7 @@
 #include "apptheme.h"
 #include "filelabels.h"
 #include "filelegend.h"
+#include "fileshowncounter.h"
 #include "logviewwidget.h"
 #include "navhistory.h"
 #include "logmodel.h"
@@ -1003,6 +1004,155 @@ static void checkLineNumbers(const QDir& dir, bool indexed)
     settings.setIndexedThresholdMB(512);
 }
 
+// ---------------------------------------------------------------------------
+// PR 4: фильтр по файлу
+// ---------------------------------------------------------------------------
+static QHash<const LogFile*, qint64> shownByEnumeration(LogModel& model)
+{
+    QHash<const LogFile*, qint64> n;
+    for (int r = 0; r < model.rowCount(); ++r)
+        ++n[model.keyAt(r).file.get()];
+    return n;
+}
+
+static void checkFileFilter(const QDir& dir, bool indexed)
+{
+    const QString label = indexed ? QStringLiteral("file filter, indexed") : QStringLiteral("file filter, resident");
+    section(indexed ? "file filter, indexed" : "file filter, resident");
+    AppSettings& settings = AppSettings::instance();
+    settings.setIndexedThresholdMB(indexed ? 0 : 512);
+    settings.setFileLabelMode(FileLabelMode::Name);
+    const QString a = testdocs::writeFile(dir, QStringLiteral("ff-a-%1.log").arg(indexed), numberedLines(0, 300));
+    const QString b = testdocs::writeFile(dir, QStringLiteral("ff-b-%1.log").arg(indexed), numberedLines(1, 200));
+    LogViewWidget tab;
+    tab.setParserPattern(testdocs::buildSchema());
+    tab.resize(900, 500);
+    tab.show();
+    tab.addLogFile(a);
+    tab.addLogFile(b);
+    CHECK(settledTab(tab) && tab.model()->rowCount() == 500, label + ": loads");
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    FileLegend* legend = tab.fileLegend();
+    CHECK(legend->isVisible() && legend->chipCount() == 2, label + ": legend");
+    const int chipA = legend->chipFile(0)->filePath == a ? 0 : 1;
+    const int chipB = 1 - chipA;
+
+    // Выбранная строка файла A и её место на экране.
+    int selected = -1;
+    for (int r = 150; r < model.rowCount() && selected < 0; ++r)
+        if (model.keyAt(r).file->filePath == a)
+            selected = r;
+    view.goToRow(selected);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const RecordKey selectedKey = model.keyAt(selected);
+
+    // Щелчок по чипу B скрывает B.
+    CHECK(legend->toggleFile(chipB, false), label + ": click hides B");
+    CHECK(settledTab(tab) && model.rowCount() == 300 && model.hiddenFiles() == QSet<QString>{b}
+              && legend->isChipHidden(chipB) && !legend->isChipHidden(chipA),
+          QStringLiteral("%1: only A is shown (%2)").arg(label).arg(model.rowCount()));
+    bool onlyA = true;
+    for (int r = 0; r < model.rowCount(); r += 11)
+        onlyA = onlyA && model.keyAt(r).file->filePath == a;
+    CHECK(onlyA, label + ": rows of B are hidden");
+    const int nowSel = view.userSelectedRow();
+    CHECK(nowSel >= 0 && model.keyAt(nowSel).line == selectedKey.line && model.keyAt(nowSel).file == selectedKey.file
+              && view.visualRect(model.index(nowSel, 0)).intersects(view.viewport()->rect()),
+          label + ": the selected line stays selected and on screen");
+
+    // Последний видимый файл не скрывается.
+    CHECK(!legend->toggleFile(chipA, false) && model.hiddenFiles() == QSet<QString>{b},
+          label + ": the last shown file cannot be hidden");
+    // Повторный щелчок возвращает B.
+    CHECK(legend->toggleFile(chipB, false) && settledTab(tab) && model.rowCount() == 500
+              && model.hiddenFiles().isEmpty(), label + ": a second click returns B");
+
+    // Строка скрытого файла: выбор переходит к ближайшей видимой.
+    int rowB = -1;
+    for (int r = 200; r < model.rowCount() && rowB < 0; ++r)
+        if (model.keyAt(r).file->filePath == b)
+            rowB = r;
+    view.goToRow(rowB);
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    const RecordKey keyB = model.keyAt(rowB);
+    // Ctrl+щелчок: только A; повторный — все.
+    CHECK(legend->toggleFile(chipA, true) && settledTab(tab) && model.hiddenFiles() == QSet<QString>{b},
+          label + ": Ctrl+click shows only A");
+    testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    testdocs::pump(50);
+    const int nearest = model.nearestRowForKey(keyB);
+    const QRect vr = view.visualRect(model.index(qMax(0, nearest), 0));
+    CHECK(nearest >= 0 && vr.intersects(view.viewport()->rect()),
+          label + ": a hidden selected line leaves the view at its nearest shown neighbour");
+
+    // Счётчик «показано / всего»: фильтр уровней поверх — числа против перебора.
+    model.setLogLevelFilter({LogLevel::Warn});
+    CHECK(settledTab(tab), label + ": WARN filter");
+    FileShownCounter* counter = legend->shownCounter();
+    CHECK(testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": counter settles");
+    QHash<const LogFile*, qint64> expected = shownByEnumeration(model);
+    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
+              && counter->shown(legend->chipFile(chipB)) == 0,
+          QStringLiteral("%1: shown counts A %2 (expected %3), B %4").arg(label)
+              .arg(counter->shown(legend->chipFile(chipA))).arg(expected.value(legend->chipFile(chipA)))
+              .arg(counter->shown(legend->chipFile(chipB))));
+    CHECK(legend->chipText(chipA).endsWith(QStringLiteral("%1 / 300").arg(expected.value(legend->chipFile(chipA)))),
+          QStringLiteral("%1: chip A says shown / total: %2").arg(label, legend->chipText(chipA)));
+    CHECK(legend->toggleFile(chipA, true) && settledTab(tab) && model.hiddenFiles().isEmpty(),
+          label + ": Ctrl+click again shows all");
+
+    // Дозапись: числа — по перебору.
+    testdocs::appendToFile(a, numberedLines(300, 20));
+    tab.reloadChangedFiles(true);
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": appended");
+    expected = shownByEnumeration(model);
+    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
+              && counter->shown(legend->chipFile(chipB)) == expected.value(legend->chipFile(chipB)),
+          label + ": counts after an append match the shown rows");
+
+    // Reset посреди расчёта: результат отброшен, итог — по новому набору.
+    model.setLogLevelFilter({LogLevel::Info});
+    model.setLogLevelFilter({LogLevel::Warn, LogLevel::Info});
+    model.setHiddenFiles({b});
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": resets settle");
+    expected = shownByEnumeration(model);
+    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
+              && counter->shown(legend->chipFile(chipB)) == 0,
+          label + ": after resets mid-count the counts match the final rows");
+
+    // Поток батчей: третий, большой файл грузится порциями — запусков счёта
+    // единицы, а не по порции.
+    {
+        const QString big = testdocs::writeFile(dir, QStringLiteral("ff-big-%1.log").arg(indexed),
+                                                numberedLines(0, 300000));
+        const int launches = counter->launchCount();
+        int batches = 0;
+        auto c = QObject::connect(&model, &LogModel::fileLinesChanged, [&batches]() { ++batches; });
+        tab.addLogFile(big);
+        CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 30000),
+              label + ": the big file loads");
+        QObject::disconnect(c);
+        // Не по порции: дебаунс склеивает порции, пришедшие быстрее 150 мс.
+        // (Индексатор публикует порции по ~600 тыс. строк — у индексного
+        // бэкенда порция здесь одна-две.)
+        const int runs = counter->launchCount() - launches;
+        CHECK(batches >= 8 ? runs * 4 <= batches : runs <= 2,
+              QStringLiteral("%1: %2 counting runs for %3 batches").arg(label)
+                  .arg(counter->launchCount() - launches).arg(batches));
+    }
+
+    // Режим Hidden: легенды нет, фильтр по файлу остаётся.
+    settings.setFileLabelMode(FileLabelMode::Hidden);
+    CHECK(legend->isHidden() && model.hiddenFiles() == QSet<QString>{b} && model.hasFilters(),
+          label + ": Hidden mode keeps the file filter");
+    settings.setFileLabelMode(FileLabelMode::Name);
+    model.setHiddenFiles({});
+    model.setLogLevelFilter({});
+    settledTab(tab);
+    settings.setIndexedThresholdMB(512);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1023,6 +1173,8 @@ int main(int argc, char** argv)
     checkMergedTab(dir, true);
     checkLineNumbers(dir, false);
     checkLineNumbers(dir, true);
+    checkFileFilter(dir, false);
+    checkFileFilter(dir, true);
 
     if (failures) {
         std::fprintf(stderr, "row_chrome: %d failure(s)\n", failures);

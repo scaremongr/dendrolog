@@ -741,6 +741,74 @@ static void checkMerged(const QDir& dir, const QString& name, const QString& sch
               QStringLiteral("место на экране %1, было %2").arg(topOf(*tab, row)).arg(currentTop));
 }
 
+
+static int g_rowsA = 0;
+
+// Фильтр по файлу (U-23, часть 4): скрытые файлы — индексы источников в
+// снимке вкладки; круговой проход через JSON, применение возвращает их;
+// показ полного лога снимает приостановленные; эталон версии 1 без поля —
+// ничего не скрыто.
+static void checkHiddenFiles(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / скрытые файлы");
+    const QString a = writeFile(dir, name + "-hidden-a.log", logBytes(120));
+    const QString b = writeFile(dir, name + "-hidden-b.log", logBytes(120, 1, "bee"));
+    TabState state;
+    TabState pausedState;
+    {
+        auto tab = makeTab(schema);
+        tab->addLogFile(a);
+        tab->addLogFile(b);
+        CHECK(settled(*tab), QStringLiteral("загрузка"));
+        LogModel& model = *tab->model();
+        const int all = model.rowCount();
+        int rowsA = 0;
+        for (int r = 0; r < all; ++r)
+            rowsA += model.keyAt(r).file->filePath == a ? 1 : 0;
+        g_rowsA = rowsA;
+        model.setHiddenFiles({b});
+        CHECK(settled(*tab) && model.rowCount() == rowsA && model.hasFilters(),
+              QStringLiteral("b скрыт: %1 из %2").arg(model.rowCount()).arg(all));
+        state = throughJson(tab->captureState());
+        CHECK(state.view.hiddenSources == QVector<int>{1} && state.view.hasFilters(),
+              QStringLiteral("снимок помнит скрытый b"));
+        CHECK(state.toJson().value(QLatin1String("view")).toObject().contains(QLatin1String("hiddenFiles"))
+                  || state.view.toJson().contains(QLatin1String("hiddenFiles")),
+              QStringLiteral("поле hiddenFiles в JSON"));
+        // Показ полного лога: фильтр по файлу приостановлен и снимается им.
+        CHECK(tab->toggleFullLog() && settled(*tab) && model.rowCount() == all && model.hiddenFiles().isEmpty(),
+              QStringLiteral("полный лог показывает и b"));
+        pausedState = throughJson(tab->captureState());
+        CHECK(pausedState.view.hiddenSources == QVector<int>{1},
+              QStringLiteral("снимок во время полного лога — приостановленный фильтр"));
+        CHECK(tab->toggleFullLog() && settled(*tab) && model.hiddenFiles() == QSet<QString>{b}
+                  && model.rowCount() == rowsA,
+              QStringLiteral("возврат из полного лога скрывает b снова"));
+    }
+    auto tab = makeTab(schema);
+    tab->applyState(state);
+    CHECK(settled(*tab), QStringLiteral("применение"));
+    LogModel& model = *tab->model();
+    CHECK(model.hiddenFiles() == QSet<QString>{b} && model.rowCount() == g_rowsA,
+          QStringLiteral("применённый снимок скрывает b: %1 строк").arg(model.rowCount()));
+    for (int r = 0; r < model.rowCount(); r += 7)
+        CHECK(model.keyAt(r).file && model.keyAt(r).file->filePath == a, QStringLiteral("строки только из a"));
+
+    // Без поля (снимок версии 1 прежних версий) — ничего не скрыто.
+    QJsonObject json = state.toJson();
+    QJsonObject view = json.value(QLatin1String("view")).toObject();
+    view.remove(QLatin1String("hiddenFiles"));
+    json.insert(QLatin1String("view"), view);
+    const auto old = TabState::fromJson(json);
+    CHECK(old && old->view.hiddenSources.isEmpty() && !old->view.hasFilters(),
+          QStringLiteral("снимок без hiddenFiles читается как «ничего не скрыто»"));
+    QJsonObject bad = state.toJson();
+    QJsonObject badView = bad.value(QLatin1String("view")).toObject();
+    badView.insert(QLatin1String("hiddenFiles"), QStringLiteral("b"));
+    bad.insert(QLatin1String("view"), badView);
+    CHECK(!TabState::fromJson(bad), QStringLiteral("битое hiddenFiles — отказ"));
+}
+
 static void checkStdin(const QDir& dir, const QString& schema)
 {
     g_context = QStringLiteral("спул stdin");
@@ -2754,6 +2822,7 @@ int main(int argc, char** argv)
         checkReopen(dir, name, schema);
         checkFollowTail(dir, name, schema);
         checkMerged(dir, name, schema);
+        checkHiddenFiles(dir, name, schema);
         checkTabMemory(dir, name, schema);
         checkSessionOpen(dir, name, schema);
         checkCrossOsSession(dir, name, schema, QStringLiteral("windows"));

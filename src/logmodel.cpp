@@ -363,6 +363,8 @@ void LogModel::clear()
     m_store = std::make_unique<ResidentLogStore>(*this);
     m_filterRules = {};
     m_activeLogLevels.clear();
+    m_hiddenFiles.clear();
+    ++m_hiddenFilesGeneration;
     m_filterStartTime = {};
     m_filterEndTime = {};
     resetFileColors();
@@ -529,6 +531,16 @@ void LogModel::setLogLevelFilter(const QSet<LogLevel>& levels)
     applyFilter();
 }
 
+void LogModel::setHiddenFiles(const QSet<QString>& filePaths)
+{
+    if (filePaths == m_hiddenFiles)
+        return;
+    m_hiddenFiles = filePaths;
+    ++m_hiddenFilesGeneration;
+    emit filterSettingsChanged();
+    applyFilter();
+}
+
 void LogModel::setTimeRangeFilter(const QDateTime& start, const QDateTime& end)
 {
     m_filterStartTime = start;
@@ -555,12 +567,24 @@ void LogModel::setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
     applyFilter();
 }
 
+void LogModel::setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
+                          const QDateTime& end, const FilterRuleSet& rules,
+                          const QSet<QString>& hiddenFiles)
+{
+    if (hiddenFiles != m_hiddenFiles) {
+        m_hiddenFiles = hiddenFiles;
+        ++m_hiddenFilesGeneration;
+    }
+    setFilters(levels, start, end, rules);
+}
+
 bool LogModel::hasFilters() const
 {
     // Правила, из которых ни одно не действует (невалидный регекс, колонки
     // нет в схеме), строк не скрывают.
     return !m_activeLogLevels.isEmpty() || m_filterStartTime.isValid()
-        || m_filterEndTime.isValid() || m_filterRules.usableRuleCount() > 0;
+        || m_filterEndTime.isValid() || m_filterRules.usableRuleCount() > 0
+        || !m_hiddenFiles.isEmpty();
 }
 
 void LogModel::applyFilter()

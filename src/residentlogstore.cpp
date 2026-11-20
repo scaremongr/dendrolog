@@ -318,6 +318,24 @@ void ResidentLogStore::zeroFileLines(const QString& filePath)
         }
 }
 
+const QSet<const LogFile*>& ResidentLogStore::hiddenFilePtrs() const
+{
+    // Пути скрытых файлов → указатели файлов вкладки: O(числа файлов), только
+    // при смене набора или списка файлов, а не на каждую запись.
+    const int generation = m_model.hiddenFilesGeneration();
+    if (generation != m_hiddenPtrsGeneration || m_fileLines.size() != m_hiddenPtrsFiles) {
+        m_hiddenPtrs.clear();
+        const QSet<QString>& paths = m_model.hiddenFiles();
+        if (!paths.isEmpty())
+            for (const FileLines& f : m_fileLines)
+                if (f.file && paths.contains(f.file->filePath))
+                    m_hiddenPtrs.insert(f.file.get());
+        m_hiddenPtrsGeneration = generation;
+        m_hiddenPtrsFiles = int(m_fileLines.size());
+    }
+    return m_hiddenPtrs;
+}
+
 void ResidentLogStore::recountFileLines()
 {
     m_fileLines.clear();
@@ -691,6 +709,7 @@ LogScanSnapshot ResidentLogStore::scanSnapshot(bool filteredOnly) const
 // Общая проверка фильтров. Свободная функция, потому что фоновый воркер
 // работает со СНАПШОТАМИ настроек и не имеет права читать члены модели.
 static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
+                               const QSet<const LogFile*>& hiddenFiles,
                                const QSet<LogLevel>& levels,
                                const QDateTime& startTime,
                                const QDateTime& endTime,
@@ -699,6 +718,10 @@ static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
     if (!entry) {
         return false;
     }
+
+    // Скрытый файл (U-23) — первым, до уровней и текста.
+    if (!hiddenFiles.isEmpty() && hiddenFiles.contains(entry->sourceFile().get()))
+        return false;
 
     if (!levels.isEmpty() && !levels.contains(entry->level())) {
         return false;
@@ -720,7 +743,7 @@ static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
 
 bool ResidentLogStore::passesFilters(const std::shared_ptr<LogEntry>& entry) const
 {
-    return entryPassesFilters(entry, m_model.logLevelFilter(),
+    return entryPassesFilters(entry, hiddenFilePtrs(), m_model.logLevelFilter(),
                               m_model.startTimeFilter(), m_model.endTimeFilter(),
                               m_model.filterRules());
 }
@@ -775,9 +798,10 @@ void ResidentLogStore::startFilterJob()
     const QDateTime startTime = m_model.startTimeFilter();
     const QDateTime endTime = m_model.endTimeFilter();
     const FilterRuleSet rules = m_model.filterRules();
+    const QSet<const LogFile*> hidden = hiddenFilePtrs();
 
     QFuture<FilterResult> future = QtConcurrent::run(
-        [entries, levels, startTime, endTime, rules, cancel]() -> FilterResult {
+        [entries, hidden, levels, startTime, endTime, rules, cancel]() -> FilterResult {
             FilterResult passing;
             passing.reserve(entries.size());
             for (qsizetype i = 0; i < entries.size(); ++i) {
@@ -785,7 +809,7 @@ void ResidentLogStore::startFilterJob()
                 // ненужный воркер обрывается за миллисекунды.
                 if ((i & 0x1FFF) == 0 && cancel->load(std::memory_order_relaxed))
                     return FilterResult();
-                if (entryPassesFilters(entries[i], levels, startTime, endTime, rules))
+                if (entryPassesFilters(entries[i], hidden, levels, startTime, endTime, rules))
                     passing.append(entries[i]);
             }
             return passing;

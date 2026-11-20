@@ -67,7 +67,7 @@ FullLogController::Place FullLogController::currentPlace(bool deferHiddenSelecti
 void FullLogController::setModelFilters(const Filters& filters)
 {
     const bool was = std::exchange(m_settingFilters, true);
-    m_model.setFilters(filters.levels, filters.from, filters.to, filters.rules);
+    m_model.setFilters(filters.levels, filters.from, filters.to, filters.rules, filters.hiddenFiles);
     m_settingFilters = was;
 }
 
@@ -90,6 +90,7 @@ bool FullLogController::show(int row)
     suspended.from = m_model.startTimeFilter();
     suspended.to = m_model.endTimeFilter();
     suspended.rules = m_model.filterRules();
+    suspended.hiddenFiles = m_model.hiddenFiles();
     m_suspended = suspended;
     m_origin = origin;
     // Строку выбрал пользователь — он хочет видеть её, а не хвост: как у
@@ -120,6 +121,7 @@ bool FullLogController::showRecord(const RecordKey& key)
     suspended.from = m_model.startTimeFilter();
     suspended.to = m_model.endTimeFilter();
     suspended.rules = m_model.filterRules();
+    suspended.hiddenFiles = m_model.hiddenFiles();
     // Возврат — туда, где пользователь стоит сейчас (ближайшая видимая).
     const Place origin = currentPlace(false);
     m_suspended = suspended;

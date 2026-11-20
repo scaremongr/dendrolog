@@ -971,8 +971,10 @@ void MainWindow::resetAllFiltersOnActiveView()
         onResetTimeFilterClicked();
     if (model->filterRules().isActive())
         onResetTextFiltersClicked();
+    if (!model->hiddenFiles().isEmpty())
+        model->setHiddenFiles({});   // фильтр по файлу (U-23) — тоже
     updateFilterStatusButtons();
-    m_statusLabel->setText(tr("Level, time and text filters of this tab are off."));
+    m_statusLabel->setText(tr("Level, time, text and file filters of this tab are off."));
 }
 
 // ---------------------------------------------------------------------------
@@ -2466,6 +2468,7 @@ void MainWindow::setupFilterStatusToolbar()
     };
     m_timeFilterStatusAction  = makeAction(tr("Time"));
     m_textFilterStatusAction  = makeAction(tr("Text"));
+    m_fileFilterStatusAction  = makeAction(tr("Files"));
     m_fieldFilterStatusAction = makeAction(tr("Fields"));
     m_markerStatusAction      = makeAction(tr("Markers"));
 
@@ -2484,6 +2487,11 @@ void MainWindow::setupFilterStatusToolbar()
             onApplyAllTextFiltersClicked();
         else
             onResetTextFiltersClicked();
+        updateFilterStatusButtons();
+    });
+    connect(m_fileFilterStatusAction, &QAction::triggered, this, [this](bool) {
+        if (m_activeLogView && m_activeLogView->model())
+            m_activeLogView->model()->setHiddenFiles({});
         updateFilterStatusButtons();
     });
     connect(m_fieldFilterStatusAction, &QAction::triggered, this, [this](bool on) {
@@ -2551,6 +2559,16 @@ void MainWindow::updateFilterStatusButtons()
         m_textFilterStatusAction->setToolTip(ruleCount > 0
             ? tr("Text filters: %n active rule(s)\nClick to reset", nullptr, ruleCount)
             : tr("Text filters are off\nClick to apply rules from the Text Filters panel"));
+    }
+
+    // Files (пер-вкладочный, U-23): скрытые щелчком по легенде файлы.
+    {
+        const int hidden = model ? int(model->hiddenFiles().size()) : 0;
+        m_fileFilterStatusAction->setEnabled(model != nullptr && hidden > 0);
+        m_fileFilterStatusAction->setChecked(hidden > 0);
+        m_fileFilterStatusAction->setToolTip(hidden > 0
+            ? tr("File filter: %n file(s) hidden\nClick to show all files", nullptr, hidden)
+            : tr("File filter is off\nClick a file in the legend above a merged tab to hide it"));
     }
 
     // Fields (глобальный — действует на все вкладки)

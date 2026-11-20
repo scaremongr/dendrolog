@@ -5,7 +5,7 @@
 // Модель (документ, собранный как во вкладке, testdocuments.h):
 //   • постановка, снятие, заметка; роль отвечает «да» ровно на строках
 //     закладок — сверка с ключами строк перебором;
-//   • все 33 конфигурации фильтров logstore_equivalence (filterconfigs.h):
+//   • все 36 конфигураций фильтров logstore_equivalence (filterconfigs.h):
 //     роль на видимых строках, статус Visible / Hidden, переход к скрытой —
 //     к ближайшей видимой, следующая / предыдущая — против перебора;
 //   • дозапись хвоста; слитая вкладка из двух файлов; строка продолжения
@@ -227,10 +227,10 @@ static void runModelScenario(const QString& name, Document doc, const QString& s
               QStringLiteral("переход к строке продолжения многострочной записи"));
     }
 
-    // ---- 33 конфигурации фильтров ---------------------------------------------
+    // ---- 36 конфигураций фильтров ---------------------------------------------
     const QPair<QDateTime, QDateTime> range = model.fullTimeRange();
     const QVector<FilterConfig> configs = allConfigs(range.first, range.second);
-    CHECK(configs.size() == 33, QStringLiteral("конфигураций %1").arg(configs.size()));
+    CHECK(configs.size() == 36, QStringLiteral("конфигураций %1").arg(configs.size()));
     for (const FilterConfig& cfg : configs) {
         g_context = name + QStringLiteral(" / ") + cfg.name;
         CHECK(applyConfig(model, cfg, fieldNames), QStringLiteral("фильтр не закончился"));

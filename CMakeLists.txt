@@ -77,6 +77,8 @@ set(DENDROLOG_CORE_SOURCES
     src/shortcount.h
     src/filelabels.h
     src/filelabels.cpp
+    src/fileshowncounter.h
+    src/fileshowncounter.cpp
     src/recordid.cpp
     src/recordlocator.h
     src/recordlocator.cpp

@@ -24,6 +24,7 @@
 #include "compactstyle.h"
 #include "directoryscanner.h"
 #include "encodingindicator.h"
+#include "filelegend.h"
 #include "filterpanelwidget.h"
 #include "logmodel.h"
 #include "logtabwidget.h"
@@ -1599,6 +1600,36 @@ void scenarioFileLabels(MainWindow& win)
     }
     check(menuAction(win, QStringLiteral("Color Only")) == command(win, QStringLiteral("fileLabelsColorOnly")),
           QStringLiteral("View → File Labels → Color Only"));
+
+    // Фильтр по файлу (U-23, часть 4): на слитой вкладке щелчок по чипу
+    // легенды скрывает файл — горит индикатор Files тулбара Filters; Reset
+    // Filters of This Tab снимает и его.
+    {
+        int merged = -1;
+        for (int i = 0; i < tabs(win)->count() && merged < 0; ++i)
+            if (tabAt(win, i)->fileCount() >= 2)
+                merged = i;
+        check(merged >= 0, QStringLiteral("a merged tab is open for the file filter"));
+        if (merged >= 0) {
+            tabs(win)->setCurrentIndex(merged);
+            LogViewWidget* tab = currentTab(win);
+            check(waitLoaded(tab), QStringLiteral("merged tab loaded"));
+            QAction* files = nullptr;
+            if (auto* tb = win.findChild<QToolBar*>(QStringLiteral("filtersToolBar")))
+                for (QAction* a : tb->actions())
+                    if (plainText(a->text()) == QStringLiteral("Files"))
+                        files = a;
+            check(files && !files->isChecked(), QStringLiteral("Filters → Files is off"));
+            FileLegend* legend = tab->fileLegend();
+            check(legend && legend->chipCount() >= 2 && legend->toggleFile(0, false),
+                  QStringLiteral("a legend click hides a file"));
+            check(waitLoaded(tab, 0) && files && waitFor([&]() { return files->isChecked(); }, 5000),
+                  QStringLiteral("Filters → Files lights up when a file is hidden"));
+            pressCommand(win, QStringLiteral("resetFilters"));
+            check(waitFor([&]() { return tab->model()->hiddenFiles().isEmpty() && !files->isChecked(); }, 5000),
+                  QStringLiteral("Reset Filters of This Tab shows the hidden file again"));
+        }
+    }
 
     // View → Line Numbers (U-23, часть 3): по умолчанию выключены, пункт
     // включает колонку номеров у всех view и пишет [View] lineNumbers.

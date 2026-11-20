@@ -198,8 +198,21 @@ public:
     // привязаны к схеме (bindFields).
     void setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
                     const QDateTime& end, const FilterRuleSet& rules);
+    // То же вместе со скрытыми файлами (показ полного лога, состояние вкладки).
+    void setFilters(const QSet<LogLevel>& levels, const QDateTime& start,
+                    const QDateTime& end, const FilterRuleSet& rules,
+                    const QSet<QString>& hiddenFiles);
+    // ---- Фильтр по файлу (U-23, часть 4) -------------------------------------
+    // Пути файлов, строки которых скрыты (щелчок по чипу легенды). Настройка
+    // фильтра, как уровни и время: пер-вкладочная, ставится только этим
+    // сеттером и испускает filterSettingsChanged. Строка скрытого файла
+    // отсекается первой, до текстовых правил (индексный — без чтения текста).
+    void setHiddenFiles(const QSet<QString>& filePaths);
+    const QSet<QString>& hiddenFiles() const { return m_hiddenFiles; }
+    // Растёт при каждой смене набора — хранилища кэшируют по нему указатели.
+    int hiddenFilesGeneration() const { return m_hiddenFilesGeneration; }
     // Есть ли фильтр, способный скрывать строки: уровни, граница времени,
-    // действующие текстовые правила (маркеры строк не скрывают).
+    // действующие текстовые правила, скрытые файлы (маркеры строк не скрывают).
     bool hasFilters() const;
 
     // ---- Недеструктивные row-маркеры ----------------------------------------
@@ -320,6 +333,8 @@ private:
     std::unique_ptr<LogStore> m_store;
 
     QSet<LogLevel> m_activeLogLevels;
+    QSet<QString> m_hiddenFiles;
+    int m_hiddenFilesGeneration = 0;
     QDateTime m_filterStartTime;
     QDateTime m_filterEndTime;
     FilterRuleSet m_filterRules;

@@ -5,6 +5,7 @@
 #include "apptheme.h"
 #include "logmodel.h"
 #include "shortcount.h"
+#include "fileshowncounter.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -13,6 +14,7 @@
 #include <QFileInfo>
 #include <QHelpEvent>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QToolTip>
 #include <QUrl>
@@ -33,6 +35,9 @@ FileLegend::FileLegend(QWidget* parent)
     setObjectName(QStringLiteral("fileLegend"));
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     setFocusPolicy(Qt::NoFocus);
+    setCursor(Qt::PointingHandCursor);
+    m_counter = new FileShownCounter(this);
+    connect(m_counter, &FileShownCounter::countsChanged, this, &FileLegend::updateCounts);
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
         emit visibilityWanted(shouldShow());
     });
@@ -42,11 +47,14 @@ void FileLegend::setModel(LogModel* model)
 {
     disconnect(m_setConnection);
     disconnect(m_linesConnection);
+    disconnect(m_filterConnection);
     m_model = model;
     if (model) {
         m_setConnection = connect(model, &LogModel::fileSetChanged, this, &FileLegend::rebuild);
         m_linesConnection = connect(model, &LogModel::fileLinesChanged, this, &FileLegend::updateCounts);
+        m_filterConnection = connect(model, &LogModel::filterSettingsChanged, this, &FileLegend::updateCounts);
     }
+    m_counter->setModel(model);
     rebuild();
 }
 
@@ -65,10 +73,11 @@ void FileLegend::rebuild()
             chip.file = f.file.get();
             chip.name = f.file->shortName();
             chip.path = f.file->displayPath();
+            chip.filePath = f.file->filePath;
             chip.colorOrdinal = f.colorOrdinal;
             chip.lines = f.lines;
-            chip.count = ShortCount::format(f.lines, 100000, true);
             m_chips.append(chip);
+            m_chips.last().count = countText(m_chips.last());
         }
     }
     layoutChips(width(), &m_chips);
@@ -88,13 +97,87 @@ void FileLegend::updateCounts()
     }
     for (int i = 0; i < files.size(); ++i) {
         m_chips[i].lines = files[i].lines;
-        m_chips[i].count = ShortCount::format(files[i].lines, 100000, true);
+        m_chips[i].count = countText(m_chips[i]);
     }
     // Ширина числа в пикселях могла смениться и при той же длине —
     // раскладка O(числа чипов).
     if (layoutChips(width(), &m_chips) != height())
         updateGeometry();
     update();
+}
+
+QString FileLegend::countText(const Chip& chip) const
+{
+    // «показано / всего», когда фильтр вкладки скрывает часть строк файла;
+    // пока фоновый счёт не готов — прежние числа.
+    const QString total = ShortCount::format(chip.lines, 100000, true);
+    if (!m_model || !m_model->hasFilters() || m_counter->counts().isEmpty())
+        return total;
+    const qint64 shown = m_counter->shown(chip.file);
+    if (shown == chip.lines)
+        return total;
+    return ShortCount::format(shown, 100000, true) + QStringLiteral(" / ") + total;
+}
+
+bool FileLegend::isChipHidden(int chip) const
+{
+    return m_model && chip >= 0 && chip < m_chips.size()
+        && m_model->hiddenFiles().contains(m_chips[chip].filePath);
+}
+
+bool FileLegend::toggleFile(int chip, bool only)
+{
+    if (!m_model || chip < 0 || chip >= m_chips.size())
+        return false;
+    const QString path = m_chips[chip].filePath;
+    QSet<QString> all;
+    for (const Chip& c : std::as_const(m_chips))
+        all.insert(c.filePath);
+    QSet<QString> hidden = m_model->hiddenFiles();
+    if (only) {
+        QSet<QString> others = all;
+        others.remove(path);
+        // Уже «только этот» — повторный Ctrl+щелчок возвращает все.
+        hidden = (hidden == others) ? QSet<QString>() : others;
+    } else if (hidden.contains(path)) {
+        hidden.remove(path);
+    } else {
+        QSet<QString> visible = all - hidden;
+        visible.remove(path);
+        if (visible.isEmpty())
+            return false; // последний видимый файл не скрывается
+        hidden.insert(path);
+    }
+    // Пути файлов, которых во вкладке уже нет, в наборе не держим.
+    hidden &= all;
+    if (hidden == m_model->hiddenFiles())
+        return false;
+    m_model->setHiddenFiles(hidden);
+    update();
+    return true;
+}
+
+void FileLegend::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton) {
+        const int i = chipAt(event->pos());
+        if (i >= 0 && toggleFile(i, event->modifiers() & Qt::ControlModifier))
+            event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
+}
+
+void FileLegend::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    m_counter->setActive(true);
+}
+
+void FileLegend::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    m_counter->setActive(false);
 }
 
 int FileLegend::chipWidth(const Chip& chip) const
@@ -180,6 +263,8 @@ void FileLegend::paintEvent(QPaintEvent*)
     const QColor border = AppTheme::wrapRail(pal);
     for (const Chip& chip : std::as_const(m_chips)) {
         const QRectF r = QRectF(chip.rect).adjusted(0.5, 0.5, -0.5, -0.5);
+        const bool hidden = m_model && m_model->hiddenFiles().contains(chip.filePath);
+        p.setOpacity(hidden ? 0.45 : 1.0);   // скрытый файл — приглушён
         p.setPen(border);
         p.setBrush(pal.color(QPalette::Base));
         p.drawRoundedRect(r, 3, 3);
@@ -191,12 +276,17 @@ void FileLegend::paintEvent(QPaintEvent*)
         p.drawRoundedRect(swatch, 2, 2);
         int x = swatch.right() + 1 + kSwatchGap;
         p.setPen(pal.color(QPalette::Text));
+        QFont nameFont = font();
+        nameFont.setStrikeOut(hidden);       // и зачёркнут
+        p.setFont(nameFont);
         p.drawText(QRect(x, chip.rect.top(), fm.horizontalAdvance(chip.name) + 1, chip.rect.height()),
                    Qt::AlignVCenter | Qt::AlignLeft, chip.name);
+        p.setFont(font());
         x += fm.horizontalAdvance(chip.name) + kCountGap;
         p.setPen(AppTheme::wrapToggleFg(pal));
         p.drawText(QRect(x, chip.rect.top(), fm.horizontalAdvance(chip.count) + 1, chip.rect.height()),
                    Qt::AlignVCenter | Qt::AlignLeft, chip.count);
+        p.setOpacity(1.0);
     }
 }
 
@@ -210,7 +300,11 @@ bool FileLegend::event(QEvent* event)
             c.setNumberOptions(QLocale::DefaultNumberOptions);
             const Chip& chip = m_chips[i];
             QToolTip::showText(help->globalPos(),
-                               tr("%1\n%2 line(s) in this tab").arg(chip.path, c.toString(chip.lines)),
+                               tr("%1\n%2 line(s) in this tab, %3 shown\nClick to hide or show this file; "
+                                  "Ctrl+click to show only this file")
+                                   .arg(chip.path, c.toString(chip.lines),
+                                        c.toString(m_model && m_model->hasFilters()
+                                                       ? m_counter->shown(chip.file) : chip.lines)),
                                this, chip.rect);
         } else {
             QToolTip::hideText();

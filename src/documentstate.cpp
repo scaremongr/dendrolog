@@ -84,7 +84,8 @@ std::optional<LogLevel> ViewState::levelFromName(QStringView name)
 bool ViewState::hasFilters() const
 {
     // Правила, из которых ни одно не действует, — не фильтр: предлагать нечего.
-    return !levels.isEmpty() || timeFrom.isValid() || timeTo.isValid() || textRules.isActive();
+    return !levels.isEmpty() || timeFrom.isValid() || timeTo.isValid() || textRules.isActive()
+        || !hiddenSources.isEmpty();
 }
 
 QJsonObject ViewState::toJson() const
@@ -107,6 +108,12 @@ QJsonObject ViewState::toJson() const
         json.insert(QStringLiteral("textRules"), textRules.toJson());
     if (!markers.isEmpty())
         json.insert(QStringLiteral("markers"), highlightPatternsToJson(markers));
+    if (!hiddenSources.isEmpty()) {
+        QJsonArray hidden;
+        for (int i : hiddenSources)
+            hidden.append(i);
+        json.insert(QStringLiteral("hiddenFiles"), hidden);
+    }
     if (hasCurrent()) {
         QJsonObject current;
         current.insert(QStringLiteral("source"), currentSource->toJson());
@@ -152,6 +159,16 @@ std::optional<ViewState> ViewState::fromJson(const QJsonObject& json, QString* e
         if (!markers.isArray())
             return fail(error, QStringLiteral("bad markers"));
         s.markers = highlightPatternsFromJson(markers.toArray());
+    }
+    const QJsonValue hidden = json.value(QLatin1String("hiddenFiles"));
+    if (!hidden.isUndefined()) {
+        if (!hidden.isArray())
+            return fail(error, QStringLiteral("bad hiddenFiles"));
+        for (const QJsonValue& v : hidden.toArray()) {
+            if (!v.isDouble() || v.toInt(-1) < 0)
+                return fail(error, QStringLiteral("bad hiddenFiles index"));
+            s.hiddenSources.append(v.toInt());
+        }
     }
 
     const QJsonValue currentValue = json.value(QLatin1String("current"));

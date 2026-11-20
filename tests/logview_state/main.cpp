@@ -435,6 +435,21 @@ static QVector<Trigger> triggers()
         list.append(t);
     }
 
+    // Фильтр по файлу (U-23): документы таблицы — один файл, скрывается
+    // чужой (как щелчок по чипу легенды слитой вкладки, где запись в другом
+    // файле): фильтр применяется — у индексного бэкенда фоновым заданием с
+    // reset, — а видимый набор тот же. Скрытие строк соседнего файла на
+    // слитой вкладке — tests/row_chrome.
+    {
+        Trigger t{ QStringLiteral("файл: скрыть другой файл вкладки"),
+                   [](Backend& b, const EntryInfo&) {
+                       b.doc.model->setHiddenFiles({ QStringLiteral("/no/such/other-file.log") });
+                   },
+                   [](Backend& b) { b.doc.model->setHiddenFiles({}); } };
+        t.visibleSetUnchanged = true;
+        list.append(t);
+    }
+
     list.append({ QStringLiteral("колонки: показаны только Level и Message"),
                   [](Backend& b, const EntryInfo&) {
                       b.doc.model->setFieldDisplaySelection(true, { 2, 3 });

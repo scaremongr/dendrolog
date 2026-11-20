@@ -517,7 +517,8 @@ private:
 
     // ---- Состояние вкладки (R-4) ---------------------------------------------------
     // Фильтры снимка с привязкой к схеме вкладки (bindFields).
-    void setStateFilters(const ViewState& view);
+    // hiddenFiles — пути скрытых файлов (U-23); nullptr — оставить как есть.
+    void setStateFilters(const ViewState& view, const QSet<QString>* hiddenFiles = nullptr);
     std::optional<ViewState> m_offeredFilters;
     // Позиция из снимка ждёт строку от RecordLocator.
     struct PendingPosition {

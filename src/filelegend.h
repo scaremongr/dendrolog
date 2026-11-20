@@ -5,6 +5,7 @@
 #include <QWidget>
 
 class LogModel;
+class FileShownCounter;
 class LogListView;
 struct LogFile;
 
@@ -39,6 +40,13 @@ public:
     int chipAt(const QPoint& pos) const;
     // Действия контекстного меню (тестам — без меню).
     bool goToFileLine(int chip, bool forward);
+    // Фильтр по файлу (U-23, часть 4) — то же, что щелчок по чипу: скрыть
+    // или вернуть файл; only (Ctrl+щелчок) — оставить только этот файл,
+    // повторно — вернуть все. Последний видимый файл не скрывается; false —
+    // ничего не изменилось.
+    bool toggleFile(int chip, bool only);
+    bool isChipHidden(int chip) const;
+    FileShownCounter* shownCounter() const { return m_counter; }
 
     bool hasHeightForWidth() const override { return true; }
     int heightForWidth(int width) const override;
@@ -53,6 +61,9 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     bool event(QEvent* event) override;
     void changeEvent(QEvent* event) override;
 
@@ -60,14 +71,16 @@ private:
     struct Chip {
         const LogFile* file = nullptr;
         QString name;
-        QString count;
-        QString path;
+        QString count;          // «всего» или «показано / всего»
+        QString path;           // показывать (displayPath)
+        QString filePath;       // ключ фильтра по файлу (LogModel::hiddenFiles)
         qint64 lines = 0;
         int colorOrdinal = 0;
         QRect rect;
     };
     void rebuild();
     void updateCounts();
+    QString countText(const Chip& chip) const;
     // Раскладка чипов по ширине width; возвращает высоту.
     int layoutChips(int width, QVector<Chip>* chips) const;
     int chipWidth(const Chip& chip) const;
@@ -75,6 +88,8 @@ private:
     QPointer<LogModel> m_model;
     QPointer<LogListView> m_view;
     QVector<Chip> m_chips;
+    FileShownCounter* m_counter = nullptr;
     QMetaObject::Connection m_setConnection;
     QMetaObject::Connection m_linesConnection;
+    QMetaObject::Connection m_filterConnection;
 };
