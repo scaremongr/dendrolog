@@ -634,10 +634,13 @@ static void checkOpenPanels(const QDir& dir)
     // смену темы, — как созданный в новой.
     {
         QByteArray bytes;
-        for (int i = 0; i < 12; ++i) {
+        // Весь документ — в высоту вида и без прокрутки: у пережившего смену
+        // темы вида высоты строк уже уточнены отрисовкой, у свежего могут быть
+        // ещё оценками, и ползунок скроллбара отличался бы не из-за темы.
+        for (int i = 0; i < 6; ++i) {
             bytes += "2026-03-05 10:00:" + QByteArray::number(10 + i) + ".000 [w] INFO - row "
                    + QByteArray::number(i) + ' ';
-            bytes += QByteArray(i % 3 == 0 ? 400 : 10, 'w') + '\n';
+            bytes += QByteArray(i % 3 == 0 ? 120 : 10, 'w') + '\n';
         }
         const QString path = testdocs::writeFile(dir, QStringLiteral("wrap-toggles.log"), bytes);
         auto doc = std::make_shared<testdocs::Document>(testdocs::buildResident({path}, testdocs::buildSchema()));
