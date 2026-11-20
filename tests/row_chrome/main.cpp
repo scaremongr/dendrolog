@@ -1188,9 +1188,11 @@ static void checkFileFilter(const QDir& dir, bool indexed)
         QObject::disconnect(c);
         // Не по порции: дебаунс (150 мс, не перезапускается порцией) склеивает
         // порции — запусков не больше одного на окно дебаунса плюс конец.
+        // Сравнивать с числом порций нельзя: под TSan порция дольше окна, и
+        // запуск на порцию там верен.
         const int runs = counter->launchCount() - launches;
         const qint64 windows = loading.elapsed() / 150;
-        CHECK(runs <= windows + 2 && (batches < 8 || runs < batches),
+        CHECK(runs <= windows + 2,
               QStringLiteral("%1: %2 counting runs for %3 batches in %4 ms").arg(label)
                   .arg(runs).arg(batches).arg(loading.elapsed()));
     }
