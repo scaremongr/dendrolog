@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <cstdio>
 #include <filesystem>
 
@@ -142,6 +143,26 @@ static void testBackgroundExport(const QDir& dir)
             CHECK(result.ok() && exportedLines(target) == filtered,
                   qPrintable(QStringLiteral("%1: export writes the view as it was at start").arg(m.name)));
             CHECK(testdocs::settle(model), "filter reset settles");
+        }
+
+        // Q-25: воркер закончил, finished ещё не доставлен (событий не было) —
+        // задание всё ещё идёт: второй start() отклонён, а первый отдаёт
+        // finished ровно один раз. Раньше isRunning() смотрел на QFuture, и
+        // на быстром пуле маленький экспорт «заканчивался» до второго start.
+        {
+            ViewExportJob job;
+            int finishedCount = 0;
+            ViewExport::Result result;
+            QObject::connect(&job, &ViewExportJob::finished,
+                             [&](const ViewExport::Result& r) { result = r; ++finishedCount; });
+            CHECK(job.start(model, target, {path}), "start export (worker done before delivery)");
+            QThreadPool::globalInstance()->waitForDone();
+            CHECK(job.isRunning(), "job runs until finished is delivered");
+            CHECK(!job.start(model, target, {path}), "second export is refused after the worker ended");
+            CHECK(testdocs::waitFor([&] { return finishedCount > 0; }), "export finishes");
+            QCoreApplication::processEvents();
+            CHECK(finishedCount == 1 && result.ok(), "finished is delivered exactly once");
+            CHECK(!job.isRunning(), "job is not running after finished");
         }
 
         // Источник защищён и в фоне.
