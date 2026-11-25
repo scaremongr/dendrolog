@@ -1,0 +1,48 @@
+# Временная диагностика S-15 / Q-25 (ветка diag/s15-q25, в main не идёт).
+name: Diag flaky
+on:
+  push:
+    branches: [diag/s15-q25]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+      - name: Build
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release --parallel --target open_routing viewexport mainwindow_smoke
+      - name: Loop
+        shell: pwsh
+        run: |
+          $tests = @(
+            @{ name = 'open_routing'; exe = 'build\tests\open_routing\Release\open_routing.exe'; args = ''; n = 60 },
+            @{ name = 'viewexport'; exe = 'build\tests\viewexport\Release\viewexport.exe'; args = ''; n = 60 },
+            @{ name = 'mw_separate'; exe = 'build\tests\mainwindow_smoke\Release\mainwindow_smoke.exe'; args = 'resident separate'; n = 15 }
+          )
+          foreach ($t in $tests) {
+            $jobs = 1..4 | ForEach-Object {
+              $k = $_
+              Start-Job -ScriptBlock {
+                param($exe, $a, $n, $k, $path)
+                $env:PATH = $path
+                $env:QT_QPA_PLATFORM = 'offscreen'
+                $fails = 0; $out = @()
+                for ($i = 0; $i -lt $n; $i++) {
+                  $log = cmd /c "`"$exe`" $a 2>&1"
+                  $traces = $log | Select-String 'SI-TRACE'
+                  if ($LASTEXITCODE -ne 0) { $fails++; $out += "---- job $k run $i exit $LASTEXITCODE"; $out += ($log | Select-String 'FAIL|SI-TRACE') }
+                  else { $out += ($traces | Where-Object { $_ -match 'FALSE|fail' }) }
+                  $out += ($traces | ForEach-Object { if ($_ -match 'tBytes=(\d+)') { if ([int]$Matches[1] -gt 100) { "slow: $_" } } })
+                }
+                "job $k : $fails / $n failed"
+                $out
+              } -ArgumentList (Resolve-Path $t.exe).Path, $t.args, $t.n, $k, $env:PATH
+            }
+            Write-Host "===== $($t.name)"
+            $jobs | Wait-Job | Receive-Job | ForEach-Object { Write-Host $_ }
+          }

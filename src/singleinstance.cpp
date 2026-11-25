@@ -1,6 +1,8 @@
 #include "singleinstance.h"
 
 #include <QDir>
+#include <QElapsedTimer>
+#include <cstdio>
 #include <QLocalServer>
 #include <QLockFile>
 #include <QLocalSocket>
@@ -109,14 +111,29 @@ bool SingleInstance::sendToPrimary(const QStringList& arguments) const
 {
     if (m_role != Role::Forward)
         return false;
+    QElapsedTimer t; t.start();
     QLocalSocket socket;
     socket.connectToServer(m_socketName);
-    if (!socket.waitForConnected(500))
+    const qint64 tc = t.elapsed();
+    const bool conn = socket.waitForConnected(500);
+    const qint64 tw = t.elapsed();
+    if (!conn) {
+        fprintf(stderr, "SI-TRACE connect fail: state=%d err=%d '%s' tConnect=%lld tWait=%lld\n", int(socket.state()), int(socket.error()), qPrintable(socket.errorString()), tc, tw);
+        fflush(stderr);
         return false;
-    socket.write(encodeFiles(arguments));
+    }
+    const qint64 n = socket.write(encodeFiles(arguments));
+    const qint64 btwBefore = socket.bytesToWrite();
     const bool ok = socket.waitForBytesWritten(1000);
+    const qint64 tb = t.elapsed();
+    const qint64 btwAfter = socket.bytesToWrite();
+    const int st = int(socket.state()); const int er = int(socket.error());
+    const QString es = socket.errorString();
     socket.disconnectFromServer();
     if (socket.state() != QLocalSocket::UnconnectedState)
         socket.waitForDisconnected(500);
+    fprintf(stderr, "SI-TRACE %s: written=%lld btwBefore=%lld btwAfter=%lld state=%d err=%d '%s' tConnect=%lld tWait=%lld tBytes=%lld tEnd=%lld\n",
+            ok ? "ok" : "FALSE", n, btwBefore, btwAfter, st, er, qPrintable(es), tc, tw, tb, t.elapsed());
+    fflush(stderr);
     return ok;
 }
