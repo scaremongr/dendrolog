@@ -1335,7 +1335,7 @@ void scenarioZip(MainWindow& win, const Fixtures& fx)
     check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
           QStringLiteral("member rows equal the plain file"));
     check(tabs(win)->tabText(index) == QLatin1String("alpha.log"), QStringLiteral("member tab name"));
-    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(zip) + QStringLiteral(" › logs/alpha.log")),
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(zip + QStringLiteral(" › logs/alpha.log"))),
           QStringLiteral("member tooltip: archive › member (%1)").arg(tabs(win)->tabToolTip(index)));
     const LogFilePtr lf = tab->loadedFiles().value(0);
     check(lf && lf->source().member == QLatin1String("logs/alpha.log"), QStringLiteral("tab source is the member"));
