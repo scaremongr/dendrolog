@@ -15,14 +15,16 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build
-          cmake --build build --config Release --parallel --target open_routing viewexport_test mainwindow_smoke
+          cmake --build build --config Release --parallel --target open_routing viewexport_test mainwindow_smoke logview_state logview_lifecycle
       - name: Loop
         shell: pwsh
         run: |
           $tests = @(
             @{ name = 'open_routing'; exe = 'build\tests\open_routing\Release\open_routing.exe'; args = ''; n = 60 },
             @{ name = 'viewexport'; exe = 'build\tests\viewexport\Release\viewexport_test.exe'; args = ''; n = 60 },
-            @{ name = 'mw_separate'; exe = 'build\tests\mainwindow_smoke\Release\mainwindow_smoke.exe'; args = 'resident separate'; n = 15 }
+            @{ name = 'mw_separate'; exe = 'build\tests\mainwindow_smoke\Release\mainwindow_smoke.exe'; args = 'resident separate'; n = 15 },
+            @{ name = 'logview_lifecycle'; exe = 'build\tests\logview_lifecycle\Release\logview_lifecycle.exe'; args = ''; n = 3 },
+            @{ name = 'logview_state'; exe = 'build\tests\logview_state\Release\logview_state.exe'; args = ''; n = 2 }
           )
           foreach ($t in $tests) {
             $jobs = 1..4 | ForEach-Object {

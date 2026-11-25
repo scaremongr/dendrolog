@@ -311,6 +311,38 @@ inline bool settle(LogModel& model, int quietMs = 80, int timeoutMs = 60000)
     return calm;
 }
 
+// Покой по СОСТОЯНИЮ, без окна тишины (P-6): модель не фильтрует, всё
+// отложенное доставлено (queued-вызовы и QTimer::singleShot(0) — это posted
+// events, как и UpdateRequest отрисовки, на которой view уточняет высоты), и
+// busy() — отложенная работа, которую видно только снаружи (таймеры view:
+// LogListView::hasPendingLayout) — молчит. Покой засчитывается на втором
+// подряд спокойном проходе: обработка событий первого могла поставить новые.
+// Таймеры не ждутся сверх того, что видно в busy(): тест, которому нужен
+// ещё чей-то таймер, добавляет его в предикат. false — не успокоилось.
+inline bool waitIdle(const std::function<bool()>& busy, int timeoutMs = 60000)
+{
+    QElapsedTimer total;
+    total.start();
+    int calmPasses = 0;
+    while (total.elapsed() < timeoutMs) {
+        QCoreApplication::sendPostedEvents();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        if (busy && busy()) {
+            calmPasses = 0;
+            continue;
+        }
+        if (++calmPasses >= 2)
+            return true;
+    }
+    return false;
+}
+
+inline bool settleIdle(LogModel& model, const std::function<bool()>& busy = {},
+                       int timeoutMs = 60000)
+{
+    return waitIdle([&] { return model.isFiltering() || (busy && busy()); }, timeoutMs);
+}
+
 // ---------------------------------------------------------------------------
 // Документ: модель + её файлы
 // ---------------------------------------------------------------------------

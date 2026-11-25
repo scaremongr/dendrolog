@@ -255,5 +255,10 @@ void ViewExportJob::cancel(bool wait)
 
 bool ViewExportJob::isRunning() const
 {
-    return m_future.isStarted() && !m_future.isFinished();
+    // Задание идёт до доставки finished, а не до конца воркера: маленький
+    // экспорт заканчивается в пуле раньше, чем вызывающий успевает спросить,
+    // и между концом воркера и сигналом второй start() иначе прошёл бы, а
+    // результат первого (поколение уже другое) пропал бы без finished (Q-25).
+    // m_cancel живёт ровно от start() до emit finished.
+    return m_cancel != nullptr;
 }
