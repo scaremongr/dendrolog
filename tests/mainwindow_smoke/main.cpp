@@ -1444,7 +1444,7 @@ void scenarioTar(MainWindow& win, const Fixtures& fx)
     check(waitLoaded(tab), QStringLiteral("tar member loads"));
     check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
           QStringLiteral("tar member rows equal the plain file"));
-    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(tgz) + QStringLiteral(" › logs/alpha.log")),
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(tgz + QStringLiteral(" › logs/alpha.log"))),
           QStringLiteral("tar member tooltip: archive › member (%1)").arg(tabs(win)->tabToolTip(index)));
     tabs(win)->setCurrentIndex(index);
     command(win, QStringLiteral("closeTab"))->trigger();
