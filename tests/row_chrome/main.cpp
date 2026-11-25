@@ -37,7 +37,6 @@
 #include "apptheme.h"
 #include "filelabels.h"
 #include "filelegend.h"
-#include "fileshowncounter.h"
 #include "logviewwidget.h"
 #include "navhistory.h"
 #include "logmodel.h"
@@ -502,6 +501,25 @@ static void checkScrollRepaint(const QDir& dir)
 // ---------------------------------------------------------------------------
 // PR 2: метки файлов
 // ---------------------------------------------------------------------------
+static void checkFileLabelWrap()
+{
+    section("FileLabels::wrap");
+    const QString name = QStringLiteral("payment-service-prod-eu-1.log");
+    const QStringList three = FileLabels::wrap(name, 12, 3);
+    bool fits = !three.isEmpty() && three.size() <= 3 && three.join(QString()) == name;
+    for (const QString& l : three)
+        fits = fits && !l.isEmpty() && l.size() <= 12;
+    CHECK(fits, QStringLiteral("the whole name on up to three lines: %1").arg(three.join(QLatin1String(" | "))));
+    CHECK(FileLabels::wrap(QStringLiteral("payment-service.log"), 12, 2)
+              == (QStringList{QStringLiteral("payment-"), QStringLiteral("service.log")}),
+          "a line breaks after a boundary when the name still fits");
+    CHECK(FileLabels::wrap(name, 12, 2).isEmpty(), "does not fit two lines of 12 — no wrap");
+    CHECK(FileLabels::wrap(QStringLiteral("app.log"), 12, 1) == QStringList{QStringLiteral("app.log")}, "a short name is one line");
+    const QString solid(40, QLatin1Char('x'));
+    CHECK(FileLabels::wrap(solid, 16, 3).join(QString()) == solid && FileLabels::wrap(solid, 16, 3).size() == 3,
+          "a name without boundaries breaks by width");
+}
+
 static void checkFileLabelsTable()
 {
     section("FileLabels::build");
@@ -521,6 +539,9 @@ static void checkFileLabelsTable()
          {QString(e) + "aaaa…aaa" + e, QString(e) + "bbbb…bbb" + e}, "limit below the distinct part"},
         {{"app.log", "app.log.1", "app.log.2", "very-long-name-of-a-log.log"}, 8,
          {"app.log", "app.log.1", "app.log.2", "very…log"}, "a name that is a prefix of another"},
+        {{"svc-db.log", "svc-prod-eu.log", "svc-prod-us.log"}, 12,
+         {"svc-db.log", QString(e) + "prod-eu" + e, QString(e) + "prod-us" + e},
+         "a name that fits stays whole next to shortened ones"},
     };
     for (const auto& c : cases) {
         const QStringList got = FileLabels::build(c.names, c.max);
@@ -529,6 +550,12 @@ static void checkFileLabelsTable()
             CHECK(l.size() <= c.max, QStringLiteral("%1: '%2' fits %3").arg(QLatin1String(c.what), l).arg(c.max));
         CHECK(QSet<QString>(got.begin(), got.end()).size() == got.size(),
               QStringLiteral("%1: labels differ: %2").arg(QLatin1String(c.what), got.join(QLatin1String(" | "))));
+        // Имя, которое помещается, не сокращается (повторы имён — отдельный случай).
+        if (c.what != std::string_view("same names from different folders"))
+            for (int i = 0; i < c.names.size(); ++i)
+                if (c.names[i].size() <= c.max)
+                    CHECK(got.value(i) == c.names[i], QStringLiteral("%1: '%2' fits and stays whole (got '%3')")
+                                                          .arg(QLatin1String(c.what), c.names[i], got.value(i)));
         if (c.what != std::string_view("nothing common: middle elided, repeats tagged")
             && c.what != std::string_view("a name that is a prefix of another"))
             CHECK(got == c.expected, QStringLiteral("%1: %2 (expected %3)")
@@ -765,6 +792,96 @@ static void checkMergedTab(const QDir& dir, bool indexed)
               QStringLiteral("resident: the label sticks to the top, its tooltip is the path (%1)").arg(hit.toolTip));
         view.setWordWrap(false);
         testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+    }
+
+    // Ширина колонки: авто — не больше 16 символов; имя, которое помещается,
+    // пишется целиком; границу колонки тянут мышью; двойной щелчок — авто.
+    {
+        const QString nameA = legend->chipFile(0)->shortName();
+        int rowA = -1;
+        for (int r = 0; r < model.rowCount() && rowA < 0; ++r)
+            if (model.keyAt(r).file.get() == legend->chipFile(0))
+                rowA = r;
+        view.scrollToTop();
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const int autoWidth = view.fileColumnWidth();
+        const QStringList shortA = view.fileLabelLines(rowA);
+        CHECK(view.fileColumnChars() == 0 && view.effectiveFileColumnChars() == FileLabels::kDefaultMaxChars
+                  && shortA.size() == 1 && shortA.first() != nameA && shortA.first().size() <= 16,
+              QStringLiteral("%1: auto width — 16 characters, a long name is shortened: '%2'").arg(label, shortA.join('|')));
+        CHECK(view.fileLabelRect(rowA).right() < view.textLeft(), label + ": the label stays inside its column");
+        view.setFileColumnChars(int(nameA.size()) + 2);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        CHECK(view.fileColumnWidth() > autoWidth && view.fileLabelLines(rowA) == QStringList{nameA},
+              QStringLiteral("%1: a name that fits the column is written whole: '%2'").arg(label, view.fileLabelLines(rowA).join('|')));
+        // Протяжка границы влево и вправо.
+        const QRect handle = view.fileColumnHandleRect();
+        CHECK(!handle.isEmpty() && handle.right() >= view.textLeft() - 1 && handle.left() < view.textLeft(),
+              label + ": the column edge is a handle");
+        const QPoint grab(handle.center().x(), 40);
+        QTest::mousePress(view.viewport(), Qt::LeftButton, Qt::NoModifier, grab);
+        QTest::mouseMove(view.viewport(), grab - QPoint(120, 0));
+        const int dragged = view.fileColumnChars();
+        CHECK(dragged > 0 && dragged < int(nameA.size()) + 2,
+              QStringLiteral("%1: dragging the edge narrows the column (%2 chars)").arg(label).arg(dragged));
+        QTest::mouseMove(view.viewport(), QPoint(-500, 40));
+        CHECK(view.fileColumnChars() == 3, QStringLiteral("%1: the column has a minimum (%2)").arg(label).arg(view.fileColumnChars()));
+        QTest::mouseMove(view.viewport(), grab - QPoint(60, 0));
+        QTest::mouseRelease(view.viewport(), Qt::LeftButton, Qt::NoModifier, grab - QPoint(60, 0));
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const int released = view.fileColumnChars();
+        CHECK(released > dragged && settings.fileColumnChars() == released,
+              QStringLiteral("%1: the released width (%2) becomes the setting (%3)").arg(label).arg(released).arg(settings.fileColumnChars()));
+        CHECK(view.textLeft() == plainLeft + view.fileColumnWidth() && view.userSelectedRow() >= 0,
+              label + ": the text follows the column edge");
+        settings.save();
+        {
+            QSettings ini(AppSettings::iniFilePath(), QSettings::IniFormat);
+            CHECK(ini.value(QStringLiteral("View/fileColumnChars")).toInt() == released,
+                  label + ": the width is stored in [View] fileColumnChars");
+        }
+        // Мышь над границей без кнопок — курсор протяжки.
+        QTest::mouseMove(view.viewport(), view.fileColumnHandleRect().center());
+        CHECK(view.viewport()->cursor().shape() == Qt::SplitHCursor, label + ": resize cursor over the edge");
+        QTest::mouseMove(view.viewport(), QPoint(view.textLeft() + 80, 40));
+        CHECK(view.viewport()->cursor().shape() != Qt::SplitHCursor, label + ": normal cursor over the text");
+        QTest::mouseDClick(view.viewport(), Qt::LeftButton, Qt::NoModifier, view.fileColumnHandleRect().center());
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        CHECK(view.fileColumnChars() == 0 && settings.fileColumnChars() == 0 && view.fileColumnWidth() == autoWidth,
+              label + ": a double click on the edge returns the automatic width");
+    }
+
+    // Строка в несколько линий (резидентный бэкенд, перенос): имя файла —
+    // целиком, на нескольких линиях; блок прилипает к верху вьюпорта.
+    if (!indexed) {
+        view.setWordWrap(true);
+        int tall = -1;
+        for (int r = 0; r < model.rowCount() && tall < 0; ++r)
+            if (model.keyAt(r).file.get() == legend->chipFile(1) && model.keyAt(r).line == 21)
+                tall = r;
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const QString nameB = legend->chipFile(1)->shortName();
+        const QStringList lines = view.fileLabelLines(tall);
+        bool whole = lines.size() > 1 && lines.join(QString()) == nameB;
+        for (const QString& l : lines)
+            whole = whole && l.size() <= view.effectiveFileColumnChars();
+        CHECK(whole, QStringLiteral("resident: a tall line shows the whole file name on several lines: %1").arg(lines.join('|')));
+        const int h = view.visualRect(model.index(tall, 0)).height();
+        placeRowTop(view, tall, -h / 2);
+        const QRect block = view.fileLabelRect(tall);
+        CHECK(block.top() >= 0 && block.top() <= 2 && block.height() >= int(lines.size()) * 10
+                  && block.right() < view.textLeft(),
+              QStringLiteral("resident: the name block sticks to the viewport top (%1, %2 px high)").arg(block.top()).arg(block.height()));
+        const QImage image = view.viewport()->grab().toImage();
+        const QColor color = AppTheme::fileColor(model.labeledFile(legend->chipFile(1))->colorOrdinal,
+                                                 view.viewport()->palette());
+        CHECK(image.pixelColor(block.right() - 1, block.top() + 1) == color
+                  && image.pixelColor(block.right() - 1, block.bottom() - 1) == color,
+              "resident: the block is painted in the file colour over all its lines");
+        view.setWordWrap(false);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        // Однострочная строка — короткая метка на одной линии.
+        CHECK(view.fileLabelLines(tall).size() == 1, "resident: a one-line row shows the short label");
     }
 
     // Hit-test: выделение мышью попадает в те же символы с колонкой и без.
@@ -1009,14 +1126,6 @@ static void checkLineNumbers(const QDir& dir, bool indexed)
 // ---------------------------------------------------------------------------
 // PR 4: фильтр по файлу
 // ---------------------------------------------------------------------------
-static QHash<const LogFile*, qint64> shownByEnumeration(LogModel& model)
-{
-    QHash<const LogFile*, qint64> n;
-    for (int r = 0; r < model.rowCount(); ++r)
-        ++n[model.keyAt(r).file.get()];
-    return n;
-}
-
 static void checkFileFilter(const QDir& dir, bool indexed)
 {
     const QString label = indexed ? QStringLiteral("file filter, indexed") : QStringLiteral("file filter, resident");
@@ -1088,31 +1197,27 @@ static void checkFileFilter(const QDir& dir, bool indexed)
     CHECK(nearest >= 0 && vr.intersects(view.viewport()->rect()),
           label + ": a hidden selected line leaves the view at its nearest shown neighbour");
 
-    // Счётчик «показано / всего»: фильтр уровней поверх — числа против перебора.
+    // Число на чипе — всегда строк файла во вкладке: ни скрытие файла, ни
+    // другие фильтры его не меняют, и чипы не меняют размер.
+    const QRect rectA = legend->chipRect(chipA);
+    const QRect rectB = legend->chipRect(chipB);
+    const auto chipsSteady = [&](const QString& a300, const QString& b200) {
+        return legend->chipText(chipA).endsWith(a300) && legend->chipText(chipB).endsWith(b200)
+            && legend->chipRect(chipA) == rectA && legend->chipRect(chipB) == rectB;
+    };
+    CHECK(chipsSteady(QStringLiteral(" 300"), QStringLiteral(" 200")),
+          QStringLiteral("%1: a hidden file keeps its line count: '%2', '%3'").arg(label, legend->chipText(chipA),
+                                                                                legend->chipText(chipB)));
     model.setLogLevelFilter({LogLevel::Warn});
-    CHECK(settledTab(tab), label + ": WARN filter");
-    FileShownCounter* counter = legend->shownCounter();
-    CHECK(testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": counter settles");
-    QHash<const LogFile*, qint64> expected = shownByEnumeration(model);
-    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
-              && counter->shown(legend->chipFile(chipB)) == 0,
-          QStringLiteral("%1: shown counts A %2 (expected %3), B %4").arg(label)
-              .arg(counter->shown(legend->chipFile(chipA))).arg(expected.value(legend->chipFile(chipA)))
-              .arg(counter->shown(legend->chipFile(chipB))));
-    CHECK(legend->chipText(chipA).endsWith(QStringLiteral("%1 / 300").arg(expected.value(legend->chipFile(chipA)))),
-          QStringLiteral("%1: chip A says shown / total: %2").arg(label, legend->chipText(chipA)));
-    // Фильтр, скрывший все строки: «0 / всего», а не прежние числа.
+    CHECK(settledTab(tab) && model.rowCount() < 300, label + ": WARN filter");
+    CHECK(chipsSteady(QStringLiteral(" 300"), QStringLiteral(" 200")),
+          QStringLiteral("%1: a level filter does not change the chips: '%2', '%3'").arg(label, legend->chipText(chipA),
+                                                                                       legend->chipText(chipB)));
     model.setLogLevelFilter({LogLevel::Error});
-    CHECK(settledTab(tab) && model.rowCount() == 0
-              && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
-          label + ": ERROR filter hides everything");
-    CHECK(legend->chipText(chipA).endsWith(QStringLiteral("0 / 300"))
-              && legend->chipText(chipB).endsWith(QStringLiteral("0 / 200")),
-          QStringLiteral("%1: nothing shown reads 0 / total: '%2', '%3'").arg(label, legend->chipText(chipA),
-                                                                             legend->chipText(chipB)));
+    CHECK(settledTab(tab) && model.rowCount() == 0, label + ": ERROR filter hides everything");
+    CHECK(chipsSteady(QStringLiteral(" 300"), QStringLiteral(" 200")), label + ": nothing shown — the chips still say the totals");
     model.setLogLevelFilter({LogLevel::Warn});
-    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
-          label + ": back to WARN");
+    CHECK(settledTab(tab), label + ": back to WARN");
     CHECK(legend->toggleFile(chipA, true) && settledTab(tab) && model.hiddenFiles().isEmpty(),
           label + ": Ctrl+click again shows all");
 
@@ -1135,67 +1240,27 @@ static void checkFileFilter(const QDir& dir, bool indexed)
         CHECK(settledTab(tab), label + ": WARN again");
     }
 
-    // Дозапись: числа — по перебору.
+    // Дозапись: число растёт, размер чипов — нет (под число постоянное место).
     testdocs::appendToFile(a, numberedLines(300, 20));
     tab.reloadChangedFiles(true);
-    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": appended");
-    expected = shownByEnumeration(model);
-    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
-              && counter->shown(legend->chipFile(chipB)) == expected.value(legend->chipFile(chipB)),
-          label + ": counts after an append match the shown rows");
-
-    // Поток дозаписи чаще дебаунса: счёт идёт и посреди потока, а не после.
-    {
-        const int launches = counter->launchCount();
-        QElapsedTimer stream;
-        stream.start();
-        int line = 320;
-        while (stream.elapsed() < 1500) {
-            testdocs::appendToFile(a, numberedLines(line++, 1));
-            tab.reloadChangedFiles(true);
-            testdocs::pump(40);
-        }
-        CHECK(counter->launchCount() > launches,
-              QStringLiteral("%1: counting runs during a stream of appends (%2 runs)").arg(label)
-                  .arg(counter->launchCount() - launches));
-        CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000),
-              label + ": stream settles");
-    }
-
-    // Reset посреди расчёта: результат отброшен, итог — по новому набору.
-    model.setLogLevelFilter({LogLevel::Info});
-    model.setLogLevelFilter({LogLevel::Warn, LogLevel::Info});
-    model.setHiddenFiles({b});
-    CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 10000), label + ": resets settle");
-    expected = shownByEnumeration(model);
-    CHECK(counter->shown(legend->chipFile(chipA)) == expected.value(legend->chipFile(chipA))
-              && counter->shown(legend->chipFile(chipB)) == 0,
-          label + ": after resets mid-count the counts match the final rows");
-
-    // Поток батчей: третий, большой файл грузится порциями — запусков счёта
-    // единицы, а не по порции.
+    CHECK(settledTab(tab) && testdocs::waitFor([&] { return legend->chipText(chipA).endsWith(QStringLiteral(" 320")); }, 10000),
+          QStringLiteral("%1: appended lines are counted: '%2'").arg(label, legend->chipText(chipA)));
+    CHECK(chipsSteady(QStringLiteral(" 320"), QStringLiteral(" 200")), label + ": the chips keep their size after an append");
+    // Третий, большой файл (другая разрядность числа): прежние чипы на месте.
     {
         const QString big = testdocs::writeFile(dir, QStringLiteral("ff-big-%1.log").arg(indexed),
                                                 numberedLines(0, 300000));
-        const int launches = counter->launchCount();
-        QElapsedTimer loading;
-        loading.start();
-        int batches = 0;
-        auto c = QObject::connect(&model, &LogModel::fileLinesChanged, [&batches]() { ++batches; });
         tab.addLogFile(big);
-        CHECK(settledTab(tab) && testdocs::waitFor([&] { return counter->isUpToDate(); }, 30000),
+        CHECK(settledTab(tab) && testdocs::waitFor([&] { return legend->chipCount() == 3; }, 30000),
               label + ": the big file loads");
-        QObject::disconnect(c);
-        // Не по порции: дебаунс (150 мс, не перезапускается порцией) склеивает
-        // порции — запусков не больше одного на окно дебаунса плюс конец.
-        // Сравнивать с числом порций нельзя: под TSan порция дольше окна, и
-        // запуск на порцию там верен.
-        const int runs = counter->launchCount() - launches;
-        const qint64 windows = loading.elapsed() / 150;
-        CHECK(runs <= windows + 2,
-              QStringLiteral("%1: %2 counting runs for %3 batches in %4 ms").arg(label)
-                  .arg(runs).arg(batches).arg(loading.elapsed()));
+        testdocs::waitFor([&] { return legend->chipText(3 - chipA - chipB).endsWith(QStringLiteral(" 300K")); }, 30000);
+        CHECK(chipsSteady(QStringLiteral(" 320"), QStringLiteral(" 200")), label + ": a new chip does not move the earlier ones");
+        int big3 = 3 - chipA - chipB;
+        CHECK(legend->chipText(big3).endsWith(QStringLiteral(" 300K")),
+              QStringLiteral("%1: big counts are shortened: '%2'").arg(label, legend->chipText(big3)));
     }
+    model.setHiddenFiles({b});
+    settledTab(tab);
 
     // Режим Hidden: легенды нет, фильтр по файлу остаётся.
     settings.setFileLabelMode(FileLabelMode::Hidden);
@@ -1223,6 +1288,7 @@ int main(int argc, char** argv)
     checkHiddenCounts(dir);
     checkHugeRowMode(dir);
     checkScrollRepaint(dir);
+    checkFileLabelWrap();
     checkFileLabelsTable();
     checkMergedTab(dir, false);
     checkMergedTab(dir, true);

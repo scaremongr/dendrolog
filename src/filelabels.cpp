@@ -81,7 +81,13 @@ QStringList build(const QStringList& names, int maxChars)
         while (prefix + suffix < minPieces - 1
                && samePieceAt([suffix](const QStringList& p) { return p[p.size() - 1 - suffix]; }))
             ++suffix;
-        for (const QStringList& p : split) {
+        for (int k = 0; k < split.size(); ++k) {
+            const QStringList& p = split[k];
+            // Имя, которое помещается целиком, не сокращается.
+            if (names[k].size() <= maxChars) {
+                labels << names[k];
+                continue;
+            }
             QString middle;
             for (int i = prefix; i < p.size() - suffix; ++i)
                 middle += p[i];
@@ -118,6 +124,34 @@ QStringList build(const QStringList& names, int maxChars)
         label = candidate;
     }
     return labels;
+}
+
+QStringList wrap(const QString& name, int charsPerLine, int maxLines)
+{
+    if (charsPerLine < 1 || maxLines < 1)
+        return {};
+    // Сначала — с разрывами после границ («payment-» / «service.log»);
+    // линий вышло больше, чем есть, — по ширине, без оглядки на границы.
+    for (const bool atBoundaries : {true, false}) {
+        QStringList lines;
+        int pos = 0;
+        while (pos < name.size() && lines.size() <= maxLines) {
+            int len = std::min<int>(charsPerLine, name.size() - pos);
+            if (atBoundaries && pos + len < name.size()) {
+                for (int cut = len; cut > charsPerLine / 2; --cut) {
+                    if (isBoundary(name[pos + cut - 1])) {
+                        len = cut;
+                        break;
+                    }
+                }
+            }
+            lines << name.mid(pos, len);
+            pos += len;
+        }
+        if (lines.size() <= maxLines)
+            return lines;
+    }
+    return {};
 }
 
 QString modeName(FileLabelMode mode)

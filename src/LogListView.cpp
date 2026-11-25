@@ -60,9 +60,14 @@ LogListView::LogListView(QWidget *parent)
     // Режим метки файла (U-23) — общая настройка: меняет её окно (View →
     // File Labels), все view, включая выдачу Search, следуют сами.
     m_fileLabelMode = AppSettings::instance().fileLabelMode();
+    m_fileColumnChars = AppSettings::instance().fileColumnChars();
     m_lineNumbersVisible = AppSettings::instance().lineNumbers();
+    // Движение мыши без кнопок — только курсор над границей колонки файла.
+    viewport()->setMouseTracking(true);
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
         setFileLabelMode(AppSettings::instance().fileLabelMode());
+        if (!m_columnDrag)
+            setFileColumnChars(AppSettings::instance().fileColumnChars());
         setLineNumbersVisible(AppSettings::instance().lineNumbers());
     });
     
@@ -227,6 +232,7 @@ void LogListView::setModel(QAbstractItemModel *model) {
         m_scrollbarMarks->setModel(logModel);
         m_lineNumberHighWater = 0;
         m_fileColumnWidth = computeFileColumnWidth();
+        rebuildFileLabels();
         m_lineNumberWidth = computeLineNumberWidth();
         if (logModel) {
             m_modelConnections << connect(logModel, &LogModel::fileSetChanged, this, [this]() {
@@ -876,11 +882,60 @@ int LogListView::computeFileColumnWidth() const
         return 0;
     if (m_fileLabelMode == FileLabelMode::ColorOnly)
         return kFileStripeWidth + kFileStripeGap;
-    const QFontMetrics fm(font());
-    int widest = 0;
+    return kFileStripeWidth + kFileLabelGap + fileLabelTextWidth(effectiveFileColumnChars())
+         + kBadgeHPadding + kFileStripeGap;
+}
+
+int LogListView::fileLabelTextWidth(int chars) const
+{
+    return int(std::ceil(chars * m_charWidth));
+}
+
+int LogListView::effectiveFileColumnChars() const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    int chars = m_fileColumnChars;
+    if (chars <= 0) {
+        // Авто: имена до kDefaultMaxChars видны целиком.
+        chars = kMinFileColumnChars;
+        if (logModel)
+            for (const LogModel::LabeledFile& f : logModel->labeledFiles())
+                chars = qMax(chars, int(f.file->shortName().size()));
+        chars = qMin(chars, FileLabels::kDefaultMaxChars);
+    }
+    // Колонка не шире половины вьюпорта: тексту должно остаться место.
+    const int most = qMax(kMinFileColumnChars, int(viewport()->width() / 2 / qMax<qreal>(1.0, m_charWidth)));
+    return qBound(kMinFileColumnChars, chars, most);
+}
+
+void LogListView::setFileColumnChars(int chars)
+{
+    chars = qMax(0, chars);
+    if (m_fileColumnChars == chars)
+        return;
+    m_fileColumnChars = chars;
+    applyLeftColumns();
+}
+
+void LogListView::rebuildFileLabels()
+{
+    m_fileShortLabels.clear();
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || m_fileLabelMode != FileLabelMode::Name || logModel->labeledFiles().size() < 2)
+        return;
+    QStringList names;
     for (const LogModel::LabeledFile& f : logModel->labeledFiles())
-        widest = qMax(widest, fm.horizontalAdvance(f.label));
-    return kFileStripeWidth + kFileLabelGap + widest + kBadgeHPadding + kFileStripeGap;
+        names << f.file->shortName();
+    const QStringList labels = FileLabels::build(names, effectiveFileColumnChars());
+    for (int i = 0; i < names.size(); ++i)
+        m_fileShortLabels.insert(logModel->labeledFiles()[i].file.get(), labels.value(i));
+}
+
+QRect LogListView::fileColumnHandleRect() const
+{
+    if (m_fileLabelMode != FileLabelMode::Name || m_fileColumnWidth <= 0)
+        return QRect();
+    return QRect(textAreaLeft() - kFileStripeGap, 0, kFileStripeGap + 2, viewport()->height());
 }
 
 void LogListView::updateFileColumn()
@@ -907,6 +962,7 @@ void LogListView::applyLeftColumns()
 {
     const int width = computeFileColumnWidth();
     const int numbers = computeLineNumberWidth();
+    rebuildFileLabels();   // O(числа файлов): метки — по ширине колонки
     if (width == m_fileColumnWidth && numbers == m_lineNumberWidth) {
         viewport()->update();   // метки могли смениться при той же ширине
         return;
@@ -1015,16 +1071,51 @@ const LogModel::LabeledFile* LogListView::rowFile(int row) const
     return logModel->labeledFile(reinterpret_cast<const LogFile*>(ptr));
 }
 
-QRect LogListView::fileLabelScreenRect(int row, const QString& label, qint64 rowTop, int rowHeight) const
+QStringList LogListView::fileLabelLinesFor(const LogModel::LabeledFile& file, int rowHeight) const
 {
-    Q_UNUSED(row);
-    const QFontMetrics fm(font());
-    const int h = fm.height() - 2;
+    // У строки в несколько линий имя пишется целиком — на стольких линиях,
+    // сколько у строки есть; не помещается и так — короткая метка.
+    const int chars = effectiveFileColumnChars();
+    const QString name = file.file->shortName();
+    const int rowLines = qMax(1, (rowHeight - kLineVerticalPadding) / qMax(1, m_lineHeight));
+    if (rowLines >= 2 && name.size() > chars) {
+        const QStringList lines = FileLabels::wrap(name, chars, rowLines);
+        if (!lines.isEmpty())
+            return lines;
+    }
+    return { m_fileShortLabels.value(file.file.get(), name) };
+}
+
+QRect LogListView::fileLabelScreenRect(const QStringList& lines, qint64 rowTop, int rowHeight) const
+{
     const int x = fileColumnLeft() + kFileStripeWidth + kFileLabelGap;
-    const int w = qMin(fm.horizontalAdvance(label) + kBadgeHPadding,
-                       m_fileColumnWidth - kFileStripeWidth - kFileLabelGap - kFileStripeGap);
+    const int most = m_fileColumnWidth - kFileStripeWidth - kFileLabelGap - kFileStripeGap;
+    if (lines.size() > 1) {
+        // Блок линий с шагом строк текста; прилипает к верху целиком.
+        const int h = int(lines.size()) * m_lineHeight;
+        const int slot = h + kLineVerticalPadding;
+        return QRect(x, stickyTop(rowTop, rowHeight, slot) + kLineVerticalPadding / 2, most, h);
+    }
+    const int h = m_lineHeight - 2;
+    const int w = qMin(fileLabelTextWidth(int(lines.value(0).size())) + kBadgeHPadding, most);
     const int top = stickyTop(rowTop, rowHeight, singleRowHeight()) + (singleRowHeight() - h) / 2;
     return QRect(x, top, w, h);
+}
+
+QStringList LogListView::fileLabelLines(int row) const
+{
+    if (m_fileLabelMode != FileLabelMode::Name || !model() || row < 0 || row >= model()->rowCount())
+        return {};
+    const LogModel::LabeledFile* file = rowFile(row);
+    return file ? fileLabelLinesFor(*file, getRowHeight(row)) : QStringList();
+}
+
+QRect LogListView::fileLabelRect(int row) const
+{
+    const QStringList lines = fileLabelLines(row);
+    if (lines.isEmpty())
+        return QRect();
+    return fileLabelScreenRect(lines, rowYOffset(row) - scrollContentY(), getRowHeight(row));
 }
 
 void LogListView::paintFileColumn(QPainter& painter, int row, int rowTop, int rowHeight)
@@ -1038,13 +1129,16 @@ void LogListView::paintFileColumn(QPainter& painter, int row, int rowTop, int ro
     // Полоса — на всю высоту строки: цвет файла виден в любой её части.
     painter.fillRect(QRect(fileColumnLeft(), rowTop, kFileStripeWidth, rowHeight), color);
     if (m_fileLabelMode == FileLabelMode::Name) {
-        const QRect r = fileLabelScreenRect(row, file->label, rowTop, rowHeight);
+        const QStringList lines = fileLabelLinesFor(*file, rowHeight);
+        const QRect r = fileLabelScreenRect(lines, rowTop, rowHeight);
         painter.fillRect(r, color);
         painter.setPen(AppTheme::instance().badgeFg);
-        painter.drawText(r.adjusted(kBadgeHPadding / 2, 0, -kBadgeHPadding / 2, 0),
-                         Qt::AlignVCenter | Qt::AlignLeft,
-                         QFontMetrics(font()).elidedText(file->label, Qt::ElideMiddle,
-                                                         r.width() - kBadgeHPadding));
+        painter.setClipRect(r);
+        const int lineH = r.height() / int(lines.size());
+        for (int i = 0; i < lines.size(); ++i)
+            painter.drawText(QRect(r.left() + kBadgeHPadding / 2, r.top() + i * lineH,
+                                   r.width() - kBadgeHPadding / 2, lineH),
+                             Qt::AlignVCenter | Qt::AlignLeft, lines[i]);
     }
     painter.restore();
 }
@@ -2544,6 +2638,11 @@ void LogListView::paintEvent(QPaintEvent *event) {
         currentY += rowHeight;
     }
 
+    // Граница колонки метки файла — её тянут мышью (fileColumnHandleRect).
+    if (const QRect handle = fileColumnHandleRect(); !handle.isEmpty())
+        painter.fillRect(QRect(textAreaLeft() - 2, visibleRect.top(), 1, visibleRect.height()),
+                         AppTheme::wrapRail(palette()));
+
     // Если реальные высоты отличались от оценок — перестроим prefix-суммы через 50 мс
     if (anyHeightChanged && !m_heightUpdateTimer->isActive()) {
         m_heightUpdateTimer->start(50);
@@ -2553,6 +2652,9 @@ void LogListView::paintEvent(QPaintEvent *event) {
 void LogListView::resizeEvent(QResizeEvent *event) {
     QListView::resizeEvent(event);
     placeNewLinesIndicator();
+    // Предел ширины колонки файла — половина вьюпорта.
+    if (m_fileColumnWidth > 0 && computeFileColumnWidth() != m_fileColumnWidth)
+        scheduleLeftColumns();
     
     if (m_anchorRow < 0)
         captureResizeAnchor();
@@ -2706,6 +2808,13 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
 
     // === Основная логика mousePressEvent ===
 
+    // 0. Граница колонки метки файла: протяжка меняет её ширину.
+    if (fileColumnHandleRect().contains(event->pos())) {
+        m_columnDrag = true;
+        event->accept();
+        return;
+    }
+
     // 1. Игнорируем если уже идёт выделение
     if (m_selection.isDragging) return;
 
@@ -2755,6 +2864,28 @@ void LogListView::invalidateSelectionRange(int topRow, int bottomRow) {
 
 // Обработка движения мыши — расширяет выделение на несколько строк.
 void LogListView::mouseMoveEvent(QMouseEvent *event) {
+    if (m_columnDrag) {
+        // Ширина — в символах, от левого края метки до курсора.
+        const int labelLeft = fileColumnLeft() + kFileStripeWidth + kFileLabelGap + kBadgeHPadding;
+        const int most = qMax(kMinFileColumnChars, int(viewport()->width() / 2 / qMax<qreal>(1.0, m_charWidth)));
+        const int chars = qBound(kMinFileColumnChars,
+                                 qRound((event->pos().x() - labelLeft) / qMax<qreal>(1.0, m_charWidth)), most);
+        setFileColumnChars(chars);
+        event->accept();
+        return;
+    }
+    if (event->buttons() == Qt::NoButton) {
+        // Движение без кнопок (mouse tracking): курсор над границей колонки.
+        const bool over = fileColumnHandleRect().contains(event->pos());
+        if (over != m_columnCursor) {
+            m_columnCursor = over;
+            if (over)
+                viewport()->setCursor(Qt::SplitHCursor);
+            else
+                viewport()->unsetCursor();
+        }
+        return;
+    }
     if (!m_selection.isDragging) return;
 
     const qint64 contentY = event->pos().y() + scrollContentY();
@@ -2792,6 +2923,13 @@ void LogListView::mouseMoveEvent(QMouseEvent *event) {
 
 // Завершение выделения при отпускании кнопки мыши
 void LogListView::mouseReleaseEvent(QMouseEvent *event) {
+    if (m_columnDrag) {
+        // Ширина — общая настройка: её берут все виды (и следующий запуск).
+        m_columnDrag = false;
+        AppSettings::instance().setFileColumnChars(m_fileColumnChars);
+        event->accept();
+        return;
+    }
     if (m_pendingChromeClick.row >= 0) {
         const PendingChromeClick pending = m_pendingChromeClick;
         m_pendingChromeClick = {};
@@ -2825,6 +2963,14 @@ void LogListView::mouseDoubleClickEvent(QMouseEvent *event)
     }
     if (event->button() != Qt::LeftButton) {
         QListView::mouseDoubleClickEvent(event);
+        return;
+    }
+    // Двойной щелчок по границе колонки файла — ширина «авто».
+    if (fileColumnHandleRect().contains(event->pos())) {
+        m_columnDrag = false;
+        setFileColumnChars(0);
+        AppSettings::instance().setFileColumnChars(0);
+        event->accept();
         return;
     }
     // Двойной щелчок по переключателю или рейке — второй щелчок по ним (по

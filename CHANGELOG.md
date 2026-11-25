@@ -9,15 +9,18 @@ All notable changes to DendroLog are documented here. The format follows
 ### Added
 - **File labels on the left.** In a tab with several files, the source file
   of a line is shown in a column left of the text: a stripe in the file's
-  colour down the whole line and a short label that tells the files apart
-  (the common start and end of the names are cut off). On a tall wrapped
-  line the label stays at the top of the screen. `View → File Labels`
+  colour down the whole line and the file name. A name that fits the column
+  is written whole; a longer one is shortened to the part that tells the
+  files apart, and on a line wrapped over several screen lines it is written
+  whole over several lines. Drag the column's right edge to resize it
+  (double-click — default width); the width is remembered. On a tall wrapped
+  line the name stays at the top of the screen. `View → File Labels`
   switches between Name, Color Only and Hidden.
 - **File filter.** Click a chip of the file legend to hide that file's lines
   and click again to bring them back; `Ctrl`+click shows only that file
   (again — all files). The last shown file cannot be hidden. A hidden file's
-  chip is dimmed and crossed out, and every chip shows "shown / total" while
-  a filter of the tab hides part of its lines. The **Files** button of the
+  chip is dimmed and crossed out; the number on a chip is always the file's
+  line count, and chips keep their size. The **Files** button of the
   Filters toolbar lights up while a file is hidden (click it to show all),
   **Reset Filters of This Tab** shows them again, and **Show in Full Log**
   pauses the file filter too. Hidden files are kept in sessions and with

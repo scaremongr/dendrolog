@@ -116,6 +116,7 @@ void AppSettings::load()
     s.beginGroup(QStringLiteral("View"));
     m_fileLabelMode = FileLabels::modeFromName(s.value(QStringLiteral("fileLabels")).toString());
     m_lineNumbers = s.value(QStringLiteral("lineNumbers"), false).toBool();
+    m_fileColumnChars = qBound(0, s.value(QStringLiteral("fileColumnChars"), 0).toInt(), 400);
     s.endGroup();
 
     s.beginGroup(QStringLiteral("QuickSearch"));
@@ -172,6 +173,7 @@ void AppSettings::save()
     s.beginGroup(QStringLiteral("View"));
     s.setValue(QStringLiteral("fileLabels"), FileLabels::modeName(m_fileLabelMode));
     s.setValue(QStringLiteral("lineNumbers"), m_lineNumbers);
+    s.setValue(QStringLiteral("fileColumnChars"), m_fileColumnChars);
     s.endGroup();
 
     writeQuickSearch(s);
@@ -306,6 +308,15 @@ void AppSettings::setLineNumbers(bool visible)
     if (m_lineNumbers == visible)
         return;
     m_lineNumbers = visible;
+    emit settingsChanged();
+}
+
+void AppSettings::setFileColumnChars(int chars)
+{
+    chars = qBound(0, chars, 400);
+    if (m_fileColumnChars == chars)
+        return;
+    m_fileColumnChars = chars;
     emit settingsChanged();
 }
 

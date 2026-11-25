@@ -5,7 +5,6 @@
 #include "apptheme.h"
 #include "logmodel.h"
 #include "shortcount.h"
-#include "fileshowncounter.h"
 
 #include <utility>
 #include <QApplication>
@@ -37,8 +36,6 @@ FileLegend::FileLegend(QWidget* parent)
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     setFocusPolicy(Qt::NoFocus);
     setCursor(Qt::PointingHandCursor);
-    m_counter = new FileShownCounter(this);
-    connect(m_counter, &FileShownCounter::countsChanged, this, &FileLegend::updateCounts);
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
         emit visibilityWanted(shouldShow());
     });
@@ -53,9 +50,10 @@ void FileLegend::setModel(LogModel* model)
     if (model) {
         m_setConnection = connect(model, &LogModel::fileSetChanged, this, &FileLegend::rebuild);
         m_linesConnection = connect(model, &LogModel::fileLinesChanged, this, &FileLegend::updateCounts);
-        m_filterConnection = connect(model, &LogModel::filterSettingsChanged, this, &FileLegend::updateCounts);
+        // Скрытый файл — другой вид чипа; число на чипе от фильтров не зависит.
+        m_filterConnection = connect(model, &LogModel::filterSettingsChanged, this,
+                                     qOverload<>(&QWidget::update));
     }
-    m_counter->setModel(model);
     rebuild();
 }
 
@@ -100,24 +98,16 @@ void FileLegend::updateCounts()
         m_chips[i].lines = files[i].lines;
         m_chips[i].count = countText(m_chips[i]);
     }
-    // Ширина числа в пикселях могла смениться и при той же длине —
-    // раскладка O(числа чипов).
-    if (layoutChips(width(), &m_chips) != height())
-        updateGeometry();
+    // Ширина чипа от числа не зависит (под число — постоянное место), так
+    // что раскладка не меняется: легенда не «скачет» на дозаписи.
     update();
 }
 
 QString FileLegend::countText(const Chip& chip) const
 {
-    // «показано / всего», когда фильтр вкладки скрывает часть строк файла;
-    // пока числа файла нет (первый счёт, новый файл) — только «всего».
-    const QString total = ShortCount::format(chip.lines, 100000, true);
-    if (!m_model || !m_model->hasFilters() || !m_counter->knows(chip.file))
-        return total;
-    const qint64 shown = m_counter->shown(chip.file);
-    if (shown == chip.lines)
-        return total;
-    return ShortCount::format(shown, 100000, true) + QStringLiteral(" / ") + total;
+    // Всегда — сколько строк файла во вкладке, при любых фильтрах: скрытый
+    // файл показывал бы «0 / N», а это ничего не сообщает.
+    return ShortCount::format(chip.lines, 100000, true);
 }
 
 bool FileLegend::isChipHidden(int chip) const
@@ -190,23 +180,17 @@ void FileLegend::mouseReleaseEvent(QMouseEvent* event)
     QWidget::mouseReleaseEvent(event);
 }
 
-void FileLegend::showEvent(QShowEvent* event)
-{
-    QWidget::showEvent(event);
-    m_counter->setActive(true);
-}
-
-void FileLegend::hideEvent(QHideEvent* event)
-{
-    QWidget::hideEvent(event);
-    m_counter->setActive(false);
-}
-
 int FileLegend::chipWidth(const Chip& chip) const
 {
     const QFontMetrics fm(font());
+    // Под число — место самого широкого («99,999»; сокращённые короче).
     return kChipPadX + kSwatch + kSwatchGap + fm.horizontalAdvance(chip.name) + kCountGap
-         + fm.horizontalAdvance(chip.count) + kChipPadX;
+         + countFieldWidth() + kChipPadX;
+}
+
+int FileLegend::countFieldWidth() const
+{
+    return QFontMetrics(font()).horizontalAdvance(QStringLiteral("99,999"));
 }
 
 int FileLegend::layoutChips(int width, QVector<Chip>* chips) const
@@ -306,8 +290,8 @@ void FileLegend::paintEvent(QPaintEvent*)
         p.setFont(font());
         x += fm.horizontalAdvance(chip.name) + kCountGap;
         p.setPen(AppTheme::wrapToggleFg(pal));
-        p.drawText(QRect(x, chip.rect.top(), fm.horizontalAdvance(chip.count) + 1, chip.rect.height()),
-                   Qt::AlignVCenter | Qt::AlignLeft, chip.count);
+        p.drawText(QRect(x, chip.rect.top(), countFieldWidth(), chip.rect.height()),
+                   Qt::AlignVCenter | Qt::AlignRight, chip.count);
         p.setOpacity(1.0);
     }
 }
@@ -321,13 +305,7 @@ bool FileLegend::event(QEvent* event)
             QLocale c = QLocale::c();
             c.setNumberOptions(QLocale::DefaultNumberOptions);
             const Chip& chip = m_chips[i];
-            const bool filtered = m_model && m_model->hasFilters();
-            const QString lines = !filtered
-                ? tr("%1 line(s) in this tab").arg(c.toString(chip.lines))
-                : m_counter->knows(chip.file)
-                    ? tr("%1 line(s) in this tab, %2 shown")
-                          .arg(c.toString(chip.lines), c.toString(m_counter->shown(chip.file)))
-                    : tr("%1 line(s) in this tab, counting shown lines…").arg(c.toString(chip.lines));
+            const QString lines = tr("%1 line(s) in this tab").arg(c.toString(chip.lines));
             QToolTip::showText(help->globalPos(),
                                tr("%1\n%2\nClick to hide or show this file; "
                                   "Ctrl+click to show only this file")

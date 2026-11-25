@@ -3,6 +3,7 @@
 
 #include <QListView>
 #include <QDateTime>
+#include <QHash>
 #include <QMap>
 #include <QSet>
 #include <QStringView>
@@ -240,6 +241,22 @@ public:
     FileLabelMode fileLabelMode() const { return m_fileLabelMode; }
     // Ширина колонки (0 — нет) и левый край текста — тестам.
     int fileColumnWidth() const { return m_fileColumnWidth; }
+    // Ширина колонки в символах: её задаёт пользователь — протяжкой границы
+    // колонки мышью (двойной щелчок по границе — авто) — и хранит
+    // [View] fileColumnChars; 0 — авто (самое длинное имя, не больше
+    // FileLabels::kDefaultMaxChars). effective — действующая, с пределом в
+    // половину вьюпорта.
+    void setFileColumnChars(int chars);
+    int fileColumnChars() const { return m_fileColumnChars; }
+    int effectiveFileColumnChars() const;
+    // Граница колонки, за которую её тянут (пусто — колонки с именем нет).
+    QRect fileColumnHandleRect() const;
+    // Что написано в колонке у строки: имя целиком, если помещается; у
+    // строки в несколько линий — имя целиком на нескольких линиях (сколько
+    // у строки есть); иначе короткая метка FileLabels::build по ширине
+    // колонки. И экранный прямоугольник метки (с прилипанием).
+    QStringList fileLabelLines(int row) const;
+    QRect fileLabelRect(int row) const;
     int textLeft() const { return textAreaLeft(); }
 
     // ---- Номера строк (U-23, часть 3) ------------------------------------------
@@ -530,6 +547,14 @@ private:
     static constexpr int kFileStripeGap = 5;
     FileLabelMode m_fileLabelMode = FileLabelMode::Name;
     int m_fileColumnWidth = 0;
+    int m_fileColumnChars = 0;                          // 0 — авто
+    QHash<const LogFile*, QString> m_fileShortLabels;   // метки по ширине колонки
+    bool m_columnDrag = false;
+    bool m_columnCursor = false;
+    static constexpr int kMinFileColumnChars = 3;
+    void rebuildFileLabels();
+    QStringList fileLabelLinesFor(const LogModel::LabeledFile& file, int rowHeight) const;
+    int fileLabelTextWidth(int chars) const;
     static constexpr int kLineNumberPadX = 4;
     bool m_lineNumbersVisible = false;
     int m_lineNumberWidth = 0;
@@ -547,7 +572,7 @@ private:
     mutable qint64 m_lineNumberHighWater = 0;
     QTimer* m_leftColumnsTimer = nullptr;
     const LogModel::LabeledFile* rowFile(int row) const;
-    QRect fileLabelScreenRect(int row, const QString& label, qint64 rowTop, int rowHeight) const;
+    QRect fileLabelScreenRect(const QStringList& lines, qint64 rowTop, int rowHeight) const;
     void paintFileColumn(QPainter& painter, int row, int rowTop, int rowHeight);
 
     // ========== Константы геометрии и отрисовки ==========

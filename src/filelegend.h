@@ -5,7 +5,6 @@
 #include <QWidget>
 
 class LogModel;
-class FileShownCounter;
 class LogListView;
 struct LogFile;
 
@@ -18,6 +17,8 @@ struct LogFile;
 // (shouldShow; ставит и прячет её вкладка — LogViewWidget). Число строк — у
 // хранилища за O(1) на файл, обновляется на события модели без прохода по
 // строкам; больше 99 999 — сокращённо, точное — в подсказке вместе с путём.
+// Число — всегда «всего», при любых фильтрах (и у скрытого файла), и стоит
+// в поле постоянной ширины: чипы не меняют размер и легенда не «скачет».
 // Контекстное меню чипа: следующая / предыдущая строка файла (от выбранной
 // строки, через LogListView::goToRow — в историю переходов), Copy Path,
 // Show in Folder. Цвета — AppTheme::fileColor, как у полос строк.
@@ -46,7 +47,6 @@ public:
     // ничего не изменилось.
     bool toggleFile(int chip, bool only);
     bool isChipHidden(int chip) const;
-    FileShownCounter* shownCounter() const { return m_counter; }
 
     bool hasHeightForWidth() const override { return true; }
     int heightForWidth(int width) const override;
@@ -63,8 +63,6 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
-    void showEvent(QShowEvent* event) override;
-    void hideEvent(QHideEvent* event) override;
     bool event(QEvent* event) override;
     void changeEvent(QEvent* event) override;
 
@@ -72,7 +70,7 @@ private:
     struct Chip {
         const LogFile* file = nullptr;
         QString name;
-        QString count;          // «всего» или «показано / всего»
+        QString count;          // строк файла во вкладке (от фильтров не зависит)
         QString path;           // показывать (displayPath)
         QString filePath;       // ключ фильтра по файлу (LogModel::hiddenFiles)
         qint64 lines = 0;
@@ -85,11 +83,11 @@ private:
     // Раскладка чипов по ширине width; возвращает высоту.
     int layoutChips(int width, QVector<Chip>* chips) const;
     int chipWidth(const Chip& chip) const;
+    int countFieldWidth() const;
 
     QPointer<LogModel> m_model;
     QPointer<LogListView> m_view;
     QVector<Chip> m_chips;
-    FileShownCounter* m_counter = nullptr;
     QMetaObject::Connection m_setConnection;
     QMetaObject::Connection m_linesConnection;
     QMetaObject::Connection m_filterConnection;

@@ -103,6 +103,10 @@ public:
     // [View] fileLabels.
     FileLabelMode fileLabelMode() const { return m_fileLabelMode; }
     void setFileLabelMode(FileLabelMode mode);
+    // Ширина колонки метки файла в символах ([View] fileColumnChars);
+    // 0 — авто: по самому длинному имени, но не шире kDefaultMaxChars.
+    int fileColumnChars() const { return m_fileColumnChars; }
+    void setFileColumnChars(int chars);
     // Номера строк в логе (U-23), [View] lineNumbers, по умолчанию выключены.
     bool lineNumbers() const { return m_lineNumbers; }
     void setLineNumbers(bool visible);
@@ -229,6 +233,7 @@ private:
     int         m_scanRefreshIntervalSecs { 30 };
     bool        m_wordWrap        { true };
     FileLabelMode m_fileLabelMode { FileLabelMode::Name };
+    int m_fileColumnChars { 0 };
     bool        m_lineNumbers     { false };
     ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };

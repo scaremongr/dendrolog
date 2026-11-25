@@ -76,8 +76,13 @@ void LogModel::appendEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 
 void LogModel::mergeEntries(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
 {
-    if (auto* r = residentOrNull())
+    if (auto* r = residentOrNull()) {
         r->mergeEntries(sortedBatch);
+        // Порция, все строки которой скрыл фильтр, не даёт ни rowsInserted,
+        // ни modelFiltered — число строк файла (легенда) обновляется здесь.
+        // O(числа файлов).
+        refreshFileSet();
+    }
 }
 
 NavHistory& LogModel::navHistory() const
