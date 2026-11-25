@@ -1350,10 +1350,15 @@ void DirectoryScanner::onHeaderClicked(int column)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-bool DirectoryScanner::matchesExtension(const QString& fileName) const
+QStringList DirectoryScanner::effectiveExtensions() const
 {
     static const QStringList kDefault{ QStringLiteral("log"), QStringLiteral("txt") };
-    return scannerNameMatches(fileName, m_extensions.isEmpty() ? kDefault : m_extensions);
+    return m_extensions.isEmpty() ? kDefault : m_extensions;
+}
+
+bool DirectoryScanner::matchesExtension(const QString& fileName) const
+{
+    return scannerNameMatches(fileName, effectiveExtensions());
 }
 
 QString DirectoryScanner::formatAlerts(int fatals, int errors, int warns)

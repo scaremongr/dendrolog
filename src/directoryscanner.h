@@ -137,6 +137,9 @@ public:
 
     // Call before scan() to pick up the latest settings.
     void setFileExtensions(const QStringList& extensions);
+    // Расширения, по которым отбираются файлы (пустой список настроек —
+    // log и txt); имя — scannerNameMatches. Им же отбираются члены zip.
+    QStringList effectiveExtensions() const;
 
     // Clears the tree and starts a fresh scan of rootPath.
     // Running workers finish gracefully; stale results are silently discarded.

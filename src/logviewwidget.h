@@ -54,6 +54,14 @@ public:
     // закладки — до файлов (BookmarkStore::restore): строки находятся по ходу
     // загрузки, заметки не теряются.
     void addFilesFrom(const LogViewWidget& other);
+    // Член zip (F-2, шаг 4): извлекается во временную копию
+    // (SourceUnpacker::unpackZipMember; член-gzip — распакованным) и дальше
+    // живёт как сжатый файл: LogSource{Archive, архив, member}, F5, память
+    // файла по архиву и имени, закладки и сессии с именем члена. Файл из
+    // каталога, который сканер извлёк из архива (ArchiveRegistry), addLogFile
+    // направляет сюда сам. Пустой member — addLogFile(archivePath).
+    void addArchiveMember(const QString& archivePath, const QString& member,
+                          const FileEncoding& initial = FileEncoding());
 
     // ---- Сжатые источники (F-2, docs/design/F-2.md, шаг 2) -----------------------
     // Файл с сигнатурой gzip (по байтам, не по имени) распаковывается целиком
@@ -453,8 +461,15 @@ private:
     FileEncoding pendingArchiveEncoding(const LogFilePtr& logFile) const;
     void setPendingArchiveEncoding(const LogFilePtr& logFile, const FileEncoding& encoding);
     // Тот же источник, что путь, открытый пользователем.
-    static bool sameSource(const LogFilePtr& logFile, const QString& path);
-    void addArchive(const QString& archivePath, const FileEncoding& initial);
+    // Член архива — по пути архива и имени (F-2, шаг 4).
+    static bool sameSource(const LogFilePtr& logFile, const QString& path,
+                           const QString& member = QString());
+    void addArchive(const QString& archivePath, const FileEncoding& initial,
+                    const QString& member = QString());
+    // Файл уже во вкладке, его открывают снова (память, снимок, --encoding).
+    void reopenLoaded(const LogFilePtr& file, const FileEncoding& initial);
+    // Источник снимка или памяти: обычный файл, .gz или член zip.
+    void openSource(const QString& path, const QString& member, const FileEncoding& initial);
     void startUnpack(const LogFilePtr& logFile);
     void handleUnpackFinished(const LogFilePtr& logFile, quint64 job, bool ok,
                               const QString& message);

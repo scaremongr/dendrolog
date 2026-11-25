@@ -7,6 +7,7 @@
 #include <QObject>
 #include <QString>
 #include <QThreadPool>
+#include <QVector>
 
 #include <atomic>
 #include <functional>
@@ -34,6 +35,20 @@
 //
 // Отмена и любая ошибка удаляют частичный файл: результата либо нет, либо он
 // целиком проверен (CRC и длина каждого потока gzip).
+//
+// zip (шаг 4, ziparchive.h):
+//   • unpackZip — набор файлов во временный КАТАЛОГ (сканер): только члены,
+//     которые принял фильтр (имена логов из настроек и их .gz); имена
+//     обезврежены ArchiveNames::safeRelativePath, ссылки и члены с паролем
+//     пропускаются и считаются. Место ДО начала — сумма размеров отобранных
+//     членов из оглавления (они точные) плюс резерв, по ходу — как у gzip.
+//     Ошибка или отмена удаляют каталог целиком (воркер, до итога; ждать его
+//     для этого не нужно). Повтор имени члена — извлекается первый;
+//   • unpackZipMember — один член в ФАЙЛ (вкладка: открыть из сканера,
+//     восстановить закладки, память файла, сессию по имени члена). Член,
+//     который сам gzip (`app.log.gz` в архиве), распаковывается дальше в тот
+//     же файл — вкладка получает текст.
+// Прогресс у zip — распакованные байты из суммы размеров оглавления.
 // ============================================================================
 class SourceUnpacker : public QObject {
     Q_OBJECT
@@ -57,8 +72,22 @@ public:
         qint64 bytesWritten = 0;  // распакованных байт (при ошибке — сколько успели)
         qint64 requiredBytes = 0; // NoSpace: сколько требовалось (с резервом)
         qint64 availableBytes = 0;// NoSpace: сколько было свободно
+        // unpackZip: что извлечено (имя в архиве → путь относительно каталога)
+        // и что пропущено.
+        struct Extracted {
+            QString member;       // имя в архиве (как записано, '/')
+            QString relativePath; // путь в каталоге извлечения
+            qint64 size = 0;
+        };
+        QVector<Extracted> extracted;
+        int skippedUnsafe = 0;    // опасное имя (.., абсолютный путь, диск) или ссылка
+        int skippedEncrypted = 0; // с паролем или неизвестным методом сжатия
         bool ok() const { return error == Error::None; }
     };
+
+    // Фильтр членов для unpackZip: имя в архиве → извлекать ли. Зовётся в
+    // воркере: только копии данных, без живых объектов GUI-потока.
+    using MemberFilter = std::function<bool(const QString& memberName)>;
 
     // Сколько байт свободно на томе каталога dir (-1 — неизвестно: проверка
     // пропускается). Зовётся в воркере.
@@ -81,6 +110,11 @@ public:
     // Result::job; 0 — воркер ещё занят прежним заданием, ничего не запущено.
     // Итог — сигнал finished.
     quint64 unpackGzip(const QString& sourcePath, const QString& targetPath);
+    // zip целиком (отобранные члены) в каталог targetDir (создаётся; при
+    // ошибке и отмене удаляется). Номер задания — как у unpackGzip.
+    quint64 unpackZip(const QString& zipPath, const QString& targetDir, MemberFilter accept);
+    // Один член zip в файл targetPath; член-gzip — распакованным.
+    quint64 unpackZipMember(const QString& zipPath, const QString& member, const QString& targetPath);
 
     // Отменить идущее задание (finished придёт с Cancelled, файла не будет).
     // Прерывание срабатывает на ближайшем блоке входа (GzipDevice::setAbortFlag).
@@ -107,6 +141,9 @@ signals:
 
 private:
     void onWorkerFinished(const SourceUnpacker::Result& result);
+    struct Job;
+    quint64 start(const std::function<void(Job&)>& body, const QString& sourcePath,
+                  const QString& targetPath);
 
     QThreadPool m_pool;
     std::atomic_bool m_cancel{false};

@@ -1,5 +1,5 @@
-// Тест ядра сжатых источников (F-2, шаг 1): GzipDevice, SourceUnpacker,
-// SpoolDir / SpoolItem. Без виджетов и без окна.
+// Тест ядра сжатых источников (F-2, шаги 1 и 4): GzipDevice, ZipArchive,
+// SourceUnpacker (gzip и zip), SpoolDir / SpoolItem. Без виджетов и без окна.
 //
 // Фикстуры настоящего gzip (утилита gzip 1.12) зашиты массивами байт: двоичные
 // файлы в репозитории на Windows рискуют пострадать от core.autocrlf. Большие
@@ -17,6 +17,10 @@
 #include "logfile.h"
 #include "sourceunpacker.h"
 #include "spooldir.h"
+#include "recordid.h"
+#include "ziparchive.h"
+
+#include "../common/zipbytes.h"
 
 #include <miniz.h>
 
@@ -1003,6 +1007,475 @@ void testDiskSpace(const QDir& dir)
     }
 }
 
+
+// ===========================================================================
+// zip (F-2, шаг 4)
+// ===========================================================================
+
+// Настоящий zip — Info-ZIP 3.0 (`zip -X -r`, затем `zip -0` для
+// logs/sub/debug.log): каталоги, deflate и stored.
+const unsigned char kInfoZip[] = {
+    0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79, 0x5d, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x6c, 0x6f,
+    0x67, 0x73, 0x2f, 0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79,
+    0x5d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00,
+    0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x73, 0x75, 0x62, 0x2f, 0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79, 0x5d, 0x8b, 0xd7, 0xf4, 0x75, 0x12, 0x00, 0x00, 0x00,
+    0x12, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x73, 0x75, 0x62,
+    0x2f, 0x64, 0x65, 0x62, 0x75, 0x67, 0x2e, 0x6c, 0x6f, 0x67, 0x6c, 0x69, 0x6e, 0x65, 0x20, 0x6f,
+    0x6e, 0x65, 0x0a, 0x6c, 0x69, 0x6e, 0x65, 0x20, 0x74, 0x77, 0x6f, 0x0a, 0x50, 0x4b, 0x03, 0x04,
+    0x14, 0x00, 0x00, 0x00, 0x08, 0x00, 0x21, 0xa0, 0x79, 0x5d, 0xc6, 0x3c, 0x54, 0x43, 0x2d, 0x00,
+    0x00, 0x00, 0x3e, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x61,
+    0x70, 0x70, 0x2e, 0x6c, 0x6f, 0x67, 0x33, 0x32, 0x30, 0x32, 0xd3, 0x35, 0x30, 0x04, 0x22, 0x05,
+    0x43, 0x03, 0x2b, 0x03, 0x10, 0x52, 0xf0, 0xf4, 0x73, 0xf3, 0x57, 0x28, 0x2e, 0x49, 0x2c, 0x2a,
+    0xe1, 0x32, 0xc2, 0x90, 0x36, 0x54, 0x70, 0x0d, 0x0a, 0xf2, 0x0f, 0x52, 0x48, 0xca, 0xcf, 0xcf,
+    0xe5, 0x02, 0x00, 0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79,
+    0x5d, 0x3e, 0xd2, 0xd8, 0xd6, 0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00,
+    0x00, 0x72, 0x65, 0x61, 0x64, 0x6d, 0x65, 0x2e, 0x6d, 0x64, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x0a,
+    0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79, 0x5d,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xed, 0x41, 0x00, 0x00, 0x00, 0x00, 0x6c, 0x6f,
+    0x67, 0x73, 0x2f, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0xa0, 0x79, 0x5d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0xed, 0x41, 0x23, 0x00, 0x00,
+    0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x73, 0x75, 0x62, 0x2f, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xa0, 0x79, 0x5d, 0x8b, 0xd7, 0xf4, 0x75, 0x12, 0x00,
+    0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xa4, 0x81, 0x4a, 0x00, 0x00, 0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x73, 0x75, 0x62,
+    0x2f, 0x64, 0x65, 0x62, 0x75, 0x67, 0x2e, 0x6c, 0x6f, 0x67, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03,
+    0x14, 0x00, 0x00, 0x00, 0x08, 0x00, 0x21, 0xa0, 0x79, 0x5d, 0xc6, 0x3c, 0x54, 0x43, 0x2d, 0x00,
+    0x00, 0x00, 0x3e, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0xa4, 0x81, 0x8c, 0x00, 0x00, 0x00, 0x6c, 0x6f, 0x67, 0x73, 0x2f, 0x61, 0x70, 0x70,
+    0x2e, 0x6c, 0x6f, 0x67, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x21, 0xa0, 0x79, 0x5d, 0x3e, 0xd2, 0xd8, 0xd6, 0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa4, 0x81, 0xe3, 0x00,
+    0x00, 0x00, 0x72, 0x65, 0x61, 0x64, 0x6d, 0x65, 0x2e, 0x6d, 0x64, 0x50, 0x4b, 0x05, 0x06, 0x00,
+    0x00, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 0x1b, 0x01, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00,
+    0x00,
+};
+
+const QByteArray kInfoAppLog("2026-01-01 10:00:00 INFO start\n2026-01-01 10:00:01 ERROR boom\n");
+const QByteArray kInfoDebugLog("line one\nline two\n");
+
+QByteArray infoZip() { return QByteArray(reinterpret_cast<const char*>(kInfoZip), int(sizeof(kInfoZip))); }
+
+struct ZipRun {
+    SourceUnpacker::Result result;
+    qint64 lastProgress = -1;
+    qint64 progressTotal = -1;
+};
+
+ZipRun runJob(SourceUnpacker& unpacker, const std::function<quint64()>& startJob)
+{
+    ZipRun zr;
+    bool done = false;
+    QObject ctx;
+    QObject::connect(&unpacker, &SourceUnpacker::progress, &ctx, [&zr](qint64 d, qint64 t) {
+        CHECK(d >= zr.lastProgress);
+        zr.lastProgress = d;
+        zr.progressTotal = t;
+    });
+    QObject::connect(&unpacker, &SourceUnpacker::finished, &ctx,
+                     [&zr, &done](const SourceUnpacker::Result& r) {
+                         zr.result = r;
+                         done = true;
+                     });
+    CHECK(startJob() != 0);
+    CHECK(waitFor([&done] { return done; }));
+    return zr;
+}
+
+bool logOrGz(const QString& member)
+{
+    const QString name = QFileInfo(member).fileName().toLower();
+    return name.endsWith(QLatin1String(".log")) || name.endsWith(QLatin1String(".log.gz"));
+}
+
+QStringList filesUnder(const QString& root)
+{
+    QStringList out;
+    QDir base(root);
+    std::function<void(const QString&)> walk = [&](const QString& dir) {
+        const QFileInfoList list = QDir(dir).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+        for (const QFileInfo& fi : list) {
+            if (fi.isDir() && !fi.isSymLink())
+                walk(fi.absoluteFilePath());
+            else
+                out << base.relativeFilePath(fi.absoluteFilePath());
+        }
+    };
+    walk(root);
+    out.sort();
+    return out;
+}
+
+void testZipReader(const QDir& dir)
+{
+    const QString path = writeBytes(dir, QStringLiteral("info.zip"), infoZip());
+    CHECK(ZipArchive::fileHasSignature(path));
+    CHECK(!GzipDevice::fileHasSignature(path));
+    CHECK(ZipArchive::hasSignature(testzip::zip({})));          // пустой архив — «PK\5\6»
+    CHECK(!ZipArchive::hasSignature(QByteArray("PK")));
+    CHECK(!ZipArchive::fileHasSignature(writeBytes(dir, QStringLiteral("plain.zip"), "hello\n")));
+
+    ZipArchive zip(path);
+    CHECK(zip.open());
+    CHECK_EQ(zip.members().size(), qsizetype(5));
+    const int app = zip.find(QStringLiteral("logs/app.log"));
+    const int debug = zip.find(QStringLiteral("logs/sub/debug.log"));
+    CHECK(app >= 0 && debug >= 0);
+    CHECK(zip.find(QStringLiteral("logs/")) >= 0 && zip.members().at(zip.find(QStringLiteral("logs/"))).directory);
+    CHECK(zip.find(QStringLiteral("nope.log")) < 0);
+    for (const auto& [index, expected] : {std::make_pair(app, kInfoAppLog), std::make_pair(debug, kInfoDebugLog)}) {
+        QBuffer buffer;
+        buffer.open(QIODevice::WriteOnly);
+        CHECK(zip.extract(zip.members().at(index), buffer));
+        CHECK(buffer.data() == expected);
+    }
+
+    // Имена: UTF-8 с флагом и без, OEM (IBM866) без флага.
+    testzip::Entry utf8 = testzip::file(QStringLiteral("журнал.log").toUtf8(), "a\n");
+    testzip::Entry utf8NoFlag = testzip::file(QStringLiteral("отчёт.log").toUtf8(), "b\n");
+    utf8NoFlag.utf8Flag = false;
+    testzip::Entry oem = testzip::file(QByteArray("\x8B\xAE\xA3.log"), "c\n"); // «Лог» в cp866
+    oem.utf8Flag = false;
+    const QString names = writeBytes(dir, QStringLiteral("names.zip"), testzip::zip({utf8, utf8NoFlag, oem}));
+    ZipArchive named(names);
+    CHECK(named.open());
+    CHECK(named.find(QStringLiteral("журнал.log")) >= 0);
+    CHECK(named.find(QStringLiteral("отчёт.log")) >= 0);
+    CHECK(named.find(QStringLiteral("Лог.log")) >= 0);
+
+    // Повреждения: не zip, обрезан, неверный CRC, данные длиннее заявленного.
+    ZipArchive notZip(writeBytes(dir, QStringLiteral("text.zip"), "just text\n"));
+    CHECK(!notZip.open());
+    CHECK(notZip.error() == ZipArchive::Error::NotZip);
+    QByteArray cut = infoZip();
+    cut.chop(30);
+    ZipArchive truncated(writeBytes(dir, QStringLiteral("cut.zip"), cut));
+    CHECK(!truncated.open());
+    CHECK(truncated.error() == ZipArchive::Error::Corrupt || truncated.error() == ZipArchive::Error::NotZip);
+
+    testzip::Entry badCrc = testzip::file("bad.log", makeLog(100000, 5));
+    badCrc.badCrc = true;
+    testzip::Entry badCrcStored = testzip::file("bad-stored.log", "stored data\n", false);
+    badCrcStored.badCrc = true;
+    testzip::Entry bomb = testzip::file("bomb.log", QByteArray(8 * 1024 * 1024, '\0'));
+    bomb.declaredSize = 1000; // разворачивается больше заявленного
+    ZipArchive broken(writeBytes(dir, QStringLiteral("broken.zip"), testzip::zip({badCrc, badCrcStored, bomb})));
+    CHECK(broken.open());
+    for (const QString& name : {QStringLiteral("bad.log"), QStringLiteral("bad-stored.log"), QStringLiteral("bomb.log")}) {
+        QBuffer buffer;
+        buffer.open(QIODevice::WriteOnly);
+        CHECK(!broken.extract(broken.members().at(broken.find(name)), buffer));
+        CHECK(broken.error() == ZipArchive::Error::Corrupt);
+        CHECK(buffer.size() <= 8 * 1024 * 1024);
+    }
+    // Флаг прерывания.
+    std::atomic_bool abort{true};
+    ZipArchive info(path);
+    CHECK(info.open());
+    QBuffer sink;
+    sink.open(QIODevice::WriteOnly);
+    CHECK(!info.extract(info.members().at(info.find(QStringLiteral("logs/app.log"))), sink, &abort));
+    CHECK(info.error() == ZipArchive::Error::Aborted);
+}
+
+void testArchiveNames()
+{
+    const auto safe = [](const char* name) { return ArchiveNames::safeRelativePath(QString::fromUtf8(name)); };
+    CHECK(safe("app.log") == QStringLiteral("app.log"));
+    CHECK(safe("logs/sub/app.log") == QStringLiteral("logs/sub/app.log"));
+    CHECK(safe("logs\\win\\app.log") == QStringLiteral("logs/win/app.log"));
+    CHECK(safe("./logs//app.log") == QStringLiteral("logs/app.log"));
+    // Отбрасываются.
+    for (const char* bad : {"", "logs/", "/etc/passwd.log", "\\\\server\\share\\x.log", "C:\\x.log", "c:x.log",
+                            "../x.log", "a/../../x.log", "logs/../x.log", "..\\x.log", "a/..", "..", "/"})
+        CHECK(safe(bad).isEmpty());
+    // Заменяются.
+    CHECK(safe("bad:name?.log") == QStringLiteral("bad_name_.log"));
+    CHECK(safe("a<b>|\"*.log") == QStringLiteral("a_b___.log") || safe("a<b>|\"*.log") == QStringLiteral("a_b____.log"));
+    CHECK(safe("tab\there.log") == QStringLiteral("tab_here.log"));
+    CHECK(safe("con.log") == QStringLiteral("_con.log"));
+    CHECK(safe("logs/NUL") == QStringLiteral("logs/_NUL"));
+    CHECK(safe("Com1.txt") == QStringLiteral("_Com1.txt"));
+    CHECK(safe("com10.txt") == QStringLiteral("com10.txt"));
+    CHECK(safe("console.log") == QStringLiteral("console.log"));
+    CHECK(safe("trailing.log. ") == QStringLiteral("trailing.log"));
+    CHECK(safe("dir./x.log") == QStringLiteral("dir/x.log"));
+    CHECK(safe(".../x.log") == QStringLiteral("_/x.log"));
+}
+
+void testUnpackZip(const QDir& dir)
+{
+    // Набор: вложенные каталоги, опасные имена, ссылка, пароль,
+    // зарезервированное и недопустимое имя, повтор по регистру, .gz внутри,
+    // не-лог (отсеивает фильтр).
+    const QByteArray nested = makeLog(300000, 21);
+    QList<testzip::Entry> entries = {
+        testzip::file("logs/app.log", kInfoAppLog),
+        testzip::file("logs/deep/er/x.log", nested),
+        testzip::file("stored.log", "stored\n", false),
+        testzip::file("../evil.log", "evil\n"),
+        testzip::file("/abs.log", "abs\n"),
+        testzip::file("C:\\win.log", "win\n"),
+        testzip::file("..\\back.log", "back\n"),
+        testzip::file("a/../../up.log", "up\n"),
+        testzip::file("con.log", "reserved\n"),
+        testzip::file("bad:name?.log", "bad name\n"),
+        testzip::file("Case.log", "upper\n"),
+        testzip::file("case.log", "lower\n"),
+        testzip::file("inner/app.log.gz", gzipMember(kInfoAppLog, 6)),
+        testzip::file("readme.md", "not a log\n"),
+    };
+    testzip::Entry link = testzip::file("link.log", "/etc/passwd", false);
+    link.symlink = true;
+    testzip::Entry secret = testzip::file("secret.log", "xxxx", false);
+    secret.encrypted = true;
+    testzip::Entry folder;
+    folder.name = "logs/";
+    folder.directory = true;
+    entries << link << secret << folder;
+    const QString zipPath = writeBytes(dir, QStringLiteral("bundle.zip"), testzip::zip(entries));
+    const QString outer = dir.filePath(QStringLiteral("zipout"));
+    QDir().mkpath(outer);
+    const QString target = outer + QStringLiteral("/bundle");
+
+    SourceUnpacker unpacker;
+    unpacker.setFreeSpaceFunction([](const QString&) { return qint64(1) << 50; });
+    const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackZip(zipPath, target, &logOrGz); });
+    CHECK(zr.result.ok());
+    if (!zr.result.ok())
+        std::fprintf(stderr, "  unpackZip: %s\n", qPrintable(zr.result.message));
+    CHECK_EQ(zr.result.skippedUnsafe, 6); // 5 имён + ссылка
+    CHECK_EQ(zr.result.skippedEncrypted, 1);
+    // Ничего не вышло за каталог извлечения.
+    CHECK(filesUnder(outer).size() == filesUnder(target).size());
+    const QStringList expected = {
+        QStringLiteral("Case.log"), QStringLiteral("_con.log"), QStringLiteral("bad_name_.log"),
+        QStringLiteral("case~2.log"), QStringLiteral("inner/app.log.gz"), QStringLiteral("logs/app.log"),
+        QStringLiteral("logs/deep/er/x.log"), QStringLiteral("stored.log"),
+    };
+    QStringList sortedExpected = expected;
+    sortedExpected.sort();
+    CHECK(filesUnder(target) == sortedExpected);
+    if (filesUnder(target) != sortedExpected)
+        std::fprintf(stderr, "  files: %s\n", qPrintable(filesUnder(target).join(QStringLiteral(", "))));
+    CHECK(readFile(target + QStringLiteral("/logs/deep/er/x.log")) == nested);
+    CHECK(readFile(target + QStringLiteral("/stored.log")) == QByteArray("stored\n"));
+    CHECK(readFile(target + QStringLiteral("/case~2.log")) == QByteArray("lower\n"));
+    CHECK(readFile(target + QStringLiteral("/inner/app.log.gz")) == gzipMember(kInfoAppLog, 6)); // .gz остаётся файлом
+    // Извлечённые: имя в архиве → путь в каталоге.
+    QHash<QString, QString> map;
+    for (const auto& e : zr.result.extracted)
+        map.insert(e.member, e.relativePath);
+    CHECK_EQ(map.size(), qsizetype(8));
+    CHECK(map.value(QStringLiteral("con.log")) == QStringLiteral("_con.log"));
+    CHECK(map.value(QStringLiteral("case.log")) == QStringLiteral("case~2.log"));
+    CHECK(map.value(QStringLiteral("logs/app.log")) == QStringLiteral("logs/app.log"));
+    CHECK_EQ(zr.lastProgress, zr.progressTotal);
+    CHECK(QFileInfo::exists(zipPath)); // источник цел
+
+    // Два члена с одним именем: извлекается первый, второй — пропуск (член
+    // ищется по имени, второй открылся бы первым).
+    const QString dupZip = writeBytes(dir, QStringLiteral("dup.zip"),
+        testzip::zip({testzip::file("app.log", "first\n"), testzip::file("app.log", "second\n")}));
+    const QString dupTarget = outer + QStringLiteral("/dup");
+    ZipRun dr = runJob(unpacker, [&] { return unpacker.unpackZip(dupZip, dupTarget, &logOrGz); });
+    CHECK(dr.result.ok() && dr.result.extracted.size() == 1 && dr.result.skippedUnsafe == 1);
+    CHECK(filesUnder(dupTarget) == QStringList{QStringLiteral("app.log")});
+    CHECK(readFile(dupTarget + QStringLiteral("/app.log")) == QByteArray("first\n"));
+    // Не zip — каталог, созданный заранее вызывающим, тоже убран.
+    const QString preTarget = outer + QStringLiteral("/pre");
+    QDir().mkpath(preTarget);
+    dr = runJob(unpacker, [&] { return unpacker.unpackZip(writeBytes(dir, QStringLiteral("nz.zip"), "text\n"),
+                                                          preTarget, &logOrGz); });
+    CHECK(dr.result.error == SourceUnpacker::Error::SourceError && !QFileInfo::exists(preTarget));
+
+    // Повреждённый член — каталог удалён целиком.
+    testzip::Entry bad = testzip::file("z-bad.log", "data\n");
+    bad.badCrc = true;
+    const QString badZip = writeBytes(dir, QStringLiteral("badcrc.zip"),
+                                      testzip::zip({testzip::file("a.log", "ok\n"), bad}));
+    const QString badTarget = outer + QStringLiteral("/bad");
+    ZipRun br = runJob(unpacker, [&] { return unpacker.unpackZip(badZip, badTarget, &logOrGz); });
+    CHECK(br.result.error == SourceUnpacker::Error::SourceError);
+    CHECK(br.result.message.contains(QStringLiteral("z-bad.log")));
+    CHECK(!QFileInfo::exists(badTarget));
+    CHECK(br.result.extracted.isEmpty());
+    // Не zip.
+    const QString textZip = writeBytes(dir, QStringLiteral("text2.zip"), "plain text\n");
+    br = runJob(unpacker, [&] { return unpacker.unpackZip(textZip, outer + QStringLiteral("/t"), &logOrGz); });
+    CHECK(br.result.error == SourceUnpacker::Error::SourceError);
+    CHECK(!QFileInfo::exists(outer + QStringLiteral("/t")));
+    // Пустой архив — успех без файлов.
+    const QString emptyZip = writeBytes(dir, QStringLiteral("empty.zip"), testzip::zip({}));
+    br = runJob(unpacker, [&] { return unpacker.unpackZip(emptyZip, outer + QStringLiteral("/e"), &logOrGz); });
+    CHECK(br.result.ok());
+    CHECK(br.result.extracted.isEmpty());
+    // Член с паролем — только он: архив открывается пустым, пропуск посчитан.
+    const QString onlySecret = writeBytes(dir, QStringLiteral("secret.zip"), testzip::zip({secret}));
+    br = runJob(unpacker, [&] { return unpacker.unpackZip(onlySecret, outer + QStringLiteral("/s"), &logOrGz); });
+    CHECK(br.result.ok());
+    CHECK_EQ(br.result.skippedEncrypted, 1);
+}
+
+void testZipSpaceAndCancel(const QDir& dir)
+{
+    const QByteArray a = makeLog(3 * 1024 * 1024, 31);
+    const QByteArray b = makeLog(5 * 1024 * 1024, 32);
+    const QString zipPath = writeBytes(dir, QStringLiteral("space.zip"),
+        testzip::zip({testzip::file("a.log", a), testzip::file("b.log", b), testzip::file("skip.md", makeLog(1 << 20, 1))}));
+    const QString outer = dir.filePath(QStringLiteral("zipspace"));
+    QDir().mkpath(outer);
+
+    // ДО начала: сумма отобранных (не всех) членов + резерв.
+    {
+        SourceUnpacker unpacker;
+        unpacker.setReserveBytes(1024 * 1024);
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        unpacker.setFreeSpaceFunction([calls](const QString&) {
+            calls->fetch_add(1);
+            return qint64(8 * 1024 * 1024);
+        });
+        const QString target = outer + QStringLiteral("/before");
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackZip(zipPath, target, &logOrGz); });
+        CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+        CHECK_EQ(zr.result.requiredBytes, qint64(a.size() + b.size()) + 1024 * 1024);
+        CHECK_EQ(zr.result.availableBytes, qint64(8 * 1024 * 1024));
+        CHECK_EQ(calls->load(), 1);
+        CHECK(!QFileInfo::exists(target));
+    }
+    // ПО ХОДУ: диск «заполняется» распаковкой; остановка у резерва.
+    {
+        SourceUnpacker unpacker;
+        const qint64 reserve = 1024 * 1024;
+        unpacker.setReserveBytes(reserve);
+        unpacker.setCheckIntervalBytes(1024 * 1024);
+        const QString target = outer + QStringLiteral("/during");
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        unpacker.setFreeSpaceFunction([calls, target](const QString&) {
+            // Первый вызов — до начала: места хватает; дальше — «чужая
+            // программа» съела диск.
+            return calls->fetch_add(1) == 0 ? qint64(1) << 40 : qint64(512 * 1024);
+        });
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackZip(zipPath, target, &logOrGz); });
+        CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+        CHECK(zr.result.bytesWritten < a.size() + b.size());
+        CHECK(!QFileInfo::exists(target));
+    }
+    // Отмена посреди — каталог удалён.
+    {
+        SourceUnpacker unpacker;
+        unpacker.setCheckIntervalBytes(1024 * 1024);
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        SourceUnpacker* self = &unpacker;
+        unpacker.setFreeSpaceFunction([calls, self](const QString&) {
+            if (calls->fetch_add(1) == 2)
+                self->cancel(); // атомарный флаг: можно из воркера
+            return qint64(1) << 40;
+        });
+        const QString target = outer + QStringLiteral("/cancel");
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackZip(zipPath, target, &logOrGz); });
+        CHECK(zr.result.error == SourceUnpacker::Error::Cancelled);
+        CHECK(!QFileInfo::exists(target));
+    }
+}
+
+void testUnpackZipMember(const QDir& dir)
+{
+    const QByteArray big = makeLog(2 * 1024 * 1024, 41);
+    testzip::Entry secret = testzip::file("secret.log", "xxxx", false);
+    secret.encrypted = true;
+    testzip::Entry link = testzip::file("link.log", "/etc/passwd", false);
+    link.symlink = true;
+    const QString zipPath = writeBytes(dir, QStringLiteral("members.zip"), testzip::zip({
+        testzip::file("logs/app.log", kInfoAppLog),
+        testzip::file("logs/big.log", big),
+        testzip::file("logs/app.log.gz", gzipMember(big, 1) + gzipMember(kInfoAppLog, 6)),
+        testzip::file(QStringLiteral("журнал.log").toUtf8(), "кириллица\n"),
+        secret, link}));
+    SourceUnpacker unpacker;
+    unpacker.setFreeSpaceFunction([](const QString&) { return qint64(1) << 50; });
+
+    const auto extract = [&](const QString& member, const QString& name) {
+        const QString target = dir.filePath(name);
+        return std::make_pair(runJob(unpacker, [&] { return unpacker.unpackZipMember(zipPath, member, target); }), target);
+    };
+    {
+        const auto [zr, target] = extract(QStringLiteral("logs/app.log"), QStringLiteral("m-app.log"));
+        CHECK(zr.result.ok());
+        CHECK(readFile(target) == kInfoAppLog);
+    }
+    {
+        const auto [zr, target] = extract(QStringLiteral("logs/big.log"), QStringLiteral("m-big.log"));
+        CHECK(zr.result.ok());
+        CHECK(readFile(target) == big);
+        CHECK_EQ(zr.lastProgress, zr.progressTotal);
+    }
+    {
+        // .gz внутри zip — текст в файле, промежуточного не осталось.
+        const auto [zr, target] = extract(QStringLiteral("logs/app.log.gz"), QStringLiteral("m-gz.log"));
+        CHECK(zr.result.ok());
+        CHECK(readFile(target) == big + kInfoAppLog);
+        CHECK(!QFileInfo::exists(target + QStringLiteral(".gz-part")));
+    }
+    {
+        const auto [zr, target] = extract(QStringLiteral("журнал.log"), QStringLiteral("m-cyr.log"));
+        CHECK(zr.result.ok());
+        CHECK(readFile(target) == QStringLiteral("кириллица\n").toUtf8());
+    }
+    // Ошибки — файла нет.
+    for (const char* member : {"missing.log", "secret.log", "link.log", "logs/"}) {
+        const auto [zr, target] = extract(QString::fromUtf8(member), QStringLiteral("m-err.log"));
+        CHECK(zr.result.error == SourceUnpacker::Error::SourceError);
+        CHECK(!zr.result.message.isEmpty());
+        CHECK(!QFileInfo::exists(target));
+    }
+    // Место до начала — размер члена.
+    {
+        unpacker.setReserveBytes(0);
+        unpacker.setFreeSpaceFunction([](const QString&) { return qint64(1000); });
+        const auto [zr, target] = extract(QStringLiteral("logs/big.log"), QStringLiteral("m-space.log"));
+        CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+        CHECK_EQ(zr.result.requiredBytes, qint64(big.size()));
+        CHECK(!QFileInfo::exists(target));
+    }
+}
+
+void testZipIdentity(const QDir& dir)
+{
+    // Идентичность члена zip (F-2, шаг 4): путь — архив, member — имя,
+    // checkAt — сигнатура и отпечатки zip, а не gzip.
+    const QString zipPath = writeBytes(dir, QStringLiteral("ident.zip"),
+                                       testzip::zip({testzip::file("logs/app.log", kInfoAppLog)}));
+    const QString copy = writeBytes(dir, QStringLiteral("ident-copy.log"), kInfoAppLog);
+    LogFile file(copy);
+    LogSource source;
+    source.kind = LogSource::Kind::Archive;
+    source.path = zipPath;
+    source.member = QStringLiteral("logs/app.log");
+    file.setSource(source);
+    CHECK(file.displayPath().endsWith(QStringLiteral("ident.zip \u203A logs/app.log")));
+    const auto id = SourceIdentity::capture(file);
+    CHECK(id.has_value());
+    CHECK(id && id->compressed && id->member == QStringLiteral("logs/app.log"));
+    CHECK(id && id->check() == SourceIdentity::State::Valid);
+    CHECK(id && id->checkContentAt(copy) == SourceIdentity::State::Valid);
+    const auto json = id ? SourceIdentity::fromJson(id->toJson()) : std::nullopt;
+    CHECK(json && *json == *id);
+    // Другой zip по тому же пути — Changed; не zip — Missing.
+    writeBytes(dir, QStringLiteral("ident.zip"), testzip::zip({testzip::file("logs/app.log", "other\n")}));
+    CHECK(id && id->check() == SourceIdentity::State::Changed);
+    writeBytes(dir, QStringLiteral("ident.zip"), kInfoAppLog);
+    CHECK(id && id->check() == SourceIdentity::State::Missing);
+    // Архив ещё не прочитан (копия пишется): член переживает снимок.
+    writeBytes(dir, QStringLiteral("ident.zip"), testzip::zip({testzip::file("logs/app.log", kInfoAppLog)}));
+    const auto unread = SourceIdentity::captureUnread(file);
+    CHECK(unread && unread->member == QStringLiteral("logs/app.log") && unread->isUnreadArchive());
+    CHECK(unread && unread->check() == SourceIdentity::State::Valid);
+}
+
 // ===========================================================================
 // SpoolDir / SpoolItem
 // ===========================================================================
@@ -1276,6 +1749,12 @@ int main(int argc, char** argv)
     stage("unpack: cancel", [&] { testCancel(files); });
     stage("unpack: disk space", [&] { testDiskSpace(files); });
     stage("unpack: source == target", [&] { testSameSourceAndTarget(files); });
+    stage("zip: reader", [&] { testZipReader(files); });
+    stage("zip: names", testArchiveNames);
+    stage("zip: unpack to folder", [&] { testUnpackZip(files); });
+    stage("zip: space, cancel", [&] { testZipSpaceAndCancel(files); });
+    stage("zip: one member", [&] { testUnpackZipMember(files); });
+    stage("zip: identity", [&] { testZipIdentity(files); });
     stage("spool: lifetime", [&] { testSpoolLifetime(dir.filePath(QStringLiteral("spool1"))); });
     stage("spool: orphans", [&] { testOrphans(dir.filePath(QStringLiteral("spool2"))); });
     stage("logfile: source", testLogSource);

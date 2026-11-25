@@ -23,6 +23,21 @@ All notable changes to DendroLog are documented here. The format follows
   Auto-reload leaves `.gz` files alone; `F5` unpacks a changed archive again.
   Save View As refuses to overwrite the archive. Temporary files left behind
   by a crash are removed at the next start.
+- **Zip archives.** A `.zip` opened from the Open dialog, a drop, the
+  command line, a second instance or Recent Files goes to the Directory
+  Scanner: its log files (names matched by the scanner's extensions, and
+  their `.gz`) are extracted in the background to a temporary folder and
+  shown as a folder tree labelled with the archive name; the **←** button
+  returns to the folder shown before and removes the extracted files. A zip
+  under another name is recognised by its bytes. A file opened from there is
+  a tab named after the file, with `bundle.zip › logs/app.log` in tooltips;
+  Recent Files get the archive, and bookmarks, the file memory and sessions
+  remember the archive and the file inside it (each file of an archive has
+  its own memory), so reopening extracts that file again. A `.gz` inside the
+  zip opens as text. Names that would leave the extraction folder (`..`,
+  absolute paths, drive letters) and links are skipped, names Windows cannot
+  hold are renamed, password-protected entries are skipped — the status bar
+  says so; free disk space is checked before extracting.
 - **Time without a date.** Lines that start with a time only —
   `13:55:40.016 [main] INFO …` (Logback) and `[13:55:36 INF] …` (Serilog
   console) — now get a moment: they are ordered, filtered by time, drawn on

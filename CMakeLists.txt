@@ -70,6 +70,10 @@ set(DENDROLOG_CORE_SOURCES
     src/spooldir.cpp
     src/sourceunpacker.h
     src/sourceunpacker.cpp
+    src/ziparchive.h
+    src/ziparchive.cpp
+    src/archiveregistry.h
+    src/archiveregistry.cpp
     src/logmodel.h
     src/logmodel.cpp
     src/logstore.h

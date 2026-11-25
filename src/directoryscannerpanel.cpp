@@ -1,10 +1,14 @@
 #include "directoryscannerpanel.h"
 
 #include "appsettings.h"
+#include "archiveregistry.h"
 #include "cardframe.h"
 #include "apptheme.h"
+#include "spooldir.h"
 
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QDateTimeEdit>
@@ -96,7 +100,17 @@ void DirectoryScannerPanel::buildUi()
     m_refreshButton->setContextMenuPolicy(Qt::CustomContextMenu);
     headerRow->addWidget(m_refreshButton);
 
+    // «Назад» из архива к прежней папке (F-2, шаг 4): видна, пока показан архив.
+    m_backButton = card->makeToolButton(QString(),
+        tr("Leave the archive and return to the folder shown before it"));
+    m_backButton->setObjectName(QStringLiteral("scannerBackButton"));
+    m_backButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    m_backButton->setFixedSize(squareBtn);
+    m_backButton->setVisible(false);
+    headerRow->addWidget(m_backButton);
+
     m_pathLabel = new QLabel(tr("No directory scanned yet"), card);
+    m_pathLabel->setObjectName(QStringLiteral("scannerPathLabel"));
     m_pathLabel->setStyleSheet(QStringLiteral("color: palette(mid); font-style: italic;"));
     // Don't let a long path force the dock wider — clip instead of pushing.
     m_pathLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -216,6 +230,8 @@ void DirectoryScannerPanel::buildUi()
             this, &DirectoryScannerPanel::scanRequested);
     connect(m_extsButton, &QToolButton::clicked,
             this, &DirectoryScannerPanel::configureExtensionsRequested);
+    connect(m_backButton, &QToolButton::clicked,
+            this, &DirectoryScannerPanel::returnFromArchive);
     connect(m_refreshButton, &QToolButton::clicked, this, [this]() {
         m_scanner->rescan();
     });
@@ -260,19 +276,200 @@ void DirectoryScannerPanel::setDateEditorsEnabled(bool on)
     m_dateResetButton->setEnabled(on);
 }
 
-void DirectoryScannerPanel::scanDirectory(const QString& path)
+void DirectoryScannerPanel::showPath(const QString& path)
 {
-    m_pathLabel->setStyleSheet(QString());
-    m_pathLabel->setText(path);
-    m_pathLabel->setToolTip(path);
-
     // Reset filter UI for the new scan.
     m_userTouchedDates = false;
     m_statusLabel->clear();
     m_progress->setVisible(false);
 
     m_scanner->scan(path);
+    showCurrentPath();
     updateRefreshButton();
+}
+
+void DirectoryScannerPanel::showCurrentPath()
+{
+    m_backButton->setVisible(!m_archivePath.isEmpty());
+    m_backButton->setToolTip(tr("Leave the archive and return to the folder shown before it"));
+    if (!m_archivePath.isEmpty()) {
+        // Подпись — архив, а не временный каталог (F-2): его путь ничего не
+        // говорит и после выхода исчезнет.
+        m_pathLabel->setStyleSheet(QString());
+        m_pathLabel->setText(QFileInfo(m_archivePath).fileName());
+        m_pathLabel->setToolTip(tr("Archive %1\nIts log files were extracted to a temporary folder; "
+                                   "they are removed when you leave the archive.")
+                                    .arg(QDir::toNativeSeparators(m_archivePath)));
+    } else if (!m_scanner->rootPath().isEmpty()) {
+        m_pathLabel->setStyleSheet(QString());
+        m_pathLabel->setText(m_scanner->rootPath());
+        m_pathLabel->setToolTip(m_scanner->rootPath());
+    } else {
+        m_pathLabel->setStyleSheet(QStringLiteral("color: palette(mid); font-style: italic;"));
+        m_pathLabel->setText(tr("No directory scanned yet"));
+        m_pathLabel->setToolTip(QString());
+    }
+}
+
+void DirectoryScannerPanel::scanDirectory(const QString& path)
+{
+    // Папка вместо архива: архив и его каталог отпускаются, идущее
+    // извлечение — отменяется.
+    cancelExtraction();
+    const std::shared_ptr<SpoolItem> keep = m_archiveItem; // до смены корня
+    releaseArchive();
+    m_folderBeforeArchive.clear();
+    showPath(path);
+}
+
+// ─── Archive (F-2, step 4) ───────────────────────────────────────────────────
+
+DirectoryScannerPanel::~DirectoryScannerPanel()
+{
+    cancelExtraction();
+    if (m_archiveItem)
+        ArchiveRegistry::instance().remove(m_archiveItem->path());
+}
+
+void DirectoryScannerPanel::setSpoolRoot(const QString& root)
+{
+    if (root == m_spoolRoot)
+        return;
+    m_spoolRoot = root;
+    m_spoolDir.reset(); // показанный архив держит свой каталог сам
+}
+
+void DirectoryScannerPanel::cancelExtraction()
+{
+    if (m_pendingArchive.isEmpty())
+        return;
+    // Не ждать: частичный каталог (бывает на гигабайты) воркер удаляет сам,
+    // в своём потоке. Распаковщик отцепляется от панели и удаляет себя по
+    // итогу; следующее извлечение берёт новый — его итог и прогресс с
+    // прежними не путаются.
+    SourceUnpacker* old = m_unpacker;
+    m_unpacker = nullptr;
+    old->disconnect(this);
+    connect(old, &SourceUnpacker::finished, old, &QObject::deleteLater);
+    old->cancel();
+    m_pendingArchive.clear();
+    m_pendingItem.reset();
+    m_job = 0;
+    showCurrentPath();
+}
+
+void DirectoryScannerPanel::releaseArchive()
+{
+    if (!m_archiveItem)
+        return;
+    ArchiveRegistry::instance().remove(m_archiveItem->path());
+    m_archiveItem.reset(); // каталог удалится в фоне, когда отпустят все ссылки
+    m_archivePath.clear();
+}
+
+void DirectoryScannerPanel::openArchive(const QString& archivePath)
+{
+    cancelExtraction();
+    const QString root = m_spoolRoot.isEmpty() ? AppSettings::spoolRoot() : m_spoolRoot;
+    QString error;
+    if (!m_spoolDir)
+        m_spoolDir = SpoolDir::shared(root, &error);
+    const QString name = QFileInfo(archivePath).fileName();
+    if (!m_spoolDir) {
+        emit statusMessage(tr("Cannot open %1: no place for temporary files (%2).").arg(name, error));
+        return;
+    }
+    if (!m_unpacker) {
+        m_unpacker = new SourceUnpacker(this);
+        connect(m_unpacker, &SourceUnpacker::progress, this, [this](qint64 done, qint64 total) {
+            if (m_pendingArchive.isEmpty())
+                return;
+            const int percent = total > 0 ? int(qMin<qint64>(100, done * 100 / total)) : 0;
+            m_pathLabel->setText(tr("Extracting %1… %2%")
+                                     .arg(QFileInfo(m_pendingArchive).fileName(), QString::number(percent)));
+        });
+        connect(m_unpacker, &SourceUnpacker::finished, this, &DirectoryScannerPanel::onArchiveExtracted);
+    }
+    // Члены отбираются тем же правилом имён, что и файлы дерева; воркер
+    // получает копию списка.
+    const QStringList extensions = m_scanner->effectiveExtensions();
+    m_pendingItem = m_spoolDir->createDirectory(QFileInfo(archivePath).completeBaseName());
+    if (!m_pendingItem) {
+        emit statusMessage(tr("Cannot open %1: no place for temporary files in %2.")
+                               .arg(name, QDir::toNativeSeparators(m_spoolDir->path())));
+        return;
+    }
+    m_pendingArchive = archivePath;
+    m_job = m_unpacker->unpackZip(archivePath, m_pendingItem->path(), [extensions](const QString& member) {
+        return scannerNameMatches(QFileInfo(member).fileName(), extensions);
+    });
+    m_pathLabel->setStyleSheet(QString());
+    m_pathLabel->setText(tr("Extracting %1…").arg(name));
+    m_pathLabel->setToolTip(QDir::toNativeSeparators(archivePath));
+    // Пока идёт извлечение, «назад» его отменяет (первый архив иначе нечем
+    // остановить); показанное до него остаётся.
+    m_backButton->setVisible(true);
+    m_backButton->setToolTip(tr("Cancel extracting %1").arg(name));
+}
+
+void DirectoryScannerPanel::onArchiveExtracted(const SourceUnpacker::Result& r)
+{
+    if (r.job != m_job || m_pendingArchive.isEmpty())
+        return; // отменённое задание
+    const QString archive = m_pendingArchive;
+    const std::shared_ptr<SpoolItem> item = std::move(m_pendingItem);
+    m_pendingArchive.clear();
+    m_job = 0;
+    const QString name = QFileInfo(archive).fileName();
+    if (!r.ok()) {
+        showCurrentPath();
+        emit statusMessage(r.error == SourceUnpacker::Error::Cancelled
+                               ? tr("Extracting %1 was cancelled.").arg(name)
+                               : tr("Cannot open %1: %2").arg(name, r.message));
+        return;
+    }
+    QHash<QString, QString> members;
+    for (const SourceUnpacker::Result::Extracted& e : r.extracted)
+        members.insert(e.relativePath, e.member);
+    // Папка до архива — та, что была показана до ПЕРВОГО архива: из архива в
+    // архив «назад» ведёт к ней же.
+    if (m_archivePath.isEmpty())
+        m_folderBeforeArchive = m_scanner->rootPath();
+    ArchiveRegistry::instance().add(item->path(), archive, members, item);
+    const std::shared_ptr<SpoolItem> previous = m_archiveItem;
+    if (previous)
+        ArchiveRegistry::instance().remove(previous->path());
+    m_archiveItem = item;
+    m_archivePath = archive;
+    showPath(item->path()); // прежний каталог отпускается после смены корня
+
+    QStringList notes;
+    if (r.extracted.isEmpty())
+        notes << tr("%1 has no log files (names are matched by the scanner's extensions).").arg(name);
+    if (r.skippedUnsafe > 0)
+        notes << tr("%n entry(ies) of %1 skipped: unsafe names or links.", nullptr, r.skippedUnsafe).arg(name);
+    if (r.skippedEncrypted > 0)
+        notes << tr("%n entry(ies) of %1 skipped: password-protected or compressed with an unsupported method.",
+                    nullptr, r.skippedEncrypted).arg(name);
+    if (!notes.isEmpty())
+        emit statusMessage(notes.join(QLatin1Char(' ')));
+}
+
+void DirectoryScannerPanel::returnFromArchive()
+{
+    // Идёт извлечение — «назад» отменяет только его.
+    if (!m_pendingArchive.isEmpty()) {
+        cancelExtraction();
+        emit statusMessage(tr("Extracting the archive was cancelled."));
+        return;
+    }
+    if (m_archivePath.isEmpty())
+        return;
+    const std::shared_ptr<SpoolItem> keep = m_archiveItem; // до смены корня
+    releaseArchive();
+    const QString folder = m_folderBeforeArchive;
+    m_folderBeforeArchive.clear();
+    showPath(folder);
 }
 
 void DirectoryScannerPanel::showEvent(QShowEvent* event)

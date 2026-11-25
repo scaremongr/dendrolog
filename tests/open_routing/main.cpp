@@ -102,6 +102,25 @@ static void testPlan(const QTemporaryDir& tmp)
         CHECK(plan.files == QStringList({gz}) && plan.scanDirectory.isEmpty() && plan.sessions.isEmpty(),
               ".gz opens as a file");
     }
+    {   // F-2, шаг 4: zip — в сканер, как каталог; у сканера один корень —
+        // первый из каталогов и архивов, остальные названы пропущенными.
+        const QString zip = writeFile(root + "/bundle.zip", QByteArray("PK\x05\x06", 4) + QByteArray(18, '\0'));
+        const QString upper = writeFile(root + "/OTHER.ZIP", QByteArray("PK\x05\x06", 4) + QByteArray(18, '\0'));
+        auto plan = OpenRouting::plan({zip});
+        CHECK(plan.scanArchive == zip && plan.scanDirectory.isEmpty() && plan.files.isEmpty(),
+              "zip: goes to the scanner as an archive");
+        CHECK(!plan.isEmpty(), "zip: plan is not empty");
+        plan = OpenRouting::plan({a, zip, dir1});
+        CHECK(plan.files == QStringList({a}) && plan.scanArchive == zip && plan.scanDirectory.isEmpty()
+                  && plan.skippedDirectories == QStringList({dir1}),
+              "zip before a folder: the archive is scanned, the folder skipped");
+        plan = OpenRouting::plan({dir1, upper});
+        CHECK(plan.scanDirectory == dir1 && plan.scanArchive.isEmpty()
+                  && plan.skippedDirectories == QStringList({upper}),
+              "folder before a zip: the folder is scanned, the archive skipped");
+        CHECK(OpenRouting::isArchiveName(upper) && !OpenRouting::isArchiveName(root + "/app.log.gz"),
+              "archive name: .zip in any case; .gz is a file");
+    }
     {   // Q-6: один каталог — в сканер.
         const auto plan = OpenRouting::plan({dir1});
         CHECK(plan.files.isEmpty(), "folder: no files to open");

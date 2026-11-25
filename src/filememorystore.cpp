@@ -167,12 +167,12 @@ std::optional<FileMemory> FileMemory::fromJson(const QJsonObject& json, QString*
     return m;
 }
 
-void FileMemory::relocate(const QString& newPath, bool compressed)
+void FileMemory::relocate(const QString& newPath, bool compressed, const QString& member)
 {
     // Сравнение — как у ключа памяти (на Windows без учёта регистра).
-    const QString oldKey = FileMemoryStore::normalizedKeyPath(source.source.path);
-    const auto sameFile = [&oldKey](const QString& p) {
-        return FileMemoryStore::normalizedKeyPath(p) == oldKey;
+    const QString oldKey = FileMemoryStore::keyFor(source.source.path, source.source.member);
+    const auto sameFile = [&oldKey](const SourceIdentity& id) {
+        return FileMemoryStore::keyFor(id.path, id.member) == oldKey;
     };
     // Сжатый ли источник — как открыли сейчас (F-2): лог, сжатый в .gz или
     // распакованный, находится по содержимому и в обе стороны.
@@ -182,14 +182,15 @@ void FileMemory::relocate(const QString& newPath, bool compressed)
             id.archiveSize = -1;
         id.path = newPath;
         id.compressed = compressed;
-        id.member.clear();
+        id.member = compressed ? member : QString();
     };
-    move(source.source);
+    // Сначала закладки и позиция (их сверяют с прежним ключом источника).
     for (BookmarkState& b : bookmarks)
-        if (sameFile(b.source.path))
+        if (sameFile(b.source))
             move(b.source);
-    if (view && view->currentSource && sameFile(view->currentSource->path))
+    if (view && view->currentSource && sameFile(*view->currentSource))
         move(*view->currentSource);
+    move(source.source);
 }
 
 TabState FileMemory::toTabState() const
@@ -237,9 +238,15 @@ QString FileMemoryStore::normalizedKeyPath(const QString& path)
     return normalized;
 }
 
-QString FileMemoryStore::fileNameForPath(const QString& path)
+QString FileMemoryStore::keyFor(const QString& path, const QString& member)
 {
-    const QByteArray digest = QCryptographicHash::hash(normalizedKeyPath(path).toUtf8(),
+    const QString key = normalizedKeyPath(path);
+    return member.isEmpty() ? key : key + QChar(0x01) + member;
+}
+
+QString FileMemoryStore::fileNameForPath(const QString& path, const QString& member)
+{
+    const QByteArray digest = QCryptographicHash::hash(keyFor(path, member).toUtf8(),
                                                        QCryptographicHash::Sha1);
     return QString::fromLatin1(digest.toHex().left(16)) + kJsonSuffix;
 }
@@ -292,7 +299,7 @@ void FileMemoryStore::ensureIndex()
 }
 
 FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath,
-                                              const QString& unpackedPath)
+                                              const QString& unpackedPath, const QString& member)
 {
     Lookup result;
     if (requestedPath.isEmpty())
@@ -303,8 +310,8 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath,
     // распакованной копии (её отпечатки и сохранены).
     const bool compressed = !unpackedPath.isEmpty();
     const QString content = compressed ? unpackedPath : path;
-    const QString name = fileNameForPath(path);
-    const QString keyPath = normalizedKeyPath(path);
+    const QString name = fileNameForPath(path, member);
+    const QString keyPath = keyFor(path, member);
 
     // ---- 1–2: по пути ---------------------------------------------------------
     bool newer = false;
@@ -313,12 +320,12 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath,
         result.found = Found::Refused;
         return result;
     }
-    if (byPath && normalizedKeyPath(byPath->source.source.path) != keyPath)
+    if (byPath && keyFor(byPath->source.source.path, byPath->source.source.member) != keyPath)
         byPath.reset(); // чужой путь с тем же отпечатком имени — не наш
     if (byPath) {
         switch (byPath->source.source.checkContentAt(content)) {
         case SourceIdentity::State::Valid:
-            byPath->relocate(path, compressed); // написание пути — как открыли сейчас
+            byPath->relocate(path, compressed, member); // написание пути — как открыли сейчас
             result.found = Found::ByPath;
             result.memory = byPath;
             return result;
@@ -392,7 +399,7 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath,
         // Прежний файл на месте и цел — это копия: память остаётся и там.
         const bool detached = candidate.contains(kDetachedMark);
         const bool copy = !detached && memory->source.source.check() == SourceIdentity::State::Valid;
-        memory->relocate(path, compressed);
+        memory->relocate(path, compressed, member);
         memory->lastUsed = QDateTime::currentDateTimeUtc();
         const QString from = filePath(candidate);
         const QString to = filePath(name);
@@ -420,7 +427,7 @@ void FileMemoryStore::save(const FileMemory& memory, const QVector<RecordId>& ba
         return;
     FileMemory copy = memory;
     copy.lastUsed = QDateTime::currentDateTimeUtc();
-    const QString name = fileNameForPath(source.path);
+    const QString name = fileNameForPath(source.path, source.member);
     ensureIndex();
     Entry& entry = m_index[name];
     entry.source = source;

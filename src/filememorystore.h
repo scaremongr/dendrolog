@@ -97,7 +97,8 @@ struct FileMemory {
 
     // Подменить путь источника (переезд, копия): у источника, закладок этого
     // файла и текущей строки. compressed — новый путь — сжатый файл (F-2).
-    void relocate(const QString& newPath, bool compressed = false);
+    // member — имя в архиве (zip, F-2 шаг 4); пусто у .gz и обычного файла.
+    void relocate(const QString& newPath, bool compressed = false, const QString& member = QString());
     // Снимок вкладки из одного файла (для LogViewWidget::applyState).
     TabState toTabState() const;
 };
@@ -137,7 +138,11 @@ public:
     // локальным не совпадает. Такая память читается (не битая и не
     // удаляется как битая), по пути не находится, по содержимому — да.
     static QString normalizedKeyPath(const QString& path);
-    static QString fileNameForPath(const QString& path);
+    // Ключ памяти источника: нормализованный путь, у члена архива (F-2,
+    // шаг 4) — плюс '\x01' и имя в архиве: у каждого лога из bundle.zip своя
+    // память. Имя файла памяти — от этого ключа.
+    static QString keyFor(const QString& path, const QString& member = QString());
+    static QString fileNameForPath(const QString& path, const QString& member = QString());
 
     // Найти память открываемого файла (три случая выше). Путь — что открывает
     // вкладка (абсолютный). Спул stdin и нечитаемый файл — None.
@@ -145,7 +150,9 @@ public:
     // распакованная копия: по ней сверяется содержимое во всех трёх случаях,
     // поэтому память ищется ПОСЛЕ распаковки (поиск по содержимому тогда
     // дёшев — те же два чтения по 4 КБ).
-    Lookup open(const QString& path, const QString& unpackedPath = QString());
+    // Член архива (zip) — member: ключ — архив и имя (keyFor).
+    Lookup open(const QString& path, const QString& unpackedPath = QString(),
+                const QString& member = QString());
 
     // Записать память файла memory.source.source.path. base — закладки,
     // которые пишущий прочитал из памяти или записал прошлый раз (правило

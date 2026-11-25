@@ -41,6 +41,10 @@ public:
     // Каталог экземпляра в root (root создаётся при необходимости). nullptr —
     // не удалось создать каталог или взять блокировку; errorString — почему.
     static std::shared_ptr<SpoolDir> create(const QString& root, QString* errorString = nullptr);
+    // Общий на процесс каталог экземпляра для root: вкладки и сканер делят
+    // один каталог и одну блокировку, пока кто-то его держит (слабая ссылка);
+    // последний владелец его удаляет. Только GUI-поток.
+    static std::shared_ptr<SpoolDir> shared(const QString& root, QString* errorString = nullptr);
 
     // <CacheLocation>/spool. Не QDir::temp(): /tmp бывает в оперативной памяти.
     static QString defaultRoot();

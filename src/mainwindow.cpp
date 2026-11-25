@@ -25,6 +25,8 @@
 #include "updatechecker.h"
 #include "stdinspooler.h"
 #include "openrouting.h"
+#include "archiveregistry.h"
+#include "ziparchive.h"
 #include "singleinstance.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
@@ -985,7 +987,7 @@ void MainWindow::resetAllFiltersOnActiveView()
 }
 
 // ---------------------------------------------------------------------------
-QString MainWindow::logFileDialogFilter() const
+QString MainWindow::logFileDialogFilter(bool forOpen) const
 {
     QStringList patterns;
     for (const QString& ext : AppSettings::instance().scanExtensions()) {
@@ -995,8 +997,11 @@ QString MainWindow::logFileDialogFilter() const
     }
     if (patterns.isEmpty())
         patterns << QStringLiteral("*.log") << QStringLiteral("*.txt");
-    // Сжатые логи (F-2) открываются вкладкой.
-    patterns << QStringLiteral("*.gz");
+    // Сжатые логи (F-2) открываются вкладкой, zip — в Directory Scanner.
+    // Save View As пишет текст: сохранённый под именем .zip открывался бы
+    // как архив.
+    if (forOpen)
+        patterns << QStringLiteral("*.gz") << QStringLiteral("*.zip");
 
     return tr("Log files (%1);;All files (*)").arg(patterns.join(QLatin1Char(' ')));
 }
@@ -2048,6 +2053,7 @@ void MainWindow::setupStatusBar()
     ui->statusbar->addWidget(m_lineInfoLabel);
 
     m_statusLabel = new QLabel(tr("Ready"), this);
+    m_statusLabel->setObjectName(QStringLiteral("statusMessageLabel"));
     ui->statusbar->addWidget(m_statusLabel, 1);
     // Отчёт о восстановлении сессии: ссылка живёт, пока в отчёте что-то есть.
     m_sessionReportLink = new QLabel(this);
@@ -2658,6 +2664,8 @@ void MainWindow::setupDirectoryScanner()
 
     connect(m_dirScannerPanel, &DirectoryScannerPanel::scanRequested,
             this, &MainWindow::onScanDirectoryClicked);
+    connect(m_dirScannerPanel, &DirectoryScannerPanel::statusMessage, this,
+            [this](const QString& message) { m_statusLabel->setText(message); });
     connect(m_dirScannerPanel, &DirectoryScannerPanel::configureExtensionsRequested,
             this, &MainWindow::onConfigureScanExtensionsClicked);
 
@@ -3106,6 +3114,23 @@ void MainWindow::on_actionOpen_triggered()
     files.removeIf([](const QString& f) { return SessionFile::isSessionFile(f); });
     if (files.isEmpty())
         return;
+    // Архив (zip) — в Directory Scanner (F-2, шаг 4); у сканера один корень —
+    // первый архив.
+    const auto firstArchive = std::find_if(files.cbegin(), files.cend(), &MainWindow::isScannerArchive);
+    if (firstArchive != files.cend()) {
+        const QString archive = *firstArchive;
+        const qsizetype archives = files.removeIf(&MainWindow::isScannerArchive);
+        addToRecentFiles(archive);
+        scanArchive(archive);
+        if (archives > 1) {
+            m_statusLabel->setText(
+                tr("Scanning %1. The Directory Scanner shows one folder or archive at a time: %n other(s) skipped.",
+                   nullptr, int(archives - 1))
+                    .arg(QDir::toNativeSeparators(archive)));
+        }
+    }
+    if (files.isEmpty())
+        return;
 
     for (const QString& f : files)
         addToRecentFiles(f);
@@ -3131,7 +3156,7 @@ void MainWindow::on_actionSaveAs_triggered()
         this,
         tr("Save view as"),
         m_lastOpenDir,
-        logFileDialogFilter());
+        logFileDialogFilter(/*forOpen=*/false));
 
     if (fileName.isEmpty())
         return;
@@ -4008,6 +4033,19 @@ void MainWindow::scanDirectory(const QString& dirPath)
     ui->directoryScannerDockWidget->raise();
 }
 
+bool MainWindow::isScannerArchive(const QString& path)
+{
+    return OpenRouting::isArchiveName(path) || ZipArchive::fileHasSignature(path);
+}
+
+void MainWindow::scanArchive(const QString& archivePath)
+{
+    m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
+    m_dirScannerPanel->openArchive(archivePath);
+    ui->directoryScannerDockWidget->show();
+    ui->directoryScannerDockWidget->raise();
+}
+
 void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
 {
     if (filePaths.isEmpty())
@@ -4071,7 +4109,13 @@ void MainWindow::toggleTimeFilterDock()
 void MainWindow::addToRecentFiles(const QString& filePath)
 {
     // Спул stdin в недавние не попадает (RecentFiles::accepts): после выхода
-    // временного файла нет, запись была бы мёртвой.
+    // временного файла нет, запись была бы мёртвой. Файл извлечённого архива
+    // (F-2, шаг 4) — тоже временный: вместо него — сам архив.
+    if (const auto member = ArchiveRegistry::instance().locate(filePath)) {
+        if (m_recentFiles.add(member->archivePath))
+            updateRecentFilesMenu();
+        return;
+    }
     if (m_recentFiles.add(filePath))
         updateRecentFilesMenu();
 }
@@ -4128,14 +4172,20 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEn
         openSessionFile(session);
     for (const QString& file : plan.files)
         openRecentFile(file, initial);
-    if (plan.scanDirectory.isEmpty())
+    const QString scanned = plan.scanArchive.isEmpty() ? plan.scanDirectory : plan.scanArchive;
+    if (scanned.isEmpty())
         return;
-    scanDirectory(plan.scanDirectory);
+    if (plan.scanArchive.isEmpty()) {
+        scanDirectory(plan.scanDirectory);
+    } else {
+        addToRecentFiles(plan.scanArchive);
+        scanArchive(plan.scanArchive);
+    }
     if (!plan.skippedDirectories.isEmpty()) {
         m_statusLabel->setText(
-            tr("Scanning %1. The Directory Scanner shows one folder at a time: %n other folder(s) skipped.",
+            tr("Scanning %1. The Directory Scanner shows one folder or archive at a time: %n other(s) skipped.",
                nullptr, int(plan.skippedDirectories.size()))
-                .arg(QDir::toNativeSeparators(plan.scanDirectory)));
+                .arg(QDir::toNativeSeparators(scanned)));
     }
 }
 
@@ -4362,6 +4412,16 @@ void MainWindow::openRecentFile(const QString& filePath, const FileEncoding& ini
             tr("The file '%1' no longer exists.").arg(filePath));
         m_recentFiles.remove(filePath);
         updateRecentFilesMenu();
+        return;
+    }
+
+    // Архив с набором файлов (zip, по имени или сигнатуре) — в Directory
+    // Scanner, а не вкладкой (F-2, шаг 4): недавние, второй экземпляр, zip
+    // под чужим именем.
+    if (isScannerArchive(filePath)) {
+        m_lastOpenDir = QFileInfo(filePath).absolutePath();
+        addToRecentFiles(filePath);
+        scanArchive(filePath);
         return;
     }
 

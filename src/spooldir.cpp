@@ -1,5 +1,7 @@
 #include "spooldir.h"
 
+#include <QHash>
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -159,6 +161,17 @@ SpoolDir::~SpoolDir()
 std::shared_ptr<SpoolItem> SpoolDir::createFile(const QString& nameHint)
 {
     return createItem(nameHint, false);
+}
+
+std::shared_ptr<SpoolDir> SpoolDir::shared(const QString& root, QString* errorString)
+{
+    static QHash<QString, std::weak_ptr<SpoolDir>> dirs;
+    if (auto dir = dirs.value(root).lock())
+        return dir;
+    auto dir = create(root, errorString);
+    if (dir)
+        dirs.insert(root, dir);
+    return dir;
 }
 
 std::shared_ptr<SpoolItem> SpoolDir::createDirectory(const QString& nameHint)

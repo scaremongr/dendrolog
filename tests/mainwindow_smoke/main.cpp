@@ -38,6 +38,9 @@
 #include "singleinstance.h"
 #include "testdocuments.h"
 #include "gzipbytes.h"
+#include "zipbytes.h"
+#include "directoryscannerpanel.h"
+#include "archiveregistry.h"
 #include "updatechecker.h"
 
 #include <QApplication>
@@ -1286,6 +1289,113 @@ void scenarioCompressed(MainWindow& win, const Fixtures& fx)
     check(waitFor([&]() { return !QFileInfo::exists(copy); }, 10000), QStringLiteral(".gz copy removed with the tab"));
 }
 
+
+// zip (F-2, шаг 4): из командной строки, броска, диалога Open и недавних —
+// в Directory Scanner извлечённым; файл оттуда — вкладка члена архива, в
+// недавних — архив; «назад» возвращает прежнюю папку.
+void scenarioZip(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("zip archive"));
+    QFile source(fx.a);
+    source.open(QIODevice::ReadOnly);
+    const QByteArray bytes = source.readAll();
+    const QDir root = QFileInfo(fx.a).dir();
+    const QString zip = root.filePath(QStringLiteral("bundle.zip"));
+    const QByteArray zipBytes = testzip::zip({ testzip::file("logs/alpha.log", bytes),
+                                               testzip::file("logs/notes.md", "not a log\n") });
+    {
+        QFile out(zip);
+        out.open(QIODevice::WriteOnly);
+        out.write(zipBytes);
+    }
+    auto* panel = win.findChild<DirectoryScannerPanel*>();
+    auto* scanner = win.findChild<DirectoryScanner*>();
+    auto* dock = win.findChild<QDockWidget*>(QStringLiteral("directoryScannerDockWidget"));
+    if (!panel || !scanner || !dock) {
+        check(false, QStringLiteral("scanner panel and dock"));
+        return;
+    }
+    const int before = tabs(win)->count();
+    win.openCommandLine(OpenRouting::parseCommandLine({zip}));
+    check(waitFor([&]() { return !panel->isExtractingArchive() && panel->archivePath() == zip; }),
+          QStringLiteral("command line: zip goes to the scanner"));
+    check(dock->isVisible(), QStringLiteral("scanner dock shown for the archive"));
+    check(tabs(win)->count() == before, QStringLiteral("zip opens no tab"));
+    check(inRecentFiles(win, zip), QStringLiteral("zip in Recent Files"));
+    const QString extracted = scanner->rootPath() + QStringLiteral("/logs/alpha.log");
+    check(scanner->rootPath().startsWith(AppSettings::spoolRoot()), QStringLiteral("archive extracted into the test spool"));
+    check(QFileInfo::exists(extracted), QStringLiteral("log member extracted"));
+    check(!QFileInfo::exists(scanner->rootPath() + QStringLiteral("/logs/notes.md")), QStringLiteral("non-log member skipped"));
+
+    emit scanner->fileActivated(extracted); // двойной щелчок в дереве
+    check(waitFor([&]() { return tabs(win)->count() == before + 1; }), QStringLiteral("member opens a tab"));
+    const int index = tabs(win)->count() - 1;
+    LogViewWidget* tab = tabAt(win, index);
+    check(waitLoaded(tab), QStringLiteral("member loads"));
+    check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
+          QStringLiteral("member rows equal the plain file"));
+    check(tabs(win)->tabText(index) == QLatin1String("alpha.log"), QStringLiteral("member tab name"));
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(zip) + QStringLiteral(" › logs/alpha.log")),
+          QStringLiteral("member tooltip: archive › member (%1)").arg(tabs(win)->tabToolTip(index)));
+    const LogFilePtr lf = tab->loadedFiles().value(0);
+    check(lf && lf->source().member == QLatin1String("logs/alpha.log"), QStringLiteral("tab source is the member"));
+    check(!inRecentFiles(win, extracted), QStringLiteral("extracted path not in Recent Files"));
+    check(inRecentFiles(win, zip), QStringLiteral("archive stays in Recent Files"));
+    tabs(win)->setCurrentIndex(index);
+    command(win, QStringLiteral("closeTab"))->trigger();
+    check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("member tab closes"));
+
+    // Назад — к папке до архива.
+    win.openCommandLine(OpenRouting::parseCommandLine({fx.dir}));
+    check(waitFor([&]() { return scanner->rootPath() == QDir::cleanPath(fx.dir); }), QStringLiteral("folder scanned"));
+    dropPaths(win, {zip});
+    check(waitFor([&]() { return !panel->isExtractingArchive() && panel->archivePath() == zip; }),
+          QStringLiteral("dropped zip goes to the scanner"));
+    const QString dropRoot = scanner->rootPath();
+    auto* back = panel->findChild<QToolButton*>(QStringLiteral("scannerBackButton"));
+    check(back && back->isVisible(), QStringLiteral("back button shown"));
+    if (back)
+        back->click();
+    check(scanner->rootPath() == QDir::cleanPath(fx.dir), QStringLiteral("back returns to the folder"));
+    check(waitFor([&]() { return !QFileInfo::exists(dropRoot); }, 10000), QStringLiteral("extraction removed after back"));
+
+    // zip под чужим именем — по сигнатуре, через Open.
+    const QString disguised = root.filePath(QStringLiteral("bundle.data"));
+    {
+        QFile out(disguised);
+        out.open(QIODevice::WriteOnly);
+        out.write(zipBytes);
+    }
+    bool asked = false;
+    g_driver->expect([&](QWidget* w) {
+        asked = true;
+        if (auto* dialog = qobject_cast<QFileDialog*>(w))
+            typeFileName(dialog, disguised);
+        else
+            DialogDriver::close(w);
+    });
+    pressCommand(win, QStringLiteral("open"));
+    check(waitFor([&]() { return asked && !panel->isExtractingArchive() && panel->archivePath() == disguised; }),
+          QStringLiteral("Open: zip by signature goes to the scanner"));
+    check(tabs(win)->count() == before, QStringLiteral("Open of a zip opens no tab"));
+
+    // Битый архив — сообщение в строке статуса, вид прежний.
+    const QString broken = root.filePath(QStringLiteral("broken.zip"));
+    {
+        QFile out(broken);
+        out.open(QIODevice::WriteOnly);
+        out.write(zipBytes.left(zipBytes.size() - 8));
+    }
+    win.openCommandLine(OpenRouting::parseCommandLine({broken}));
+    auto* status = win.findChild<QLabel*>(QStringLiteral("statusMessageLabel"));
+    check(waitFor([&]() { return !panel->isExtractingArchive(); }), QStringLiteral("broken zip finishes"));
+    check(panel->archivePath() == disguised, QStringLiteral("broken zip keeps the shown archive"));
+    check(!status || status->text().contains(QStringLiteral("broken.zip")),
+          QStringLiteral("broken zip reported: %1").arg(status ? status->text() : QString()));
+    if (back)
+        back->click();
+}
+
 // Панель Search следует за активной вкладкой, пока поиск запущен.
 void scenarioSearchFollowsTab(MainWindow& win, const Fixtures& fx)
 {
@@ -2099,6 +2209,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioOpen(win, fx, indexed, instanceKey);
         scenarioOpenMore(win, fx);
         scenarioCompressed(win, fx);
+        scenarioZip(win, fx);
         section(QStringLiteral("shortcuts: with tabs"));
         checkShortcutAmbiguity(win, QStringLiteral("with tabs"));
         scenarioNavigate(win, fx);

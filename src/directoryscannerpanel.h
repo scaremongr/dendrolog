@@ -5,8 +5,13 @@
 #include <QDateTime>
 
 #include "directoryscanner.h"
+#include "sourceunpacker.h"
+
+#include <memory>
 
 class CardFrame;
+class SpoolDir;
+class SpoolItem;
 
 class QTreeWidget;
 class QLineEdit;
@@ -30,6 +35,15 @@ class QShowEvent;
 //
 // Наружу отдаёт только высокоуровневые сигналы; о внутренних layout'ах и
 // контролах MainWindow ничего не знает (тот же подход, что у FilterPanelWidget).
+//
+// Архив (F-2, шаг 4, docs/design/F-2.md «Архивы с набором файлов»): zip
+// извлекается во временный каталог (SourceUnpacker::unpackZip, только имена
+// логов по расширениям сканера и их .gz), каталог показывается как обычная
+// папка с подписью архива и кнопкой «назад» к прежнему корню (папке до
+// первого архива). Каталог регистрируется в ArchiveRegistry: файлы оттуда
+// открываются вкладкой как члены архива. Возврат, другой архив или скан папки
+// отпускают каталог (удаляется в фоне). Ошибка архива — statusMessage,
+// показанное остаётся.
 // ============================================================================
 
 class DirectoryScannerPanel : public QWidget
@@ -45,11 +59,28 @@ public:
     // Обновляет подпись пути, сбрасывает UI фильтров и запускает скан.
     void scanDirectory(const QString& path);
 
+    // ---- Архив (F-2, шаг 4) -------------------------------------------------
+    // Извлечь zip и показать его; идёт в фоне (прогресс — в подписи пути).
+    void openArchive(const QString& archivePath);
+    // Показанный архив (пусто — показана папка или ничего).
+    QString archivePath() const { return m_archivePath; }
+    bool isExtractingArchive() const { return !m_pendingArchive.isEmpty(); }
+    // Вернуться к папке, показанной до архива (кнопка «назад»); пока идёт
+    // извлечение — отменить его (показанное остаётся).
+    void returnFromArchive();
+    // Корень временных файлов (по умолчанию AppSettings::spoolRoot; тесты —
+    // свой каталог).
+    void setSpoolRoot(const QString& root);
+
+    ~DirectoryScannerPanel() override;
+
 signals:
     // Пользователь нажал «Scan Directory…» — MainWindow покажет диалог выбора.
     void scanRequested();
     // Пользователь нажал «Exts…» — MainWindow откроет настройки расширений.
     void configureExtensionsRequested();
+    // Сообщение для строки статуса окна (архив не открылся, имена пропущены).
+    void statusMessage(const QString& message);
 
 protected:
     // Пока док скрыт, авто-обновление только копит «есть изменения»; при
@@ -66,6 +97,11 @@ private:
     void onContentFinished(int matched, int total);
     void onRescanFinished(int added, int removed, int updated);
     void setDateEditorsEnabled(bool on);
+    void showPath(const QString& path);
+    void showCurrentPath();
+    void releaseArchive();
+    void cancelExtraction();
+    void onArchiveExtracted(const SourceUnpacker::Result& result);
 
     // Кнопка ⟳ несёт три состояния обновления (вручную / авто / отключено);
     // они же живут в AppSettings, чтобы переживать перезапуск.
@@ -83,6 +119,7 @@ private:
     QToolButton*  m_refreshButton = nullptr;
     QToolButton*  m_extsButton = nullptr;
     QToolButton*  m_settingsToggle = nullptr;  // ⚙ collapse/expand the filter area
+    QToolButton*  m_backButton = nullptr;      // ← из архива к прежней папке (F-2)
     QLabel*       m_pathLabel = nullptr;
 
     QWidget*      m_filterArea = nullptr;      // collapsible filter controls
@@ -105,6 +142,17 @@ private:
     bool m_userTouchedDates = false;
     // Guards the dateTimeChanged handlers while we set editors programmatically.
     bool m_seeding = false;
+
+    // Архив (F-2, шаг 4).
+    QString m_spoolRoot;
+    std::shared_ptr<SpoolDir> m_spoolDir;
+    SourceUnpacker* m_unpacker = nullptr;
+    quint64 m_job = 0;
+    QString m_pendingArchive;                    // извлекается
+    std::shared_ptr<SpoolItem> m_pendingItem;    // его каталог
+    QString m_archivePath;                       // показан
+    std::shared_ptr<SpoolItem> m_archiveItem;    // каталог показанного архива
+    QString m_folderBeforeArchive;               // куда ведёт «назад»
 };
 
 #endif // DIRECTORYSCANNERPANEL_H

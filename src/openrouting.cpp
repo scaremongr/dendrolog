@@ -1,11 +1,13 @@
 #include "openrouting.h"
 
+#include "archiveregistry.h"
 #include "sessionfile.h"
 #include "stdinspooler.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QSet>
 
 namespace OpenRouting {
 
@@ -83,10 +85,16 @@ static QString absoluteClean(const QString& path)
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
 }
 
+bool isArchiveName(const QString& path)
+{
+    return path.endsWith(QLatin1String(".zip"), Qt::CaseInsensitive);
+}
+
 Plan plan(const QStringList& paths)
 {
     Plan result;
-    QStringList directories;
+    QStringList directories; // каталоги и архивы — по порядку передачи
+    QSet<QString> archives;
     for (const QString& raw : paths) {
         if (raw.isEmpty())
             continue;
@@ -95,6 +103,11 @@ Plan plan(const QStringList& paths)
         if (info.isDir()) {
             if (!directories.contains(path))
                 directories << path;
+        } else if (info.isFile() && isArchiveName(path)) {
+            if (!directories.contains(path)) {
+                directories << path;
+                archives.insert(path);
+            }
         } else if (info.isFile() && SessionFile::isSessionFile(path)) {
             if (!result.sessions.contains(path))
                 result.sessions << path;
@@ -106,7 +119,11 @@ Plan plan(const QStringList& paths)
         }
     }
     if (!directories.isEmpty()) {
-        result.scanDirectory = directories.takeFirst();
+        const QString first = directories.takeFirst();
+        if (archives.contains(first))
+            result.scanArchive = first;
+        else
+            result.scanDirectory = first;
         result.skippedDirectories = directories;
     }
     return result;
@@ -126,7 +143,8 @@ QStringList absolutePaths(const QStringList& paths)
 
 bool RecentFiles::accepts(const QString& path)
 {
-    return !path.isEmpty() && !StdinSpooler::isSpoolFilePath(path);
+    return !path.isEmpty() && !StdinSpooler::isSpoolFilePath(path)
+        && !ArchiveRegistry::instance().isInsideExtraction(path);
 }
 
 void RecentFiles::setPaths(const QStringList& paths)

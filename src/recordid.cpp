@@ -1,4 +1,5 @@
 #include "recordid.h"
+#include "ziparchive.h"
 
 #include "gzipdevice.h"
 #include "stdinspooler.h"
@@ -402,7 +403,8 @@ SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
         return checkContentAt(filePath);
     // Содержимое без распаковки не проверить — проверяется сам архив.
     if (filePath.isEmpty() || SavedPath::isForeign(filePath) || !QFileInfo(filePath).isFile()
-        || !GzipDevice::fileHasSignature(filePath))
+        || !(member.isEmpty() ? GzipDevice::fileHasSignature(filePath)
+                              : ZipArchive::fileHasSignature(filePath)))
         return State::Missing;
     if (archiveSize < 0)
         return State::Valid; // отпечатков архива нет: «есть и gzip»

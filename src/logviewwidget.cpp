@@ -5,7 +5,9 @@
 #include "filememorystore.h"
 #include "indexedlogstore.h"
 #include "stdinspooler.h"
+#include "archiveregistry.h"
 #include "gzipdevice.h"
+#include "ziparchive.h"
 #include "sourceunpacker.h"
 #include "spooldir.h"
 #include "quicksearch.h"
@@ -602,13 +604,13 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
         // без повторной распаковки и без удаления копии из-под читателя.
         // Ещё не распакован — распаковывается здесь заново.
         const bool present = std::any_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
-            [&lf](const LogFilePtr& f) { return sameSource(f, lf->source().path); });
+            [&lf](const LogFilePtr& f) { return sameSource(f, lf->source().path, lf->source().member); });
         if (present)
             continue;
         if (!other.isUnpacked(lf)) {
             // Выбор пользователя, сделанный, пока копия пишется, — у
             // ArchiveState источника, а не в его хранилище.
-            addLogFile(lf->source().path, other.pendingArchiveEncoding(lf));
+            openSource(lf->source().path, lf->source().member, other.pendingArchiveEncoding(lf));
             continue;
         }
         auto copy = std::make_shared<LogFile>(lf->filePath);
@@ -651,29 +653,15 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
     // дубли строк и промахи rowForKey. Путь приводится к абсолютному виду.
     // Сжатый файл сравнивается по источнику (архиву), а не по копии (F-2).
     const QString filePath = normalizedPath(requestedPath);
+    // Файл извлечённого в сканере архива (F-2, шаг 4) — член архива: в
+    // недавние, память и сессии идёт архив и имя, а не временный путь.
+    if (const auto member = ArchiveRegistry::instance().locate(filePath)) {
+        addArchiveMember(member->archivePath, member->member, initial);
+        return;
+    }
     for (const auto &file : m_loadedFiles) {
         if (sameSource(file, filePath)) {
-            // Сжатый файл распакован и ждёт решения памяти файла: её
-            // applyState / addLogFile приходит сюда — теперь грузим.
-            if (isArchive(file)) {
-                ArchiveState& as = m_archives[file->filePath];
-                if (as.awaitingLoad) {
-                    as.awaitingLoad = false;
-                    startLoad(file, initial);
-                    return;
-                }
-                // Копия ещё пишется: выбор кодировки — к её загрузке, а не
-                // перечитыванием недописанного файла.
-                if (isArchivePending(file)) {
-                    if (initial.source == FileEncoding::Source::User)
-                        setPendingArchiveEncoding(file, initial);
-                    return;
-                }
-            }
-            // Файл уже загружен или в процессе загрузки: --encoding для него —
-            // обычный выбор пользователя.
-            if (initial.source == FileEncoding::Source::User)
-                setFileEncoding(file, initial.decoder.encoding());
+            reopenLoaded(file, initial);
             return;
         }
     }
@@ -682,6 +670,13 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
     // после распаковки (continueArchive).
     if (!StdinSpooler::isSpoolFilePath(filePath) && GzipDevice::fileHasSignature(filePath)) {
         addArchive(filePath, initial);
+        return;
+    }
+    // Архив с набором файлов (zip) вкладкой не читается: двоичные байты
+    // вместо строк. Его открывает Directory Scanner (окно направляет туда).
+    if (ZipArchive::fileHasSignature(filePath)) {
+        emit statusMessage(tr("%1 is a zip archive: open it in the Directory Scanner to see its files.")
+                               .arg(QFileInfo(filePath).fileName()));
         return;
     }
 
@@ -693,6 +688,56 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
     auto logFile = std::make_shared<LogFile>(filePath);
     m_loadedFiles.append(logFile);
     startLoad(logFile, initial);
+}
+
+void LogViewWidget::reopenLoaded(const LogFilePtr& file, const FileEncoding& initial)
+{
+    // Сжатый файл распакован и ждёт решения памяти файла: её
+    // applyState / addLogFile приходит сюда — теперь грузим.
+    if (isArchive(file)) {
+        ArchiveState& as = m_archives[file->filePath];
+        if (as.awaitingLoad) {
+            as.awaitingLoad = false;
+            startLoad(file, initial);
+            return;
+        }
+        // Копия ещё пишется: выбор кодировки — к её загрузке, а не
+        // перечитыванием недописанного файла.
+        if (isArchivePending(file)) {
+            if (initial.source == FileEncoding::Source::User)
+                setPendingArchiveEncoding(file, initial);
+            return;
+        }
+    }
+    // Файл уже загружен или в процессе загрузки: --encoding для него —
+    // обычный выбор пользователя.
+    if (initial.source == FileEncoding::Source::User)
+        setFileEncoding(file, initial.decoder.encoding());
+}
+
+void LogViewWidget::addArchiveMember(const QString& archivePath, const QString& member,
+                                     const FileEncoding& initial)
+{
+    if (member.isEmpty()) {
+        addLogFile(archivePath, initial);
+        return;
+    }
+    const QString path = normalizedPath(archivePath);
+    for (const auto& file : m_loadedFiles) {
+        if (sameSource(file, path, member)) {
+            reopenLoaded(file, initial);
+            return;
+        }
+    }
+    addArchive(path, initial, member);
+}
+
+void LogViewWidget::openSource(const QString& path, const QString& member, const FileEncoding& initial)
+{
+    if (member.isEmpty())
+        addLogFile(path, initial);
+    else
+        addArchiveMember(path, member, initial);
 }
 
 void LogViewWidget::startLoad(const LogFilePtr& logFile, const FileEncoding& initial)
@@ -855,39 +900,30 @@ void LogViewWidget::setPendingArchiveEncoding(const LogFilePtr& logFile, const F
     emit fileEncodingChanged(logFile);
 }
 
-bool LogViewWidget::sameSource(const LogFilePtr& logFile, const QString& path)
+bool LogViewWidget::sameSource(const LogFilePtr& logFile, const QString& path, const QString& member)
 {
     if (!logFile)
         return false;
-    return isArchive(logFile) ? samePath(logFile->source().path, path)
-                              : samePath(logFile->filePath, path);
+    if (!isArchive(logFile))
+        return member.isEmpty() && samePath(logFile->filePath, path);
+    return logFile->source().member == member && samePath(logFile->source().path, path);
 }
 
-// Каталоги экземпляра — общие на процесс по корню: вкладки делят один
-// каталог и одну блокировку; последний владелец его удаляет.
-static std::shared_ptr<SpoolDir> sharedSpoolDir(const QString& root, QString* error)
-{
-    static QHash<QString, std::weak_ptr<SpoolDir>> dirs;
-    if (auto dir = dirs.value(root).lock())
-        return dir;
-    auto dir = SpoolDir::create(root, error);
-    if (dir)
-        dirs.insert(root, dir);
-    return dir;
-}
-
-void LogViewWidget::addArchive(const QString& archivePath, const FileEncoding& initial)
+void LogViewWidget::addArchive(const QString& archivePath, const FileEncoding& initial,
+                               const QString& member)
 {
     QString error;
     if (!m_spoolDir)
-        m_spoolDir = sharedSpoolDir(spoolRoot(), &error);
+        m_spoolDir = SpoolDir::shared(spoolRoot(), &error);
+    // Имя вкладки — архива (.gz) или члена (zip): `app.log.gz`, `app.log`.
+    const QString archiveName = member.isEmpty() ? QFileInfo(archivePath).fileName()
+                                                 : QFileInfo(member).fileName();
     if (!m_spoolDir) {
         emit statusMessage(tr("Cannot unpack %1: no place for temporary files (%2).")
-                               .arg(QFileInfo(archivePath).fileName(), error));
+                               .arg(archiveName, error));
         return;
     }
     // Имя копии — узнаваемое: app.log.gz → app.log.
-    const QString archiveName = QFileInfo(archivePath).fileName();
     QString name = archiveName;
     if (name.endsWith(QLatin1String(".gz"), Qt::CaseInsensitive) && name.size() > 3)
         name.chop(3);
@@ -897,6 +933,7 @@ void LogViewWidget::addArchive(const QString& archivePath, const FileEncoding& i
     LogSource source;
     source.kind = LogSource::Kind::Archive;
     source.path = archivePath;
+    source.member = member;
     logFile->setSource(source);
     logFile->spool = item;
     m_loadedFiles.append(logFile);
@@ -933,12 +970,19 @@ void LogViewWidget::startUnpack(const LogFilePtr& logFile)
     as.archiveStamp = DiskStamp::of(logFile->source().path);
     as.unpacked = false;
     as.error.clear();
-    as.job = as.unpacker->unpackGzip(logFile->source().path, logFile->filePath);
+    // .gz — распаковать; член zip (F-2, шаг 4) — извлечь (член-gzip —
+    // распакованным).
+    const auto run = [&as, &logFile]() {
+        const LogSource& src = logFile->source();
+        return src.member.isEmpty() ? as.unpacker->unpackGzip(src.path, logFile->filePath)
+                                    : as.unpacker->unpackZipMember(src.path, src.member, logFile->filePath);
+    };
+    as.job = run();
     if (as.job == 0) {
         // Прежнее задание ещё не отпустило воркер (отмена посреди F5).
         as.unpacker->cancel();
         as.unpacker->waitForFinished();
-        as.job = as.unpacker->unpackGzip(logFile->source().path, logFile->filePath);
+        as.job = run();
     }
     as.running = as.job != 0;
     updateLoadingState();
@@ -1018,7 +1062,9 @@ bool LogViewWidget::reloadArchive(const LogFilePtr& logFile)
         return false;
     const QString archivePath = logFile->source().path;
     const DiskStamp stamp = DiskStamp::of(archivePath);
-    if (!stamp.exists() || !GzipDevice::fileHasSignature(archivePath)) {
+    const bool signature = logFile->source().member.isEmpty() ? GzipDevice::fileHasSignature(archivePath)
+                                                              : ZipArchive::fileHasSignature(archivePath);
+    if (!stamp.exists() || !signature) {
         // Копия самодостаточна: строки остаются. Копии нет (распаковка не
         // удалась или отменена) — показывать нечего.
         emit statusMessage(as.unpacked
@@ -2110,7 +2156,7 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         // Память файла здесь дополняет снимок только закладками: вид, фильтры
         // и позиция — снимка (сессия главнее памяти, docs/design/R-5.md).
         const bool wasApplying = std::exchange(m_applyingState, true);
-        addLogFile(source.source.path, initial);
+        openSource(source.source.path, source.source.member, initial);
         m_applyingState = wasApplying;
     }
     // Восстановленные закладки — не правка: отложенной записи памяти не надо.
@@ -2138,7 +2184,7 @@ void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource
     if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
         initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
     const bool wasApplying = std::exchange(m_applyingState, true);
-    addLogFile(source.source.path, initial);
+    openSource(source.source.path, source.source.member, initial);
     m_applyingState = wasApplying;
 }
 
@@ -2252,9 +2298,11 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
 {
     if (StdinSpooler::isSpoolFilePath(filePath))
         return false;
+    // Член zip (F-2, шаг 4): ключ памяти — архив и имя члена.
+    const QString member = self ? self->source().member : QString();
     const FileMemoryStore::Lookup found =
-        m_fileMemory->open(filePath, self ? self->filePath : QString());
-    const QString name = QFileInfo(filePath).fileName();
+        m_fileMemory->open(filePath, self ? self->filePath : QString(), member);
+    const QString name = self ? self->displayName : QFileInfo(filePath).fileName();
     switch (found.found) {
     case FileMemoryStore::Found::None:
         return false;
@@ -2286,7 +2334,7 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
     FileMemory memory = *found.memory;
     if (initial.source == FileEncoding::Source::User)
         memory.source.userEncoding = initial.decoder.encoding(); // --encoding главнее памяти
-    m_memoryBase.insert(FileMemoryStore::normalizedKeyPath(filePath), recordsOf(memory.bookmarks));
+    m_memoryBase.insert(FileMemoryStore::keyFor(filePath, member), recordsOf(memory.bookmarks));
 
     const bool wasApplying = std::exchange(m_memoryApplying, true);
     // «Первый файл» — по порядку открытия: сжатый (self) уже лежит в
@@ -2306,7 +2354,7 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
         if (!m_applyingState && initial.source != FileEncoding::Source::User && memory.source.userEncoding
             && TextEncodings::isDecodable(*memory.source.userEncoding))
             encoding = FileEncoding().withUserChoice(TextDecoder(*memory.source.userEncoding));
-        addLogFile(filePath, encoding);
+        openSource(filePath, member, encoding);
     }
     m_memoryApplying = wasApplying;
     m_bookmarkSignature = bookmarkSignature(); // восстановление — не правка
@@ -2325,6 +2373,8 @@ QString LogViewWidget::bookmarkSignature() const
     QString signature;
     for (const BookmarkState& b : bookmarks().states()) {
         signature += b.source.path;
+        signature += QLatin1Char('\x1f');
+        signature += b.source.member;
         signature += QLatin1Char('\x1f');
         signature += QString::number(b.record.line);
         signature += QLatin1Char('\x1f');
@@ -2365,7 +2415,7 @@ void LogViewWidget::saveFileMemory()
         memory.source = source;
         QHash<QString, bool> sameContent; // идентичность закладки → то же содержимое
         for (const BookmarkState& b : state.bookmarks) {
-            if (!samePath(b.source.path, source.source.path))
+            if (!samePath(b.source.path, source.source.path) || b.source.member != source.source.member)
                 continue;
             // Серая закладка прежнего содержимого (файл переписан) — в
             // отсоединённой памяти, а не в памяти нового содержимого.
@@ -2380,7 +2430,7 @@ void LogViewWidget::saveFileMemory()
         }
         if (single)
             memory.view = state.view;
-        const QString key = FileMemoryStore::normalizedKeyPath(source.source.path);
+        const QString key = FileMemoryStore::keyFor(source.source.path, source.source.member);
         m_fileMemory->save(memory, m_memoryBase.value(key));
         m_memoryBase.insert(key, recordsOf(memory.bookmarks));
     }

@@ -375,6 +375,12 @@ private:
     void addToRecentFiles(const QString& filePath);
     // Запустить скан каталога и показать панель Directory Scanner.
     void scanDirectory(const QString& dirPath);
+    // zip (F-2, шаг 4): в Directory Scanner извлечённым — из диалога Open,
+    // броска, командной строки, второго экземпляра и недавних.
+    void scanArchive(const QString& archivePath);
+    // Архив с набором файлов: по имени (OpenRouting::isArchiveName) или по
+    // сигнатуре zip.
+    static bool isScannerArchive(const QString& path);
     void updateRecentFilesMenu();
 
     // Auto-reload support
@@ -418,7 +424,8 @@ private:
 
     // Builds the file dialog filter string ("Log files (*.log *.txt);;All files (*)")
     // from the shared scan-extension list so Open and Save use the same set.
-    QString logFileDialogFilter() const;
+    // forOpen — с *.gz и *.zip (Open); Save View As пишет только текст.
+    QString logFileDialogFilter(bool forOpen = true) const;
 
     // ---- Help menu -------------------------------------------------------
     // Встроенная справка (docs/help_*.md из ресурсов), About и проверка

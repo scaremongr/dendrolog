@@ -20,14 +20,21 @@
 //     каталогов сканируется ПЕРВЫЙ; остальные перечислены в
 //     skippedDirectories — окно сообщает о них в строке статуса;
 //   • файлы вперемешку с каталогами: и то и другое, файлы — первыми;
+//   • архив с набором файлов (`*.zip`, F-2 шаг 4) уходит в Directory Scanner,
+//     как каталог: сканер показывает его извлечённым (scanArchive). Каталоги
+//     и архивы делят один корень сканера — первый из них по порядку
+//     передачи, остальные в skippedDirectories. Архив узнаётся по имени:
+//     план файлы не читает; zip под другим именем ловит открытие по
+//     сигнатуре (MainWindow::openRecentFile). `.gz` — не архив, а файл;
 //   • файл сессии (*.dlsession, R-5) открывается как сессия, а не как лог:
 //     вкладки сессии добавляются к открытым; сессии — до обычных файлов;
 //   • чего нет на диске — в missing; молча, как и раньше, не открывается.
 // Пути в плане абсолютные и очищенные (QDir::cleanPath), повторы убраны.
 //
 // RecentFiles — список недавних файлов и правило, что в него НЕ попадает:
-// спул stdin (`program | DendroLog -`) — временный файл, после выхода его
-// нет, запись была бы мёртвой. Запись спула, оставшаяся в ini от прежних
+// спул stdin (`program | DendroLog -`) и файлы извлечённого архива
+// (ArchiveRegistry) — временные файлы, после выхода их нет, запись была бы
+// мёртвой. Вместо файла из архива в недавние идёт сам архив (окно). Запись спула, оставшаяся в ini от прежних
 // версий, отбрасывается при загрузке (setPaths).
 //
 // Саму механику открытия (выбор вкладки, бэкенд) этот модуль не трогает —
@@ -39,13 +46,20 @@ struct Plan {
     QStringList sessions;            // открыть как сессии (*.dlsession)
     QStringList files;               // открыть вкладками
     QString     scanDirectory;       // открыть в Directory Scanner; пусто — нет
-    QStringList skippedDirectories;  // каталоги сверх первого
+    QString     scanArchive;         // архив — в Directory Scanner (или scanDirectory, не оба)
+    QStringList skippedDirectories;  // каталоги и архивы сверх первого
     QStringList missing;             // не существует (или не файл и не каталог)
 
-    bool isEmpty() const { return sessions.isEmpty() && files.isEmpty() && scanDirectory.isEmpty(); }
+    bool isEmpty() const
+    {
+        return sessions.isEmpty() && files.isEmpty() && scanDirectory.isEmpty() && scanArchive.isEmpty();
+    }
 };
 
 Plan plan(const QStringList& paths);
+
+// Архив с набором файлов по имени (`.zip`; `.tar`, `.tgz` — F-2 шаг 5).
+bool isArchiveName(const QString& path);
 
 // Абсолютные пути относительно текущего каталога ЭТОГО процесса. Второй
 // экземпляр обязан разрешить пути до передачи первому: у того другой cwd.

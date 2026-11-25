@@ -15,6 +15,13 @@
 //   • слияние вкладок делит копию: источник закрыт — копия жива, строки те же;
 //   • F5 при изменённом архиве — новое содержимое; при пропавшем — строки
 //     остаются, сообщение; тик авто-обновления архив не трогает;
+//   • член zip (F-2, шаг 4): строки = близнец на обоих бэкендах, .gz внутри
+//     zip, имя и displayPath «архив › член», тот же член дважды не
+//     добавляется, файл из каталога извлечения сканера (ArchiveRegistry)
+//     открывается членом, сам zip вкладкой не читается, F5 изменённого и
+//     пропавшего архива, слияние, закладка → память файла (у каждого члена
+//     своя) → открыть, сессия с членом, перенесённая вместе с архивом,
+//     снимок посреди первого извлечения;
 //   • идентичность сжатого источника (R-1): закладка → память файла →
 //     закрыть → открыть — закладка на месте; сессия с .gz, перенесённая
 //     вместе с архивом, — вкладка и закладка на месте; переписанный архив —
@@ -22,6 +29,7 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "archiveregistry.h"
 #include "bookmarkstore.h"
 #include "documentstate.h"
 #include "filememorystore.h"
@@ -32,6 +40,7 @@
 #include "sessionfile.h"
 #include "testdocuments.h"
 #include "viewexport.h"
+#include "zipbytes.h"
 
 #include <QApplication>
 #include <QDirIterator>
@@ -676,6 +685,172 @@ static void checkMemoryFirstArchive(const QDir& dir)
           label + QStringLiteral(": position of the first file restored"));
 }
 
+
+// ---------------------------------------------------------------------------
+// F-2, шаг 4: член zip во вкладке.
+
+static QByteArray readAll(const QString& path)
+{
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
+static void checkZipMember(const QDir& dir, const QString& name)
+{
+    const QString label = QStringLiteral("zip/%1").arg(name);
+    QDir work(dir.filePath(QStringLiteral("zip-") + name));
+    QDir().mkpath(work.path() + QStringLiteral("/a"));
+    FileMemoryStore store(work.filePath(QStringLiteral("memory")));
+    const QByteArray bytes = logBytes("member", 300);
+    const QByteArray otherBytes = logBytes("sibling", 40);
+    const QByteArray nestedBytes = logBytes("nested", 70);
+    const QString plain = testdocs::writeFile(work, "plain-twin.log", bytes);
+    const auto bundle = [&](const QByteArray& twin) {
+        return testzip::zip({ testzip::file("logs/twin.log", twin), testzip::file("logs/other.log", otherBytes),
+                              testzip::file("logs/nested.log.gz", testgzip::gzip(nestedBytes)) });
+    };
+    const QString zip = testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(bytes));
+    const QString member = QStringLiteral("logs/twin.log");
+
+    QStringList expected;
+    {
+        auto tab = newTab();
+        tab->addLogFile(plain);
+        CHECK(settled(*tab), label + QStringLiteral(": plain loads"));
+        expected = numbered(*tab->model());
+    }
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->show();
+        tab->addArchiveMember(zip, member);
+        CHECK(tab->isUnpacking() && tab->isLoading(), label + QStringLiteral(": member is extracted in the background"));
+        // Снимок посреди первого извлечения — с именем члена.
+        const TabState early = tab->captureState();
+        CHECK(early.sources.size() == 1 && early.sources[0].source.member == member
+                  && early.sources[0].source.isUnreadArchive(),
+              label + QStringLiteral(": state during the first extraction keeps the member"));
+        tab->addArchiveMember(zip, member);
+        CHECK(settled(*tab), label + QStringLiteral(": member loads"));
+        CHECK(tab->fileCount() == 1, label + QStringLiteral(": same member added once"));
+        CHECK(numbered(*tab->model()) == expected, label + QStringLiteral(": rows equal the plain twin"));
+        const LogFilePtr lf = tab->loadedFiles().value(0);
+        CHECK(lf && lf->shortName() == QLatin1String("twin.log"), label + QStringLiteral(": tab name is the member"));
+        CHECK(lf && lf->displayPath() == LogViewWidget::normalizedPath(zip) + QStringLiteral(" › ") + member,
+              label + QStringLiteral(": displayPath is archive › member"));
+        CHECK(lf && lf->source().member == member && lf->filePath.startsWith(g_spool),
+              label + QStringLiteral(": reads its own copy in the spool"));
+        // Закладка и позиция → память файла.
+        tab->bookmarks().add(rowOfLine(*tab->model(), 25), QStringLiteral("in zip"));
+        tab->view()->goToRow(rowOfLine(*tab->model(), 90));
+        tab->saveFileMemory();
+        store.waitForWrites();
+        CHECK(QFileInfo::exists(store.directory() + QLatin1Char('/') + FileMemoryStore::fileNameForPath(zip, member)),
+              label + QStringLiteral(": memory keyed by archive and member"));
+        CHECK(!QFileInfo::exists(store.directory() + QLatin1Char('/') + FileMemoryStore::fileNameForPath(zip)),
+              label + QStringLiteral(": not by the archive alone"));
+        // Второй член того же архива и .gz внутри zip — слитая вкладка.
+        tab->addArchiveMember(zip, QStringLiteral("logs/nested.log.gz"));
+        CHECK(settled(*tab) && tab->fileCount() == 2, label + QStringLiteral(": .gz member loads"));
+        CHECK(tab->model()->rowCount() == expected.size() + int(nestedBytes.count('\n')),
+              label + QStringLiteral(": .gz inside zip shows text rows"));
+        // Сам zip вкладкой не читается.
+        Spy status(tab.get(), &LogViewWidget::statusMessage);
+        tab->addLogFile(zip);
+        CHECK(tab->fileCount() == 2 && status.size() == 1, label + QStringLiteral(": zip itself is not opened as text"));
+        // Слияние: копия делится.
+        auto target = newTab();
+        Spy unpacking(target.get(), &LogViewWidget::unpackingStarted);
+        target->addFilesFrom(*tab);
+        CHECK(settled(*target) && unpacking.isEmpty() && target->fileCount() == 2,
+              label + QStringLiteral(": merge shares the extracted copies"));
+    }
+    // Открыть снова — закладка и позиция на месте; у другого члена памяти нет.
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->show();
+        tab->addArchiveMember(zip, member);
+        CHECK(settled(*tab), label + QStringLiteral(": reopened"));
+        const auto list = tab->bookmarks().bookmarks();
+        CHECK(list.size() == 1 && list[0].note == QLatin1String("in zip")
+                  && tab->bookmarks().visibleRow(list[0].id) == rowOfLine(*tab->model(), 25),
+              label + QStringLiteral(": bookmark of the member restored"));
+        CHECK(tab->view()->userSelectedRow() == rowOfLine(*tab->model(), 90),
+              label + QStringLiteral(": position of the member restored"));
+        auto sibling = newTab();
+        sibling->setFileMemory(&store);
+        sibling->addArchiveMember(zip, QStringLiteral("logs/other.log"));
+        CHECK(settled(*sibling) && sibling->bookmarks().bookmarks().isEmpty(),
+              label + QStringLiteral(": another member has its own (empty) memory"));
+
+        // Сессия с членом, перенесённая вместе с архивом.
+        SessionState state;
+        state.tabs.append(tab->captureState());
+        state.activeTab = 0;
+        QString error;
+        const QString sessionPath = work.filePath(QStringLiteral("a/work.dlsession"));
+        CHECK(SessionFile::save(sessionPath, state, &error), label + QStringLiteral(": save session ") + error);
+        CHECK(state.tabs.value(0).sources.value(0).source.member == member,
+              label + QStringLiteral(": session source has the member"));
+
+        // F5: архив изменился — новое содержимое; пропал — строки остаются.
+        const QByteArray changed = logBytes("changed", 20);
+        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(changed));
+        tab->reloadChangedFiles(false);
+        CHECK(!tab->isUnpacking(), label + QStringLiteral(": tick skips the archive"));
+        CHECK(tab->reloadChangedFiles(true) && settled(*tab)
+                  && tab->model()->rowCount() == int(changed.count('\n')),
+              label + QStringLiteral(": F5 extracts the changed member"));
+        Spy message(tab.get(), &LogViewWidget::statusMessage);
+        QFile::rename(zip, zip + QStringLiteral(".away"));
+        CHECK(!tab->reloadChangedFiles(true) && settled(*tab) && message.size() == 1
+                  && tab->model()->rowCount() == int(changed.count('\n')),
+              label + QStringLiteral(": F5 on a missing archive keeps the rows"));
+        QFile::rename(zip + QStringLiteral(".away"), zip);
+        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(bytes));
+    }
+    const QString moved = work.filePath(QStringLiteral("b"));
+    CHECK(QDir().rename(work.filePath(QStringLiteral("a")), moved), label + QStringLiteral(": move the folder"));
+    SessionFile::LoadResult loaded = SessionFile::load(moved + QStringLiteral("/work.dlsession"));
+    CHECK(loaded.state.has_value(), label + QStringLiteral(": load ") + loaded.error);
+    if (loaded.state) {
+        const auto resolutions = SessionFile::rebind(*loaded.state, moved + QStringLiteral("/work.dlsession"));
+        CHECK(resolutions.size() == 1 && resolutions[0].kind == SessionFile::Resolution::Kind::Relocated,
+              label + QStringLiteral(": archive found next to the session"));
+        auto tab = newTab();
+        tab->show();
+        const auto report = tab->applyState(loaded.state->tabs.value(0));
+        CHECK(report.missingSources.isEmpty(), label + QStringLiteral(": nothing missing"));
+        CHECK(settled(*tab) && numbered(*tab->model()) == expected, label + QStringLiteral(": session member rows"));
+        const LogFilePtr lf = tab->loadedFiles().value(0);
+        CHECK(lf && lf->source().member == member, label + QStringLiteral(": session reopens the member"));
+        const auto list = tab->bookmarks().bookmarks();
+        CHECK(list.size() == 1 && tab->bookmarks().visibleRow(list.value(0).id) == rowOfLine(*tab->model(), 25),
+              label + QStringLiteral(": session bookmark on its line"));
+    }
+
+    // Файл из каталога, который извлёк сканер (реестр), — член архива.
+    const QString movedZip = moved + QStringLiteral("/bundle.zip");
+    const QString extracted = work.filePath(QStringLiteral("extracted"));
+    QDir().mkpath(extracted + QStringLiteral("/logs"));
+    testdocs::writeFile(QDir(extracted + QStringLiteral("/logs")), "twin.log", bytes);
+    ArchiveRegistry::instance().add(extracted, movedZip, { { member, member } }, nullptr);
+    {
+        auto tab = newTab();
+        tab->addLogFile(extracted + QStringLiteral("/logs/twin.log"));
+        CHECK(settled(*tab) && numbered(*tab->model()) == expected, label + QStringLiteral(": registry file loads"));
+        const LogFilePtr lf = tab->loadedFiles().value(0);
+        CHECK(lf && lf->source().kind == LogSource::Kind::Archive && lf->source().member == member
+                  && SavedPath::same(lf->source().path, movedZip) && !lf->filePath.startsWith(extracted),
+              label + QStringLiteral(": registry file becomes the archive member"));
+        tab->addArchiveMember(movedZip, member);
+        CHECK(tab->fileCount() == 1, label + QStringLiteral(": registry file and member are one source"));
+    }
+    ArchiveRegistry::instance().remove(extracted);
+    CHECK(readAll(movedZip) == bundle(bytes), label + QStringLiteral(": archive untouched"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -700,6 +875,7 @@ int main(int argc, char** argv)
         checkMerge(work);
         checkMemory(work, name);
         checkSession(work, name);
+        checkZipMember(work, name);
     }
     settings.setIndexedThresholdMB(512);
     checkCloseAndCancel(dir);

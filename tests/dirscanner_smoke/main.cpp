@@ -17,6 +17,10 @@
 //     фильтр по содержимому через GzipDevice совпадают с несжатым близнецом
 //     (кодировки, размеры блока, предварительное решение), прогресс — в
 //     сжатых байтах до размера файла, отмена, повреждённый архив;
+//   • zip (F-2, шаг 4): архив в панели — извлечённым каталогом с подписью
+//     и возвратом к прежнему корню; вложенные папки деревом, опасные имена
+//     не выходят за каталог извлечения, только логи; реестр источников;
+//     ошибка архива оставляет прежний корень;
 //   • инкрементальное обновление rescan(): добавленный файл появляется,
 //     удалённый исчезает, а дописанный в хвост пересчитывается «по дельте»
 //     и даёт РОВНО те же цифры, что полный повторный скан.
@@ -25,9 +29,12 @@
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
 #include "appsettings.h"
+#include "archiveregistry.h"
+#include "openrouting.h"
 #include "filecontentsearch.h"
 #include "filterruleset.h"
 #include "../common/gzipwriter.h"
+#include "../common/zipbytes.h"
 #include "../common/testdocuments.h"
 
 #include <QApplication>
@@ -39,6 +46,7 @@
 #include <QToolButton>
 #include <QSet>
 #include <QStringEncoder>
+#include <QLabel>
 #include <QTreeWidget>
 #include <QThread>
 #include <QtConcurrent>
@@ -1590,6 +1598,193 @@ static void testGzipCancel()
           "gz cancel: the worker stops at the next block, and reports what it read");
 }
 
+
+// ---------------------------------------------------------------------------
+// F-2, шаг 4: zip в панели сканера.
+
+static QStringList allFilesUnder(const QString& root)
+{
+    QStringList out;
+    QDir base(root);
+    std::function<void(const QString&)> walk = [&](const QString& dir) {
+        for (const QFileInfo& fi : QDir(dir).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden)) {
+            if (fi.isDir() && !fi.isSymLink())
+                walk(fi.absoluteFilePath());
+            else
+                out << base.relativeFilePath(fi.absoluteFilePath());
+        }
+    };
+    walk(root);
+    return out;
+}
+
+static void testZipArchive()
+{
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        ++g_failures;
+        return;
+    }
+    const QString folder = tmp.path() + u"/folder"_s;
+    const QString spool = tmp.path() + u"/spool"_s;
+    QDir().mkpath(folder);
+    writeFile(folder + u"/one.log"_s, "2026-04-01 10:00:00 INFO  one\n");
+    const QByteArray appLog = "2026-04-01 10:00:00 INFO  zipped\n2026-04-01 10:00:01 ERROR zipped boom\n";
+    const QString zipPath = tmp.path() + u"/bundle.zip"_s;
+    writeFile(zipPath, testzip::zip({
+        testzip::file("logs/app.log", appLog),
+        testzip::file("logs/deep/x.log", "2026-04-01 11:00:00 WARN  deep\n"),
+        testzip::file("../evil.log", "evil\n"),
+        testzip::file("/abs.log", "abs\n"),
+        testzip::file("readme.md", "not a log\n"),
+        testzip::file("con.log", "2026-04-01 12:00:00 INFO  reserved name\n"),
+        testzip::file("rotated.log.gz", testgzip::gzip("2026-04-01 13:00:00 INFO  gz in zip\n")),
+    }));
+    const QString badZip = tmp.path() + u"/broken.zip"_s;
+    QByteArray broken = testzip::zip({ testzip::file("a.log", "aaaa\n") });
+    broken.chop(10);
+    writeFile(badZip, broken);
+
+    {
+        DirectoryScannerPanel panel;
+        panel.setSpoolRoot(spool);
+        DirectoryScanner* scanner = panel.scanner();
+        scanner->setRefreshMode(DirectoryScanner::RefreshMode::Off);
+        scanner->setFileExtensions({ u"log"_s });
+        QTreeWidget* tree = panel.findChild<QTreeWidget*>();
+        auto* back = panel.findChild<QToolButton*>(u"scannerBackButton"_s);
+        auto* label = panel.findChild<QLabel*>(u"scannerPathLabel"_s);
+        CHECK(tree && back && label, "panel exposes tree, back button and path label");
+        if (!tree || !back || !label)
+            return;
+        QStringList messages;
+        QObject::connect(&panel, &DirectoryScannerPanel::statusMessage,
+                         [&messages](const QString& m) { messages << m; });
+
+        panel.scanDirectory(folder);
+        CHECK(waitFor([&] { return tree->topLevelItemCount() == 1 && allScanned(tree->invisibleRootItem()); }),
+              "folder scanned");
+        CHECK(back->isHidden(), "no back button while a folder is shown");
+
+        // Архив → извлечённый каталог с подписью архива.
+        panel.openArchive(zipPath);
+        CHECK(waitFor([&] { return !panel.isExtractingArchive() && panel.archivePath() == zipPath; }),
+              "archive extracted and shown");
+        const QString root = scanner->rootPath();
+        CHECK(root.startsWith(QDir(spool).absolutePath()), "archive root lives in the spool");
+        CHECK(label->text().contains(u"bundle.zip"_s), "path label names the archive");
+        CHECK(!label->text().contains(spool), "path label does not show the temporary folder");
+        CHECK(!back->isHidden(), "back button is shown for an archive");
+        CHECK(waitFor([&] { return findItem(tree->invisibleRootItem(), u"logs"_s) != nullptr
+                                && allScanned(tree->invisibleRootItem()); }),
+              "archive tree populated");
+        if (QTreeWidgetItem* logs = findItem(tree->invisibleRootItem(), u"logs"_s))
+            tree->expandItem(logs);
+        CHECK(waitFor([&] { return findItem(tree->invisibleRootItem(), u"deep"_s) != nullptr; }),
+              "nested folder of the archive shown as a tree");
+        if (QTreeWidgetItem* deep = findItem(tree->invisibleRootItem(), u"deep"_s))
+            tree->expandItem(deep);
+        CHECK(waitFor([&] { return findItem(tree->invisibleRootItem(), u"x.log"_s) != nullptr
+                                && allScanned(tree->invisibleRootItem()); }),
+              "file two levels deep shown");
+        CHECK(entriesOf(*tree, u"app.log"_s) == u"2"_s, "archive member counted like a file");
+        CHECK(entriesOf(*tree, u"rotated.log.gz"_s) == u"1"_s, ".gz inside the archive stays a .gz and is counted");
+        CHECK(findItem(tree->invisibleRootItem(), u"_con.log"_s) != nullptr, "reserved Windows name is renamed");
+        CHECK(findItem(tree->invisibleRootItem(), u"readme.md"_s) == nullptr, "non-log members are not extracted");
+        CHECK(findItem(tree->invisibleRootItem(), u"evil.log"_s) == nullptr, "dangerous name dropped");
+        // Ничего за пределами каталога извлечения: в спуле — только он (и блокировка).
+        for (const QString& f : allFilesUnder(spool))
+            CHECK(f.endsWith(u".lock"_s) || QDir(spool).absoluteFilePath(f).startsWith(root + u'/'),
+                  qPrintable(u"file outside the extraction folder: "_s + f));
+        CHECK(!QFileInfo::exists(tmp.path() + u"/evil.log"_s), "../evil.log not written next to the archive");
+        CHECK(messages.join(u' ').contains(u"skipped"_s), "skipped unsafe names are reported");
+
+        // Реестр источников.
+        const auto member = ArchiveRegistry::instance().locate(root + u"/logs/app.log"_s);
+        CHECK(member && member->archivePath == zipPath && member->member == u"logs/app.log"_s,
+              "registry maps an extracted file to the archive and member");
+        const auto renamed = ArchiveRegistry::instance().locate(root + u"/_con.log"_s);
+        CHECK(renamed && renamed->member == u"con.log"_s, "registry keeps the original member name");
+        CHECK(!RecentFiles::accepts(root + u"/logs/app.log"_s), "extracted files never go to recent files");
+        CHECK(RecentFiles::accepts(zipPath), "the archive itself does");
+
+        // Повреждённый архив: сообщение, вид — прежний (архив).
+        messages.clear();
+        panel.openArchive(badZip);
+        CHECK(waitFor([&] { return !panel.isExtractingArchive(); }), "broken archive finishes");
+        CHECK(!messages.isEmpty() && messages.last().contains(u"broken.zip"_s), "broken archive reported");
+        CHECK(panel.archivePath() == zipPath && scanner->rootPath() == root, "broken archive keeps the current view");
+
+        // «Назад» посреди извлечения — отмена; показанный архив остаётся.
+        {
+            QByteArray big;
+            for (int i = 0; big.size() < (24 << 20); ++i)
+                big += "2026-04-01 10:00:00 INFO  a long enough line to take a while " + QByteArray::number(i) + '\n';
+            const QString bigZip = tmp.path() + u"/big.zip"_s;
+            writeFile(bigZip, testzip::zip({ testzip::file("big.log", big) }));
+            panel.openArchive(bigZip);
+            CHECK(panel.isExtractingArchive() && !back->isHidden(), "back button cancels a running extraction");
+            back->click();
+            CHECK(!panel.isExtractingArchive(), "extraction cancelled");
+            CHECK(panel.archivePath() == zipPath && scanner->rootPath() == root, "cancel keeps the shown archive");
+            CHECK(waitFor([&] { return allFilesUnder(spool).filter(u"big"_s).isEmpty(); }), "cancelled extraction leaves no files");
+        }
+
+        // Возврат — к папке до архива; каталог извлечения отпущен и удалён.
+        back->click();
+        CHECK(scanner->rootPath() == QDir::cleanPath(folder), "back returns to the folder shown before the archive");
+        CHECK(panel.archivePath().isEmpty(), "no archive after going back");
+        CHECK(back->isHidden(), "back button hidden again");
+        CHECK(!ArchiveRegistry::instance().locate(root + u"/logs/app.log"_s), "registry entry dropped");
+        CHECK(waitFor([&] { return !QFileInfo::exists(root); }), "extraction folder removed in the background");
+        CHECK(waitFor([&] { return tree->topLevelItemCount() == 1 && allScanned(tree->invisibleRootItem()); }),
+              "folder scanned again");
+
+        // Архив без папки до него; другой архив поверх; скан папки отпускает архив.
+        DirectoryScannerPanel fresh;
+        fresh.setSpoolRoot(spool);
+        fresh.scanner()->setRefreshMode(DirectoryScanner::RefreshMode::Off);
+        fresh.scanner()->setFileExtensions({ u"log"_s });
+        fresh.openArchive(zipPath);
+        CHECK(waitFor([&] { return !fresh.isExtractingArchive() && fresh.archivePath() == zipPath; }),
+              "archive opened in a fresh panel");
+        const QString firstRoot = fresh.scanner()->rootPath();
+        const QString second = tmp.path() + u"/second.zip"_s;
+        writeFile(second, testzip::zip({ testzip::file("b.log", "2026-04-01 10:00:00 INFO  b\n") }));
+        fresh.openArchive(second);
+        CHECK(waitFor([&] { return !fresh.isExtractingArchive() && fresh.archivePath() == second; }),
+              "second archive replaces the first");
+        CHECK(waitFor([&] { return !QFileInfo::exists(firstRoot); }), "first extraction released");
+        const QString secondRoot = fresh.scanner()->rootPath();
+        auto* freshBack = fresh.findChild<QToolButton*>(u"scannerBackButton"_s);
+        if (freshBack)
+            freshBack->click();
+        CHECK(fresh.scanner()->rootPath().isEmpty(), "back with no folder before clears the tree");
+        CHECK(waitFor([&] { return !QFileInfo::exists(secondRoot); }), "second extraction released");
+        fresh.openArchive(zipPath);
+        CHECK(waitFor([&] { return !fresh.isExtractingArchive() && fresh.archivePath() == zipPath; }), "archive again");
+        const QString thirdRoot = fresh.scanner()->rootPath();
+        fresh.scanDirectory(folder);
+        CHECK(fresh.archivePath().isEmpty(), "scanning a folder leaves the archive");
+        CHECK(waitFor([&] { return !QFileInfo::exists(thirdRoot); }), "extraction released by a folder scan");
+
+        // Другой архив сразу поверх идущего извлечения: прежнее отменяется без
+        // ожидания, новое идёт своим распаковщиком.
+        if (const QString bigZip = tmp.path() + u"/big.zip"_s; QFileInfo::exists(bigZip)) {
+            fresh.openArchive(bigZip);
+            CHECK(fresh.isExtractingArchive(), "big archive is extracting");
+            fresh.openArchive(second);
+            CHECK(waitFor([&] { return !fresh.isExtractingArchive() && fresh.archivePath() == second; }),
+                  "archive opened right over a running extraction");
+            CHECK(waitFor([&] { return allFilesUnder(spool).filter(u"big"_s).isEmpty(); }),
+                  "the replaced extraction leaves no files");
+        }
+    }
+    // Каталоги отпущенных архивов удаляются в глобальном пуле — дождаться
+    // до удаления временного каталога теста.
+    QThreadPool::globalInstance()->waitForDone();
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1621,6 +1816,7 @@ int main(int argc, char** argv)
     testGzipCounts();
     testGzipContent();
     testGzipCancel();
+    testZipArchive();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =
