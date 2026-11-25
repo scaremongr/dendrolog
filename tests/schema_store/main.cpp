@@ -32,6 +32,7 @@
 #include <QJsonObject>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -541,6 +542,105 @@ void testDialog()
           "after the dialog: nothing to install, nothing declined");
 }
 
+
+// ---------------------------------------------------------------- F-4
+
+// Ключевая схема (F-4, PR 1): «keyed» — часть формата, а не метаданные;
+// файл пересохраняется без потерь (хранилище и редактор), запасные блоки —
+// «Message» для версий без F-4; чужая ключевая часть не читается, но файл
+// переживает правку каталога (Q-23).
+QByteArray keyedSchemaFile(const QString& name)
+{
+    PatternDefinition def;
+    KeyedDefinition keyed;
+    keyed.format = KeyedDefinition::Format::Logfmt;
+    keyed.extraColumns = {QStringLiteral("logger"), QStringLiteral("trace_id")};
+    keyed.numericLevels = KeyedDefinition::NumericLevels::Python;
+    def.keyed = keyed;
+    QJsonObject obj = QJsonDocument::fromJson(LogPattern::serializeDefinition(def).toUtf8()).object();
+    obj.insert(QStringLiteral("name"), name);
+    obj.insert(QStringLiteral("description"), QStringLiteral("App logfmt"));
+    obj.insert(QStringLiteral("author"), QStringLiteral("ops team"));
+    obj.insert(QStringLiteral("x-detect"), QJsonObject{{QStringLiteral("sample"), QStringLiteral("2026-01-01 boot")}});
+    return QJsonDocument(obj).toJson(QJsonDocument::Indented);
+}
+
+void testKeyedSchema()
+{
+    clearPatterns();
+    const QString path = patterns().filePath(QStringLiteral("app-logfmt.json"));
+    const QByteArray original = keyedSchemaFile(QStringLiteral("App logfmt"));
+    check(writeBytes(path, original), "keyed: write schema file");
+    const QJsonObject keyedJson = QJsonDocument::fromJson(original).object().value(QStringLiteral("keyed")).toObject();
+    check(QJsonDocument::fromJson(original).object().value(QStringLiteral("version")).toInt() == 3,
+          "keyed: format version stays 3");
+
+    SchemaStore::SchemaList list = SchemaStore::loadAll();
+    check(list.size() == 1, "keyed: schema loaded");
+    if (list.size() != 1)
+        return;
+    check(!list[0].meta.contains(QStringLiteral("keyed")), "keyed: a format key, not metadata");
+    LogPattern pattern(list[0].schema);
+    check(pattern.isKeyed() && pattern.keyed()->format == KeyedDefinition::Format::Logfmt
+              && pattern.fieldNames() == QStringList({"Timestamp", "Level", "Message", "logger", "trace_id"}),
+          "keyed: canonical schema carries the keyed part");
+
+    check(SchemaStore::sync(list), "keyed: sync untouched");
+    check(readBytes(path) == original, "keyed: untouched file not rewritten");
+
+    list[0].name = QStringLiteral("App logfmt v2");
+    check(SchemaStore::sync(list), "keyed: sync renamed");
+    QJsonObject obj = readJson(path);
+    check(obj.value(QStringLiteral("keyed")).toObject() == keyedJson, "keyed: rename keeps the keyed part");
+    check(hasMeta(obj, QStringLiteral("App logfmt")), "keyed: rename keeps metadata");
+    const QJsonArray blocks = obj.value(QStringLiteral("blocks")).toArray();
+    check(blocks.size() == 1 && blocks[0].toObject().value(QStringLiteral("name")).toString() == QLatin1String("Message")
+              && blocks[0].toObject().value(QStringLiteral("kind")).toString() == QLatin1String("remainder"),
+          "keyed: fallback blocks for versions without F-4 are a single Message");
+
+    // Редактор схем (ключевого режима в нём ещё нет — шаг 4): правка
+    // описания и Apply ключевую часть не теряют.
+    list = SchemaStore::loadAll();
+    {
+        ConversionPatternDialog dlg(list);
+        auto* table = child<QTableWidget>(&dlg, "schemaTable");
+        auto* description = child<QLineEdit>(&dlg, "descriptionEdit");
+        auto* apply = child<QPushButton>(&dlg, "applyBtn");
+        if (!table || !description || !apply)
+            return;
+        const int row = rowOf(table, QStringLiteral("App logfmt v2"));
+        check(row >= 0, "keyed: dialog lists the schema");
+        table->setCurrentCell(row, 0);
+        // Правка блоков не подействовала бы (ключевая часть главнее) —
+        // карточки и Add Block недоступны.
+        auto* addBlock = child<QPushButton>(&dlg, "addBlockBtn");
+        auto* blocksScroll = child<QScrollArea>(&dlg, "blocksScroll");
+        check(addBlock && !addBlock->isEnabled(), "keyed: Add Block disabled");
+        check(blocksScroll && blocksScroll->widget() && !blocksScroll->widget()->isEnabled(),
+              "keyed: block cards are read-only");
+        typeInto(description, QStringLiteral("Edited in dialog"));
+        apply->click();
+        list = dlg.resultPatterns();
+    }
+    check(SchemaStore::sync(list), "keyed: sync dialog result");
+    obj = readJson(path);
+    check(obj.value(QStringLiteral("keyed")).toObject() == keyedJson, "keyed: dialog Apply keeps the keyed part");
+    check(obj.value(QStringLiteral("description")).toString() == QLatin1String("Edited in dialog"),
+          "keyed: dialog edit saved");
+
+    // Ключевая часть, которой эта версия не знает (будущий формат), — схема
+    // не читается, файл переживает правку каталога байт в байт.
+    QJsonObject future = QJsonDocument::fromJson(keyedSchemaFile(QStringLiteral("Future"))).object();
+    future.insert(QStringLiteral("keyed"), QJsonObject{{QStringLiteral("format"), QStringLiteral("gelf")}});
+    const QString futurePath = patterns().filePath(QStringLiteral("future.json"));
+    const QByteArray futureBytes = QJsonDocument(future).toJson();
+    check(writeBytes(futurePath, futureBytes), "keyed: write future schema");
+    list = SchemaStore::loadAll();
+    check(!findByName(list, QStringLiteral("Future")), "keyed: unknown keyed format is not loaded");
+    list.removeIf([](const SchemaStore::SchemaEntry& e) { return e.name == QLatin1String("App logfmt v2"); });
+    check(SchemaStore::sync(list), "keyed: sync after removing a schema");
+    check(readBytes(futurePath) == futureBytes, "keyed: unparsed future schema survives sync");
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -572,6 +672,7 @@ int main(int argc, char** argv)
     testBuiltinManifest(tmp, fixed, UserAction::Rename, "builtin renamed");
 
     testDialog();
+    testKeyedSchema();
 
     clearPatterns();
     QFile::remove(AppSettings::iniFilePath());

@@ -665,6 +665,7 @@ void ConversionPatternDialog::saveSchemaRow(int row)
 
 void ConversionPatternDialog::rebuildCards(const PatternDefinition& definition)
 {
+    m_keyed = definition.keyed;
     const bool wasSyncing = m_syncing;
     m_syncing = true;
 
@@ -724,6 +725,16 @@ void ConversionPatternDialog::rebuildCards(const PatternDefinition& definition)
     }
 
     refreshCardChrome();
+    // Ключевая схема (F-4): её колонки задаёт часть «keyed», блоки — только
+    // запасные для версий без F-4. Правка блоков здесь не подействовала бы
+    // (ключевая часть главнее) — карточки только для чтения, пока у
+    // редактора нет ключевого режима (шаг 4 docs/design/F-4.md).
+    if (QWidget* host = m_cardsLayout->parentWidget()) {
+        host->setEnabled(!m_keyed);
+        host->setToolTip(m_keyed ? tr("JSON / logfmt schema: its columns are set by keys in the "
+                                      "schema file, the blocks are not used.")
+                                 : QString());
+    }
     m_syncing = wasSyncing;
 }
 
@@ -748,6 +759,7 @@ PatternDefinition ConversionPatternDialog::currentDefinitionFromEditor() const
         }
         definition.blocks.push_back(block);
     }
+    definition.keyed = m_keyed;
     return definition;
 }
 
@@ -1166,7 +1178,7 @@ void ConversionPatternDialog::updateButtonStates()
     ui->nameEdit->setEnabled(hasSchema);
     ui->applyBtn->setEnabled(hasSchema && m_dirty);
     ui->revertBtn->setEnabled(hasSchema && m_dirty);
-    ui->addBlockBtn->setEnabled(hasSchema);
+    ui->addBlockBtn->setEnabled(hasSchema && !m_keyed);
     ui->autoDetectBtn->setEnabled(hasSchema);
     ui->presetBtn->setEnabled(hasSchema);
     ui->grokBtn->setEnabled(hasSchema);

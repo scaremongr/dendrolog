@@ -112,6 +112,8 @@ set(DENDROLOG_CORE_SOURCES
     src/logparser.cpp
     src/filechangedetector.h
     src/filechangedetector.cpp
+    src/keyedline.h
+    src/keyedline.cpp
     src/logpattern.h
     src/logpattern.cpp
     src/patternheuristics.h

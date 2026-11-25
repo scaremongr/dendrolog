@@ -700,7 +700,11 @@ QString LogModel::formatDisplayText(const QString& message, const LogEntryFields
     QString result;
     bool first = true;
     for (const int fieldIndex : visibleIndexes) {
-        const QStringView value = fields.get(fieldIndex, message);
+        // Экранированное значение (F-4) — раскодированным, но однострочным:
+        // \n, \t, \r остаются последовательностями (строка view — одна линия).
+        const bool escaped = fields.isEscaped(fieldIndex);
+        const QString decoded = escaped ? fields.value(fieldIndex, message, true) : QString();
+        const QStringView value = escaped ? QStringView(decoded) : fields.get(fieldIndex, message);
         if (value.isEmpty())
             continue;
 
@@ -742,10 +746,11 @@ int LogModel::displayTextLength(int row) const
     int length = 0;
     bool first = true;
     for (const int fieldIndex : m_visibleFieldIndexes) {
-        const QStringView value = entry.fields().get(fieldIndex, entry.message());
-        if (value.isEmpty())
+        const int valueLength =
+            int(entry.fields().valueSize(fieldIndex, entry.message(), /*displayLine=*/true));
+        if (valueLength == 0)
             continue;
-        length += (first ? 0 : 1) + static_cast<int>(value.length());
+        length += (first ? 0 : 1) + valueLength;
         first = false;
     }
     return length;
