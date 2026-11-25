@@ -58,6 +58,7 @@
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QProgressBar>
 #include <QToolButton>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrentRun>
@@ -1261,6 +1262,22 @@ void scenarioCompressed(MainWindow& win, const Fixtures& fx)
     check(lf && lf->filePath.startsWith(AppSettings::spoolRoot()), QStringLiteral(".gz copy in the test spool"));
     auto* cancel = win.findChild<QToolButton*>(QStringLiteral("cancelUnpackButton"));
     check(cancel && !cancel->isVisible(), QStringLiteral("Cancel Unpacking hidden after the load"));
+    // Ушли на другую вкладку и вернулись посреди распаковки: процент приходит
+    // — полоса прогресса снова видна (ревью шагов 2–3). Сигналы — как от вкладки.
+    auto* bar = win.findChild<QProgressBar*>(QStringLiteral("statusProgressBar"));
+    if (index > 0 && bar) {
+        emit tab->unpackingStarted(lf);
+        check(bar->isVisible(), QStringLiteral("unpacking progress bar shown"));
+        tabs(win)->setCurrentIndex(0);
+        check(!bar->isVisible(), QStringLiteral("unpacking progress bar hidden on another tab"));
+        tabs(win)->setCurrentIndex(index);
+        emit tab->unpackingProgress(lf, 40);
+        check(bar->isVisible() && bar->value() == 40, QStringLiteral("unpacking progress bar back with the tab"));
+        emit tab->unpackingFinished(lf, true);
+        check(!bar->isVisible(), QStringLiteral("unpacking progress bar hidden after the end"));
+    } else {
+        check(false, QStringLiteral("status progress bar and a second tab"));
+    }
     const QString copy = lf ? lf->filePath : QString();
     lf.reset(); // копию держит последний LogFile
     tabs(win)->setCurrentIndex(index);

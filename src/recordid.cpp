@@ -375,6 +375,25 @@ std::optional<SourceIdentity> SourceIdentity::capture(const LogFile& file, qint6
     return id;
 }
 
+std::optional<SourceIdentity> SourceIdentity::captureUnread(const LogFile& file)
+{
+    if (file.source().kind != LogSource::Kind::Archive)
+        return std::nullopt;
+    const auto archive = capture(file.source().path);
+    if (!archive)
+        return std::nullopt;
+    SourceIdentity id;
+    id.path = archive->path;
+    id.member = file.source().member;
+    id.compressed = true;
+    id.size = 0;
+    id.head = id.tail = RecordFingerprint::ofBytes(QByteArrayView());
+    id.archiveSize = archive->size;
+    id.archiveHead = archive->head;
+    id.archiveTail = archive->tail;
+    return id;
+}
+
 SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
 {
     if (ephemeral)

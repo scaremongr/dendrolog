@@ -29,6 +29,10 @@
 - **Huge files** — multi-gigabyte logs open without being loaded into RAM: a
   compact line index (~10 bytes per line) keeps scrolling, filtering and
   search responsive while the text stays on disk.
+- **Compressed logs** — `.gz` files (rotated `app.log.1.gz` too) open in a tab
+  with progress and cancel: unpacked to a temporary copy that is removed with the
+  tab. The Directory Scanner lists them and counts and searches them without
+  unpacking to disk.
 - **Directory scanner** — scan a whole folder of logs into a sortable tree:
   per-file entry counts, time ranges, warn/error/fatal counts and sizes;
   narrow it down by content or date range and open files right from the results.

@@ -345,6 +345,10 @@ void LogViewWidget::setFileEncoding(const LogFilePtr& logFile, TextEncoding enco
     // вкладке такой файл не загружен вовсе).
     if (!TextEncodings::isDecodable(fileStreamEncoding(logFile)))
         return;
+    if (isArchivePending(logFile)) {
+        setPendingArchiveEncoding(logFile, pendingArchiveEncoding(logFile).withUserChoice(decoder));
+        return;
+    }
     if (m_model->isIndexedBackend()) {
         adoptIndexedEncoding(logFile, fileEncoding(logFile).withUserChoice(decoder),
                              /*wholeState=*/true);
@@ -357,11 +361,15 @@ void LogViewWidget::restoreAutomaticEncoding(const LogFilePtr& logFile)
 {
     if (!logFile || !m_loadedFiles.contains(logFile))
         return;
-    const FileEncoding current = fileEncoding(logFile);
+    const FileEncoding current = pendingArchiveEncoding(logFile);
     if (current.source != FileEncoding::Source::User)
         return;
     if (!TextEncodings::isDecodable(fileStreamEncoding(logFile)))
         return;
+    if (isArchivePending(logFile)) {
+        setPendingArchiveEncoding(logFile, current.automatic());
+        return;
+    }
     if (m_model->isIndexedBackend()) {
         adoptIndexedEncoding(logFile, current.automatic(), /*wholeState=*/true);
         return;
@@ -598,7 +606,9 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
         if (present)
             continue;
         if (!other.isUnpacked(lf)) {
-            addLogFile(lf->source().path, other.fileEncoding(lf));
+            // Выбор пользователя, сделанный, пока копия пишется, — у
+            // ArchiveState источника, а не в его хранилище.
+            addLogFile(lf->source().path, other.pendingArchiveEncoding(lf));
             continue;
         }
         auto copy = std::make_shared<LogFile>(lf->filePath);
@@ -655,11 +665,8 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
                 // Копия ещё пишется: выбор кодировки — к её загрузке, а не
                 // перечитыванием недописанного файла.
                 if (isArchivePending(file)) {
-                    if (initial.source == FileEncoding::Source::User) {
-                        as.initial = initial;
-                        if (as.loadStarted)
-                            m_fileEncodings[file->filePath] = initial;
-                    }
+                    if (initial.source == FileEncoding::Source::User)
+                        setPendingArchiveEncoding(file, initial);
                     return;
                 }
             }
@@ -726,8 +733,18 @@ void LogViewWidget::startLoad(const LogFilePtr& logFile, const FileEncoding& ini
                 // Сжатый файл, который ещё распаковывается (или не
                 // распаковался), не читается: копия не готова (F-2). Его
                 // загрузит конец распаковки — уже в индексную вкладку.
-                if (isArchivePending(lf))
+                if (isArchivePending(lf)) {
+                    // Выбор пользователя — к загрузке копии (решение
+                    // автоматики относилось к прежнему содержимому).
+                    // Ещё не начатый файл хранит свой initial как есть.
+                    ArchiveState& pending = m_archives[lf->filePath];
+                    if (pending.loadStarted) {
+                        const FileEncoding chosen = encodings.value(lf->filePath);
+                        pending.initial = chosen.source == FileEncoding::Source::User ? chosen
+                                                                                        : FileEncoding();
+                    }
                     continue;
+                }
                 startIndexedLoad(lf, encodings.value(lf->filePath));
             }
             qDebug() << "LogViewWidget: Indexed backend enabled for tab,"
@@ -800,6 +817,42 @@ bool LogViewWidget::isArchivePending(const LogFilePtr& logFile) const
     // Перераспаковка по F5 (loadStarted, но копия пишется заново) — тоже:
     // недописанную копию не читает ни конвертация, ни снимок.
     return it == m_archives.constEnd() || !it->loadStarted || it->running || !it->unpacked;
+}
+
+FileEncoding LogViewWidget::pendingArchiveEncoding(const LogFilePtr& logFile) const
+{
+    // Загрузка копии ещё не начиналась — выбор лежит только в ArchiveState;
+    // перераспаковка (F5) — в хранилище вкладки, как у загруженного файла.
+    // Вкладка стала индексной посреди перераспаковки — хранилище файла ещё
+    // не знает, выбор отложен туда же.
+    if (isArchivePending(logFile)) {
+        const auto it = m_archives.constFind(logFile->filePath);
+        if (it == m_archives.constEnd())
+            return {};
+        const auto* store = m_model->indexedOrNull();
+        if (!it->loadStarted || (store && !store->indexForFile(logFile->filePath)))
+            return it->initial;
+    }
+    return fileEncoding(logFile);
+}
+
+void LogViewWidget::setPendingArchiveEncoding(const LogFilePtr& logFile, const FileEncoding& encoding)
+{
+    // Копия ещё пишется: выбор — к её загрузке, без перечитывания
+    // недописанного файла (F-2). После F5 строки файла уже сброшены, поэтому
+    // выбор кладётся и туда, откуда его возьмёт полная перезагрузка: в
+    // индексное хранилище (пустой индекс — без перечитывания) или в
+    // m_fileEncodings резидентного пути.
+    ArchiveState& as = m_archives[logFile->filePath];
+    as.initial = encoding;
+    if (as.loadStarted) {
+        auto* store = m_model->indexedOrNull();
+        if (store && store->indexForFile(logFile->filePath))
+            store->setFileEncodingState(logFile, encoding);
+        else if (!store)
+            m_fileEncodings[logFile->filePath] = encoding;
+    }
+    emit fileEncodingChanged(logFile);
 }
 
 bool LogViewWidget::sameSource(const LogFilePtr& logFile, const QString& path)
@@ -927,8 +980,10 @@ void LogViewWidget::handleUnpackFinished(const LogFilePtr& logFile, quint64 job,
         bookmarks().recheckSource(RecordLocator::sourceKey(*logFile));
         const auto* store = m_model->indexedOrNull();
         if (store && !store->indexForFile(logFile->filePath)) {
-            // Пока копия писалась, вкладка стала индексной и файл пропустила.
-            startLoad(logFile, m_fileEncodings.value(logFile->filePath));
+            // Пока копия писалась, вкладка стала индексной и файл пропустила;
+            // выбор пользователя она отложила в as.initial.
+            startLoad(logFile, as.initial.source == FileEncoding::Source::User ? as.initial
+                                                                             : FileEncoding());
             return;
         }
         if (!m_fileReloadStates.contains(logFile->filePath))
@@ -964,9 +1019,13 @@ bool LogViewWidget::reloadArchive(const LogFilePtr& logFile)
     const QString archivePath = logFile->source().path;
     const DiskStamp stamp = DiskStamp::of(archivePath);
     if (!stamp.exists() || !GzipDevice::fileHasSignature(archivePath)) {
-        // Копия самодостаточна: строки остаются.
-        emit statusMessage(tr("%1: the archive was not found; the unpacked copy stays open.")
-                               .arg(QDir::toNativeSeparators(archivePath)));
+        // Копия самодостаточна: строки остаются. Копии нет (распаковка не
+        // удалась или отменена) — показывать нечего.
+        emit statusMessage(as.unpacked
+            ? tr("%1: the archive was not found; the unpacked copy stays open.")
+                  .arg(QDir::toNativeSeparators(archivePath))
+            : tr("%1: the archive was not found; the file is not loaded.")
+                  .arg(QDir::toNativeSeparators(archivePath)));
         return false;
     }
     if (as.unpacked && stamp == as.archiveStamp)
@@ -1853,8 +1912,11 @@ TabState LogViewWidget::captureState() const
         std::optional<SourceIdentity> source;
         if (isArchivePending(lf)) {
             // Копия не готова: идентичность прежнего содержимого или снимка,
-            // по которому файл открыт; иначе снимать нечего.
+            // по которому файл открыт; иначе — архив без прочитанного
+            // содержимого (снимок откроет его заново).
             source = m_archives.value(lf->filePath).identity;
+            if (!source)
+                source = SourceIdentity::captureUnread(*lf);
         } else {
             source = locator.sourceFor(lf);
         }
@@ -2227,7 +2289,11 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
     m_memoryBase.insert(FileMemoryStore::normalizedKeyPath(filePath), recordsOf(memory.bookmarks));
 
     const bool wasApplying = std::exchange(m_memoryApplying, true);
-    const qsizetype others = m_loadedFiles.size() - (self && m_loadedFiles.contains(self) ? 1 : 0);
+    // «Первый файл» — по порядку открытия: сжатый (self) уже лежит в
+    // m_loadedFiles с момента открытия, и считаются только открытые до него;
+    // файл, открытый после ещё распаковывающегося архива, — второй.
+    const qsizetype others = self && m_loadedFiles.contains(self) ? m_loadedFiles.indexOf(self)
+                                                                   : m_loadedFiles.size();
     if (others == 0 && memory.view && !m_applyingState) {
         // Первый файл вкладки — состояние целиком, фильтры предложением.
         applyState(memory.toTabState(), StateFilters::Offer);
@@ -2291,6 +2357,10 @@ void LogViewWidget::saveFileMemory()
     // тоже второй файл: позиция могла быть на нём).
     const bool single = state.sources.size() == 1 && m_loadedFiles.size() == 1;
     for (const TabSource& source : state.sources) {
+        // Архив, из которого ещё ничего не прочитано (закрыт посреди первой
+        // распаковки): помнить нечего, а запись затёрла бы его память.
+        if (source.source.isUnreadArchive())
+            continue;
         FileMemory memory;
         memory.source = source;
         QHash<QString, bool> sameContent; // идентичность закладки → то же содержимое

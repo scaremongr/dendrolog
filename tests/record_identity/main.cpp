@@ -602,6 +602,27 @@ static void testJson(const QDir& dir)
         expectState(gz, State::Changed, "сжатый: другой gzip по тому же пути");
         bad = gz.toJson(); bad.remove("compressed"); refused(bad, "archive без compressed");
         bad = gz.toJson(); bad.insert("archive", 5); refused(bad, "archive не объект");
+        // Архив, из которого ещё ничего не прочитано (снимок посреди первой
+        // распаковки, ревью F-2): пустой префикс — любая копия Valid, архив —
+        // по отпечаткам; круговой проход через JSON.
+        {
+            LogFile copy(path);
+            LogSource src;
+            src.kind = LogSource::Kind::Archive;
+            src.path = gz.path;
+            copy.setSource(src);
+            const auto unread = SourceIdentity::captureUnread(copy);
+            CHECK(unread && unread->isValid() && unread->isUnreadArchive() && unread->archiveSize == 9,
+                  "непрочитанный архив: снятие");
+            if (unread) {
+                CHECK(unread->checkContentAt(path) == State::Valid, "непрочитанный архив: любая копия — Valid");
+                expectState(*unread, State::Valid, "непрочитанный архив: тот же архив");
+                const auto back = SourceIdentity::fromJson(unread->toJson());
+                CHECK(back && *back == *unread && back->isUnreadArchive(), "непрочитанный архив: круговой проход");
+            }
+            CHECK(!SourceIdentity::captureUnread(LogFile(path)), "непрочитанный: обычный файл — нет");
+            CHECK(!id->isUnreadArchive() && !gz.isUnreadArchive(), "прочитанный — не «непрочитанный»");
+        }
     }
 
     const RecordId rid = RecordId::forLine(185, u"2026-07-16 09:20:31.554 [db-pool] ERROR первый таймаут");

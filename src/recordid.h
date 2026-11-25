@@ -255,6 +255,13 @@ struct SourceIdentity {
     // чтения (filePath), путь — источника: у сжатого — архив и имя внутри
     // (compressed), у обычного — тот же filePath.
     static std::optional<SourceIdentity> capture(const LogFile& file, qint64 size = -1);
+    // Сжатый источник, из которого ещё ничего не прочитано (копия пишется
+    // впервые): содержимое — пустой префикс (size 0; checkContentAt любой
+    // копии — Valid), отпечатки архива — текущие. Снимок такой вкладки
+    // (сессия, Ctrl+Shift+T) открывает архив заново. nullopt — не сжатый или
+    // архива нет.
+    static std::optional<SourceIdentity> captureUnread(const LogFile& file);
+    bool isUnreadArchive() const { return compressed && size == 0; }
 
     // Проверка по сохранённому пути.
     State check() const { return checkAt(path); }

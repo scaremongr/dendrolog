@@ -447,6 +447,11 @@ private:
     { return logFile && logFile->source().kind == LogSource::Kind::Archive; }
     // Файл ещё не загружается: распаковка идёт, сорвалась или ждёт памяти.
     bool isArchivePending(const LogFilePtr& logFile) const;
+    // Кодировка файла с учётом выбора, отложенного до загрузки копии, и
+    // запись такого выбора (ревью шагов 2–3: --encoding, меню индикатора,
+    // слияние и конвертация посреди распаковки).
+    FileEncoding pendingArchiveEncoding(const LogFilePtr& logFile) const;
+    void setPendingArchiveEncoding(const LogFilePtr& logFile, const FileEncoding& encoding);
     // Тот же источник, что путь, открытый пользователем.
     static bool sameSource(const LogFilePtr& logFile, const QString& path);
     void addArchive(const QString& archivePath, const FileEncoding& initial);
