@@ -802,7 +802,7 @@ static void checkMergedTab(const QDir& dir, bool indexed, int fontSize = 0)
               "resident: the file stripe runs through every visible part of the tall line");
         const LogListView::RowChromeHit hit = view.rowChromeAt(QPoint(stripeX + 8, 6));
         CHECK(hit.kind == LogListView::RowChrome::FileLabel && hit.row == tall
-                  && hit.toolTip == legend->chipFile(1)->displayPath(),
+                  && hit.toolTip == legend->chipFile(1)->nativeDisplayPath(),
               QStringLiteral("resident: the label sticks to the top, its tooltip is the path (%1)").arg(hit.toolTip));
         view.setWordWrap(false);
         testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
