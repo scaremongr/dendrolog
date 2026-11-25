@@ -107,7 +107,9 @@ struct MemberPlanner {
             return QString();
         }
         // Повтор того же пути (другой регистр, хвостовая точка, имя,
-        // занятое каталогом) — суффиксом «~N» перед расширением.
+        // занятое каталогом) — суффиксом «~N» перед ВСЕМИ расширениями
+        // (`app~2.log.gz`, `svc~2.log.1`): сканер узнаёт лог по расширению с
+        // хвостом ротации или `.gz`, и `app.log~2.gz` в дереве не показал бы.
         const auto taken = [&](const QString& p) {
             return used.contains(p.toLower()) || dirs.contains(p.toLower());
         };
@@ -122,8 +124,8 @@ struct MemberPlanner {
             const QFileInfo fi(relative);
             const QString dir = relative.contains(QLatin1Char('/'))
                 ? relative.left(relative.lastIndexOf(QLatin1Char('/')) + 1) : QString();
-            const QString base = fi.completeBaseName();
-            const QString suffix = fi.suffix().isEmpty() ? QString() : QLatin1Char('.') + fi.suffix();
+            const QString base = fi.baseName();
+            const QString suffix = fi.completeSuffix().isEmpty() ? QString() : QLatin1Char('.') + fi.completeSuffix();
             for (int n = 2;; ++n) {
                 const QString candidate = dir + base + QStringLiteral("~%1").arg(n) + suffix;
                 if (!taken(candidate)) {
@@ -619,7 +621,9 @@ void SourceUnpacker::Job::tarMember(const QString& tarPath, const QString& membe
     TarMember m;
     bool found = false;
     while (tar.next(m)) {
-        if (m.name == member) {
+        // Каталоги набор не рассматривает (`wanted` в tarSet) — и поиск тоже:
+        // каталог-член с тем же именем не заслоняет файл, показанный сканером.
+        if (m.name == member && m.type != TarMember::Type::Directory) {
             found = true;
             break;
         }

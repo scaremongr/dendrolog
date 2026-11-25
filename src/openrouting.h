@@ -4,6 +4,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
+
 #include "textencoding.h"
 
 #include <optional>
@@ -58,7 +60,11 @@ struct Plan {
     }
 };
 
-Plan plan(const QStringList& paths);
+// isArchiveByContent — архив, узнанный по содержимому (окно передаёт
+// ArchiveFormats::isMultiFileArchive): такой файл делит с папками один корень
+// сканера по порядку передачи, как архив по имени. Пусто — только имена.
+Plan plan(const QStringList& paths,
+          const std::function<bool(const QString&)>& isArchiveByContent = {});
 
 // Архив с набором файлов по имени: `.zip`, `.tar`, `.tar.gz`, `.tgz` (F-2,
 // шаги 4–5), регистр любой.

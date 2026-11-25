@@ -378,6 +378,9 @@ private:
     // zip и tar (F-2, шаги 4–5): в Directory Scanner извлечённым — из диалога Open,
     // броска, командной строки, второго экземпляра и недавних.
     void scanArchive(const QString& archivePath);
+    // Архивы (isScannerArchive) — из списка в сканер: первый показан,
+    // остальные названы пропущенными; в списке остаются файлы.
+    void takeArchivesToScanner(QStringList& files);
     // Архив с набором файлов: по имени (OpenRouting::isArchiveName) или по
     // содержимому (ArchiveFormats::detect: zip, tar, gzip с tar внутри).
     static bool isScannerArchive(const QString& path);

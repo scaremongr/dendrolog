@@ -37,11 +37,14 @@ All notable changes to DendroLog are documented here. The format follows
   zip opens as text. Names that would leave the extraction folder (`..`,
   absolute paths, drive letters) and links are skipped, names Windows cannot
   hold are renamed, password-protected entries are skipped — the status bar
-  says so; free disk space is checked before extracting.
+  says so; a name that differs from another only in case gets `~2` before
+  its extensions (`app~2.log.gz`) and still shows in the tree. Free disk
+  space is checked before extracting.
 - **Tar archives.** `.tar`, `.tar.gz` and `.tgz` open in the Directory
-  Scanner the same way as a zip: extracted logs as a folder tree, files
-  opened from there as tabs named `bundle.tar.gz › logs/app.log`, remembered
-  by bookmarks, the file memory and sessions. ustar, GNU and pax archives
+  Scanner the same way as a zip: extracted logs as a folder tree, a file
+  opened from there is a tab named after the file, with
+  `bundle.tar.gz › logs/app.log` in tooltips, remembered by bookmarks, the
+  file memory and sessions. ustar, GNU and pax archives
   are read, long names included. A tar is recognised by its bytes too, so a
   `.gz` with a tar inside goes to the scanner while a `.gz` with one log
   still opens in a tab. Links, devices and names that would leave the

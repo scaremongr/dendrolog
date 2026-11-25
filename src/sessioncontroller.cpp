@@ -24,7 +24,11 @@ TabState SessionController::captureTab(LogViewWidget* tab) const
         if (e.tab != tab || e.kind != ReportEntry::Kind::Missing)
             continue;
         const bool present = std::any_of(state.sources.cbegin(), state.sources.cend(),
-            [&e](const TabSource& s) { return SessionState::samePath(s.source.path, e.path); });
+            [&e](const TabSource& s) {
+                // Члены одного архива делят путь (архив) — различает имя члена.
+                return SessionState::samePath(s.source.path, e.path)
+                    && s.source.member == e.source.source.member;
+            });
         if (!present)
             state.sources.append(e.source);
     }

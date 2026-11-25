@@ -1,4 +1,6 @@
 #include "logfile.h"
+
+#include <QDir>
 #include <QFileInfo>
 
 LogFile::LogFile(const QString &path)
@@ -40,4 +42,11 @@ QString LogFile::displayPath() const
         return m_source.label.isEmpty() ? displayName : m_source.label;
     }
     return filePath;
+}
+
+QString LogFile::nativeDisplayPath() const
+{
+    if (m_source.kind == LogSource::Kind::Archive && !m_source.member.isEmpty())
+        return QDir::toNativeSeparators(m_source.path) + QStringLiteral(" \u203A ") + m_source.member;
+    return QDir::toNativeSeparators(displayPath());
 }

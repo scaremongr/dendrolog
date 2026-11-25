@@ -2947,7 +2947,7 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
                    .arg(QDir::toNativeSeparators(files.first()->filePath));
     } else if (n == 1 && files.first()) {
         text = files.first()->shortName();
-        tip  = QDir::toNativeSeparators(files.first()->displayPath());
+        tip  = files.first()->nativeDisplayPath();
         // Сжатый файл (F-2): распакованная копия занимает место на диске.
         if (files.first()->source().kind == LogSource::Kind::Archive && view->isUnpacked(files.first()))
             tip += QLatin1Char('\n') + tr("Unpacked copy: %1")
@@ -2959,7 +2959,7 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
         QStringList paths;
         for (const auto& lf : files)
             if (lf)
-                paths << QDir::toNativeSeparators(lf->displayPath());
+                paths << lf->nativeDisplayPath();
         tip = tr("%n file(s), merged by time:", nullptr, n)
               + QLatin1Char('\n') + paths.join(QLatin1Char('\n'));
     } else {
@@ -3049,7 +3049,7 @@ void MainWindow::copyTabPath(int index)
     QStringList paths;
     for (const auto& lf : view->loadedFiles())
         if (lf)
-            paths << QDir::toNativeSeparators(lf->displayPath());
+            paths << lf->nativeDisplayPath();
     if (paths.isEmpty())
         return;
     QApplication::clipboard()->setText(paths.join(QLatin1Char('\n')));
@@ -3115,21 +3115,8 @@ void MainWindow::on_actionOpen_triggered()
     files.removeIf([](const QString& f) { return SessionFile::isSessionFile(f); });
     if (files.isEmpty())
         return;
-    // Архив (zip, tar) — в Directory Scanner (F-2, шаги 4–5); у сканера один корень —
-    // первый архив.
-    const auto firstArchive = std::find_if(files.cbegin(), files.cend(), &MainWindow::isScannerArchive);
-    if (firstArchive != files.cend()) {
-        const QString archive = *firstArchive;
-        const qsizetype archives = files.removeIf(&MainWindow::isScannerArchive);
-        addToRecentFiles(archive);
-        scanArchive(archive);
-        if (archives > 1) {
-            m_statusLabel->setText(
-                tr("Scanning %1. The Directory Scanner shows one folder or archive at a time: %n other(s) skipped.",
-                   nullptr, int(archives - 1))
-                    .arg(QDir::toNativeSeparators(archive)));
-        }
-    }
+    // Архив (zip, tar) — в Directory Scanner (F-2, шаги 4–5).
+    takeArchivesToScanner(files);
     if (files.isEmpty())
         return;
 
@@ -4039,6 +4026,24 @@ bool MainWindow::isScannerArchive(const QString& path)
     return OpenRouting::isArchiveName(path) || ArchiveFormats::isMultiFileArchive(path);
 }
 
+void MainWindow::takeArchivesToScanner(QStringList& files)
+{
+    // У сканера один корень — первый архив; остальные названы пропущенными.
+    const auto firstArchive = std::find_if(files.cbegin(), files.cend(), &MainWindow::isScannerArchive);
+    if (firstArchive == files.cend())
+        return;
+    const QString archive = *firstArchive;
+    const qsizetype archives = files.removeIf(&MainWindow::isScannerArchive);
+    addToRecentFiles(archive);
+    scanArchive(archive);
+    if (archives > 1) {
+        m_statusLabel->setText(
+            tr("Scanning %1. The Directory Scanner shows one folder or archive at a time: %n other(s) skipped.",
+               nullptr, int(archives - 1))
+                .arg(QDir::toNativeSeparators(archive)));
+    }
+}
+
 void MainWindow::scanArchive(const QString& archivePath)
 {
     m_dirScanner->setFileExtensions(AppSettings::instance().scanExtensions());
@@ -4052,8 +4057,15 @@ void MainWindow::onOpenSelectedDirectoryFiles(const QStringList &filePaths)
     if (filePaths.isEmpty())
         return;
 
+    // Архив, выбранный в дереве (расширения сканера его пропустили), — в
+    // сканер, как из Open; вкладка — только если есть что открыть.
+    QStringList files = filePaths;
+    takeArchivesToScanner(files);
+    if (files.isEmpty())
+        return;
+
     LogViewWidget* view = tabForOpening();
-    for (const QString &fPath : filePaths)
+    for (const QString &fPath : files)
     {
         view->addLogFile(fPath);
         // Как у Open: открытое из сканера — в Recent Files (раньше не
@@ -4168,7 +4180,11 @@ void MainWindow::openFilesFromCommandLine(const QStringList& paths, const FileEn
 {
     // Что куда идёт, решает OpenRouting::plan: файлы — вкладками, как раньше;
     // папка — в Directory Scanner (из нескольких — первая).
-    const OpenRouting::Plan plan = OpenRouting::plan(paths);
+    // Архив под чужим именем (по содержимому) делит с папками и архивами по
+    // имени один корень сканера — первый по порядку передачи, остальные
+    // названы пропущенными (иначе его извлечение молча отменял бы следующий
+    // скан).
+    const OpenRouting::Plan plan = OpenRouting::plan(paths, &ArchiveFormats::isMultiFileArchive);
     for (const QString& session : plan.sessions)
         openSessionFile(session);
     for (const QString& file : plan.files)

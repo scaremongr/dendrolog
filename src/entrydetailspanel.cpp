@@ -643,7 +643,7 @@ QString EntryDetailsPanel::buildHtml()
 
         QStringList location;
         if (m_line->sourceFile())
-            location << QDir::toNativeSeparators(m_line->sourceFile()->displayPath()); // F-2: архив, не копия
+            location << m_line->sourceFile()->nativeDisplayPath(); // F-2: архив, не копия
         if (m_logicalLines.size() > 1)
             location << tr("lines %1–%2 (%3)")
                             .arg(m_logicalLines.first()->originalLineNumber())

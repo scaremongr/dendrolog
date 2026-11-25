@@ -48,7 +48,7 @@ GoToDialog::GoToDialog(LogModel* model, const QList<LogFilePtr>& files, int curr
         if (!file)
             continue;
         m_fileCombo->addItem(file->shortName(), QVariant::fromValue(file));
-        m_fileCombo->setItemData(m_fileCombo->count() - 1, QDir::toNativeSeparators(file->displayPath()), Qt::ToolTipRole);
+        m_fileCombo->setItemData(m_fileCombo->count() - 1, file->nativeDisplayPath(), Qt::ToolTipRole);
         if (file.get() == currentFile)
             m_fileCombo->setCurrentIndex(m_fileCombo->count() - 1);
     }

@@ -2174,6 +2174,9 @@ void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource
         // Закладку, которую не снять (нет идентификатора), оставляем как есть:
         // лучше «line not loaded», чем потерянная заметка.
         if (auto state = bookmarks().state(b.id)) {
+            // Члены одного архива делят путь — переносятся закладки только этого члена.
+            if (state->source.member != source.source.member)
+                continue;
             state->source.path = source.source.path;
             moved.append(*state);
             bookmarks().remove(b.id);

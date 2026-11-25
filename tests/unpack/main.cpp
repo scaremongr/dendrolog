@@ -1835,6 +1835,20 @@ void testUnpackTar(const QDir& dir)
         const ZipRun mr = runJob(unpacker, [&] { return unpacker.unpackArchiveMember(v7, QStringLiteral("old.log"), target); });
         CHECK(mr.result.ok() && readFile(target) == QByteArray("v7 log\n"));
     }
+    // Каталог-член с тем же именем, что у файла (дописанный архив): набор
+    // извлекает файл — член вкладки обязан найти его же, а не каталог (ревью шагов 4–5).
+    {
+        const QString dirFirst = writeBytes(dir, QStringLiteral("dir-first.tar"),
+            testtar::tar({testtar::special("x/app.log", '5'), testtar::file("x/app.log", "file after dir\n")}));
+        const ZipRun sr = runJob(unpacker, [&] { return unpacker.unpackArchive(dirFirst, outer + QStringLiteral("/df"), &tarLogOrGz); });
+        CHECK(sr.result.ok() && sr.result.extracted.size() == 1);
+        const QString target = dir.filePath(QStringLiteral("dir-first-member.log"));
+        const ZipRun mr = runJob(unpacker, [&] { return unpacker.unpackArchiveMember(dirFirst, QStringLiteral("x/app.log"), target); });
+        CHECK(mr.result.ok());
+        if (!mr.result.ok())
+            std::fprintf(stderr, "  dir-first member: %s\n", qPrintable(mr.result.message));
+        CHECK(readFile(target) == QByteArray("file after dir\n"));
+    }
     // Архива нет — причина чтения, а не «не архив».
     {
         const QString gone = dir.filePath(QStringLiteral("gone.tar"));

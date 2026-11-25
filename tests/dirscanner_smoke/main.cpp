@@ -1813,6 +1813,12 @@ static void testTarArchive()
         testtar::special("dev.log", '3'),
         testtar::file("readme.md", "not a log\n"),
         testtar::file("rotated.log.gz", testgzip::gzip("2026-04-01 13:00:00 INFO  gz in tar\n")),
+        // Имена, совпадающие без учёта регистра (архив с Linux): второе
+        // получает «~N» и обязано остаться видимым в дереве (ревью шагов 4–5).
+        testtar::file("logs/App.log.gz", testgzip::gzip("2026-04-01 14:00:00 INFO  upper gz\n")),
+        testtar::file("logs/app.log.gz", testgzip::gzip("2026-04-01 14:00:01 INFO  lower gz\n")),
+        testtar::file("logs/svc.log.1", "2026-04-01 15:00:00 INFO  lower rotated\n"),
+        testtar::file("logs/SVC.log.1", "2026-04-01 15:00:01 INFO  upper rotated\n"),
     }, testtar::Format::Gnu);
     const QString tgzPath = tmp.path() + u"/bundle.tar.gz"_s;
     writeFile(tgzPath, testgzip::gzip(bundle));
@@ -1866,6 +1872,11 @@ static void testTarArchive()
         CHECK(findItem(tree->invisibleRootItem(), QString(120, u'n') + u".log"_s) != nullptr,
               "tar: GNU long name extracted");
         CHECK(findItem(tree->invisibleRootItem(), u"readme.md"_s) == nullptr, "tar: non-log members not extracted");
+        // Каждый извлечённый файл виден в дереве — в том числе переименованный повтор.
+        for (const QString& name : QDir(root + u"/logs"_s).entryList(QDir::Files))
+            CHECK(findItem(tree->invisibleRootItem(), name) != nullptr,
+                  qPrintable(u"tar: extracted file shown in the tree: "_s + name));
+        CHECK(QDir(root + u"/logs"_s).entryList(QDir::Files).size() == 6, "tar: case duplicates extracted");
         CHECK(findItem(tree->invisibleRootItem(), u"link.log"_s) == nullptr
                   && findItem(tree->invisibleRootItem(), u"dev.log"_s) == nullptr,
               "tar: links and devices not extracted");

@@ -71,7 +71,7 @@ void FileLegend::rebuild()
             Chip chip;
             chip.file = f.file.get();
             chip.name = f.file->shortName();
-            chip.path = f.file->displayPath();
+            chip.path = f.file->nativeDisplayPath();
             chip.filePath = f.file->filePath;
             chip.colorOrdinal = f.colorOrdinal;
             chip.lines = f.lines;

@@ -37,6 +37,7 @@
 #include "logmodel.h"
 #include "logviewwidget.h"
 #include "recordlocator.h"
+#include "sessioncontroller.h"
 #include "sessionfile.h"
 #include "testdocuments.h"
 #include "viewexport.h"
@@ -750,6 +751,10 @@ static void checkArchiveMember(const QDir& dir, const QString& name, ArchiveKind
         CHECK(lf && lf->shortName() == QLatin1String("twin.log"), label + QStringLiteral(": tab name is the member"));
         CHECK(lf && lf->displayPath() == LogViewWidget::normalizedPath(zip) + QStringLiteral(" › ") + member,
               label + QStringLiteral(": displayPath is archive › member"));
+        // На Windows — нативные разделители у пути архива, имя члена — как в архиве.
+        CHECK(lf && lf->nativeDisplayPath() == QDir::toNativeSeparators(LogViewWidget::normalizedPath(zip))
+                        + QStringLiteral(" › ") + member,
+              label + QStringLiteral(": native display path keeps the member's slashes"));
         CHECK(lf && lf->source().member == member && lf->filePath.startsWith(g_spool),
               label + QStringLiteral(": reads its own copy in the spool"));
         // Закладка и позиция → память файла.
@@ -863,6 +868,53 @@ static void checkArchiveMember(const QDir& dir, const QString& name, ArchiveKind
     CHECK(readAll(movedZip) == bundle(bytes), label + QStringLiteral(": archive untouched"));
 }
 
+// Пересохранение сессии не теряет пропавшие члены одного архива: путь у них
+// общий (архив), различает имя члена (ревью шагов 4–5).
+static void checkSessionMissingMembers(const QDir& dir)
+{
+    const QString label = QStringLiteral("session missing members");
+    QDir work(dir.filePath(QStringLiteral("missing-members")));
+    QDir().mkpath(work.path());
+    const QString zip = testdocs::writeFile(work, "pair.zip",
+        testzip::zip({ testzip::file("logs/a.log", logBytes("a", 30)), testzip::file("logs/b.log", logBytes("b", 40)) }));
+    SessionState saved;
+    {
+        auto tab = newTab();
+        tab->addArchiveMember(zip, QStringLiteral("logs/a.log"));
+        tab->addArchiveMember(zip, QStringLiteral("logs/b.log"));
+        CHECK(settled(*tab) && tab->fileCount() == 2, label + QStringLiteral(": both members load"));
+        saved.tabs.append(tab->captureState());
+        saved.activeTab = 0;
+    }
+    CHECK(saved.tabs.value(0).sources.size() == 2, label + QStringLiteral(": both members captured"));
+    const QString sessionPath = work.filePath(QStringLiteral("pair.dlsession"));
+    QString error;
+    CHECK(SessionFile::save(sessionPath, saved, &error), label + QStringLiteral(": save ") + error);
+    CHECK(QFile::remove(zip), label + QStringLiteral(": archive removed"));
+    SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+    if (!loaded.state) {
+        CHECK(false, label + QStringLiteral(": load ") + loaded.error);
+        return;
+    }
+    std::vector<std::unique_ptr<LogViewWidget>> tabs;
+    SessionController controller;
+    const auto result = controller.open(*loaded.state, sessionPath, [&tabs]() {
+        tabs.push_back(newTab());
+        return tabs.back().get();
+    });
+    CHECK(result.tabs.size() == 1 && result.missing == 2, label + QStringLiteral(": both members missing"));
+    if (result.tabs.size() != 1)
+        return;
+    CHECK(settled(*result.tabs[0]), label + QStringLiteral(": tab settles"));
+    const SessionState resaved = controller.capture({ result.tabs[0] }, result.tabs[0]);
+    QStringList members;
+    for (const TabSource& s : resaved.tabs.value(0).sources)
+        members << s.source.member;
+    members.sort();
+    CHECK(members == (QStringList{ QStringLiteral("logs/a.log"), QStringLiteral("logs/b.log") }),
+          label + QStringLiteral(": resaved session keeps both members: ") + members.join(QLatin1Char(',')));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -898,6 +950,7 @@ int main(int argc, char** argv)
     checkEncodingWhilePending(dir);
     checkStateWhileFirstUnpack(dir);
     checkMemoryFirstArchive(dir);
+    checkSessionMissingMembers(dir);
 
     std::fprintf(stdout, "compressed tabs: %d failure(s)\n", failures);
     return failures ? 1 : 0;

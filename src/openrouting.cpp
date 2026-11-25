@@ -93,7 +93,7 @@ bool isArchiveName(const QString& path)
     return false;
 }
 
-Plan plan(const QStringList& paths)
+Plan plan(const QStringList& paths, const std::function<bool(const QString&)>& isArchiveByContent)
 {
     Plan result;
     QStringList directories; // каталоги и архивы — по порядку передачи
@@ -106,7 +106,9 @@ Plan plan(const QStringList& paths)
         if (info.isDir()) {
             if (!directories.contains(path))
                 directories << path;
-        } else if (info.isFile() && isArchiveName(path)) {
+        } else if (info.isFile()
+                   && (isArchiveName(path)
+                       || (!SessionFile::isSessionFile(path) && isArchiveByContent && isArchiveByContent(path)))) {
             if (!directories.contains(path)) {
                 directories << path;
                 archives.insert(path);

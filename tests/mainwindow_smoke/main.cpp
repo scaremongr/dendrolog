@@ -1341,7 +1341,7 @@ void scenarioZip(MainWindow& win, const Fixtures& fx)
     check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
           QStringLiteral("member rows equal the plain file"));
     check(tabs(win)->tabText(index) == QLatin1String("alpha.log"), QStringLiteral("member tab name"));
-    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(zip + QStringLiteral(" › logs/alpha.log"))),
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(zip) + QStringLiteral(" › logs/alpha.log")),
           QStringLiteral("member tooltip: archive › member (%1)").arg(tabs(win)->tabToolTip(index)));
     const LogFilePtr lf = tab->loadedFiles().value(0);
     check(lf && lf->source().member == QLatin1String("logs/alpha.log"), QStringLiteral("tab source is the member"));
@@ -1444,7 +1444,7 @@ void scenarioTar(MainWindow& win, const Fixtures& fx)
     check(waitLoaded(tab), QStringLiteral("tar member loads"));
     check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
           QStringLiteral("tar member rows equal the plain file"));
-    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(tgz + QStringLiteral(" › logs/alpha.log"))),
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(tgz) + QStringLiteral(" › logs/alpha.log")),
           QStringLiteral("tar member tooltip: archive › member (%1)").arg(tabs(win)->tabToolTip(index)));
     tabs(win)->setCurrentIndex(index);
     command(win, QStringLiteral("closeTab"))->trigger();
@@ -1455,6 +1455,24 @@ void scenarioTar(MainWindow& win, const Fixtures& fx)
     check(waitFor([&]() { return !panel->isExtractingArchive() && panel->archivePath() == disguised; }),
           QStringLiteral("dropped .gz with a tar inside goes to the scanner"));
     check(tabs(win)->count() == before, QStringLiteral(".gz with a tar inside opens no tab"));
+    // Архив, узнанный по содержимому, вместе с папкой (ревью шагов 4–5): у
+    // сканера один корень — первый по порядку, папка названа пропущенной;
+    // извлечение архива не отменяется молча.
+    if (auto* back = panel->findChild<QToolButton*>(QStringLiteral("scannerBackButton")); back && back->isVisible())
+        back->click();
+    auto* status = win.findChild<QLabel*>(QStringLiteral("statusMessageLabel"));
+    dropPaths(win, {disguised, fx.dir});
+    check(waitFor([&]() { return !panel->isExtractingArchive() && panel->archivePath() == disguised; }),
+          QStringLiteral("archive by content dropped with a folder: the first one is scanned (%1)").arg(scanner->rootPath()));
+    check(status && status->text().contains(QStringLiteral("skipped")),
+          QStringLiteral("archive by content with a folder: the folder is named skipped (%1)").arg(status ? status->text() : QString()));
+    check(tabs(win)->count() == before, QStringLiteral("archive by content with a folder opens no tab"));
+    // Архив, выбранный в дереве сканера (двойной щелчок), — в сканер, без
+    // пустой вкладки.
+    emit scanner->fileActivated(tgz);
+    check(waitFor([&]() { return !panel->isExtractingArchive() && panel->archivePath() == tgz; }),
+          QStringLiteral("archive activated in the scanner tree is opened in the scanner"));
+    check(tabs(win)->count() == before, QStringLiteral("archive activated in the scanner tree opens no tab"));
     // `.gz` с одним логом — по-прежнему вкладка.
     const QString single = write(QStringLiteral("tar-single.log.gz"), testgzip::gzip(bytes));
     win.openCommandLine(OpenRouting::parseCommandLine({single}));

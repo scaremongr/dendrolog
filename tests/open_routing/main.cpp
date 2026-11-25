@@ -121,6 +121,20 @@ static void testPlan(const QTemporaryDir& tmp)
               "folder before a zip: the folder is scanned, the archive skipped");
         CHECK(OpenRouting::isArchiveName(upper) && !OpenRouting::isArchiveName(root + "/app.log.gz"),
               "archive name: .zip in any case; .gz is a file");
+        // Архив по содержимому (предикат окна) делит корень сканера по
+        // порядку передачи, как архив по имени (ревью шагов 4–5).
+        const QString disguised = writeFile(root + "/bundle.data", QByteArray("PK"));
+        const auto byContent = [&disguised](const QString& p) { return p == disguised; };
+        plan = OpenRouting::plan({disguised, a, dir1}, byContent);
+        CHECK(plan.scanArchive == disguised && plan.files == QStringList({a})
+                  && plan.skippedDirectories == QStringList({dir1}),
+              "archive by content before a folder: the archive is scanned, the folder skipped");
+        plan = OpenRouting::plan({dir1, disguised}, byContent);
+        CHECK(plan.scanDirectory == dir1 && plan.files.isEmpty()
+                  && plan.skippedDirectories == QStringList({disguised}),
+              "folder before an archive by content: the archive is skipped, not opened as a file");
+        plan = OpenRouting::plan({disguised});
+        CHECK(plan.files == QStringList({disguised}), "without the predicate: a file");
     }
     {   // Q-6: один каталог — в сканер.
         const auto plan = OpenRouting::plan({dir1});

@@ -3167,7 +3167,7 @@ LogListView::RowChromeHit LogListView::rowChromeAt(const QPoint& pos) const
             hit.rect = QRect(fileColumnLeft(), int(qMax<qint64>(0, rowTop)), m_fileColumnWidth,
                              int(qMin<qint64>(viewport()->height(), rowTop + state.height)
                                  - qMax<qint64>(0, rowTop)));
-            hit.toolTip = file->file->displayPath();
+            hit.toolTip = file->file->nativeDisplayPath();
         }
         return hit;
     }

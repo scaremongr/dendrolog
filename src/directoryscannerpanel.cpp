@@ -346,14 +346,21 @@ void DirectoryScannerPanel::cancelExtraction()
     // Не ждать: частичный каталог (бывает на гигабайты) воркер удаляет сам,
     // в своём потоке. Распаковщик отцепляется от панели и удаляет себя по
     // итогу; следующее извлечение берёт новый — его итог и прогресс с
-    // прежними не путаются.
+    // прежними не путаются. Каталог извлечения (SpoolItem) живёт до итога
+    // отменённого задания: отпустить его сразу — удаление в фоне могло бы
+    // пройти раньше последней записи воркера, и файл остался бы в спуле
+    // (ревью шагов 4–5). Закрытие окна посреди извлечения всё же ждёт
+    // воркер — деструктор распаковщика, дочернего объекта панели.
     SourceUnpacker* old = m_unpacker;
     m_unpacker = nullptr;
     old->disconnect(this);
-    connect(old, &SourceUnpacker::finished, old, &QObject::deleteLater);
+    std::shared_ptr<SpoolItem> item = std::move(m_pendingItem);
+    connect(old, &SourceUnpacker::finished, old, [old, item]() mutable {
+        item.reset();
+        old->deleteLater();
+    });
     old->cancel();
     m_pendingArchive.clear();
-    m_pendingItem.reset();
     m_job = 0;
     showCurrentPath();
 }
