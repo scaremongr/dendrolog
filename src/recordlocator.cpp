@@ -699,7 +699,10 @@ void RecordLocator::fileReset(const QString& filePath)
             if (r.kind == Kind::Saved) {
                 r.phase = Phase::Waiting;
                 r.file = nullptr;
-                m_waiting[key].append(token);
+                // Ждёт под ключом источника: его ищут bindWaiting (fs.path) и
+                // unplace (sourceKey(r.source)); у сжатого источника это путь
+                // архива, а не копии (key).
+                m_waiting[fs.path].append(token);
                 continue;
             }
             place(token, r, fs);

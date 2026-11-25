@@ -17,6 +17,9 @@ All notable changes to DendroLog are documented here. The format follows
   tab tooltip gives the size of the unpacked copy. Bookmarks, the file memory
   and sessions remember the archive, so its bookmarks are back when it is
   opened again, also after a session folder was moved together with it.
+  A session saved, or a tab closed, while the archive is still unpacking
+  keeps it (reopening unpacks it again); an encoding picked meanwhile is
+  applied to the unpacked file.
   Auto-reload leaves `.gz` files alone; `F5` unpacks a changed archive again.
   Save View As refuses to overwrite the archive. Temporary files left behind
   by a crash are removed at the next start.

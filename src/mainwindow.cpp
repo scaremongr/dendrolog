@@ -1987,6 +1987,7 @@ LogViewWidget* MainWindow::createLogViewWidget()
         m_statusLabel->setText(tr("Unpacking %1… %2 %").arg(lf->shortName()).arg(percent));
         m_unpackStatusShown = true;
         m_progressBar->setValue(percent);
+        m_progressBar->show(); // вернулись на вкладку посреди распаковки
     });
     connect(view, &LogViewWidget::unpackingFinished, this, [this, view](const LogFilePtr&, bool) {
         updateTabLabel(view);
@@ -2064,6 +2065,7 @@ void MainWindow::setupStatusBar()
     updateLineInfoLabel(-1, 0);
 
     m_progressBar = new QProgressBar(this);
+    m_progressBar->setObjectName(QStringLiteral("statusProgressBar"));
     m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     m_progressBar->setTextVisible(true);

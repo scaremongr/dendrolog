@@ -26,6 +26,7 @@
 #include "documentstate.h"
 #include "filememorystore.h"
 #include "gzipbytes.h"
+#include "logmodel.h"
 #include "logviewwidget.h"
 #include "recordlocator.h"
 #include "sessionfile.h"
@@ -237,8 +238,19 @@ static void checkBroken(const QDir& dir)
     const QString gz = testdocs::writeFile(dir, "broken.log.gz", cut);
     auto tab = newTab();
     Spy failed(tab.get(), &LogViewWidget::fileParsingFailed);
+    QStringList status;
+    QObject::connect(tab.get(), &LogViewWidget::statusMessage, tab.get(),
+                     [&status](const QString& text) { status << text; });
     tab->addLogFile(gz);
     CHECK(settled(*tab) && failed.size() == 1, label + QStringLiteral(": failure reported"));
+    // Архив пропал, копии не было: F5 не обещает «копию, которая осталась».
+    QFile::rename(gz, gz + QStringLiteral(".away"));
+    status.clear();
+    tab->reloadChangedFiles(true);
+    CHECK(status.size() == 1 && !status.value(0).contains(QLatin1String("copy"))
+              && status.value(0).contains(QLatin1String("not found")),
+          label + QStringLiteral(": F5 without archive and copy — message: ") + status.value(0));
+    QFile::rename(gz + QStringLiteral(".away"), gz);
     const QString message = tab->loadFailureMessage(tab->loadedFiles().value(0));
     CHECK(message.contains(QLatin1String("broken.log.gz")) && message.size() > 30,
           label + QStringLiteral(": reason is named: ") + message);
@@ -432,6 +444,238 @@ static void checkSession(const QDir& dir, const QString& name)
           label + QStringLiteral(": bookmark on its line"));
 }
 
+// RecordLocator: сохранённый запрос к сжатому источнику переживает сброс строк
+// файла (F5 изменённого архива, конвертация вкладки) — ждёт следующего
+// поколения под ключом источника (архив), а не пути копии (ревью шагов 2–3).
+static void checkLocatorReset(const QDir& dir)
+{
+    const QString label = QStringLiteral("locator reset");
+    QDir work(dir.filePath(QStringLiteral("locator")));
+    QDir().mkpath(work.path());
+    const QByteArray bytes = logBytes("loc", 120);
+    const QString gz = testdocs::writeFile(work, "loc.log.gz", testgzip::gzip(bytes));
+    const QString copy = testdocs::writeFile(work, "copy-loc.log", bytes);
+    auto lf = std::make_shared<LogFile>(copy);
+    LogSource source;
+    source.kind = LogSource::Kind::Archive;
+    source.path = gz;
+    lf->setSource(source);
+    const auto identity = SourceIdentity::capture(*lf);
+    CHECK(identity && identity->compressed, label + QStringLiteral(": identity captured"));
+    if (!identity)
+        return;
+    const QList<QByteArray> lines = bytes.split('\n');
+    QVector<std::shared_ptr<LogEntry>> entries;
+    for (int i = 0; i + 1 < lines.size(); ++i)
+        entries.append(std::make_shared<LogEntry>(i, i + 1, QDateTime(), LogLevel::Info,
+                                                  QString::fromUtf8(lines[i]), lf));
+    const qint64 target = 100;
+    LogModel model;
+    RecordLocator& loc = model.recordLocator();
+    QHash<int, RecordKey> resolved;
+    QHash<int, RecordLocator::Refusal> refused;
+    QObject::connect(&loc, &RecordLocator::resolved, &loc,
+                     [&](int token, const RecordKey& key) { resolved.insert(token, key); });
+    QObject::connect(&loc, &RecordLocator::refused, &loc,
+                     [&](int token, RecordLocator::Refusal reason) { refused.insert(token, reason); });
+    const int token = loc.request(*identity, RecordId::forLine(target, QString::fromUtf8(lines[target - 1])));
+    loc.residentBatch(entries.mid(0, 10)); // строка 100 ещё не пришла
+    testdocs::pump(20);
+    CHECK(resolved.isEmpty() && refused.isEmpty(), label + QStringLiteral(": pending before reset"));
+    loc.fileReset(copy);                   // строки файла сброшены
+    loc.residentBatch(entries);            // новое поколение
+    loc.fileLoaded(lf);
+    CHECK(testdocs::waitFor([&] { return resolved.contains(token) || refused.contains(token); }, 5000),
+          label + QStringLiteral(": request answered after reset"));
+    CHECK(resolved.value(token).line == target, label + QStringLiteral(": line found after reset"));
+    loc.cancel(token);
+    CHECK(loc.pendingCount() == 0, label + QStringLiteral(": nothing left waiting"));
+}
+
+// Выбор кодировки, сделанный, пока копия пишется (первая распаковка или F5
+// изменённого архива), доезжает до загрузки копии на обоих бэкендах, через
+// конвертацию вкладки и слияние (ревью шагов 2–3).
+static void checkEncodingWhilePending(const QDir& dir)
+{
+    const QString label = QStringLiteral("encoding while pending");
+    QDir work(dir.filePath(QStringLiteral("pending-encoding")));
+    QDir().mkpath(work.path());
+    const QByteArray bytes = logBytes("enc", 200);
+    const QByteArray changed = logBytes("changed", 150);
+    const auto isCp1251 = [](const FileEncoding& e) {
+        return e.source == FileEncoding::Source::User && e.decoder.encoding() == TextEncoding::Windows1251;
+    };
+    const FileEncoding cp1251 = FileEncoding().withUserChoice(TextDecoder(TextEncoding::Windows1251));
+    for (const int threshold : { 512, 0 }) {
+        AppSettings::instance().setIndexedThresholdMB(threshold);
+        const QString name = threshold ? QStringLiteral("resident") : QStringLiteral("indexed");
+        // --encoding второго открытия посреди перераспаковки по F5.
+        {
+            const QString gz = testdocs::writeFile(work, "f5-" + name.toUtf8() + ".log.gz", testgzip::gzip(bytes));
+            auto tab = newTab();
+            tab->addLogFile(gz);
+            CHECK(settled(*tab), label + QStringLiteral(" %1: loads").arg(name));
+            testdocs::writeFile(work, "f5-" + name.toUtf8() + ".log.gz", testgzip::gzip(changed));
+            CHECK(tab->reloadChangedFiles(true) && tab->isUnpacking(), label + QStringLiteral(" %1: F5 unpacks").arg(name));
+            tab->addLogFile(gz, cp1251);
+            CHECK(settled(*tab) && tab->model()->rowCount() == changed.count('\n'),
+                  label + QStringLiteral(" %1: --encoding during F5 — rows once: %2").arg(name).arg(tab->model()->rowCount()));
+            CHECK(isCp1251(tab->fileEncoding(tab->loadedFiles().value(0))),
+                  label + QStringLiteral(" %1: --encoding during F5 — choice kept").arg(name));
+        }
+        // Меню индикатора посреди перераспаковки: без перечитывания недописанной копии.
+        {
+            const QString gz = testdocs::writeFile(work, "menu-" + name.toUtf8() + ".log.gz", testgzip::gzip(bytes));
+            auto tab = newTab();
+            tab->addLogFile(gz);
+            CHECK(settled(*tab), label + QStringLiteral(" %1: menu — loads").arg(name));
+            testdocs::writeFile(work, "menu-" + name.toUtf8() + ".log.gz", testgzip::gzip(changed));
+            CHECK(tab->reloadChangedFiles(true) && tab->isUnpacking(), label + QStringLiteral(" %1: menu — F5").arg(name));
+            tab->setFileEncoding(tab->loadedFiles().value(0), TextEncoding::Windows1251);
+            CHECK(settled(*tab) && tab->model()->rowCount() == changed.count('\n'),
+                  label + QStringLiteral(" %1: menu during F5 — rows once: %2").arg(name).arg(tab->model()->rowCount()));
+            CHECK(isCp1251(tab->fileEncoding(tab->loadedFiles().value(0))),
+                  label + QStringLiteral(" %1: menu during F5 — choice kept").arg(name));
+        }
+        // Слияние вкладки, где архив ещё распаковывается с выбором пользователя.
+        {
+            const QString gz = testdocs::writeFile(work, "merge-" + name.toUtf8() + ".log.gz", testgzip::gzip(bytes));
+            auto source = newTab();
+            source->addLogFile(gz, cp1251);
+            CHECK(source->isUnpacking(), label + QStringLiteral(" %1: merge — source unpacking").arg(name));
+            auto target = newTab();
+            target->addFilesFrom(*source);
+            source.reset();
+            CHECK(settled(*target) && target->model()->rowCount() == bytes.count('\n'),
+                  label + QStringLiteral(" %1: merge — rows").arg(name));
+            CHECK(isCp1251(target->fileEncoding(target->loadedFiles().value(0))),
+                  label + QStringLiteral(" %1: merge — choice kept").arg(name));
+        }
+    }
+    // Резидентная вкладка: выбор сделан до F5, вкладка стала индексной, пока
+    // копия перераспаковывалась.
+    {
+        AppSettings::instance().setIndexedThresholdMB(1);
+        QByteArray large;
+        for (int i = 0; large.size() < (3 << 20); ++i)
+            large += record(i, "INFO", "large " + QByteArray::number(i));
+        const QString plain = testdocs::writeFile(work, "large.log", large);
+        const QString gz = testdocs::writeFile(work, "conv.log.gz", testgzip::gzip(bytes));
+        auto tab = newTab();
+        tab->addLogFile(gz);
+        CHECK(settled(*tab) && !tab->model()->isIndexedBackend(), label + QStringLiteral(" conversion: loads resident"));
+        tab->setFileEncoding(tab->loadedFiles().value(0), TextEncoding::Windows1251);
+        CHECK(settled(*tab), label + QStringLiteral(" conversion: reencoded"));
+        testdocs::writeFile(work, "conv.log.gz", testgzip::gzip(changed));
+        CHECK(tab->reloadChangedFiles(true) && tab->isUnpacking(), label + QStringLiteral(" conversion: F5"));
+        tab->addLogFile(plain);
+        CHECK(tab->model()->isIndexedBackend(), label + QStringLiteral(" conversion: converted"));
+        CHECK(settled(*tab) && tab->model()->rowCount() == changed.count('\n') + large.count('\n'),
+              label + QStringLiteral(" conversion: rows"));
+        LogFilePtr archive;
+        for (const LogFilePtr& lf : tab->loadedFiles())
+            if (lf->source().kind == LogSource::Kind::Archive)
+                archive = lf;
+        CHECK(archive && isCp1251(tab->fileEncoding(archive)), label + QStringLiteral(" conversion: choice kept"));
+    }
+    AppSettings::instance().setIndexedThresholdMB(512);
+}
+
+// Снимок вкладки, чей архив ещё распаковывается впервые: источник в снимке
+// есть (сессия, last-session.json, Ctrl+Shift+T), а память файла от закрытия
+// посреди распаковки не теряет прежних закладок (ревью шагов 2–3).
+static void checkStateWhileFirstUnpack(const QDir& dir)
+{
+    const QString label = QStringLiteral("state while first unpack");
+    QDir work(dir.filePath(QStringLiteral("first-unpack")));
+    QDir().mkpath(work.path());
+    FileMemoryStore store(work.filePath(QStringLiteral("memory")));
+    const QByteArray bytes = logBytes("first", 160);
+    const QString gz = testdocs::writeFile(work, "first.log.gz", testgzip::gzip(bytes));
+    TabState during;
+    {
+        auto tab = newTab();
+        tab->addLogFile(gz);
+        CHECK(tab->isUnpacking(), label + QStringLiteral(": unpacking"));
+        during = tab->captureState();
+    }
+    CHECK(during.sources.size() == 1 && during.sources[0].source.compressed
+              && SavedPath::same(during.sources[0].source.path, LogViewWidget::normalizedPath(gz)),
+          label + QStringLiteral(": archive in the snapshot"));
+    // Через JSON, как на диск.
+    const auto json = TabState::fromJson(during.toJson());
+    CHECK(json.has_value(), label + QStringLiteral(": snapshot JSON round trip"));
+    {
+        auto tab = newTab();
+        tab->show();
+        const auto report = tab->applyState(json ? *json : during);
+        CHECK(report.missingSources.isEmpty() && report.changedSources.isEmpty(),
+              label + QStringLiteral(": nothing missing on restore"));
+        CHECK(settled(*tab) && tab->model()->rowCount() == bytes.count('\n'),
+              label + QStringLiteral(": restored tab loads the archive"));
+    }
+    // Память файла: закладка есть; вкладку закрыли посреди распаковки.
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->show();
+        tab->addLogFile(gz);
+        CHECK(settled(*tab), label + QStringLiteral(": memory — loads"));
+        tab->bookmarks().add(rowOfLine(*tab->model(), 40), QStringLiteral("forty"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+    }
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->addLogFile(gz);
+        CHECK(tab->isUnpacking(), label + QStringLiteral(": memory — unpacking"));
+        tab->saveFileMemory();
+        store.waitForWrites();
+    }
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->show();
+        tab->addLogFile(gz);
+        CHECK(settled(*tab) && tab->bookmarks().visibleRows().size() == 1
+                  && tab->bookmarks().visibleRows().value(0) == rowOfLine(*tab->model(), 40),
+              label + QStringLiteral(": memory — bookmark survives closing during unpack"));
+    }
+}
+
+// Память файла у `a.log.gz b.log`: первый открытый файл получает состояние
+// целиком (позицию), как у `a.log b.log` (ревью шагов 2–3).
+static void checkMemoryFirstArchive(const QDir& dir)
+{
+    const QString label = QStringLiteral("memory, archive first");
+    QDir work(dir.filePath(QStringLiteral("memory-first")));
+    QDir().mkpath(work.path());
+    FileMemoryStore store(work.filePath(QStringLiteral("memory")));
+    const QByteArray bytes = logBytes("afirst", 150);
+    const QString gz = testdocs::writeFile(work, "afirst.log.gz", testgzip::gzip(bytes));
+    const QString plain = testdocs::writeFile(work, "bsecond.log", logBytes("bsecond", 30));
+    {
+        auto tab = newTab();
+        tab->setFileMemory(&store);
+        tab->show();
+        tab->addLogFile(gz);
+        CHECK(settled(*tab), label + QStringLiteral(": loads"));
+        tab->view()->goToRow(rowOfLine(*tab->model(), 70));
+        tab->saveFileMemory();
+        store.waitForWrites();
+    }
+    auto tab = newTab();
+    tab->setFileMemory(&store);
+    tab->show();
+    tab->addLogFile(gz);
+    tab->addLogFile(plain);
+    CHECK(settled(*tab), label + QStringLiteral(": both load"));
+    const RecordKey key = tab->model()->keyAt(tab->view()->userSelectedRow());
+    CHECK(key.isValid() && key.file && key.file->source().kind == LogSource::Kind::Archive && key.line == 70,
+          label + QStringLiteral(": position of the first file restored"));
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -460,6 +704,10 @@ int main(int argc, char** argv)
     settings.setIndexedThresholdMB(512);
     checkCloseAndCancel(dir);
     checkConversionWhileUnpacking(dir);
+    checkLocatorReset(dir);
+    checkEncodingWhilePending(dir);
+    checkStateWhileFirstUnpack(dir);
+    checkMemoryFirstArchive(dir);
 
     std::fprintf(stdout, "compressed tabs: %d failure(s)\n", failures);
     return failures ? 1 : 0;
