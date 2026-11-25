@@ -60,6 +60,11 @@ QString accessTimestampDetectPattern();
 // day may be " 8" or "8"): (1) month name, (2) day, (3)(4)(5) time, then the
 // suffix layout from (6).
 QString syslogTimestampDetectPattern();
+// Time without a date (F-11) "HH:MM:SS" at position 0 or right after "[" at
+// position 0: (1)(2)(3) time — not followed by a digit or ":", (4) optional
+// "[.,]digits". No zone. Only file readers with date state take it as a
+// timestamp (LineClassifier::ClockDates).
+QString clockTimestampDetectPattern();
 // English month abbreviation Jan…Dec, ASCII case folded, no capture.
 QString monthNameRegex();
 // (1) = level word.

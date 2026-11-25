@@ -3510,8 +3510,11 @@ void LogListView::keyPressEvent(QKeyEvent *event) {
 // year — опорная дата года для меток без года (syslog): та же, что у файла
 // строки, иначе граница получила бы год по сегодняшней дате, а строки — по
 // mtime файла.
+// rowDate — дата строки под курсором: время без даты (F-11: у строк лога его
+// дата — по состоянию разбора файла) берёт её, без строки — сегодняшнюю.
 static QDateTime parseTimestampText(const QString& raw,
-                                    const LineClassifier::YearReference& year) {
+                                    const LineClassifier::YearReference& year,
+                                    const QDate& rowDate) {
     // Сначала тем же классификатором, что и при загрузке (ISO с дробью и
     // зоной, фолбэк-формы, syslog, access): граница фильтра — тот же
     // момент, что у строки.
@@ -3537,14 +3540,14 @@ static QDateTime parseTimestampText(const QString& raw,
             return dt;
     }
 
-    // Только время — подставляем сегодняшнюю дату.
+    // Только время — дата строки под курсором, без неё сегодняшняя.
     static const QStringList timeFormats = {
         QStringLiteral("HH:mm:ss"), QStringLiteral("H:mm:ss"),
     };
     for (const QString& f : timeFormats) {
         const QTime t = QTime::fromString(s, f);
         if (t.isValid())
-            return QDateTime(QDate::currentDate(), t);
+            return QDateTime(rowDate.isValid() ? rowDate : QDate::currentDate(), t);
     }
     return QDateTime();
 }
@@ -3635,14 +3638,18 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
     QDateTime boundTime;
     if (selType == TextToken::TokenType::Timestamp) {
         LineClassifier::YearReference year;
+        QDate rowDate;
         if (haveRow) {
             if (auto* logModel = qobject_cast<LogModel*>(model())) {
                 const std::shared_ptr<LogEntry> entry = logModel->entryAt(row);
                 if (entry && entry->sourceFile())
                     year = LineClassifier::yearReferenceForFile(entry->sourceFile()->filePath);
+                const QDateTime rowMoment = logModel->visibleTimestampAt(row);
+                if (rowMoment.isValid())
+                    rowDate = rowMoment.toLocalTime().date();
             }
         }
-        boundTime = parseTimestampText(sel, year);
+        boundTime = parseTimestampText(sel, year, rowDate);
     }
     if (!boundTime.isValid() && haveRow) {
         if (auto* logModel = qobject_cast<LogModel*>(model()))

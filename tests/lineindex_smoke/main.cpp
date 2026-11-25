@@ -332,6 +332,254 @@ static void testNewTimestampFormsBackends(const QDir& dir)
           "forms_grow.log: appended line after New Year gets the new year");
 }
 
+// F-11. Время без даты на обоих путях загрузки и в сканере каталога:
+// последняя строка — дата по mtime (ближайшая), к началу файла дата
+// уменьшается на сутки, когда время идёт назад больше чем на час. Моменты —
+// против заранее заданных; дозапись через полночь продолжает уже показанные
+// строки и совпадает со свежим разбором.
+
+// Дозапись резидентным парсером с конца прежнего прохода (контекст — от
+// последней строки, как у вкладки); блокирует до завершения.
+static QVector<std::shared_ptr<LogEntry>> parseAppend(const LogFilePtr& lf, qint64 from,
+                                                      const std::shared_ptr<LogEntry>& last)
+{
+    QVector<std::shared_ptr<LogEntry>> all;
+    std::atomic_bool done{false};
+    LogParser parser;
+    QObject::connect(&parser, &LogParser::entriesParsed, &parser,
+                     [&](const QVector<std::shared_ptr<LogEntry>>& batch,
+                         const LogFilePtr&) { all += batch; },
+                     Qt::DirectConnection);
+    QObject::connect(&parser, &LogParser::parsingFinished, &parser,
+                     [&](int, const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+    LogParser::ResumeContext context;
+    if (last) {
+        context.nextLogicalEntryId = last->logicalEntryId() + 1;
+        context.currentLogicalEntryId = last->logicalEntryId();
+        context.currentTimestamp = last->timestamp();
+        context.currentLevel = last->level();
+        context.nextLineNumber = last->originalLineNumber() + 1;
+    }
+    parser.startParsingFrom(lf, from, context);
+    QElapsedTimer t; t.start();
+    while (!done && t.elapsed() < 30000)
+        QThread::msleep(2);
+    CHECK(done.load(), "incremental parsing did not finish in time");
+    return all;
+}
+
+static qint64 localMs(const QDate& date, int h, int mi, int sec, int ms = 0)
+{
+    return QDateTime(date, QTime(h, mi, sec, ms)).toMSecsSinceEpoch();
+}
+
+static qint64 entryMs(const LogEntry& e)
+{
+    return e.timestamp().isValid() ? e.timestamp().toMSecsSinceEpoch() : kNoTimestampMs;
+}
+
+static void checkMoments(const QString& tag, const LineIndex& index,
+                         const QVector<std::shared_ptr<LogEntry>>& entries,
+                         const QVector<qint64>& expected)
+{
+    CHECK(index.lineCount() == expected.size() && entries.size() == expected.size(),
+          qPrintable(QString("%1: %2 lines (index %3, parser %4)").arg(tag).arg(expected.size())
+                         .arg(index.lineCount()).arg(entries.size())));
+    for (int i = 0; i < expected.size() && i < index.lineCount() && i < entries.size(); ++i) {
+        const qint64 idx = index.timestampMs(index.logicalId(i));
+        const qint64 res = entryMs(*entries[i]);
+        if (idx != expected[i] || res != expected[i]) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL %s line %d moment: index %s, parser %s, expected %s\n",
+                         qPrintable(tag), i + 1,
+                         qPrintable(QDateTime::fromMSecsSinceEpoch(idx).toString(Qt::ISODateWithMs)),
+                         qPrintable(QDateTime::fromMSecsSinceEpoch(res).toString(Qt::ISODateWithMs)),
+                         qPrintable(QDateTime::fromMSecsSinceEpoch(expected[i]).toString(Qt::ISODateWithMs)));
+        }
+    }
+}
+
+static void testClockTimestamps(const QDir& dir)
+{
+    const QDate d0(2026, 11, 16), d1(2026, 11, 17), d2(2026, 11, 18);
+    // Трое суток; mtime — чуть после последней строки.
+    const QByteArray threeDays =
+        "23:50:00.000 [main] INFO  app - started\n"          // d0
+        "23:59:59.500 [main] DEBUG app - tick\n"            // d0
+        "00:00:01,250 [main] INFO  app - after midnight\n"  // d1: назад больше чем на час
+        "java.lang.IllegalStateException: at 00:00:01\n"    // продолжение
+        "\tat com.example.App.run(App.java:1)\n"            // продолжение
+        "12:00:00 [main] INFO  app - noon\n"                 // d1
+        "11:00:00 [main] WARN  app - clock moved back\n"     // d1: ровно час назад — перевод часов
+        "10:59:59 [pool-1] INFO  app - threads interleave\n" // d1: чуть назад
+        "[23:00:00 INF] evening\n"                           // d1
+        "took 00:01:23 to finish\n"                          // продолжение: длительность в тексте
+        "2026-01-10 10:00:00 INFO  iso line keeps its date\n"
+        "[00:30:00 ERR] next day\n"                          // d2
+        "00:40:00.5 [main] ERROR app - last\n";              // d2
+    const QString path = writeFile(dir, QStringLiteral("clock.log"), threeDays);
+    setMtime(path, QDateTime(d2, QTime(0, 45)));
+    auto lf = std::make_shared<LogFile>(path);
+    const auto entries = parseFile(lf);
+    const auto index = indexFile(lf);
+    compareParserVsIndex(QStringLiteral("clock.log"), path, lf, entries, *index);
+    const qint64 afterMidnight = localMs(d1, 0, 0, 1, 250);
+    const QVector<qint64> expected = {
+        localMs(d0, 23, 50, 0), localMs(d0, 23, 59, 59, 500),
+        afterMidnight, afterMidnight, afterMidnight,
+        localMs(d1, 12, 0, 0), localMs(d1, 11, 0, 0), localMs(d1, 10, 59, 59),
+        localMs(d1, 23, 0, 0), localMs(d1, 23, 0, 0),
+        localMs(QDate(2026, 1, 10), 10, 0, 0),
+        localMs(d2, 0, 30, 0), localMs(d2, 0, 40, 0, 500),
+    };
+    checkMoments(QStringLiteral("clock.log"), *index, entries, expected);
+    CHECK(index->logicalEntryCount() == 10, "clock.log: ten records (time without a date is leading)");
+    CHECK(ClockDateState::fromPacked(lf->clockState.load()).isSet(),
+          "clock.log: date state kept on the file for an append");
+
+    // Без контекста файла форма — не метка (граница фильтра из текста, Go to).
+    {
+        const LineClassifier classifier;
+        qint64 ms = 0;
+        CHECK(!classifier.detectTimestampMs(QStringLiteral("13:55:40.016 [main] INFO x"), ms),
+              "time without a date needs the file context");
+    }
+
+    // Последняя строка у полуночи: сброшена на диск после полуночи — день
+    // её записи, а не mtime; писатель в поясе восточнее — следующий день.
+    const QString flush = writeFile(dir, QStringLiteral("clock_flush.log"),
+                                    "23:59:58 INFO a\n23:59:59 INFO b\n");
+    setMtime(flush, QDateTime(d2, QTime(0, 0, 3)));
+    auto flushLf = std::make_shared<LogFile>(flush);
+    checkMoments(QStringLiteral("clock_flush.log"), *indexFile(flushLf), parseFile(flushLf),
+                 { localMs(d1, 23, 59, 58), localMs(d1, 23, 59, 59) });
+    const QString east = writeFile(dir, QStringLiteral("clock_east.log"),
+                                   "22:00:00 INFO a\n02:00:00 INFO b\n");
+    setMtime(east, QDateTime(d1, QTime(23, 0)));
+    auto eastLf = std::make_shared<LogFile>(east);
+    checkMoments(QStringLiteral("clock_east.log"), *indexFile(eastLf), parseFile(eastLf),
+                 { localMs(d1, 22, 0, 0), localMs(d2, 2, 0, 0) });
+
+    // UTF-16 (только резидентный путь): предпросмотр читает поток в кодировке.
+    {
+        QStringEncoder enc(QStringConverter::Utf16LE, QStringConverter::Flag::WriteBom);
+        const QByteArray wide = enc.encode(QStringLiteral("23:00:00 INFO a\n01:00:00 INFO b\n"));
+        const QString widePath = writeFile(dir, QStringLiteral("clock_utf16.log"), wide);
+        setMtime(widePath, QDateTime(d2, QTime(1, 0, 1)));
+        const auto wideEntries = parseFile(std::make_shared<LogFile>(widePath));
+        CHECK(wideEntries.size() == 2 && entryMs(*wideEntries[0]) == localMs(d1, 23, 0, 0)
+                  && entryMs(*wideEntries[1]) == localMs(d2, 1, 0, 0),
+              "clock_utf16.log: dates through the UTF-16 look-ahead");
+    }
+
+    // Сканер каталога: From/To — те же моменты, без предпросмотра.
+    {
+        const LogParser parser;
+        const LogParser::StatsScan scan = parser.analyzeFileForStats(path, LogParser::StatsResume());
+        CHECK(scan.stats.totalEntries == 10, "clock.log scanner: ten records");
+        CHECK(scan.stats.firstEntryTimestamp.toMSecsSinceEpoch() == expected.first()
+                  && scan.stats.lastEntryTimestamp.toMSecsSinceEpoch() == expected.last(),
+              qPrintable(QString("clock.log scanner: From/To %1 / %2")
+                             .arg(scan.stats.firstEntryTimestamp.toString(Qt::ISODateWithMs),
+                                  scan.stats.lastEntryTimestamp.toString(Qt::ISODateWithMs))));
+    }
+
+    // Дозапись через полночь на обоих путях и в сканере: прочитанные строки
+    // сохраняют даты, дописанная после полуночи получает следующий день —
+    // как при свежем разборе того же файла.
+    const QString grow = writeFile(dir, QStringLiteral("clock_grow.log"),
+                                   "23:59:57 INFO a\n23:59:58 INFO b\n");
+    setMtime(grow, QDateTime(d1, QTime(23, 59, 59)));
+    auto growLf = std::make_shared<LogFile>(grow);
+    auto growIndexLf = std::make_shared<LogFile>(grow);
+    auto growEntries = parseFile(growLf);
+    const auto growIndex = indexFile(growIndexLf);
+    const LogParser scanner;
+    const LogParser::StatsScan head = scanner.analyzeFileForStats(grow, LogParser::StatsResume());
+    const qint64 headSize = QFileInfo(grow).size();
+
+    // Сначала оборванная строка (писатель не дописал '\n'), затем она целиком.
+    appendToFile(grow, "00:00:0");
+    setMtime(grow, QDateTime(d2, QTime(0, 0, 2)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, growIndexLf, growIndex, false);
+    }
+    const auto partial = parseAppend(growLf, headSize, growEntries.last());
+    CHECK(partial.size() == 1
+              && partial.first()->logicalEntryId() == growEntries.last()->logicalEntryId(),
+          "clock_grow.log: an unfinished time is not a timestamp yet (continuation)");
+    appendToFile(grow, "2 INFO c\n00:00:03 INFO d\n");
+    setMtime(grow, QDateTime(d2, QTime(0, 0, 4)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, growIndexLf, growIndex, true);
+    }
+    // Резидентный путь перечитывает оборванную строку с её начала.
+    growEntries += parseAppend(growLf, headSize, growEntries.last());
+    const QVector<qint64> grown = {
+        localMs(d1, 23, 59, 57), localMs(d1, 23, 59, 58),
+        localMs(d2, 0, 0, 2), localMs(d2, 0, 0, 3),
+    };
+    checkMoments(QStringLiteral("clock_grow.log"), *growIndex, growEntries, grown);
+    const auto freshGrow = indexFile(std::make_shared<LogFile>(grow));
+    compareIndexes(QStringLiteral("clock_grow.log"), *growIndex, *freshGrow);
+
+    const LogParser::StatsScan tail = scanner.analyzeFileForStats(grow, head.next);
+    const LogParser::FileStats merged = LogParser::mergeStats(head.complete, tail.stats);
+    CHECK(head.stats.lastEntryTimestamp.toMSecsSinceEpoch() == grown[1]
+              && merged.firstEntryTimestamp.toMSecsSinceEpoch() == grown.first()
+              && merged.lastEntryTimestamp.toMSecsSinceEpoch() == grown.last()
+              && merged.totalEntries == 4,
+          qPrintable(QString("clock_grow.log scanner tail: %1 … %2, %3 records")
+                         .arg(merged.firstEntryTimestamp.toString(Qt::ISODate),
+                              merged.lastEntryTimestamp.toString(Qt::ISODate))
+                         .arg(merged.totalEntries)));
+
+    // Огрызок оборванной строки похож на время, целая строка — нет
+    // («13:55:36» от «13:55:36:123»): состояние дат не должно его помнить —
+    // дописанная после полуночи строка получает следующий день, а не через
+    // день. Первый проход видел огрызок последней строкой и привязал к нему
+    // дату первой (d0); показанное не пересчитывается.
+    const QString cut = writeFile(dir, QStringLiteral("clock_cut.log"), "23:30:00 INFO a\n13:55:36");
+    setMtime(cut, QDateTime(d1, QTime(23, 30, 1)));
+    auto cutLf = std::make_shared<LogFile>(cut);
+    auto cutIndexLf = std::make_shared<LogFile>(cut);
+    auto cutEntries = parseFile(cutLf);
+    const auto cutIndex = indexFile(cutIndexLf);
+    const qint64 cutFrom = QByteArray("23:30:00 INFO a\n").size();
+    cutEntries.removeLast();   // оборванную строку вкладка перечитывает с начала
+    appendToFile(cut, ":123 INFO tail of the line\n00:10:00 INFO b\n");
+    setMtime(cut, QDateTime(d2, QTime(0, 10, 1)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, cutIndexLf, cutIndex, true);
+    }
+    cutEntries += parseAppend(cutLf, cutFrom, cutEntries.last());
+    checkMoments(QStringLiteral("clock_cut.log"), *cutIndex, cutEntries,
+                 { localMs(d0, 23, 30, 0), localMs(d0, 23, 30, 0), localMs(d1, 0, 10, 0) });
+
+    // Дозапись в файл, где времени без даты ещё не было: дата дописанных строк
+    // — по mtime в момент дозаписи (предпросмотр от начала дозаписи).
+    const QString late = writeFile(dir, QStringLiteral("clock_late.log"),
+                                   "2026-11-17 10:00:00 INFO iso first\n");
+    setMtime(late, QDateTime(d1, QTime(10, 0, 1)));
+    auto lateLf = std::make_shared<LogFile>(late);
+    auto lateIndexLf = std::make_shared<LogFile>(late);
+    auto lateEntries = parseFile(lateLf);
+    const auto lateIndex = indexFile(lateIndexLf);
+    const qint64 lateSize = QFileInfo(late).size();
+    appendToFile(late, "23:30:00 INFO a\n00:15:00 INFO b\n");
+    setMtime(late, QDateTime(d2, QTime(0, 15, 1)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, lateIndexLf, lateIndex, false);
+    }
+    lateEntries += parseAppend(lateLf, lateSize, lateEntries.last());
+    checkMoments(QStringLiteral("clock_late.log"), *lateIndex, lateEntries,
+                 { localMs(d1, 10, 0, 0), localMs(d1, 23, 30, 0), localMs(d2, 0, 15, 0) });
+}
+
 // F-12. Границы записей без слова уровня на обоих путях загрузки: запись
 // начинает строка с ведущей меткой (позиция 0, «[» на позиции 0, access за
 // «[»), а метка в середине строки или под отступом — продолжение. Оба пути
@@ -679,7 +927,22 @@ static QDateTime refMoment(int year, int month, int day, int hour, int minute,
 struct RefTimestampRes {
     QRegularExpression iso, access, syslog, suffix;
     LineClassifier::YearReference year;
+    // Время без даты (F-11) — PatternHeuristics::clockTimestampDetectPattern.
+    QRegularExpression clock{PatternHeuristics::clockTimestampDetectPattern()};
 };
+
+// Дата одиночной строки с временем без даты независимо от сканера (F-11):
+// последняя дата, при которой местный момент раньше опорного + 12 ч.
+static QDateTime refClockMoment(const LineClassifier::YearReference& ref, const QTime& time)
+{
+    const QDateTime anchor = QDateTime::fromMSecsSinceEpoch(ref.momentMs);
+    const qint64 limit = ref.momentMs + 12 * 3600 * 1000;
+    for (QDate date = anchor.date().addDays(1);; date = date.addDays(-1)) {
+        const QDateTime moment(date, time);
+        if (moment.toMSecsSinceEpoch() < limit)
+            return moment;
+    }
+}
 
 static int refMonth(const QString& name)
 {
@@ -713,7 +976,7 @@ static int refResolveYear(int month, int day, const LineClassifier::YearReferenc
 // формы позиции 0; форма с полной датой с позиции 0, с позиции 1 за «[» или
 // access за «[» в строке, которая не начинается с пробела или табуляции.
 static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, QDateTime& ts,
-                               bool* leading = nullptr)
+                               bool* leading = nullptr, bool withClock = false)
 {
     bool leadingDummy = false;
     bool& lead = leading ? *leading : leadingDummy;
@@ -841,6 +1104,24 @@ static bool refDetectTimestamp(const RefTimestampRes& re, const QString& line, Q
         }
     }
 
+    // F-11: время без даты, только с контекстом файла; невалидное — не метка,
+    // поиск идёт дальше.
+    if (withClock) {
+        const auto clock = re.clock.match(line);
+        if (clock.hasMatch()) {
+            const int hour = clock.captured(1).toInt();
+            const int minute = clock.captured(2).toInt();
+            const int second = clock.captured(3).toInt();
+            const int millis = clock.captured(4).isEmpty()
+                ? 0 : clock.captured(4).mid(1).left(3).leftJustified(3, QLatin1Char('0')).toInt();
+            if (hour < 24 && minute < 60 && second < 60) {
+                ts = refClockMoment(re.year, QTime(hour, minute, second, millis));
+                lead = true;
+                return true;
+            }
+        }
+    }
+
     if (mid) {
         if (!fromMid(*mid))
             return false;
@@ -895,6 +1176,32 @@ static void checkClassifierLine(const LineClassifier& classifier,
                      "FAIL classifier tsMs mismatch on '%s': new=%d %lld ref=%d %lld\n",
                      qPrintable(line), int(hasMsNew), (long long)msNew, int(hasRef),
                      (long long)(hasRef ? tsRef.toMSecsSinceEpoch() : -1));
+    }
+
+    // С контекстом файла (F-11): одиночная строка, без предпросмотра —
+    // дата по опорному моменту; остальные формы — те же.
+    {
+        ClockDates clock;
+        QDateTime tsClock, tsClockRef;
+        bool leadClock = false, leadClockRef = false;
+        const bool hasClock = classifier.detectTimestamp(line, tsClock, tsRe.year, &leadClock, &clock);
+        const bool hasClockRef = refDetectTimestamp(tsRe, line, tsClockRef, &leadClockRef, true);
+        if (hasClock != hasClockRef || (hasClock && tsClock != tsClockRef) || leadClock != leadClockRef) {
+            ++g_failures;
+            std::fprintf(stderr,
+                         "FAIL classifier clock mismatch on '%s': new=%d '%s' leading=%d ref=%d '%s' leading=%d\n",
+                         qPrintable(line), int(hasClock),
+                         qPrintable(tsClock.toString(Qt::ISODateWithMs)), int(leadClock),
+                         int(hasClockRef), qPrintable(tsClockRef.toString(Qt::ISODateWithMs)),
+                         int(leadClockRef));
+        }
+        // matched — метку дала форма без даты: всё, что нашлось только с
+        // контекстом, и ничего, чего нет.
+        if ((hasClock && !hasNew && !clock.matched) || (clock.matched && !hasClock)
+            || (clock.matched && !clock.state.isSet())) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL clock.matched on '%s'\n", qPrintable(line));
+        }
     }
 
     LogLevel lvlNew = LogLevel::Unknown, lvlRef = LogLevel::Unknown;
@@ -1106,6 +1413,37 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("\t2026-11-18 10:00:00 tab then iso"),
         QStringLiteral("[2026-13-40 00:00:00] bracketed invalid"),
         QStringLiteral("["),
+        // F-11: время без даты — с позиции 0 или 1 за «[», только с контекстом.
+        QStringLiteral("13:55:40.016 [main] INFO c.e.App - started"),
+        QStringLiteral("[13:55:36 INF] Starting web host"),
+        QStringLiteral("00:00:00 midnight"),
+        QStringLiteral("23:59:59.999 last millisecond"),
+        QStringLiteral("23:59:59.9999999 long fraction"),
+        QStringLiteral("13:55:36,5 comma fraction"),
+        QStringLiteral("13:55:36, comma without digits"),
+        QStringLiteral("13:55:36."),
+        QStringLiteral("13:55:36"),
+        QStringLiteral("[13:55:36]"),
+        QStringLiteral("24:00:00 bad hour"),
+        QStringLiteral("13:60:00 bad minute"),
+        QStringLiteral("13:55:60 bad second"),
+        QStringLiteral("13:55:36:00 four parts"),
+        QStringLiteral("13:55:361 digit after seconds"),
+        QStringLiteral("13:55 no seconds"),
+        QStringLiteral("1:02:03 one-digit hour"),
+        QStringLiteral(" 13:55:36 leading space"),
+        QStringLiteral("\t13:55:36 leading tab"),
+        QStringLiteral("[[13:55:36] two brackets"),
+        QStringLiteral("x 13:55:36 in the middle"),
+        QStringLiteral("took 00:01:23 to finish"),
+        QStringLiteral("13:55:36Z zone is text"),
+        QStringLiteral("13:55:36 +0300 zone is text"),
+        QStringLiteral("13:55:36abc letters after"),
+        QStringLiteral("[13:55:36] then 2026-11-17 10:00:00 later"),
+        QStringLiteral("25:00:00 bad then 2026-11-17 10:00:00 later"),
+        QStringLiteral("13:55:36 ERROR then [18/Nov/2026:13:55:36 +0000]"),
+        QStringLiteral("13-55-36 dashes"),
+        QStringLiteral("１３:55:36 fullwidth digit"),
     };
     for (const QString& line : corpus)
         check(line);
@@ -1199,6 +1537,8 @@ static void testClassifierRegexEquivalence()
         QStringLiteral("13:55"), QStringLiteral("+0000"), QStringLiteral("-0700"),
         QStringLiteral(".123"), QStringLiteral("Z"), QStringLiteral("UTC"),
         QStringLiteral("2026-07-11"), QStringLiteral("2026/07/11"),
+        QStringLiteral("[13:55:36"), QStringLiteral("00:00:00.5"), QStringLiteral(",25"),
+        QStringLiteral("24:00:00"),
     };
     const QString tsSeps = QStringLiteral("  /:[]-.T");
     for (int iter = 0; iter < 30000; ++iter) {
@@ -1211,6 +1551,22 @@ static void testClassifierRegexEquivalence()
         }
         check(line);
     }
+
+    // F-11: опорный момент у полуночи и посреди суток — одна и та же строка
+    // с временем без даты получает разные даты.
+    const LineClassifier::YearReference savedYear = tsRe.year;
+    for (const QDateTime& anchor : { QDateTime(QDate(2026, 11, 18), QTime(0, 0, 3)),
+                                     QDateTime(QDate(2026, 11, 18), QTime(23, 59, 50)),
+                                     QDateTime(QDate(2026, 11, 18), QTime(11, 59, 59, 999)),
+                                     QDateTime(QDate(2026, 11, 18), QTime(12, 0)),
+                                     QDateTime(QDate(2026, 3, 29), QTime(2, 30)) }) {
+        tsRe.year = LineClassifier::referenceAt(anchor);
+        for (const char* l : { "00:00:00 a", "00:00:02 a", "11:59:59.999 a", "12:00:00 a",
+                               "12:00:00.001 a", "13:55:36 a", "23:59:58 a", "[23:59:59.5 a",
+                               "02:30:00 a", "03:30:00 a" })
+            check(QString::fromLatin1(l));
+    }
+    tsRe.year = savedYear;
 
     // Опорная дата у границы года: та же основа даёт разные годы.
     for (const QDate& refDate : { QDate(2026, 12, 31), QDate(2027, 1, 1), QDate(2028, 2, 28),
@@ -2245,6 +2601,7 @@ int main(int argc, char** argv)
     testPre1970(dir);
     testGolden(dir);
     testNewTimestampFormsBackends(dir);
+    testClockTimestamps(dir);
     testRecordBoundariesBackends(dir);
     testLevelVocabularyBackends(dir);
     testBom(dir);

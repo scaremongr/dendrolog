@@ -20,6 +20,15 @@ All notable changes to DendroLog are documented here. The format follows
   Auto-reload leaves `.gz` files alone; `F5` unpacks a changed archive again.
   Save View As refuses to overwrite the archive. Temporary files left behind
   by a crash are removed at the next start.
+- **Time without a date.** Lines that start with a time only —
+  `13:55:40.016 [main] INFO …` (Logback) and `[13:55:36 INF] …` (Serilog
+  console) — now get a moment: they are ordered, filtered by time, drawn on
+  the timeline and counted in the Directory Scanner's From/To. The date
+  comes from the end of the file: the last such line gets the day the file
+  was last modified, and towards the start the date goes back a day each
+  time the time goes backwards by more than an hour. Lines appended to an
+  open file continue from the lines already shown. Such a line starts an
+  entry; a time in the middle of a line (`took 00:01:23`) is not a timestamp.
 - **File labels on the left.** In a tab with several files, the source file
   of a line is shown in a column left of the text: a stripe in the file's
   colour down the whole line and the file name. A name that fits the column

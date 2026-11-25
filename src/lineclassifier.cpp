@@ -1,6 +1,11 @@
 #include "lineclassifier.h"
+#include "logfile.h"
 
+#include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
+
+#include <cstring>
 
 #include <initializer_list>
 #include <limits>
@@ -16,6 +21,9 @@
 //   accessTimestampDetectPattern(): dd/Mmm/dddd:dd:dd:dd (access-лог)
 //   syslogTimestampDetectPattern(): ^Mmm dd hh:mm:ss, день может быть « 8»
 //                                   или «8» (RFC 3164, без года)
+//   clockTimestampDetectPattern():  ^[?hh:mm:ss, за секундами не цифра и не
+//                                   «:», дробь — без зоны (F-11, только с
+//                                   контекстом файла — ClockDates)
 //   за секундами любой формы — timestampSuffixDetectPattern() (дробь, зона)
 //   levelDetectPattern():         \b(слово из kLevelWords, logentry.h)\b,
 //                                 регистр сворачивается только для ASCII
@@ -403,6 +411,61 @@ bool scanSyslogTimestamp(const QChar* d, qsizetype n,
     return isValidComponents(c);
 }
 
+// Обратное к daysFromCivil (civil_from_days, H. Hinnant).
+void civilFromDays(qint64 z, int& y, int& m, int& d)
+{
+    z += 719468;
+    const qint64 era = (z >= 0 ? z : z - 146096) / 146097;
+    const int doe = int(z - era * 146097);
+    const int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    y = int(yoe + era * 400) + (m <= 2);
+    if (y <= 0)
+        --y; // к нумерации QDate: нулевого года нет
+}
+
+// Время без даты (F-11): hh:mm:ss с позиции 0 или 1 за «[», за секундами не
+// цифра и не «:», затем необязательная дробь (без зоны). Время суток в мс,
+// -1 — формы нет или время невалидно.
+qint32 clockTimeAt(const QChar* d, qsizetype n)
+{
+    const qsizetype t = (n > 0 && d[0] == QLatin1Char('[')) ? 1 : 0;
+    if (t + 8 > n || d[t + 2] != QLatin1Char(':') || d[t + 5] != QLatin1Char(':')
+        || !digitsAt(d, t, { 0, 1, 3, 4, 6, 7 }))
+        return -1;
+    if (t + 8 < n && (isAsciiDigit(d[t + 8].unicode()) || d[t + 8] == QLatin1Char(':')))
+        return -1;
+    const int hour = num2(d, t), minute = num2(d, t + 3), second = num2(d, t + 6);
+    if (hour > 23 || minute > 59 || second > 59)
+        return -1;
+    int millis = 0;
+    qsizetype pos = t + 8;
+    if (pos + 1 < n && (d[pos] == QLatin1Char('.') || d[pos] == QLatin1Char(','))
+        && isAsciiDigit(d[pos + 1].unicode())) {
+        int digits = 0;
+        for (++pos; pos < n && digits < 3 && isAsciiDigit(d[pos].unicode()); ++pos, ++digits)
+            millis = millis * 10 + (d[pos].unicode() - u'0');
+        for (; digits < 3; ++digits)
+            millis *= 10;
+    }
+    return ((hour * 60 + minute) * 60 + second) * 1000 + millis;
+}
+
+// Местный момент дня day (от эпохи) и времени суток timeMs.
+qint64 localMomentMs(qint64 day, qint32 timeMs)
+{
+    TsComponents c;
+    civilFromDays(day, c.year, c.month, c.day);
+    c.hour = timeMs / 3600000;
+    c.minute = timeMs / 60000 % 60;
+    c.second = timeMs / 1000 % 60;
+    c.millis = timeMs % 1000;
+    return epochMs(c);
+}
+
 // Ручные фолбэк-форматы (dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy — с позиции 0),
 // за секундами — те же дробная часть и зона, что у ISO-формы.
 // true — c заполнен И дата/время валидны (проверка per-format, как раньше).
@@ -478,6 +541,9 @@ bool scanFallbackFormats(const QString& line, const QStringList& formats,
 
 } // namespace
 
+static_assert(LogFile::kNoClockState == ClockDateState{}.packed(),
+              "LogFile::clockState starts as an unset ClockDateState");
+
 LineClassifier::LineClassifier()
 {
     m_timeFormats = {
@@ -492,11 +558,23 @@ LineClassifier::LineClassifier()
 
 LineClassifier::YearReference LineClassifier::yearReference(const QDate& referenceDate)
 {
-    const QDate next = (referenceDate.isValid() ? referenceDate : QDate::currentDate()).addDays(1);
+    // Опорный момент только по дате — её полдень: последняя строка с временем
+    // без даты получает именно эту дату.
+    if (!referenceDate.isValid())
+        return referenceAt(QDateTime());
+    YearReference ref = referenceAt(QDateTime(referenceDate, QTime(12, 0)));
+    return ref;
+}
+
+LineClassifier::YearReference LineClassifier::referenceAt(const QDateTime& moment)
+{
+    const QDateTime local = (moment.isValid() ? moment : QDateTime::currentDateTime()).toLocalTime();
+    const QDate next = local.date().addDays(1);
     YearReference ref;
     ref.year = next.year();
     ref.month = next.month();
     ref.day = next.day();
+    ref.momentMs = local.toMSecsSinceEpoch();
     return ref;
 }
 
@@ -504,16 +582,108 @@ LineClassifier::YearReference LineClassifier::yearReferenceForFile(const QString
 {
     const QFileInfo info(filePath);
     const QDateTime modified = info.exists() ? info.lastModified() : QDateTime();
-    return yearReference(modified.isValid() ? modified.toLocalTime().date() : QDate());
+    return referenceAt(modified);
+}
+
+qint32 LineClassifier::clockTimeOfDay(QStringView line)
+{
+    return clockTimeAt(line.data(), line.size());
+}
+
+qint32 LineClassifier::clockLastDay(qint32 timeMs, const YearReference& reference)
+{
+    const YearReference ref = hasTimestampMs(reference.momentMs) ? reference : referenceAt(QDateTime());
+    // Последняя дата, при которой момент раньше опорного + 12 ч. Опорная
+    // дата + 1 — первая проверяемая (ref хранит её для года syslog).
+    const qint64 limit = ref.momentMs + 12 * 3600 * 1000;
+    qint64 day = daysFromCivil(ref.year, ref.month, ref.day);
+    for (int k = 0; k < 3 && localMomentMs(day, timeMs) >= limit; ++k)
+        --day;
+    return qint32(day);
+}
+
+ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
+                                        std::optional<QStringConverter::Encoding> wide,
+                                        bool autoDetectBom, const std::atomic_bool* abort)
+{
+    ClockRun run;
+    const auto aborted = [abort] { return abort && abort->load(std::memory_order_relaxed); };
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return run;
+    constexpr qsizetype kHead = 64;
+    QChar head[kHead];
+    if (wide) {
+        QTextStream in(&file);
+        in.setAutoDetectUnicode(autoDetectBom);
+        if (!autoDetectBom)
+            in.setEncoding(*wide);
+        if (offset > 0 && !in.seek(offset))
+            return run;
+        QString line;
+        while (in.readLineInto(&line)) {
+            if (aborted())
+                return ClockRun();
+            const qint32 t = clockTimeAt(line.constData(), qMin(line.size(), kHead));
+            if (t >= 0)
+                run.feed(t);
+        }
+        return run;
+    }
+    if (!file.seek(offset))
+        return run;
+    // Голова каждой строки — до 64 байтов: время без даты — ASCII в начале
+    // строки в любой однобайтной кодировке и в UTF-8.
+    QByteArray buf(1 << 20, Qt::Uninitialized);
+    char carry[kHead];
+    qsizetype carryLen = 0;
+    bool inLine = false;   // в carry — начало строки, конец которой ещё не встречен
+    const auto finishLine = [&](const char* data, qsizetype len) {
+        for (qsizetype k = 0; k < len; ++k)
+            head[k] = QLatin1Char(data[k]);
+        const qint32 t = clockTimeAt(head, len);
+        if (t >= 0)
+            run.feed(t);
+    };
+    for (;;) {
+        if (aborted())
+            return ClockRun();
+        const qint64 got = file.read(buf.data(), buf.size());
+        if (got <= 0)
+            break;
+        const char* p = buf.constData();
+        qsizetype pos = 0;
+        while (pos < got) {
+            const char* nl = static_cast<const char*>(std::memchr(p + pos, '\n', size_t(got - pos)));
+            const qsizetype end = nl ? nl - p : qsizetype(got);
+            const qsizetype take = qMin<qsizetype>(kHead - carryLen, end - pos);
+            if (take > 0) {
+                std::memcpy(carry + carryLen, p + pos, size_t(take));
+                carryLen += take;
+            }
+            if (!nl) {
+                inLine = true;
+                break;
+            }
+            finishLine(carry, carryLen);
+            carryLen = 0;
+            inLine = false;
+            pos = end + 1;
+        }
+    }
+    if (inLine && carryLen > 0)
+        finishLine(carry, carryLen);   // последняя строка без '\n' — её видит и проход
+    return run;
 }
 
 bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
-                                     const YearReference& year, bool* leading) const
+                                     const YearReference& year, bool* leading,
+                                     ClockDates* clock) const
 {
     // QDateTime строится ИЗ мс epoch (одна конверсия, и та из кэша по минуте)
     // вместо прежних setDate+setTime (две конверсии локаль→epoch на строку).
     qint64 msecs = 0;
-    if (detectTimestampMs(line, msecs, year, leading)) {
+    if (detectTimestampMs(line, msecs, year, leading, clock)) {
         ts = QDateTime::fromMSecsSinceEpoch(msecs);
         return true;
     }
@@ -522,10 +692,13 @@ bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
 }
 
 bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
-                                       const YearReference& year, bool* leading) const
+                                       const YearReference& year, bool* leading,
+                                       ClockDates* clock) const
 {
     if (leading)
         *leading = false;
+    if (clock)
+        clock->matched = false;
     // Без построения QDateTime вовсе — горячий путь индексатора, которому
     // нужны только мс epoch. Порядок форм — в начале файла.
     const QChar* d = line.constData();
@@ -541,6 +714,28 @@ bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
         if (leading)
             *leading = true;   // формы позиции 0 — ведущие по определению
         return true;
+    }
+    // Время без даты (F-11) — тоже форма позиции 0 (или 1 за «[»); с
+    // формами выше не пересекается (у них d[2] — «/» или «.», либо буква).
+    if (clock) {
+        const qint32 t = clockTimeAt(d, n);
+        if (t >= 0) {
+            ClockDateState& st = clock->state;
+            if (!st.isSet()) {
+                ClockRun ahead = clock->lookAhead ? clock->lookAhead() : ClockRun();
+                if (ahead.lastTimeMs < 0)
+                    ahead = ClockRun{0, t};   // предпросмотра нет (или файл уже другой)
+                st.day = clockLastDay(ahead.lastTimeMs, year) - ahead.rollovers;
+            } else if (ClockRun::isRollover(st.timeMs, t)) {
+                ++st.day;
+            }
+            st.timeMs = t;
+            clock->matched = true;
+            msecs = localMomentMs(st.day, t);
+            if (leading)
+                *leading = true;
+            return true;
+        }
     }
     qsizetype at = -1;
     const MidForm mid = scanMidForm(d, n, at);

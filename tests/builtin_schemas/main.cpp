@@ -407,12 +407,10 @@ void testSamples(const SchemaCase& sc)
 
 bool expectsTime(const SchemaCase& sc, const Sample& s)
 {
-    static const QStringList kWithoutTime = {
-        QStringLiteral("serilog-console.json"),      // время без даты — F-11
-        QStringLiteral("python-basicconfig.json"),   // в формате нет времени вовсе
-    };
-    return !kWithoutTime.contains(sc.file)
-        && !s.fields.value(QStringLiteral("Timestamp")).startsWith(QStringLiteral("13:55:40.016"));
+    // Время без даты (Serilog console, Logback HH:mm:ss.SSS) — метка с F-11:
+    // дату даёт состояние разбора файла.
+    Q_UNUSED(s);
+    return sc.file != QStringLiteral("python-basicconfig.json");   // времени нет вовсе
 }
 
 void testClassifierTime(const SchemaCase& sc)
@@ -422,7 +420,9 @@ void testClassifierTime(const SchemaCase& sc)
         if (s.continuation)
             continue;
         qint64 ms = 0;
-        const bool has = classifier.detectTimestampMs(s.line, ms);
+        // Контекст разбора файла (F-11): без него время без даты не метка.
+        ClockDates clock;
+        const bool has = classifier.detectTimestampMs(s.line, ms, {}, nullptr, &clock);
         const bool expectedTime = expectsTime(sc, s);
         check(has == expectedTime, QStringLiteral("%1: метка времени %2 распознаётся классификатором: %3")
                                        .arg(sc.file, expectedTime ? QString() : QStringLiteral("НЕ"), s.line));
@@ -522,7 +522,7 @@ void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
 {
     for (const Sample& s : sc.samples)
         if (!s.continuation && !expectsTime(sc, s))
-            return;   // запись без метки отличает только схема (F-11)
+            return;   // запись без метки отличает только схема (basicConfig)
 
     QByteArray bytes;
     for (const Sample& s : sc.samples)
@@ -556,9 +556,9 @@ void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
 }
 
 // Момент записи распознаёт LineClassifier (F-10): ISO, nginx error
-// (dddd/dd/dd), access (dd/Mmm/dddd:…), syslog без года. Время без даты
-// (Serilog console, Logback HH:mm:ss.SSS) — нет, это F-11; Python
-// basicConfig времени не пишет вовсе. Перевернёт ожидание F-11.
+// (dddd/dd/dd), access (dd/Mmm/dddd:…), syslog без года; время без даты
+// (Serilog console, Logback HH:mm:ss.SSS) — с F-11, по состоянию разбора
+// файла. Python basicConfig времени не пишет вовсе.
 // ---------------------------------------------------------------------------
 // 3. Установка
 // ---------------------------------------------------------------------------

@@ -175,6 +175,15 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // как у LogParser: дозапись после Нового года получает новый год.
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
+    // Дата времени без даты (F-11) — как у LogParser: дозапись продолжает
+    // состояние прошлого прохода, предпросмотр — от начала этого прохода.
+    ClockDates clock;
+    if (!initial)
+        clock.state = ClockDateState::fromPacked(logFile->clockState.load());
+    clock.lookAhead = [&]() {
+        return LineClassifier::clockRunInFile(logFile->filePath, startOffset, std::nullopt,
+                                              false, &m_abort);
+    };
 
     // Автоопределение кодировки (F-1): буфер, в котором впервые встретился
     // байт ≥ 0x80, решает до разбора своих строк. Строки, разобранные раньше,
@@ -203,7 +212,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
         LogLevel lvl = LogLevel::Unknown;
         // detectTimestampMs: мс epoch без построения QDateTime на строку.
         bool leadingTs = false;
-        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef, &leadingTs);
+        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef, &leadingTs, &clock);
         const bool hasLvl = m_classifier.detectLogLevel(text, lvl);
         // extractFields здесь нужен ТОЛЬКО для решения primary/continuation
         // (спаны выбрасываются). Строка, первичная и без схемы (метка с
@@ -318,6 +327,9 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // пустых строк).
     // Одиночный '\r' в конце хвоста — не текст, как у резидентного пути
     // (readLine снимает его) и как станет, когда допишут '\n'.
+    // Состояние дат (F-11) — до предварительной строки: дозапись перечитает её
+    // с начала, и огрызок времени не должен оставить в состоянии лишний день.
+    ClockDateState clockToKeep = clock.state;
     if (!carry.isEmpty() && !truncatedByCap) {
         if (carry.endsWith('\r'))
             processLine(carry.constData(), carry.size() - 1, LineIndex::kEolProvisionalCr);
@@ -331,6 +343,7 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // продолжит копить с этого места, а не с прошлого.
     if (!encoding.detectionSettled() && encoding.evidence.end != reportedEvidenceEnd)
         emit encodingDecided(logFile, encoding);
+    logFile->clockState.store(clockToKeep.packed());
     publishPending(/*force=*/true);
     if (initial && lastReportedProgress < 100)
         emit indexingProgress(100, logFile);

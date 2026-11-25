@@ -199,6 +199,11 @@ QString syslogTimestampDetectPattern()
          + timestampSuffixDetectPattern();
 }
 
+QString clockTimestampDetectPattern()
+{
+    return QStringLiteral(R"(^\[?(\d{2}):(\d{2}):(\d{2})(?![\d:])([.,]\d+)?)");
+}
+
 QString levelDetectPattern()
 {
     return QStringLiteral(R"(\b()") + levelAlternation() + QStringLiteral(R"()\b)");

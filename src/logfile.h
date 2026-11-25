@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QDateTime>
+#include <atomic>
 #include <memory>
 #include <QMetaType>
 #include <QFileInfo>
@@ -63,6 +64,22 @@ struct LogFile {
     // у обычного лога. Копия удаляется, когда исчезает последний LogFile,
     // который на неё ссылается (Search Results делит записи с вкладкой).
     std::shared_ptr<SpoolItem> spool;
+
+    // Состояние дат для времени без даты (F-11): ClockDateState::packed()
+    // (lineclassifier.h) после последнего прохода по файлу. Пишет воркер
+    // разбора или индексации в конце прохода, читает следующий проход —
+    // дозапись продолжает с него; проход с начала файла начинает заново.
+    // По умолчанию — «не задано» (ClockDateState{}).
+    static constexpr quint64 kNoClockState = 0x8000'0000'0000'0000ull;
+    struct ClockStateSlot {
+        std::atomic<quint64> value{kNoClockState};
+        ClockStateSlot() = default;
+        ClockStateSlot(const ClockStateSlot& o) : value(o.load()) {}
+        ClockStateSlot& operator=(const ClockStateSlot& o) { store(o.load()); return *this; }
+        quint64 load() const { return value.load(std::memory_order_acquire); }
+        void store(quint64 v) { value.store(v, std::memory_order_release); }
+    };
+    ClockStateSlot clockState;
 
     // Конструктор для удобства создания: источник — сам файл.
     LogFile(const QString& path);

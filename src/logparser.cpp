@@ -238,6 +238,29 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // дозапись после Нового года получает новый год (LineClassifier).
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
+    // Дата времени без даты (F-11): дозапись продолжает состояние прошлого
+    // прохода (LogFile::clockState), проход с начала файла — с нуля; первая
+    // такая строка при пустом состоянии зовёт предпросмотр от начала прохода.
+    ClockDates clock;
+    if (!initial)
+        clock.state = ClockDateState::fromPacked(logFile->clockState.load());
+    // Предпросмотр прерывается вместе с проходом (m_abort): на огромном файле
+    // закрытие вкладки не ждёт его конца.
+    clock.lookAhead = [&]() {
+        if (byteMode)
+            return LineClassifier::clockRunInFile(logFile->filePath, linesBegin, std::nullopt,
+                                                  false, &m_abort);
+        if (detectUnicodeBom)
+            return LineClassifier::clockRunInFile(logFile->filePath, 0, QStringConverter::Utf8,
+                                                  /*autoDetectBom=*/true, &m_abort);
+        return LineClassifier::clockRunInFile(
+            logFile->filePath, linesBegin,
+            TextEncodings::toQt(streamEncoding).value_or(QStringConverter::Utf8), false, &m_abort);
+    };
+    // Состояние ДО последней прочитанной строки: оборванную (без '\n')
+    // следующий проход перечитает с начала, и её огрызок («13:55:36» от
+    // «13:55:36:123») не должен оставить в состоянии лишний день.
+    ClockDateState clockBeforeLine = clock.state;
 
     // Последняя строка байтового транспорта: начало и кончилась ли '\n' —
     // для tailState без второго прохода по файлу.
@@ -304,7 +327,9 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         LogLevel lineLevel = LogLevel::Unknown;
 
         bool leadingTimestamp = false;
-        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef, &leadingTimestamp);
+        clockBeforeLine = clock.state;
+        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef, &leadingTimestamp,
+                                                         &clock);
         bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
         const bool schemaMatched = (extraction && pattern.isValid())
@@ -408,6 +433,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // отдаём его вкладке: следующий проход продолжит копить с этого места.
     if (bytes && !fileEncoding.detectionSettled() && fileEncoding.evidence.end != reportedEvidenceEnd)
         emit encodingDecided(logFile, fileEncoding);
+    logFile->clockState.store((lastLinePartial ? clockBeforeLine : clock.state).packed());
     emit tailState(logFile, endOffset, lastLinePartial, lastLineStart, reported);
     emit parsingFinished(totalParsedEntries, logFile);
 }
@@ -476,6 +502,13 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(filePath);
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
+    // Время без даты (F-11): предпросмотра нет (`.gz` пришлось бы
+    // распаковывать дважды) — при пустом состоянии дни идут от
+    // предварительной опоры, а в конце From/To и состояние сдвигаются.
+    ClockDates clock;
+    clock.state = from.clock;
+    const bool provisionalClock = !clock.state.isSet();
+    bool firstIsClock = false, lastIsClock = false;
 
     const auto countLine = [&](const QByteArray& bytes) {
         QString line = decoder.decode(bytes);
@@ -484,15 +517,19 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         QDateTime ts;
         LogLevel level = LogLevel::Unknown;
         bool leadingTimestamp = false;
-        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef, &leadingTimestamp);
+        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef, &leadingTimestamp,
+                                                               &clock);
         const bool hasLevel = m_classifier.detectLogLevel(line, level);
         // Схема полей здесь не участвует: вкладка решает по ней, только когда
         // включено извлечение полей, а по умолчанию — по метке и уровню.
         if (LineClassifier::isPrimaryLine(false, hasTimestamp, leadingTimestamp, hasLevel)) {
             recordLevel = level;
-            if (!stats.firstEntryTimestamp.isValid())
+            if (!stats.firstEntryTimestamp.isValid()) {
                 stats.firstEntryTimestamp = ts;
+                firstIsClock = clock.matched;
+            }
             stats.lastEntryTimestamp = ts;
+            lastIsClock = clock.matched;
         } else if (!inRecord) {
             recordLevel = LogLevel::Unknown;   // строка до первой записи — своя запись
         } else {
@@ -600,8 +637,27 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
     scan.next.offset = gzip ? 0 : lineStart;
     scan.next.encoding = encoding;
     scan.next.inRecord = inRecord;
+    scan.next.clock = clock.state;
+    const bool completeFirstIsClock = firstIsClock, completeLastIsClock = lastIsClock;
     if (pending.size() >= unit.width)
         countLine(pending.left(pending.size() - pending.size() % unit.width));
+
+    // Предварительные дни времени без даты (F-11) — к настоящим: последняя
+    // такая строка (с оборванной: её показывает и вкладка) получает дату по
+    // mtime, остальные сдвигаются на ту же разницу.
+    if (provisionalClock && clock.state.isSet()) {
+        const qint32 shift = LineClassifier::clockLastDay(clock.state.timeMs, yearRef) - clock.state.day;
+        const auto moveDays = [shift](QDateTime& ts, bool isClock) {
+            if (isClock && ts.isValid())
+                ts = ts.addDays(shift);
+        };
+        moveDays(stats.firstEntryTimestamp, firstIsClock);
+        moveDays(stats.lastEntryTimestamp, lastIsClock);
+        moveDays(scan.complete.firstEntryTimestamp, completeFirstIsClock);
+        moveDays(scan.complete.lastEntryTimestamp, completeLastIsClock);
+        if (scan.next.clock.isSet())
+            scan.next.clock.day += shift;
+    }
     return scan;
 }
 
