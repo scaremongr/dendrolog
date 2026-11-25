@@ -52,6 +52,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QtConcurrent>
+#include "spooldir.h"
 #include <QFutureWatcher>
 #include <QInputDialog>
 #include <QMenu>
@@ -158,6 +159,12 @@ MainWindow::MainWindow(QWidget *parent)
     AppSettings::instance().load();
     ShortcutManager::instance().load();
     m_fileMemory = std::make_unique<FileMemoryStore>(AppSettings::fileMemoryDir());
+    // Временные каталоги распаковки (F-2), брошенные упавшими экземплярами, —
+    // в фоне: удаление копии бывает на десятки ГБ. Живые не трогаются.
+    {
+        const QString spoolRoot = AppSettings::spoolRoot();
+        (void)QtConcurrent::run([spoolRoot]() { SpoolDir::removeOrphans(spoolRoot); });
+    }
 
     setupStatusBar();
     setupTimeFilterDockContents();
@@ -988,6 +995,8 @@ QString MainWindow::logFileDialogFilter() const
     }
     if (patterns.isEmpty())
         patterns << QStringLiteral("*.log") << QStringLiteral("*.txt");
+    // Сжатые логи (F-2) открываются вкладкой.
+    patterns << QStringLiteral("*.gz");
 
     return tr("Log files (%1);;All files (*)").arg(patterns.join(QLatin1Char(' ')));
 }
@@ -1961,6 +1970,32 @@ LogViewWidget* MainWindow::createLogViewWidget()
     view->setFileMemory(m_fileMemory.get());
     connect(view, &LogViewWidget::statusMessage, this,
             [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+    // Распаковка сжатого файла (F-2): строка состояния и кнопка отмены — по
+    // активной вкладке; подсказка вкладки — размер копии.
+    connect(view, &LogViewWidget::unpackingStarted, this, [this, view](const LogFilePtr& lf) {
+        if (view != m_activeLogView || !lf)
+            return;
+        m_statusLabel->setText(tr("Unpacking %1… %2 %").arg(lf->shortName()).arg(0));
+        m_unpackStatusShown = true;
+        m_progressBar->setValue(0);
+        m_progressBar->show();
+        m_cancelUnpackButton->show();
+    });
+    connect(view, &LogViewWidget::unpackingProgress, this, [this, view](const LogFilePtr& lf, int percent) {
+        if (view != m_activeLogView || !lf)
+            return;
+        m_statusLabel->setText(tr("Unpacking %1… %2 %").arg(lf->shortName()).arg(percent));
+        m_unpackStatusShown = true;
+        m_progressBar->setValue(percent);
+    });
+    connect(view, &LogViewWidget::unpackingFinished, this, [this, view](const LogFilePtr&, bool) {
+        updateTabLabel(view);
+        if (view == m_activeLogView && !view->isUnpacking()) {
+            m_cancelUnpackButton->hide();
+            m_progressBar->hide();
+            m_unpackStatusShown = false;
+        }
+    });
     connect(view, &LogViewWidget::offeredFiltersChanged, this, [this, view](bool offered) {
         if (!offered && view == m_activeLogView) { // «Restore Filters»: кнопки уровней и поля времени
             updateLogLevelFilterButtons();
@@ -2046,6 +2081,17 @@ void MainWindow::setupStatusBar()
     m_cancelExportButton->hide();
     ui->statusbar->addPermanentWidget(m_cancelExportButton);
     connect(m_cancelExportButton, &QToolButton::clicked, this, [this]() { m_exportJob->cancel(); });
+    // Отмена распаковки сжатого файла активной вкладки (F-2).
+    m_cancelUnpackButton = new QToolButton(this);
+    m_cancelUnpackButton->setObjectName(QStringLiteral("cancelUnpackButton"));
+    m_cancelUnpackButton->setText(tr("Cancel Unpacking"));
+    m_cancelUnpackButton->setToolTip(tr("Stop unpacking the compressed file; no temporary file is left"));
+    m_cancelUnpackButton->hide();
+    ui->statusbar->addPermanentWidget(m_cancelUnpackButton);
+    connect(m_cancelUnpackButton, &QToolButton::clicked, this, [this]() {
+        if (m_activeLogView)
+            m_activeLogView->cancelUnpacking();
+    });
     connect(m_exportJob, &ViewExportJob::progress, this, [this](int percent) {
         m_statusLabel->setText(tr("Saving view to %1... %2%")
                                    .arg(QFileInfo(m_exportJob->destination()).fileName())
@@ -2634,6 +2680,8 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
     // Apply current global word wrap setting to the newly active view
     logView->view()->setWordWrap(ui->actionWordWrap->isChecked());
 
+    if (m_cancelUnpackButton)
+        m_cancelUnpackButton->setVisible(logView->isUnpacking());
     connect(logView, &LogViewWidget::fileParsingStarted, this, &MainWindow::handleFileParsingStarted);
     connect(logView, &LogViewWidget::fileParsingProgress, this, &MainWindow::handleFileParsingProgress);
     connect(logView, &LogViewWidget::fileParsingFinished, this, &MainWindow::handleFileParsingFinished);
@@ -2719,6 +2767,14 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
 {
     if (!logView)
         return;
+    // Распаковка уходящей вкладки (F-2): её прогресс и кнопка — не наши.
+    if (m_cancelUnpackButton)
+        m_cancelUnpackButton->hide();
+    if (m_unpackStatusShown) {
+        m_unpackStatusShown = false;
+        m_progressBar->hide();
+        m_statusLabel->clear();
+    }
     disconnect(logView, &LogViewWidget::fileParsingStarted, this, &MainWindow::handleFileParsingStarted);
     disconnect(logView, &LogViewWidget::fileParsingProgress, this, &MainWindow::handleFileParsingProgress);
     disconnect(logView, &LogViewWidget::fileParsingFinished, this, &MainWindow::handleFileParsingFinished);
@@ -2880,7 +2936,11 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
                    .arg(QDir::toNativeSeparators(files.first()->filePath));
     } else if (n == 1 && files.first()) {
         text = files.first()->shortName();
-        tip  = QDir::toNativeSeparators(files.first()->filePath);
+        tip  = QDir::toNativeSeparators(files.first()->displayPath());
+        // Сжатый файл (F-2): распакованная копия занимает место на диске.
+        if (files.first()->source().kind == LogSource::Kind::Archive && view->isUnpacked(files.first()))
+            tip += QLatin1Char('\n') + tr("Unpacked copy: %1")
+                       .arg(QLocale().formattedDataSize(files.first()->fileSize));
     } else if (n > 1) {
         // Имя первого файла узнаваемее безликого «Logs (3)».
         text = tr("%1 +%2").arg(files.first() ? files.first()->shortName() : tr("Logs"))
@@ -2888,7 +2948,7 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
         QStringList paths;
         for (const auto& lf : files)
             if (lf)
-                paths << QDir::toNativeSeparators(lf->filePath);
+                paths << QDir::toNativeSeparators(lf->displayPath());
         tip = tr("%n file(s), merged by time:", nullptr, n)
               + QLatin1Char('\n') + paths.join(QLatin1Char('\n'));
     } else {
@@ -2956,7 +3016,9 @@ void MainWindow::revealTabFile(int index)
     const auto files = view->loadedFiles();
     if (files.isEmpty() || !files.first())
         return;
-    const QString path = files.first()->filePath;
+    // Сжатый файл (F-2) — показать архив, а не временную копию.
+    const QString path = files.first()->source().kind == LogSource::Kind::Archive
+        ? files.first()->source().path : files.first()->filePath;
 
 #ifdef Q_OS_WIN
     // Открыть Проводник с выделенным файлом.
@@ -2976,7 +3038,7 @@ void MainWindow::copyTabPath(int index)
     QStringList paths;
     for (const auto& lf : view->loadedFiles())
         if (lf)
-            paths << QDir::toNativeSeparators(lf->filePath);
+            paths << QDir::toNativeSeparators(lf->displayPath());
     if (paths.isEmpty())
         return;
     QApplication::clipboard()->setText(paths.join(QLatin1Char('\n')));
@@ -3085,10 +3147,8 @@ void MainWindow::startViewExport(const QString& fileName)
         auto* lvw = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
         if (!lvw)
             continue;
-        for (const auto& lf : lvw->loadedFiles()) {
-            if (lf)
-                sourcePaths.append(lf->filePath);
-        }
+        // Сжатый файл (F-2): и копия, и архив.
+        sourcePaths += ViewExport::protectedPaths(lvw->loadedFiles());
     }
 
     // Save exactly what the view currently shows: the model's visible rows
@@ -4453,7 +4513,7 @@ void MainWindow::editBookmarkNote(int bookmarkId, bool created)
     const QString note = QInputDialog::getText(
         this, tr("Bookmark Note"),
         tr("Note for line %1 of %2:").arg(bookmark->line)
-            .arg(QFileInfo(bookmark->filePath).fileName()),
+            .arg(bookmark->key.file ? bookmark->key.file->shortName() : QFileInfo(bookmark->filePath).fileName()),
         QLineEdit::Normal, bookmark->note, &ok);
     if (ok)
         store.setNote(bookmarkId, note);

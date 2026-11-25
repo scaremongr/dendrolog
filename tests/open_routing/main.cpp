@@ -96,6 +96,12 @@ static void testPlan(const QTemporaryDir& tmp)
         CHECK(plan.skippedDirectories.isEmpty() && plan.missing.isEmpty(), "files only: nothing left over");
         CHECK(!plan.isEmpty(), "files only: plan is not empty");
     }
+    {   // F-2: .gz — файл (вкладка распакует его сама), не каталог и не сессия.
+        const QString gz = writeFile(root + "/app.log.gz", QByteArray("\x1F\x8B\x08\x00", 4));
+        const auto plan = OpenRouting::plan({gz});
+        CHECK(plan.files == QStringList({gz}) && plan.scanDirectory.isEmpty() && plan.sessions.isEmpty(),
+              ".gz opens as a file");
+    }
     {   // Q-6: один каталог — в сканер.
         const auto plan = OpenRouting::plan({dir1});
         CHECK(plan.files.isEmpty(), "folder: no files to open");

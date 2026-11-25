@@ -85,6 +85,21 @@ QString RecordLocator::pathKey(const QString& path)
     return key;
 }
 
+QString RecordLocator::sourceKey(const LogFile& file)
+{
+    const LogSource& source = file.source();
+    if (source.kind != LogSource::Kind::Archive)
+        return pathKey(file.filePath);
+    const QString key = pathKey(source.path);
+    return source.member.isEmpty() ? key : key + QChar(0x01) + source.member;
+}
+
+QString RecordLocator::sourceKey(const SourceIdentity& source)
+{
+    const QString key = pathKey(source.path);
+    return source.member.isEmpty() ? key : key + QChar(0x01) + source.member;
+}
+
 RecordLocator::FileState* RecordLocator::stateFor(const LogFilePtr& file, bool create)
 {
     if (!file)
@@ -96,7 +111,7 @@ RecordLocator::FileState* RecordLocator::stateFor(const LogFilePtr& file, bool c
         return nullptr;
     FileState fs;
     fs.file = file;
-    fs.path = pathKey(file->filePath);
+    fs.path = sourceKey(*file); // сжатый источник — путь архива (F-2)
     return &m_files.insert(file.get(), fs).value();
 }
 
@@ -130,7 +145,7 @@ int RecordLocator::request(const SourceIdentity& source, const RecordId& id)
         scheduleFlush();
         return token;
     }
-    const QString key = pathKey(source.path);
+    const QString key = sourceKey(source);
     m_waiting[key].append(token);
     // Файл с этим путём уже читается или прочитан — проверяем сразу. Строки
     // файла сброшены и ещё не пришли (перезагрузка, файл исчез) — ждём
@@ -247,7 +262,7 @@ std::optional<SourceIdentity> RecordLocator::sourceFor(const LogFilePtr& file) c
     const auto it = m_files.constFind(file.get());
     if (it != m_files.constEnd() && it->source)
         return it->source;
-    return SourceIdentity::capture(file->filePath);
+    return SourceIdentity::capture(*file);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,8 +278,9 @@ SourceIdentity::State RecordLocator::checkSource(FileState& fs, const SourceIden
     if (cached != fs.checks.constEnd())
         return cached.value();
     ++m_stats.sourceChecks;
-    // Путь — файла вкладки: идентичность сравнивает содержимое по нему.
-    const SourceIdentity::State state = source.checkAt(fs.file->filePath);
+    // Путь — файла вкладки: идентичность сравнивает содержимое по нему (у
+    // сжатого источника — по распакованной копии).
+    const SourceIdentity::State state = source.checkContentAt(fs.file->filePath);
     fs.checks.insert(key, state);
     return state;
 }
@@ -324,7 +340,7 @@ void RecordLocator::unplace(int token, Request& r)
     };
     switch (r.phase) {
     case Phase::Waiting: {
-        const auto it = m_waiting.find(pathKey(r.source.path));
+        const auto it = m_waiting.find(sourceKey(r.source));
         if (it != m_waiting.end()) {
             it->removeAll(token);
             if (it->isEmpty())
@@ -565,7 +581,7 @@ void RecordLocator::fileLoaded(const LogFilePtr& file, qint64 consumedBytes, qin
     FileState* fs = stateFor(file, true);
     if (!fs)
         return;
-    fs->source = SourceIdentity::capture(file->filePath, consumedBytes);
+    fs->source = SourceIdentity::capture(*file, consumedBytes);
     fs->loaded = true;
     fs->feeding = false;
     if (!m_model.isIndexedBackend())
@@ -638,10 +654,11 @@ void RecordLocator::fileLoaded(const LogFilePtr& file, qint64 consumedBytes, qin
 
 void RecordLocator::fileReset(const QString& filePath)
 {
+    // Путь чтения, а не ключ источника: сбрасываются строки этого LogFile.
     const QString key = pathKey(filePath);
     bool any = false;
     for (auto it = m_files.begin(); it != m_files.end(); ++it) {
-        if (it->path != key)
+        if (pathKey(it->file->filePath) != key)
             continue;
         any = true;
         FileState& fs = it.value();

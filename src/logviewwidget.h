@@ -20,6 +20,8 @@
 
 class QuickSearch;
 class FileMemoryStore;
+class SourceUnpacker;
+class SpoolDir;
 class FullLogController;
 class FileLegend;
 class QFrame;
@@ -52,6 +54,27 @@ public:
     // закладки — до файлов (BookmarkStore::restore): строки находятся по ходу
     // загрузки, заметки не теряются.
     void addFilesFrom(const LogViewWidget& other);
+
+    // ---- Сжатые источники (F-2, docs/design/F-2.md, шаг 2) -----------------------
+    // Файл с сигнатурой gzip (по байтам, не по имени) распаковывается целиком
+    // во временную копию (SpoolDir) в фоне и открывается обычным путём: бэкенд
+    // выбирается по размеру распакованного, память файла ищется после
+    // распаковки. У LogFile источник — архив (source(), displayPath()),
+    // читают копию (filePath). Пока идёт распаковка, вкладка isLoading();
+    // прогресс — unpackingProgress, итог ошибки — fileParsingFailed
+    // (loadFailureMessage называет причину). Авто-обновление сжатые файлы
+    // пропускает; F5 (reloadChangedFiles(true)) распаковывает изменившийся
+    // архив заново, пропавший — сообщает, строки остаются.
+    // Корень временных файлов (по умолчанию AppSettings::spoolRoot); тесты —
+    // свой QTemporaryDir. Действует на распаковки, начатые после вызова.
+    void setSpoolRoot(const QString& root);
+    QString spoolRoot() const;
+    bool isUnpacking() const;
+    // Отменить идущие распаковки вкладки: файл остаётся незагруженным с
+    // причиной «cancelled», F5 пробует снова. Частичных файлов не остаётся.
+    void cancelUnpacking();
+    // Копия сжатого файла готова (распакована целиком).
+    bool isUnpacked(const LogFilePtr& logFile) const;
 
     // ---- Состояние вкладки вне вкладки (R-4, documentstate.h) ------------------
     // Снимок: файлы (идентичность по концу прочитанного, ручной выбор
@@ -313,6 +336,12 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // Флаг авто-обновления вкладки сменился (setAutoReload, применение
     // состояния) — окно обновляет таймер и кнопку.
     void autoReloadChanged(bool enabled);
+    // Распаковка сжатого файла (F-2): началась, прогресс в процентах по
+    // прочитанным сжатым байтам, закончилась (ok — дальше обычная загрузка,
+    // иначе за ним придёт fileParsingFailed).
+    void unpackingStarted(const LogFilePtr& logFile);
+    void unpackingProgress(const LogFilePtr& logFile, int percent);
+    void unpackingFinished(const LogFilePtr& logFile, bool ok);
     // Сообщение для строки состояния (итог применения памяти файла).
     void statusMessage(const QString& text);
     // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
@@ -346,6 +375,11 @@ private slots:
     void handleResidentFallback(const LogFilePtr& logFile, const QString& reason);
 
 private:
+    // Загрузка файла после того, как он заведён во вкладке: выбор бэкенда по
+    // размеру (у сжатого — распакованной копии) и старт разбора/индексации.
+    void startLoad(const LogFilePtr& logFile, const FileEncoding& initial);
+
+
     // Ленивая инициализация LogIndexer с подключением сигналов.
     void ensureIndexer();
     // Запуск полной индексации файла (store уже индексный). encoding —
@@ -382,6 +416,47 @@ private:
         { return size == o.size && mtimeMs == o.mtimeMs; }
         static DiskStamp of(const QString& filePath);
     };
+
+    // ---- Сжатые источники (F-2) --------------------------------------------------
+    struct ArchiveState {
+        SourceUnpacker* unpacker = nullptr;
+        quint64 job = 0;
+        bool running = false;      // распаковка идёт
+        bool unpacked = false;     // копия готова целиком
+        bool awaitingLoad = false; // распакован, память файла решает, как грузить
+        bool loadStarted = false;  // startLoad уже был (F5 — полная перезагрузка)
+        QString error;             // причина последней неудачи (пусто — нет)
+        DiskStamp archiveStamp;    // архив на момент распаковки
+        FileEncoding initial;
+        // Идентичность, пока копия не готова (captureState): прежнего
+        // содержимого (F5) или из снимка, по которому файл открыт.
+        std::optional<SourceIdentity> identity;
+        bool applyingState = false; // флаги addLogFile на момент вызова —
+        bool memoryApplying = false; // распаковка их переживает
+    };
+    QHash<QString, ArchiveState> m_archives; // ключ — filePath копии
+    QString m_spoolRoot;
+    std::shared_ptr<SpoolDir> m_spoolDir;
+    // Скрытые файлы снимка (U-23), которые ещё распаковываются: ключ источника
+    // (RecordLocator::sourceKey) → скрыть копию, когда начнётся её загрузка.
+    QSet<QString> m_hiddenArchiveSources;
+    // Идентичности источников снимка (applyState), ключ — sourceKey: сжатый
+    // файл, ещё не распакованный, снимается с ней (ArchiveState::identity).
+    QHash<QString, SourceIdentity> m_stateIdentities;
+    static bool isArchive(const LogFilePtr& logFile)
+    { return logFile && logFile->source().kind == LogSource::Kind::Archive; }
+    // Файл ещё не загружается: распаковка идёт, сорвалась или ждёт памяти.
+    bool isArchivePending(const LogFilePtr& logFile) const;
+    // Тот же источник, что путь, открытый пользователем.
+    static bool sameSource(const LogFilePtr& logFile, const QString& path);
+    void addArchive(const QString& archivePath, const FileEncoding& initial);
+    void startUnpack(const LogFilePtr& logFile);
+    void handleUnpackFinished(const LogFilePtr& logFile, quint64 job, bool ok,
+                              const QString& message);
+    // Распакован впервые: память файла (по пути архива и содержимому копии),
+    // затем startLoad.
+    void continueArchive(const LogFilePtr& logFile);
+    bool reloadArchive(const LogFilePtr& logFile);
 
     // Проход по файлу закончился — RecordLocator: конец прочитанного и
     // недописанная последняя строка (R-1).
@@ -545,7 +620,10 @@ private:
     bool fileMemoryActive() const;
     // Найти и применить память файла; true — файл уже добавлен (applyState
     // или addLogFile изнутри), вызывающему addLogFile делать нечего.
-    bool applyFileMemory(const QString& filePath, const FileEncoding& initial);
+    // self — уже заведённый сжатый файл (F-2): память — по пути архива,
+    // содержимое — по его копии, «первый файл вкладки» — без него самого.
+    bool applyFileMemory(const QString& filePath, const FileEncoding& initial,
+                         const LogFilePtr& self = nullptr);
     // Закладки изменились: правка пользователя (а не сверка) — отложенная запись.
     void onBookmarksChanged();
     QString bookmarkSignature() const;

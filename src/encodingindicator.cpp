@@ -152,7 +152,7 @@ void EncodingIndicator::refresh()
             break;
         }
     }
-    const QString fileName = QFileInfo(file->filePath).fileName();
+    const QString fileName = file->shortName(); // у сжатого — имя архива (F-2)
     setToolTip(tip.contains(QLatin1String("%2")) ? tip.arg(fileName, text) : tip.arg(fileName));
 
     if (choosable) {

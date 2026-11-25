@@ -1,6 +1,7 @@
 #include "entrydetailspanel.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include <QDir>
 #include <QTimer>
 #include "cardframe.h"
 #include "logentry.h"
@@ -642,7 +643,7 @@ QString EntryDetailsPanel::buildHtml()
 
         QStringList location;
         if (m_line->sourceFile())
-            location << m_line->sourceFile()->filePath;
+            location << QDir::toNativeSeparators(m_line->sourceFile()->displayPath()); // F-2: архив, не копия
         if (m_logicalLines.size() > 1)
             location << tr("lines %1–%2 (%3)")
                             .arg(m_logicalLines.first()->originalLineNumber())

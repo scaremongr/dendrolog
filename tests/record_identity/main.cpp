@@ -555,6 +555,53 @@ static void testJson(const QDir& dir)
         bad = json; bad.remove("tail"); refused(bad, "нет отпечатка конца");
         refused(QJsonObject(), "пустой объект");
         refused(parse("[1,2]"), "не объект");
+
+        // F-2: сжатый источник — необязательные поля, версия та же.
+        SourceIdentity gz = *id;
+        gz.path = dir.filePath(QStringLiteral("json.log.gz"));
+        gz.compressed = true;
+        const QJsonObject gzJson = gz.toJson();
+        CHECK(gzJson.value("version").toInt() == 1 && gzJson.value("compressed").toBool()
+                  && !gzJson.contains("member"), "сжатый: compressed в JSON, версия 1");
+        CHECK(!json.contains("compressed") && !json.contains("member"), "обычный: полей сжатого нет");
+        const auto gzRead = SourceIdentity::fromJson(gzJson);
+        CHECK(gzRead && *gzRead == gz && gzRead->compressed, "сжатый: круговой проход");
+        CHECK(gz != *id, "сжатый и обычный с тем же содержимым — разные источники");
+        SourceIdentity member = gz;
+        member.member = QStringLiteral("logs/app.log");
+        const auto memberRead = SourceIdentity::fromJson(member.toJson());
+        CHECK(memberRead && memberRead->member == member.member && *memberRead == member,
+              "член архива: круговой проход");
+        CHECK(RecordLocator::sourceKey(member) == RecordLocator::pathKey(gz.path) + QChar(0x01) + member.member,
+              "ключ источника с членом");
+        bad = json; bad.insert("member", "x"); refused(bad, "member без compressed");
+        bad = gzJson; bad.insert("compressed", "yes"); refused(bad, "compressed строкой");
+        bad = gzJson; bad.insert("member", 3); refused(bad, "member числом");
+        // Проверка: архива нет — Missing; есть, но не gzip — Missing; gzip —
+        // Valid (содержимое сверяется по копии); содержимое — по копии.
+        expectState(gz, State::Missing, "сжатый: архива нет");
+        writeFile(dir, QStringLiteral("json.log.gz"), QByteArray("not a gzip"));
+        expectState(gz, State::Missing, "сжатый: не gzip");
+        writeFile(dir, QStringLiteral("json.log.gz"), QByteArray("\x1F\x8B\x08\x00rest", 8));
+        expectState(gz, State::Valid, "сжатый: архив gzip — можно открыть");
+        CHECK(gz.checkContentAt(path) == State::Valid, "сжатый: содержимое — по копии");
+        CHECK(gz.checkContentAt(gz.path) == State::Changed, "сжатый: байты архива — не содержимое");
+        // С отпечатками архива: тот же архив — Valid, другой gzip — Changed.
+        const auto archive = SourceIdentity::capture(gz.path);
+        CHECK(archive.has_value(), "сжатый: снятие архива");
+        if (archive) {
+            gz.archiveSize = archive->size;
+            gz.archiveHead = archive->head;
+            gz.archiveTail = archive->tail;
+        }
+        expectState(gz, State::Valid, "сжатый: тот же архив");
+        const auto withArchive = SourceIdentity::fromJson(gz.toJson());
+        CHECK(withArchive && withArchive->archiveSize == gz.archiveSize && withArchive->archiveHead == gz.archiveHead
+                  && withArchive->archiveTail == gz.archiveTail, "сжатый: отпечатки архива — круговой проход");
+        writeFile(dir, QStringLiteral("json.log.gz"), QByteArray("\x1F\x8B\x08\x00other", 9));
+        expectState(gz, State::Changed, "сжатый: другой gzip по тому же пути");
+        bad = gz.toJson(); bad.remove("compressed"); refused(bad, "archive без compressed");
+        bad = gz.toJson(); bad.insert("archive", 5); refused(bad, "archive не объект");
     }
 
     const RecordId rid = RecordId::forLine(185, u"2026-07-16 09:20:31.554 [db-pool] ERROR первый таймаут");

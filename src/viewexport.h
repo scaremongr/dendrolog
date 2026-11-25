@@ -12,6 +12,7 @@
 
 class LogModel;
 class QIODevice;
+struct LogFile;
 class QTimer;
 
 // Export of the already formatted visible rows. File publication is atomic,
@@ -43,6 +44,11 @@ Result save(const QString& destination, const QStringList& sourcePaths,
             const RowSource& rows, const std::atomic_bool* cancel = nullptr);
 Result save(const QString& destination, const QStringList& sourcePaths,
             int rowCount, const RowText& rowText);
+
+// Paths an export must not overwrite for these open files: what is read
+// (filePath) and, for a compressed source (F-2), the archive the user opened
+// as well — both its temporary copy and the .gz are protected.
+QStringList protectedPaths(const QList<std::shared_ptr<LogFile>>& files);
 
 } // namespace ViewExport
 

@@ -312,6 +312,16 @@ void BookmarkStore::invalidateFile(const QString& filePath)
     }
 }
 
+void BookmarkStore::recheckSource(const QString& sourceKey)
+{
+    for (auto it = m_items.begin(); it != m_items.end(); ++it) {
+        Item& item = it.value();
+        if (!item.bookmark.key.file && item.lost && item.source.isValid()
+            && RecordLocator::sourceKey(item.source) == sourceKey)
+            requestSaved(it.key(), item);
+    }
+}
+
 void BookmarkStore::invalidateAll()
 {
     for (auto it = m_items.begin(); it != m_items.end(); ++it) {
@@ -461,10 +471,15 @@ int BookmarkStore::restore(const BookmarkState& state)
 {
     if (!state.record.isValid() || !state.source.isValid())
         return -1;
-    const QString pathKey = RecordLocator::pathKey(state.source.path);
+    // Сравнение — по ключу источника: у сжатого файла (F-2) найденная
+    // закладка стоит на распакованной копии, а сохранённая — на архиве.
+    const QString pathKey = RecordLocator::sourceKey(state.source);
     for (auto it = m_items.begin(); it != m_items.end(); ++it) {
         Bookmark& b = it->bookmark;
-        if (b.line == state.record.line && RecordLocator::pathKey(b.filePath) == pathKey) {
+        const QString key = b.key.file ? RecordLocator::sourceKey(*b.key.file)
+            : it->source.isValid() ? RecordLocator::sourceKey(it->source)
+                                   : RecordLocator::pathKey(b.filePath);
+        if (b.line == state.record.line && key == pathKey) {
             if (b.note.isEmpty() && !state.note.isEmpty()) {
                 b.note = state.note;
                 emit changed();

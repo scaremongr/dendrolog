@@ -96,8 +96,8 @@ struct FileMemory {
                                               bool* newerVersion = nullptr);
 
     // Подменить путь источника (переезд, копия): у источника, закладок этого
-    // файла и текущей строки.
-    void relocate(const QString& newPath);
+    // файла и текущей строки. compressed — новый путь — сжатый файл (F-2).
+    void relocate(const QString& newPath, bool compressed = false);
     // Снимок вкладки из одного файла (для LogViewWidget::applyState).
     TabState toTabState() const;
 };
@@ -141,7 +141,11 @@ public:
 
     // Найти память открываемого файла (три случая выше). Путь — что открывает
     // вкладка (абсолютный). Спул stdin и нечитаемый файл — None.
-    Lookup open(const QString& path);
+    // Сжатый источник (F-2): path — архив (ключ памяти), unpackedPath —
+    // распакованная копия: по ней сверяется содержимое во всех трёх случаях,
+    // поэтому память ищется ПОСЛЕ распаковки (поиск по содержимому тогда
+    // дёшев — те же два чтения по 4 КБ).
+    Lookup open(const QString& path, const QString& unpackedPath = QString());
 
     // Записать память файла memory.source.source.path. base — закладки,
     // которые пишущий прочитал из памяти или записал прошлый раз (правило

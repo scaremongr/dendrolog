@@ -1,5 +1,6 @@
 #include "viewexport.h"
 #include "logmodel.h"
+#include "logfile.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -74,6 +75,19 @@ ViewExport::Result checkDestination(const QString& destination,
 }
 
 } // namespace
+
+QStringList ViewExport::protectedPaths(const QList<std::shared_ptr<LogFile>>& files)
+{
+    QStringList paths;
+    for (const auto& lf : files) {
+        if (!lf)
+            continue;
+        paths.append(lf->filePath);
+        if (lf->source().kind == LogSource::Kind::Archive && !lf->source().path.isEmpty())
+            paths.append(lf->source().path);
+    }
+    return paths;
+}
 
 ViewExport::Result ViewExport::writeRows(QIODevice& output, const RowSource& rows,
                                        const std::atomic_bool* cancel)

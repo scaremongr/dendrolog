@@ -37,6 +37,7 @@
 #include "shortcutmanager.h"
 #include "singleinstance.h"
 #include "testdocuments.h"
+#include "gzipbytes.h"
 #include "updatechecker.h"
 
 #include <QApplication>
@@ -57,6 +58,7 @@
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrl>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtTest/QSignalSpy>
@@ -1229,6 +1231,44 @@ void scenarioOpenMore(MainWindow& win, const Fixtures& fx)
     check(tabs(win)->count() == before, QStringLiteral("back to %1 tabs").arg(before));
 }
 
+// Сжатый лог (F-2, шаг 2): из командной строки — вкладкой с именем архива,
+// путь архива в подсказке и недавних, копия — в спуле каталога настроек
+// теста, кнопка отмены распаковки после загрузки скрыта, закрытие — копии нет.
+void scenarioCompressed(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("compressed file"));
+    const int before = tabs(win)->count();
+    QFile source(fx.a);
+    source.open(QIODevice::ReadOnly);
+    const QByteArray bytes = source.readAll();
+    const QString gz = QFileInfo(fx.a).dir().filePath(QStringLiteral("alpha-copy.log.gz"));
+    {
+        QFile out(gz);
+        out.open(QIODevice::WriteOnly);
+        out.write(testgzip::gzip(bytes));
+    }
+    win.openCommandLine(OpenRouting::parseCommandLine({gz}));
+    check(waitFor([&]() { return tabs(win)->count() == before + 1; }), QStringLiteral(".gz opens a tab"));
+    const int index = tabs(win)->count() - 1;
+    LogViewWidget* tab = tabAt(win, index);
+    check(waitLoaded(tab), QStringLiteral(".gz loads"));
+    check(tab->model()->rowCount() == bytes.count('\n') + (bytes.endsWith('\n') ? 0 : 1),
+          QStringLiteral(".gz rows equal the plain file"));
+    check(tabs(win)->tabText(index) == QLatin1String("alpha-copy.log.gz"), QStringLiteral(".gz tab name"));
+    check(tabs(win)->tabToolTip(index).contains(QDir::toNativeSeparators(gz)), QStringLiteral(".gz tab tooltip shows the archive"));
+    check(inRecentFiles(win, gz), QStringLiteral(".gz path is in Recent Files"));
+    LogFilePtr lf = tab->loadedFiles().value(0);
+    check(lf && lf->filePath.startsWith(AppSettings::spoolRoot()), QStringLiteral(".gz copy in the test spool"));
+    auto* cancel = win.findChild<QToolButton*>(QStringLiteral("cancelUnpackButton"));
+    check(cancel && !cancel->isVisible(), QStringLiteral("Cancel Unpacking hidden after the load"));
+    const QString copy = lf ? lf->filePath : QString();
+    lf.reset(); // копию держит последний LogFile
+    tabs(win)->setCurrentIndex(index);
+    command(win, QStringLiteral("closeTab"))->trigger();
+    check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral(".gz tab closes"));
+    check(waitFor([&]() { return !QFileInfo::exists(copy); }, 10000), QStringLiteral(".gz copy removed with the tab"));
+}
+
 // Панель Search следует за активной вкладкой, пока поиск запущен.
 void scenarioSearchFollowsTab(MainWindow& win, const Fixtures& fx)
 {
@@ -2041,6 +2081,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
 
         scenarioOpen(win, fx, indexed, instanceKey);
         scenarioOpenMore(win, fx);
+        scenarioCompressed(win, fx);
         section(QStringLiteral("shortcuts: with tabs"));
         checkShortcutAmbiguity(win, QStringLiteral("with tabs"));
         scenarioNavigate(win, fx);

@@ -1,5 +1,6 @@
 #include "recordid.h"
 
+#include "gzipdevice.h"
 #include "stdinspooler.h"
 
 #include <QCryptographicHash>
@@ -357,7 +358,43 @@ std::optional<SourceIdentity> SourceIdentity::capture(const QString& filePath, q
     return id;
 }
 
+std::optional<SourceIdentity> SourceIdentity::capture(const LogFile& file, qint64 size)
+{
+    std::optional<SourceIdentity> id = capture(file.filePath, size);
+    if (!id || file.source().kind != LogSource::Kind::Archive)
+        return id;
+    id->path = QFileInfo(file.source().path).absoluteFilePath();
+    id->member = file.source().member;
+    id->compressed = true;
+    id->ephemeral = false;
+    if (const auto archive = capture(id->path)) {
+        id->archiveSize = archive->size;
+        id->archiveHead = archive->head;
+        id->archiveTail = archive->tail;
+    }
+    return id;
+}
+
 SourceIdentity::State SourceIdentity::checkAt(const QString& filePath) const
+{
+    if (ephemeral)
+        return State::Ephemeral;
+    if (!compressed)
+        return checkContentAt(filePath);
+    // Содержимое без распаковки не проверить — проверяется сам архив.
+    if (filePath.isEmpty() || SavedPath::isForeign(filePath) || !QFileInfo(filePath).isFile()
+        || !GzipDevice::fileHasSignature(filePath))
+        return State::Missing;
+    if (archiveSize < 0)
+        return State::Valid; // отпечатков архива нет: «есть и gzip»
+    SourceIdentity archive;
+    archive.size = archiveSize;
+    archive.head = archiveHead;
+    archive.tail = archiveTail;
+    return archive.checkContentAt(filePath);
+}
+
+SourceIdentity::State SourceIdentity::checkContentAt(const QString& filePath) const
 {
     if (ephemeral)
         return State::Ephemeral;
@@ -391,6 +428,17 @@ QJsonObject SourceIdentity::toJson() const
     json.insert(QStringLiteral("size"), size);
     json.insert(QStringLiteral("head"), RecordFingerprint::toHex(head));
     json.insert(QStringLiteral("tail"), RecordFingerprint::toHex(tail));
+    if (compressed)
+        json.insert(QStringLiteral("compressed"), true);
+    if (compressed && archiveSize >= 0) {
+        QJsonObject archive;
+        archive.insert(QStringLiteral("size"), archiveSize);
+        archive.insert(QStringLiteral("head"), RecordFingerprint::toHex(archiveHead));
+        archive.insert(QStringLiteral("tail"), RecordFingerprint::toHex(archiveTail));
+        json.insert(QStringLiteral("archive"), archive);
+    }
+    if (!member.isEmpty())
+        json.insert(QStringLiteral("member"), member);
     return json;
 }
 
@@ -421,5 +469,36 @@ std::optional<SourceIdentity> SourceIdentity::fromJson(const QJsonObject& json, 
     }
     id.head = *head;
     id.tail = *tail;
+    // F-2: необязательные поля сжатого источника (версия формата та же).
+    const QJsonValue compressed = json.value(QLatin1String("compressed"));
+    if (!compressed.isUndefined() && !compressed.isBool()) {
+        setError(error, QStringLiteral("bad compressed flag"));
+        return std::nullopt;
+    }
+    id.compressed = compressed.toBool(false);
+    const QJsonValue member = json.value(QLatin1String("member"));
+    if (!member.isUndefined() && !member.isString()) {
+        setError(error, QStringLiteral("bad member"));
+        return std::nullopt;
+    }
+    id.member = member.toString();
+    if (!id.member.isEmpty() && !id.compressed) {
+        setError(error, QStringLiteral("member without compressed"));
+        return std::nullopt;
+    }
+    const QJsonValue archive = json.value(QLatin1String("archive"));
+    if (!archive.isUndefined()) {
+        const QJsonObject a = archive.toObject();
+        const std::optional<qint64> aSize = archive.isObject() ? integerField(a, "size", 0) : std::nullopt;
+        const std::optional<quint64> aHead = archive.isObject() ? hexField(a, "head") : std::nullopt;
+        const std::optional<quint64> aTail = archive.isObject() ? hexField(a, "tail") : std::nullopt;
+        if (!id.compressed || !aSize || !aHead || !aTail) {
+            setError(error, QStringLiteral("bad archive fingerprint"));
+            return std::nullopt;
+        }
+        id.archiveSize = *aSize;
+        id.archiveHead = *aHead;
+        id.archiveTail = *aTail;
+    }
     return id;
 }

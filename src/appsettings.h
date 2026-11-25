@@ -66,6 +66,10 @@ public:
     // ShortcutManager) остаётся — после смены каталога звать load().
     // Программа его не вызывает: для пользователя поведение не меняется.
     static void overrideConfigDirForTesting(const QString& dir);
+    // Корень временных файлов распаковки (F-2, SpoolDir): кэш приложения
+    // (SpoolDir::defaultRoot) — и в portable-режиме; при подмене каталога
+    // настроек тестом — <configDir>/spool, настоящий кэш тест не трогает.
+    static QString spoolRoot();
 
     // Path of the shared INI file (also used by MainWindow and the
     // pattern editor for presets / sample text).

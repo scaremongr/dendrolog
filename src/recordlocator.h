@@ -162,7 +162,7 @@ private:
     };
     struct FileState {
         LogFilePtr file;
-        QString path;                  // нормализованный (pathKey)
+        QString path;                  // ключ источника (sourceKey)
         quint64 generation = 1;
         qint64 maxLineFed = 0;         // строки поколения до этой — прошли
         bool loaded = false;           // поколение прочитано до конца
@@ -187,6 +187,10 @@ public:
     // Путь для сравнения: абсолютный, без «.» и «..», на Windows — без учёта
     // регистра. Так сравнивает пути локатор (и закладки — с ним).
     static QString pathKey(const QString& path);
+    // Ключ источника (F-2): у обычного файла — pathKey(filePath), у сжатого —
+    // путь архива [+ имя внутри]. По нему сохранённые запросы ждут свой файл.
+    static QString sourceKey(const LogFile& file);
+    static QString sourceKey(const SourceIdentity& source);
 
 private:
     FileState* stateFor(const LogFilePtr& file, bool create);

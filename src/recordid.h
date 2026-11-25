@@ -228,6 +228,21 @@ struct SourceIdentity {
     quint64 head = 0;
     quint64 tail = 0;
     bool    ephemeral = false;
+    // Сжатый источник (F-2): path — архив на диске (`app.log.gz`), member —
+    // имя внутри zip/tar (у .gz пусто), а size/head/tail — по РАСПАКОВАННОМУ
+    // содержимому (номер строки и её отпечаток относятся к нему). В JSON —
+    // необязательные "compressed":true и "member": версия формата та же.
+    bool    compressed = false;
+    QString member;
+    // Сжатый источник: отпечатки самого АРХИВА (размер, начало, 4 КБ перед
+    // концом) на момент снятия — по ним checkAt отличает «тот же архив» от
+    // «другой gzip по тому же пути» без распаковки. archiveSize < 0 — не
+    // сняты (старый файл): тогда checkAt знает только «архив есть».
+    // В JSON — необязательный объект "archive"; в сравнение (==) не входят:
+    // источник — содержимое.
+    qint64  archiveSize = -1;
+    quint64 archiveHead = 0;
+    quint64 archiveTail = 0;
 
     bool isValid() const { return ephemeral ? !path.isEmpty() : (!path.isEmpty() && size >= 0); }
 
@@ -236,12 +251,25 @@ struct SourceIdentity {
     // Спул stdin (StdinSpooler::isSpoolFilePath) — Ephemeral без чтения.
     static std::optional<SourceIdentity> capture(const QString& filePath, qint64 size = -1);
 
+    // Снять идентичность файла вкладки (R-1 + F-2): содержимое — по пути
+    // чтения (filePath), путь — источника: у сжатого — архив и имя внутри
+    // (compressed), у обычного — тот же filePath.
+    static std::optional<SourceIdentity> capture(const LogFile& file, qint64 size = -1);
+
     // Проверка по сохранённому пути.
     State check() const { return checkAt(path); }
-    // Проверка содержимого по ДРУГОМУ пути (переименованный, перенесённый
-    // файл): те же правила, путь не сравнивается. Путь чужой ОС
+    // Проверка ИСТОЧНИКА, лежащего по ДРУГОМУ пути (переименованный,
+    // перенесённый файл): те же правила, путь не сравнивается. Путь чужой ОС
     // (SavedPath::isForeign) — Missing без обращения к диску.
+    // Сжатый источник (compressed) проверяется по отпечаткам архива: тот же
+    // архив — Valid, другой gzip — Changed (откроется, закладки сверит
+    // локатор по копии), нет или не gzip — Missing. Без отпечатков архива —
+    // «есть и gzip» = Valid. Содержимое сверяется по распакованной копии
+    // (checkContentAt), когда она готова.
     State checkAt(const QString& filePath) const;
+    // Сверка СОДЕРЖИМОГО с файлом, из которого читают (у сжатого источника —
+    // распакованная копия): размер и отпечатки, флаг compressed не смотрится.
+    State checkContentAt(const QString& readPath) const;
     // Те же байты префикса, путь не учитывается (две снятые идентичности).
     bool sameContent(const SourceIdentity& other) const
     {
@@ -259,6 +287,7 @@ struct SourceIdentity {
     {
         // Регистр пути — SavedPath::same.
         return SavedPath::same(a.path, b.path) && a.ephemeral == b.ephemeral
+            && a.compressed == b.compressed && a.member == b.member
             && (a.ephemeral || a.sameContent(b));
     }
     friend bool operator!=(const SourceIdentity& a, const SourceIdentity& b) { return !(a == b); }

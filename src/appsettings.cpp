@@ -1,4 +1,5 @@
 #include "appsettings.h"
+#include "spooldir.h"
 #include "apptheme.h"
 
 #include <QApplication>
@@ -34,6 +35,13 @@ void AppSettings::overrideConfigDirForTesting(const QString& dir)
 {
     QDir().mkpath(dir);
     configDirOverride() = QDir(dir).absolutePath();
+}
+
+QString AppSettings::spoolRoot()
+{
+    if (!configDirOverride().isEmpty())
+        return configDirOverride() + QStringLiteral("/spool");
+    return SpoolDir::defaultRoot();
 }
 
 // ---------------------------------------------------------------------------

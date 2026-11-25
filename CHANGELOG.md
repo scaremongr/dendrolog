@@ -7,6 +7,18 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Compressed logs.** A `.gz` file opens in a tab like any log — from the
+  Open dialog, a drop, the command line or Recent Files; gzip is recognised
+  by its bytes, concatenated gzip files included. It is unpacked in the
+  background to a temporary file in the application's cache folder: the
+  status bar shows the progress and **Cancel Unpacking** stops it. The tab,
+  tooltips, Entry Details and the Bookmarks panel name the archive, and the
+  tab tooltip gives the size of the unpacked copy. Bookmarks, the file memory
+  and sessions remember the archive, so its bookmarks are back when it is
+  opened again, also after a session folder was moved together with it.
+  Auto-reload leaves `.gz` files alone; `F5` unpacks a changed archive again.
+  Save View As refuses to overwrite the archive. Temporary files left behind
+  by a crash are removed at the next start.
 - **File labels on the left.** In a tab with several files, the source file
   of a line is shown in a column left of the text: a stripe in the file's
   colour down the whole line and the file name. A name that fits the column

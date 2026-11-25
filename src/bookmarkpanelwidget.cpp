@@ -1,5 +1,6 @@
 #include "bookmarkpanelwidget.h"
 
+#include <QDir>
 #include <QMessageBox>
 #include "apptheme.h"
 #include "logviewwidget.h"
@@ -70,10 +71,14 @@ BookmarkCard::BookmarkCard(const Bookmark& bookmark, QWidget* parent)
 
 void BookmarkCard::setBookmark(const Bookmark& bookmark)
 {
-    m_goButton->setText(QStringLiteral("%1 : %2")
-                            .arg(QFileInfo(bookmark.filePath).fileName())
-                            .arg(bookmark.line));
-    m_goButton->setToolTip(tr("Go to line %1 of %2").arg(bookmark.line).arg(bookmark.filePath));
+    // Найденная закладка — по файлу вкладки (у сжатого — архив, F-2), ждущая
+    // — по сохранённому пути источника.
+    const QString shown = bookmark.key.file ? bookmark.key.file->displayPath() : bookmark.filePath;
+    const QString name = bookmark.key.file ? bookmark.key.file->shortName()
+                                           : QFileInfo(bookmark.filePath).fileName();
+    m_goButton->setText(QStringLiteral("%1 : %2").arg(name).arg(bookmark.line));
+    m_goButton->setToolTip(tr("Go to line %1 of %2").arg(bookmark.line)
+                               .arg(QDir::toNativeSeparators(shown)));
     // Первая строка фрагмента, табы — пробелами: подпись однострочная.
     QString preview = bookmark.preview;
     preview.replace(QLatin1Char('\t'), QLatin1Char(' '));

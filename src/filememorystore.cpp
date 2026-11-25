@@ -56,17 +56,25 @@ void writeMerged(const QString& filePath, FileMemory ours, const QVector<RecordI
     if (newer)
         return; // писала новая программа — не трогаем
     const QString path = ours.source.source.path;
-    if (theirs && theirs->source.source.checkAt(path) == SourceIdentity::State::Valid) {
+    // Сжатый источник (F-2) без распаковки не сверить с диском — лежащая
+    // память того же содержимого узнаётся по отпечаткам.
+    const SourceIdentity& mine = ours.source.source;
+    if (theirs && (mine.compressed || theirs->source.source.compressed
+                       ? theirs->source.source.sameContent(mine)
+                       : theirs->source.source.checkAt(path) == SourceIdentity::State::Valid)) {
         for (BookmarkState b : theirs->bookmarks) {
             if (base.contains(b.record) || containsRecord(ours.bookmarks, b.record))
                 continue;
             b.source.path = path;
+            b.source.compressed = mine.compressed;
             ours.bookmarks.append(b);
         }
         if (!ours.view && theirs->view) {
             ours.view = theirs->view;
-            if (ours.view->currentSource)
+            if (ours.view->currentSource) {
                 ours.view->currentSource->path = path;
+                ours.view->currentSource->compressed = mine.compressed;
+            }
         }
     }
     FileMemoryStore::writeFileAtomically(filePath, toBytes(ours));
@@ -159,19 +167,29 @@ std::optional<FileMemory> FileMemory::fromJson(const QJsonObject& json, QString*
     return m;
 }
 
-void FileMemory::relocate(const QString& newPath)
+void FileMemory::relocate(const QString& newPath, bool compressed)
 {
     // Сравнение — как у ключа памяти (на Windows без учёта регистра).
     const QString oldKey = FileMemoryStore::normalizedKeyPath(source.source.path);
     const auto sameFile = [&oldKey](const QString& p) {
         return FileMemoryStore::normalizedKeyPath(p) == oldKey;
     };
-    source.source.path = newPath;
+    // Сжатый ли источник — как открыли сейчас (F-2): лог, сжатый в .gz или
+    // распакованный, находится по содержимому и в обе стороны.
+    const auto move = [&](SourceIdentity& id) {
+        // Отпечатки архива — того, что лежал по прежнему пути.
+        if (!compressed || !SavedPath::same(id.path, newPath))
+            id.archiveSize = -1;
+        id.path = newPath;
+        id.compressed = compressed;
+        id.member.clear();
+    };
+    move(source.source);
     for (BookmarkState& b : bookmarks)
         if (sameFile(b.source.path))
-            b.source.path = newPath;
+            move(b.source);
     if (view && view->currentSource && sameFile(view->currentSource->path))
-        view->currentSource->path = newPath;
+        move(*view->currentSource);
 }
 
 TabState FileMemory::toTabState() const
@@ -273,13 +291,18 @@ void FileMemoryStore::ensureIndex()
     }
 }
 
-FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath)
+FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath,
+                                              const QString& unpackedPath)
 {
     Lookup result;
     if (requestedPath.isEmpty())
         return result;
     waitForWrites(); // только что закрытая вкладка того же файла — уже на диске
     const QString path = QDir::cleanPath(QFileInfo(requestedPath).absoluteFilePath());
+    // Сжатый источник (F-2): память — по пути архива, содержимое — по
+    // распакованной копии (её отпечатки и сохранены).
+    const bool compressed = !unpackedPath.isEmpty();
+    const QString content = compressed ? unpackedPath : path;
     const QString name = fileNameForPath(path);
     const QString keyPath = normalizedKeyPath(path);
 
@@ -293,9 +316,9 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath)
     if (byPath && normalizedKeyPath(byPath->source.source.path) != keyPath)
         byPath.reset(); // чужой путь с тем же отпечатком имени — не наш
     if (byPath) {
-        switch (byPath->source.source.checkAt(path)) {
+        switch (byPath->source.source.checkContentAt(content)) {
         case SourceIdentity::State::Valid:
-            byPath->relocate(path); // написание пути — как открыли сейчас
+            byPath->relocate(path, compressed); // написание пути — как открыли сейчас
             result.found = Found::ByPath;
             result.memory = byPath;
             return result;
@@ -326,14 +349,14 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath)
     }
 
     // ---- 3: по содержимому ------------------------------------------------------
-    const auto current = SourceIdentity::capture(path);
+    const auto current = SourceIdentity::capture(content);
     if (!current || current->ephemeral)
         return result; // спул stdin, нечитаемый файл
     // Начало файла читается один раз: отпечаток начала кандидата сверяется в
     // памяти (min(4 КБ, его размер) байтов), checkAt — только у совпавших.
     QByteArray prefix;
     {
-        QFile file(path);
+        QFile file(content);
         if (!file.open(QIODevice::ReadOnly))
             return result;
         prefix = file.read(SourceIdentity::kRegionBytes);
@@ -356,20 +379,20 @@ FileMemoryStore::Lookup FileMemoryStore::open(const QString& requestedPath)
     for (const auto& [lastUsed, candidate] : std::as_const(candidates)) {
         Q_UNUSED(lastUsed);
         const auto entry = m_index.constFind(candidate);
-        if (entry == m_index.cend() || entry->source.checkAt(path) != SourceIdentity::State::Valid)
+        if (entry == m_index.cend() || entry->source.checkContentAt(content) != SourceIdentity::State::Valid)
             continue;
         std::optional<FileMemory> memory = readMemory(candidate); // с диска: перечень мог устареть
         if (!memory) {
             m_index.remove(candidate);
             continue;
         }
-        if (memory->source.source.checkAt(path) != SourceIdentity::State::Valid)
+        if (memory->source.source.checkContentAt(content) != SourceIdentity::State::Valid)
             continue;
         const QString previousPath = memory->source.source.path;
         // Прежний файл на месте и цел — это копия: память остаётся и там.
         const bool detached = candidate.contains(kDetachedMark);
         const bool copy = !detached && memory->source.source.check() == SourceIdentity::State::Valid;
-        memory->relocate(path);
+        memory->relocate(path, compressed);
         memory->lastUsed = QDateTime::currentDateTimeUtc();
         const QString from = filePath(candidate);
         const QString to = filePath(name);

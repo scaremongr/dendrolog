@@ -225,6 +225,8 @@ private:
     // Фоновый Save View As и кнопка его отмены в строке статуса.
     ViewExportJob* m_exportJob = nullptr;
     QToolButton* m_cancelExportButton = nullptr;
+    QToolButton* m_cancelUnpackButton = nullptr; // F-2: распаковка активной вкладки
+    bool m_unpackStatusShown = false;            // строка состояния показывает распаковку
     class EncodingIndicator* m_encodingIndicator = nullptr; // кодировка файла текущей строки
     QString m_exportCancelReason; // почему экспорт отменён не пользователем
 
