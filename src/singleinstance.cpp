@@ -77,11 +77,11 @@ SingleInstance::SingleInstance(const QString& appKey, const OpenRouting::Command
 
     connect(m_server, &QLocalServer::newConnection, this, [this]() {
         while (QLocalSocket* client = m_server->nextPendingConnection()) {
+            // Канал не закрываем: его закрывает отправитель, дождавшись
+            // своей записи (см. «Ловушки» в заголовке, S-15).
             connect(client, &QLocalSocket::readyRead, this, [this, client]() {
-                if (!client->canReadLine())
-                    return;
-                emit filesReceived(decodeFiles(client->readLine()));
-                client->disconnectFromServer();
+                while (client->canReadLine())
+                    emit filesReceived(decodeFiles(client->readLine()));
             });
             connect(client, &QLocalSocket::disconnected,
                     client, &QLocalSocket::deleteLater);

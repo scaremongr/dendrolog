@@ -30,6 +30,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QLocalServer>
+#include <QLocalSocket>
 #include <QSemaphore>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
@@ -516,6 +517,38 @@ static void testSingleInstance(const QTemporaryDir& tmp)
 #endif
 }
 
+// S-15: канал закрывает отправитель, а не первичный. Первичный, закрывший
+// канал сразу после строки, на Windows обгонял waitForBytesWritten
+// отправителя (запись в именованный канал Qt завершается чтением сервера), и
+// sendToPrimary возвращал false при доставленных файлах: ~4 % запусков под
+// нагрузкой. Проверка по состоянию: после первого кадра канал открыт —
+// второй кадр по тому же соединению тоже доходит.
+static void testPrimaryKeepsChannel()
+{
+    const QString key = QStringLiteral("DendroLogChannel-%1").arg(QCoreApplication::applicationPid());
+    SingleInstance primary(key, OpenRouting::parseCommandLine({}));
+    CHECK(primary.role() == Role::Primary, "channel: the first launch is primary");
+    QList<QStringList> received;
+    QObject::connect(&primary, &SingleInstance::filesReceived,
+                     [&received](const QStringList& arguments) { received << arguments; });
+
+    QLocalSocket client;
+    client.connectToServer(key + QLatin1Char('-')
+                           + qEnvironmentVariable("USERNAME", qEnvironmentVariable("USER")));
+    CHECK(waitFor([&] { return client.state() == QLocalSocket::ConnectedState; }, 10000),
+          "channel: connected to the primary");
+    client.write(QByteArrayLiteral("[\"one.log\"]\n"));
+    CHECK(waitFor([&] { return received.size() == 1; }, 10000), "channel: the first frame is received");
+    CHECK(client.state() == QLocalSocket::ConnectedState,
+          "channel: the primary does not close the channel after a frame");
+    client.write(QByteArrayLiteral("[\"two.log\"]\n"));
+    CHECK(waitFor([&] { return received.size() == 2; }, 10000),
+          "channel: a second frame on the same connection is received");
+    CHECK(received == QList<QStringList>({ { "one.log" }, { "two.log" } }),
+          "channel: frames arrive in order");
+    client.disconnectFromServer();
+}
+
 // Гонка: два обычных запуска одновременно, оба ещё не нашли сервер. Первичный
 // обязан быть ровно один, второй передаёт файлы ему. SingleInstance каждого
 // запуска живёт и умирает в своём потоке, как в своём процессе.
@@ -578,6 +611,7 @@ int main(int argc, char** argv)
     testCommandLine(tmp);
     testSessions(tmp);
     testSingleInstance(tmp);
+    testPrimaryKeepsChannel();
     testSimultaneousLaunches();
 
     if (failures == 0)
