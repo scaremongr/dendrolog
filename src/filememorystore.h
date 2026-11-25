@@ -97,7 +97,7 @@ struct FileMemory {
 
     // Подменить путь источника (переезд, копия): у источника, закладок этого
     // файла и текущей строки. compressed — новый путь — сжатый файл (F-2).
-    // member — имя в архиве (zip, F-2 шаг 4); пусто у .gz и обычного файла.
+    // member — имя в архиве (zip, tar — F-2 шаги 4–5); пусто у .gz и обычного файла.
     void relocate(const QString& newPath, bool compressed = false, const QString& member = QString());
     // Снимок вкладки из одного файла (для LogViewWidget::applyState).
     TabState toTabState() const;
@@ -150,7 +150,7 @@ public:
     // распакованная копия: по ней сверяется содержимое во всех трёх случаях,
     // поэтому память ищется ПОСЛЕ распаковки (поиск по содержимому тогда
     // дёшев — те же два чтения по 4 КБ).
-    // Член архива (zip) — member: ключ — архив и имя (keyFor).
+    // Член архива (zip, tar) — member: ключ — архив и имя (keyFor).
     Lookup open(const QString& path, const QString& unpackedPath = QString(),
                 const QString& member = QString());
 

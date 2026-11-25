@@ -1,5 +1,5 @@
-// Тест ядра сжатых источников (F-2, шаги 1 и 4): GzipDevice, ZipArchive,
-// SourceUnpacker (gzip и zip), SpoolDir / SpoolItem. Без виджетов и без окна.
+// Тест ядра сжатых источников (F-2, шаги 1, 4 и 5): GzipDevice, ZipArchive,
+// TarArchive, SourceUnpacker (gzip, zip и tar), SpoolDir / SpoolItem. Без виджетов и без окна.
 //
 // Фикстуры настоящего gzip (утилита gzip 1.12) зашиты массивами байт: двоичные
 // файлы в репозитории на Windows рискуют пострадать от core.autocrlf. Большие
@@ -18,9 +18,12 @@
 #include "sourceunpacker.h"
 #include "spooldir.h"
 #include "recordid.h"
+#include "tararchive.h"
 #include "ziparchive.h"
 
+#include "../common/tarbytes.h"
 #include "../common/zipbytes.h"
+#include "tarfixtures.h"
 
 #include <miniz.h>
 
@@ -1477,6 +1480,555 @@ void testZipIdentity(const QDir& dir)
 }
 
 // ===========================================================================
+// tar (F-2, шаг 5)
+// ===========================================================================
+QByteArray fixtureGz(const unsigned char* data, size_t size)
+{
+    return QByteArray(reinterpret_cast<const char*>(data), int(size));
+}
+
+// Распаковать gzip в память (фикстуры хранятся сжатыми).
+QByteArray gunzipBytes(const QByteArray& gz)
+{
+    QBuffer src;
+    src.setData(gz);
+    GzipDevice dev(&src);
+    if (!dev.open(QIODevice::ReadOnly))
+        return {};
+    return dev.readAll();
+}
+
+struct TarFixture {
+    const char* name;
+    QByteArray gz;
+};
+
+QList<TarFixture> tarFixtures()
+{
+    return {
+        {"gnu", fixtureGz(tarfixtures::kGnuTarGz, sizeof(tarfixtures::kGnuTarGz))},
+        {"pax", fixtureGz(tarfixtures::kPaxTarGz, sizeof(tarfixtures::kPaxTarGz))},
+        {"ustar", fixtureGz(tarfixtures::kUstarTarGz, sizeof(tarfixtures::kUstarTarGz))},
+    };
+}
+
+// Члены архива: имя → тип и данные (данные — только у файлов).
+struct ListedMember {
+    TarMember::Type type;
+    QByteArray data;
+};
+
+QHash<QString, ListedMember> listTar(const QString& path, TarArchive::Error* error = nullptr)
+{
+    QHash<QString, ListedMember> out;
+    TarArchive tar(path);
+    if (tar.open()) {
+        TarMember m;
+        while (tar.next(m)) {
+            ListedMember lm{m.type, {}};
+            if (m.isFile()) {
+                QBuffer buffer;
+                buffer.open(QIODevice::WriteOnly);
+                if (!tar.extract(buffer))
+                    break;
+                lm.data = buffer.data();
+            }
+            out.insert(m.name, lm);
+        }
+        if (tar.error() == TarArchive::Error::None)
+            tar.finish();
+    }
+    if (error)
+        *error = tar.error();
+    return out;
+}
+
+void testTarReader(const QDir& dir)
+{
+    const QString longPath = QString::fromLatin1(tarfixtures::kLongPath);
+    const QString cyr = QStringLiteral("logs/журнал.log");
+    for (const TarFixture& f : tarFixtures()) {
+        const QByteArray plain = gunzipBytes(f.gz);
+        CHECK(!plain.isEmpty() && plain.size() % 512 == 0);
+        const QString base = QString::fromLatin1(f.name);
+        const QString tarPath = writeBytes(dir, base + QStringLiteral(".tar"), plain);
+        const QString tgzPath = writeBytes(dir, base + QStringLiteral(".tar.gz"), f.gz);
+        for (const QString& path : {tarPath, tgzPath}) {
+            CHECK(TarArchive::fileHasSignature(path));
+            CHECK(ArchiveFormats::detect(path) == ArchiveFormats::Format::Tar);
+            CHECK(TarArchive::fileIsCompressedTar(path) == (path == tgzPath));
+            TarArchive::Error error = TarArchive::Error::Corrupt;
+            const QHash<QString, ListedMember> members = listTar(path, &error);
+            CHECK(error == TarArchive::Error::None);
+            if (error != TarArchive::Error::None)
+                std::fprintf(stderr, "  %s: error %d\n", qPrintable(path), int(error));
+            CHECK(members.value(QStringLiteral("logs/app.log")).data == kInfoAppLog);
+            CHECK(members.value(QStringLiteral("logs/sub/debug.log")).data == kInfoDebugLog);
+            CHECK(members.value(longPath).data == QByteArray("deep line\n"));
+            CHECK(members.value(cyr).data == QStringLiteral("кириллица\n").toUtf8());
+            CHECK(members.value(QStringLiteral("readme.md")).data == QByteArray("readme\n"));
+            CHECK(members.contains(QStringLiteral("logs/link.log"))
+                  && members.value(QStringLiteral("logs/link.log")).type == TarMember::Type::Symlink);
+            CHECK(members.contains(QStringLiteral("logs/sub"))
+                  && members.value(QStringLiteral("logs/sub")).type == TarMember::Type::Directory);
+            if (!members.contains(longPath))
+                std::fprintf(stderr, "  %s: long path missing; members: %s\n", qPrintable(path),
+                             qPrintable(QStringList(members.keys()).join(QStringLiteral(", "))));
+        }
+    }
+    // Не tar: zip, gzip с логом, текст, пустой файл.
+    CHECK(ArchiveFormats::detect(writeBytes(dir, QStringLiteral("i.zip"), infoZip())) == ArchiveFormats::Format::Zip);
+    const QString logGz = writeBytes(dir, QStringLiteral("t-app.log.gz"), gzipMember(makeLog(100000, 3), 6));
+    CHECK(!TarArchive::fileHasSignature(logGz) && ArchiveFormats::detect(logGz) == ArchiveFormats::Format::None);
+    const QString shortGz = writeBytes(dir, QStringLiteral("t-short.gz"), gzipMember("tiny\n", 6));
+    CHECK(ArchiveFormats::detect(shortGz) == ArchiveFormats::Format::None);
+    CHECK(ArchiveFormats::detect(writeBytes(dir, QStringLiteral("t.txt"), makeLog(5000, 4)))
+          == ArchiveFormats::Format::None);
+    const QString empty = writeBytes(dir, QStringLiteral("t-empty.tar"), QByteArray());
+    CHECK(ArchiveFormats::detect(empty) == ArchiveFormats::Format::None);
+    {
+        TarArchive t(empty);
+        CHECK(t.open());
+        TarMember m;
+        CHECK(!t.next(m) && t.error() == TarArchive::Error::NotTar);
+    }
+    // Текст под именем .tar — не tar.
+    {
+        TarArchive t(writeBytes(dir, QStringLiteral("t-text.tar"), makeLog(5000, 5)));
+        CHECK(t.open());
+        TarMember m;
+        CHECK(!t.next(m) && t.error() == TarArchive::Error::NotTar);
+    }
+
+    // Собранные: GNU 'L', pax path, base-256, v7 (без magic), prefix ustar.
+    const QByteArray longName = QByteArray("dir/") + QByteArray(150, 'n') + QByteArray(".log");
+    testtar::Entry gnuLong = testtar::file(longName, "gnu long\n");
+    gnuLong.gnuLongName = true;
+    testtar::Entry paxLong = testtar::file(QByteArray("pax/") + QByteArray(120, 'p') + "/имя.log", "pax long\n");
+    paxLong.paxPath = true;
+    testtar::Entry big = testtar::file("b256.log", "base 256\n");
+    big.base256Size = true;
+    testtar::Entry prefixed = testtar::file("leaf.log", "prefixed\n");
+    prefixed.prefix = "some/prefix";
+    const QString built = writeBytes(dir, QStringLiteral("built.tar"),
+                                     testtar::tar({gnuLong, paxLong, big, prefixed}));
+    {
+        TarArchive::Error error = TarArchive::Error::Corrupt;
+        const auto members = listTar(built, &error);
+        CHECK(error == TarArchive::Error::None);
+        CHECK(members.value(QString::fromLatin1(longName)).data == QByteArray("gnu long\n"));
+        CHECK(members.value(QString::fromUtf8(paxLong.name)).data == QByteArray("pax long\n"));
+        CHECK(members.value(QStringLiteral("b256.log")).data == QByteArray("base 256\n"));
+        CHECK(members.value(QStringLiteral("some/prefix/leaf.log")).data == QByteArray("prefixed\n"));
+    }
+    // GNU: prefix-поля нет — те же байты в нём не склеиваются с именем.
+    {
+        testtar::Entry e = testtar::file("gnu.log", "x\n");
+        e.prefix = "ignored";
+        const QString p = writeBytes(dir, QStringLiteral("gnuprefix.tar"), testtar::tar({e}, testtar::Format::Gnu));
+        CHECK(listTar(p).contains(QStringLiteral("gnu.log")));
+    }
+    // v7: без magic — читается, но по содержимому за tar не считается.
+    const QString v7 = writeBytes(dir, QStringLiteral("v7.tar"),
+                                  testtar::tar({testtar::file("old.log", "v7\n")}, testtar::Format::V7));
+    CHECK(listTar(v7).value(QStringLiteral("old.log")).data == QByteArray("v7\n"));
+    CHECK(!TarArchive::fileHasSignature(v7));
+    // Имя не в UTF-8 — Latin-1 (байт = символ).
+    const QString latin = writeBytes(dir, QStringLiteral("latin.tar"),
+                                     testtar::tar({testtar::file("caf\xE9.log", "c\n")}));
+    CHECK(listTar(latin).contains(QString::fromLatin1("caf\xE9.log")));
+    // Без нулевых блоков в конце — конец на границе принимается.
+    {
+        TarArchive::Error error = TarArchive::Error::Corrupt;
+        const auto members = listTar(writeBytes(dir, QStringLiteral("noend.tar"),
+            testtar::tar({testtar::file("a.log", "a\n"), testtar::file("b.log", "b\n")}, testtar::Format::Ustar, 0)), &error);
+        CHECK(error == TarArchive::Error::None && members.size() == 2);
+    }
+
+    // Повреждения: контрольная сумма (первый член — не tar, второй —
+    // повреждён), обрыв в данных, в заголовке, длинное имя больше 1 МБ,
+    // размер не числом, gzip с неверным CRC.
+    testtar::Entry badSum = testtar::file("bad.log", "x\n");
+    badSum.badChecksum = true;
+    {
+        TarArchive::Error error = TarArchive::Error::None;
+        listTar(writeBytes(dir, QStringLiteral("badsum1.tar"), testtar::tar({badSum})), &error);
+        CHECK(error == TarArchive::Error::NotTar);
+        listTar(writeBytes(dir, QStringLiteral("badsum2.tar"), testtar::tar({testtar::file("ok.log", "ok\n"), badSum})), &error);
+        CHECK(error == TarArchive::Error::Corrupt);
+    }
+    const QByteArray whole = testtar::tar({testtar::file("a.log", makeLog(5000, 6)), testtar::file("b.log", "b\n")});
+    for (const qsizetype cut : {qsizetype(512 + 1000), qsizetype(512 + 5120 + 100), qsizetype(512 + 4000)}) {
+        TarArchive::Error error = TarArchive::Error::None;
+        listTar(writeBytes(dir, QStringLiteral("cut.tar"), whole.left(cut)), &error);
+        CHECK(error == TarArchive::Error::Corrupt);
+        // То же сжатым: поток gzip цел, обрыв — у tar.
+        listTar(writeBytes(dir, QStringLiteral("cut.tar.gz"), testgzip::gzip(whole.left(cut))), &error);
+        CHECK(error == TarArchive::Error::Corrupt);
+    }
+    {
+        testtar::Entry hugeName = testtar::file(QByteArray(2 * 1024 * 1024, 'x'), "x\n");
+        hugeName.gnuLongName = true;
+        TarArchive::Error error = TarArchive::Error::None;
+        listTar(writeBytes(dir, QStringLiteral("hugename.tar"), testtar::tar({testtar::file("a.log", "a\n"), hugeName})), &error);
+        CHECK(error == TarArchive::Error::Corrupt);
+    }
+    {
+        QByteArray garbled = testtar::tar({testtar::file("a.log", "a\n"), testtar::file("b.log", "b\n")});
+        garbled.replace(1024 + 124, 12, "zzzzzzzzzzz\0");
+        TarArchive::Error error = TarArchive::Error::None;
+        listTar(writeBytes(dir, QStringLiteral("garbled.tar"), garbled), &error);
+        CHECK(error == TarArchive::Error::Corrupt || error == TarArchive::Error::NotTar);
+    }
+    {
+        QByteArray gz = testgzip::gzip(whole);
+        gz[gz.size() - 6] = char(gz[gz.size() - 6] ^ 0x55); // CRC-32 в хвосте
+        const QString p = writeBytes(dir, QStringLiteral("badcrc.tar.gz"), gz);
+        CHECK(TarArchive::fileHasSignature(p));
+        TarArchive::Error error = TarArchive::Error::None;
+        listTar(p, &error);
+        CHECK(error == TarArchive::Error::Corrupt);
+    }
+    // Флаг прерывания — у .tar и .tar.gz.
+    for (const QString& name : {QStringLiteral("gnu.tar"), QStringLiteral("gnu.tar.gz")}) {
+        std::atomic_bool abort{true};
+        TarArchive t(dir.filePath(name));
+        CHECK(t.open(&abort));
+        TarMember m;
+        CHECK(!t.next(m));
+        CHECK(t.error() == TarArchive::Error::Aborted);
+    }
+}
+
+bool tarLogOrGz(const QString& member)
+{
+    return logOrGz(member);
+}
+
+void testUnpackTar(const QDir& dir)
+{
+    const QString outer = dir.filePath(QStringLiteral("tarout"));
+    QDir().mkpath(outer);
+    SourceUnpacker unpacker;
+    unpacker.setFreeSpaceFunction([](const QString&) { return qint64(1) << 50; });
+    const QString longPath = QString::fromLatin1(tarfixtures::kLongPath);
+
+    // Настоящие архивы трёх форматов, сжатые и нет.
+    for (const TarFixture& f : tarFixtures()) {
+        for (const bool compressed : {false, true}) {
+            const QString name = QString::fromLatin1(f.name) + (compressed ? QStringLiteral(".tgz") : QStringLiteral(".tar"));
+            const QString path = writeBytes(dir, QStringLiteral("real-") + name, compressed ? f.gz : gunzipBytes(f.gz));
+            const QString target = outer + QStringLiteral("/") + name;
+            const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &tarLogOrGz); });
+            CHECK(zr.result.ok());
+            if (!zr.result.ok())
+                std::fprintf(stderr, "  %s: %s\n", qPrintable(name), qPrintable(zr.result.message));
+            CHECK_EQ(zr.result.skippedUnsafe, 1); // ссылка
+            CHECK_EQ(zr.result.skippedEncrypted, 0);
+            QStringList expected = {QStringLiteral("logs/app.log"), QStringLiteral("logs/sub/debug.log"), longPath,
+                                    QStringLiteral("logs/журнал.log")};
+            expected.sort();
+            CHECK(filesUnder(target) == expected);
+            if (filesUnder(target) != expected)
+                std::fprintf(stderr, "  %s files: %s\n", qPrintable(name), qPrintable(filesUnder(target).join(QStringLiteral(", "))));
+            CHECK(readFile(target + QStringLiteral("/logs/app.log")) == kInfoAppLog);
+            CHECK(readFile(target + QLatin1Char('/') + longPath) == QByteArray("deep line\n"));
+            CHECK_EQ(zr.result.extracted.size(), qsizetype(4));
+            CHECK_EQ(zr.lastProgress, zr.progressTotal);
+            CHECK_EQ(zr.progressTotal, QFileInfo(path).size());
+        }
+    }
+
+    // Собранный набор: опасные имена, ссылки, устройства, разреженный,
+    // повтор имени и регистра, .gz внутри, не-лог.
+    const QByteArray nested = makeLog(300000, 22);
+    const QList<testtar::Entry> entries = {
+        testtar::file("logs/app.log", kInfoAppLog),
+        testtar::file("logs/deep/er/x.log", nested),
+        testtar::file("../evil.log", "evil\n"),
+        testtar::file("/abs.log", "abs\n"),
+        testtar::file("C:\\win.log", "win\n"),
+        testtar::file("a/../../up.log", "up\n"),
+        testtar::file("con.log", "reserved\n"),
+        testtar::file("Case.log", "upper\n"),
+        testtar::file("case.log", "lower\n"),
+        testtar::file("logs/app.log", "second copy\n"),
+        testtar::file("inner/app.log.gz", gzipMember(kInfoAppLog, 6)),
+        testtar::file("readme.md", "not a log\n"),
+        testtar::special("hard.log", '1'),
+        testtar::special("sym.log", '2'),
+        testtar::special("chr.log", '3'),
+        testtar::special("blk.log", '4'),
+        testtar::special("fifo.log", '6'),
+        testtar::special("sparse.log", 'S', "sparse data\n"),
+        testtar::special("logs", '5'),
+    };
+    const QByteArray bundle = testtar::tar(entries);
+    for (const bool compressed : {false, true}) {
+        const QString path = writeBytes(dir, compressed ? QStringLiteral("bundle.tar.gz") : QStringLiteral("bundle.tar"),
+                                        compressed ? testgzip::gzip(bundle) : bundle);
+        const QString target = outer + (compressed ? QStringLiteral("/bundle-gz") : QStringLiteral("/bundle"));
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &tarLogOrGz); });
+        CHECK(zr.result.ok());
+        // 4 опасных имени + повтор имени + 5 ссылок и устройств.
+        CHECK_EQ(zr.result.skippedUnsafe, 10);
+        CHECK_EQ(zr.result.skippedEncrypted, 1); // разреженный
+        CHECK(filesUnder(outer + QStringLiteral("/..")).filter(QStringLiteral("evil")).isEmpty());
+        QStringList expected = {QStringLiteral("Case.log"), QStringLiteral("_con.log"), QStringLiteral("case~2.log"),
+                                QStringLiteral("inner/app.log.gz"), QStringLiteral("logs/app.log"),
+                                QStringLiteral("logs/deep/er/x.log")};
+        expected.sort();
+        CHECK(filesUnder(target) == expected);
+        if (filesUnder(target) != expected)
+            std::fprintf(stderr, "  bundle files: %s\n", qPrintable(filesUnder(target).join(QStringLiteral(", "))));
+        CHECK(readFile(target + QStringLiteral("/logs/app.log")) == kInfoAppLog); // первый из двух
+        CHECK(readFile(target + QStringLiteral("/logs/deep/er/x.log")) == nested);
+        CHECK(readFile(target + QStringLiteral("/inner/app.log.gz")) == gzipMember(kInfoAppLog, 6));
+    }
+    CHECK(!QFileInfo::exists(dir.filePath(QStringLiteral("evil.log"))));
+    CHECK(!QFileInfo::exists(outer + QStringLiteral("/evil.log")));
+
+    // Ошибки — каталог удалён целиком: повреждённый второй член, обрыв,
+    // неверный CRC у .tar.gz (данные целы, хвост gzip — нет), не архив.
+    testtar::Entry badSum = testtar::file("z-bad.log", "data\n");
+    badSum.badChecksum = true;
+    QByteArray badCrc = testgzip::gzip(testtar::tar({testtar::file("a.log", "ok\n")}));
+    badCrc[badCrc.size() - 6] = char(badCrc[badCrc.size() - 6] ^ 0x55);
+    const QByteArray full = testtar::tar({testtar::file("a.log", makeLog(20000, 7)), testtar::file("b.log", "b\n")});
+    const QList<std::pair<QString, QByteArray>> broken = {
+        {QStringLiteral("badsum.tar"), testtar::tar({testtar::file("a.log", "ok\n"), badSum})},
+        {QStringLiteral("cut.tar"), full.left(512 + 9000)},
+        {QStringLiteral("cut.tgz"), testgzip::gzip(full.left(512 + 9000))},
+        {QStringLiteral("badcrc.tgz"), badCrc},
+        {QStringLiteral("text.tar"), QByteArray("plain text\n")},
+    };
+    for (const auto& [name, bytes] : broken) {
+        const QString path = writeBytes(dir, name, bytes);
+        const QString target = outer + QStringLiteral("/broken-") + name;
+        QDir().mkpath(target); // созданный вызывающим — тоже убран
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &tarLogOrGz); });
+        CHECK(zr.result.error == SourceUnpacker::Error::SourceError);
+        CHECK(!zr.result.message.isEmpty());
+        CHECK(!QFileInfo::exists(target));
+        CHECK(zr.result.extracted.isEmpty());
+    }
+    // Пустой архив (только нулевые блоки, сжатый и нет) — успех без файлов.
+    for (const QString& name : {QStringLiteral("empty.tar"), QStringLiteral("empty.tgz")}) {
+        const QString emptyTar = writeBytes(dir, name, name.endsWith(QLatin1String(".tgz"))
+                                                           ? testgzip::gzip(testtar::tar({}, testtar::Format::Ustar, 20))
+                                                           : testtar::tar({}, testtar::Format::Ustar, 20));
+        CHECK(ArchiveFormats::detect(emptyTar) == ArchiveFormats::Format::None);
+        CHECK(ArchiveFormats::detectKnown(emptyTar) == ArchiveFormats::Format::Tar);
+        const ZipRun er = runJob(unpacker, [&] { return unpacker.unpackArchive(emptyTar, outer + QStringLiteral("/e"), &tarLogOrGz); });
+        CHECK(er.result.ok() && er.result.extracted.isEmpty());
+    }
+    // v7 (без magic), открытый по имени: по содержимому не архив, но читается.
+    const QString v7 = writeBytes(dir, QStringLiteral("old-v7.tar"),
+        testtar::tar({testtar::file("old.log", "v7 log\n"), testtar::file("x.md", "x\n")}, testtar::Format::V7));
+    CHECK(ArchiveFormats::detect(v7) == ArchiveFormats::Format::None);
+    CHECK(ArchiveFormats::detectKnown(v7) == ArchiveFormats::Format::Tar);
+    {
+        const ZipRun vr = runJob(unpacker, [&] { return unpacker.unpackArchive(v7, outer + QStringLiteral("/v7"), &tarLogOrGz); });
+        CHECK(vr.result.ok() && vr.result.extracted.size() == 1);
+        CHECK(readFile(outer + QStringLiteral("/v7/old.log")) == QByteArray("v7 log\n"));
+        const QString target = dir.filePath(QStringLiteral("v7-member.log"));
+        const ZipRun mr = runJob(unpacker, [&] { return unpacker.unpackArchiveMember(v7, QStringLiteral("old.log"), target); });
+        CHECK(mr.result.ok() && readFile(target) == QByteArray("v7 log\n"));
+    }
+    // Архива нет — причина чтения, а не «не архив».
+    {
+        const QString gone = dir.filePath(QStringLiteral("gone.tar"));
+        const ZipRun gr = runJob(unpacker, [&] { return unpacker.unpackArchive(gone, outer + QStringLiteral("/gone"), &tarLogOrGz); });
+        CHECK(gr.result.error == SourceUnpacker::Error::SourceError);
+        CHECK(gr.result.message.startsWith(QStringLiteral("Cannot read the archive")));
+        CHECK(!QFileInfo::exists(outer + QStringLiteral("/gone")));
+    }
+    // unpackArchive выбирает zip так же, как unpackZip.
+    const QString zipPath = writeBytes(dir, QStringLiteral("via-archive.zip"), infoZip());
+    const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(zipPath, outer + QStringLiteral("/z"), &logOrGz); });
+    CHECK(zr.result.ok() && zr.result.extracted.size() == 2);
+}
+
+void testTarSpaceAndCancel(const QDir& dir)
+{
+    const QByteArray a = makeLog(3 * 1024 * 1024, 33);
+    const QByteArray b = makeLog(5 * 1024 * 1024, 34);
+    const QByteArray bytes = testtar::tar({testtar::file("a.log", a), testtar::file("b.log", b),
+                                           testtar::file("skip.md", makeLog(1 << 20, 2))});
+    const QString tarPath = writeBytes(dir, QStringLiteral("space.tar"), bytes);
+    const QString tgzPath = writeBytes(dir, QStringLiteral("space.tgz"), testgzip::gzip(bytes));
+    const QString outer = dir.filePath(QStringLiteral("tarspace"));
+    QDir().mkpath(outer);
+
+    // ДО начала: .tar — сумма отобранных (по проходу заголовков), .tar.gz —
+    // размер архива на диске; плюс резерв.
+    for (const QString& path : {tarPath, tgzPath}) {
+        SourceUnpacker unpacker;
+        unpacker.setReserveBytes(1024 * 1024);
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        unpacker.setFreeSpaceFunction([calls](const QString&) {
+            calls->fetch_add(1);
+            return qint64(1024 * 1024);
+        });
+        const QString target = outer + QStringLiteral("/before");
+        const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &logOrGz); });
+        CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+        const qint64 estimate = path == tarPath ? qint64(a.size() + b.size()) : QFileInfo(tgzPath).size();
+        CHECK_EQ(zr.result.requiredBytes, estimate + 1024 * 1024);
+        CHECK_EQ(calls->load(), 1);
+        CHECK(!QFileInfo::exists(target));
+    }
+    // ПО ХОДУ и отмена — у обоих.
+    for (const QString& path : {tarPath, tgzPath}) {
+        {
+            SourceUnpacker unpacker;
+            unpacker.setReserveBytes(1024 * 1024);
+            unpacker.setCheckIntervalBytes(1024 * 1024);
+            auto calls = std::make_shared<std::atomic<int>>(0);
+            unpacker.setFreeSpaceFunction([calls](const QString&) {
+                return calls->fetch_add(1) == 0 ? qint64(1) << 40 : qint64(512 * 1024);
+            });
+            const QString target = outer + QStringLiteral("/during");
+            const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &logOrGz); });
+            CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+            CHECK(zr.result.bytesWritten < a.size() + b.size());
+            CHECK(!QFileInfo::exists(target));
+        }
+        {
+            SourceUnpacker unpacker;
+            unpacker.setCheckIntervalBytes(1024 * 1024);
+            auto calls = std::make_shared<std::atomic<int>>(0);
+            SourceUnpacker* self = &unpacker;
+            unpacker.setFreeSpaceFunction([calls, self](const QString&) {
+                if (calls->fetch_add(1) == 2)
+                    self->cancel();
+                return qint64(1) << 40;
+            });
+            const QString target = outer + QStringLiteral("/cancel");
+            const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchive(path, target, &logOrGz); });
+            CHECK(zr.result.error == SourceUnpacker::Error::Cancelled);
+            CHECK(!QFileInfo::exists(target));
+        }
+    }
+}
+
+void testUnpackTarMember(const QDir& dir)
+{
+    const QByteArray big = makeLog(2 * 1024 * 1024, 42);
+    const QByteArray bytes = testtar::tar({
+        testtar::file("logs/app.log", kInfoAppLog),
+        testtar::file("logs/big.log", big),
+        testtar::file("logs/app.log.gz", gzipMember(big, 1) + gzipMember(kInfoAppLog, 6)),
+        testtar::file(QStringLiteral("журнал.log").toUtf8(), "кириллица\n"),
+        testtar::file("logs/app.log", "second copy\n"),
+        testtar::special("link.log", '2'),
+        testtar::special("dev.log", '3'),
+        testtar::special("logs", '5'),
+    });
+    SourceUnpacker unpacker;
+    unpacker.setFreeSpaceFunction([](const QString&) { return qint64(1) << 50; });
+    for (const bool compressed : {false, true}) {
+        const QString archive = writeBytes(dir, compressed ? QStringLiteral("members.tgz") : QStringLiteral("members.tar"),
+                                           compressed ? testgzip::gzip(bytes) : bytes);
+        const auto extract = [&](const QString& member, const QString& name) {
+            const QString target = dir.filePath(name);
+            return std::make_pair(runJob(unpacker, [&] { return unpacker.unpackArchiveMember(archive, member, target); }),
+                                  target);
+        };
+        {
+            const auto [zr, target] = extract(QStringLiteral("logs/app.log"), QStringLiteral("t-app.log"));
+            CHECK(zr.result.ok());
+            CHECK(readFile(target) == kInfoAppLog); // первый из двух
+        }
+        {
+            const auto [zr, target] = extract(QStringLiteral("logs/big.log"), QStringLiteral("t-big.log"));
+            CHECK(zr.result.ok());
+            CHECK(readFile(target) == big);
+            CHECK_EQ(zr.lastProgress, zr.progressTotal);
+            CHECK_EQ(zr.progressTotal, QFileInfo(archive).size()); // по байтам архива на всех стадиях
+        }
+        {
+            const auto [zr, target] = extract(QStringLiteral("logs/app.log.gz"), QStringLiteral("t-gz.log"));
+            CHECK(zr.result.ok());
+            CHECK(readFile(target) == big + kInfoAppLog);
+            CHECK(!QFileInfo::exists(target + QStringLiteral(".gz-part")));
+        }
+        {
+            const auto [zr, target] = extract(QStringLiteral("журнал.log"), QStringLiteral("t-cyr.log"));
+            CHECK(zr.result.ok());
+            CHECK(readFile(target) == QStringLiteral("кириллица\n").toUtf8());
+        }
+        for (const char* member : {"missing.log", "link.log", "dev.log", "logs"}) {
+            const auto [zr, target] = extract(QString::fromUtf8(member), QStringLiteral("t-err.log"));
+            CHECK(zr.result.error == SourceUnpacker::Error::SourceError);
+            CHECK(!zr.result.message.isEmpty());
+            CHECK(!QFileInfo::exists(target));
+        }
+        {
+            SourceUnpacker tight;
+            tight.setReserveBytes(0);
+            tight.setFreeSpaceFunction([](const QString&) { return qint64(1000); });
+            const QString target = dir.filePath(QStringLiteral("t-space.log"));
+            const ZipRun zr = runJob(tight, [&] { return tight.unpackArchiveMember(archive, QStringLiteral("logs/big.log"), target); });
+            CHECK(zr.result.error == SourceUnpacker::Error::NoSpace);
+            CHECK_EQ(zr.result.requiredBytes, qint64(big.size()));
+            CHECK(!QFileInfo::exists(target));
+        }
+    }
+    // .tar.gz с неверным CRC gzip: член цел, но поток — нет; файла нет.
+    QByteArray gz = testgzip::gzip(bytes);
+    gz[gz.size() - 6] = char(gz[gz.size() - 6] ^ 0x55);
+    const QString badArchive = writeBytes(dir, QStringLiteral("members-badcrc.tgz"), gz);
+    const QString target = dir.filePath(QStringLiteral("t-badcrc.log"));
+    const ZipRun zr = runJob(unpacker, [&] { return unpacker.unpackArchiveMember(badArchive, QStringLiteral("logs/app.log"), target); });
+    CHECK(zr.result.error == SourceUnpacker::Error::SourceError);
+    CHECK(!QFileInfo::exists(target));
+    // Не архив.
+    const QString notArchive = writeBytes(dir, QStringLiteral("members-text.tar"), "text\n");
+    const ZipRun nr = runJob(unpacker, [&] { return unpacker.unpackArchiveMember(notArchive, QStringLiteral("a.log"), target); });
+    CHECK(nr.result.error == SourceUnpacker::Error::SourceError && !QFileInfo::exists(target));
+}
+
+void testTarIdentity(const QDir& dir)
+{
+    // Член tar.gz: путь — архив, checkAt — по содержимому архива (tar), а не
+    // по сигнатуре gzip или zip.
+    const QByteArray bytes = testtar::tar({testtar::file("logs/app.log", kInfoAppLog)});
+    const QString tgz = writeBytes(dir, QStringLiteral("ident.tgz"), testgzip::gzip(bytes));
+    const QString copy = writeBytes(dir, QStringLiteral("ident-tar-copy.log"), kInfoAppLog);
+    LogFile file(copy);
+    LogSource source;
+    source.kind = LogSource::Kind::Archive;
+    source.path = tgz;
+    source.member = QStringLiteral("logs/app.log");
+    file.setSource(source);
+    CHECK(file.displayPath().endsWith(QStringLiteral("ident.tgz \u203A logs/app.log")));
+    const auto id = SourceIdentity::capture(file);
+    CHECK(id && id->compressed && id->member == QStringLiteral("logs/app.log"));
+    CHECK(id && id->check() == SourceIdentity::State::Valid);
+    // Другой tar.gz — Changed; gzip без tar внутри и текст — Missing.
+    writeBytes(dir, QStringLiteral("ident.tgz"), testgzip::gzip(testtar::tar({testtar::file("logs/app.log", "other\n")})));
+    CHECK(id && id->check() == SourceIdentity::State::Changed);
+    writeBytes(dir, QStringLiteral("ident.tgz"), testgzip::gzip(kInfoAppLog));
+    CHECK(id && id->check() == SourceIdentity::State::Missing);
+    writeBytes(dir, QStringLiteral("ident.tgz"), kInfoAppLog);
+    CHECK(id && id->check() == SourceIdentity::State::Missing);
+    // v7 (без magic): член узнаётся (архив известен), не Missing.
+    const QString v7 = writeBytes(dir, QStringLiteral("ident-v7.tar"),
+                                  testtar::tar({testtar::file("logs/app.log", kInfoAppLog)}, testtar::Format::V7));
+    source.path = v7;
+    file.setSource(source);
+    const auto old = SourceIdentity::capture(file);
+    CHECK(old && old->check() == SourceIdentity::State::Valid);
+    // Несжатый .tar — тоже архив.
+    const QString tarPath = writeBytes(dir, QStringLiteral("ident.tar"), bytes);
+    source.path = tarPath;
+    file.setSource(source);
+    const auto plain = SourceIdentity::capture(file);
+    CHECK(plain && plain->check() == SourceIdentity::State::Valid);
+}
+
+// ===========================================================================
 // SpoolDir / SpoolItem
 // ===========================================================================
 int holdSpool(const QString& root)
@@ -1755,6 +2307,11 @@ int main(int argc, char** argv)
     stage("zip: space, cancel", [&] { testZipSpaceAndCancel(files); });
     stage("zip: one member", [&] { testUnpackZipMember(files); });
     stage("zip: identity", [&] { testZipIdentity(files); });
+    stage("tar: reader", [&] { testTarReader(files); });
+    stage("tar: unpack to folder", [&] { testUnpackTar(files); });
+    stage("tar: space, cancel", [&] { testTarSpaceAndCancel(files); });
+    stage("tar: one member", [&] { testUnpackTarMember(files); });
+    stage("tar: identity", [&] { testTarIdentity(files); });
     stage("spool: lifetime", [&] { testSpoolLifetime(dir.filePath(QStringLiteral("spool1"))); });
     stage("spool: orphans", [&] { testOrphans(dir.filePath(QStringLiteral("spool2"))); });
     stage("logfile: source", testLogSource);

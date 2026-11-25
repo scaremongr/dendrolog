@@ -26,7 +26,7 @@
 #include "stdinspooler.h"
 #include "openrouting.h"
 #include "archiveregistry.h"
-#include "ziparchive.h"
+#include "tararchive.h"
 #include "singleinstance.h"
 #include "viewexport.h"
 #include "searchresultscontroller.h"
@@ -997,11 +997,12 @@ QString MainWindow::logFileDialogFilter(bool forOpen) const
     }
     if (patterns.isEmpty())
         patterns << QStringLiteral("*.log") << QStringLiteral("*.txt");
-    // Сжатые логи (F-2) открываются вкладкой, zip — в Directory Scanner.
-    // Save View As пишет текст: сохранённый под именем .zip открывался бы
-    // как архив.
+    // Сжатые логи (F-2) открываются вкладкой, zip и tar — в Directory
+    // Scanner (`*.tar.gz` покрыт `*.gz`). Save View As пишет текст:
+    // сохранённый под именем архива открывался бы как архив.
     if (forOpen)
-        patterns << QStringLiteral("*.gz") << QStringLiteral("*.zip");
+        patterns << QStringLiteral("*.gz") << QStringLiteral("*.zip") << QStringLiteral("*.tar")
+                 << QStringLiteral("*.tgz");
 
     return tr("Log files (%1);;All files (*)").arg(patterns.join(QLatin1Char(' ')));
 }
@@ -3114,7 +3115,7 @@ void MainWindow::on_actionOpen_triggered()
     files.removeIf([](const QString& f) { return SessionFile::isSessionFile(f); });
     if (files.isEmpty())
         return;
-    // Архив (zip) — в Directory Scanner (F-2, шаг 4); у сканера один корень —
+    // Архив (zip, tar) — в Directory Scanner (F-2, шаги 4–5); у сканера один корень —
     // первый архив.
     const auto firstArchive = std::find_if(files.cbegin(), files.cend(), &MainWindow::isScannerArchive);
     if (firstArchive != files.cend()) {
@@ -4035,7 +4036,7 @@ void MainWindow::scanDirectory(const QString& dirPath)
 
 bool MainWindow::isScannerArchive(const QString& path)
 {
-    return OpenRouting::isArchiveName(path) || ZipArchive::fileHasSignature(path);
+    return OpenRouting::isArchiveName(path) || ArchiveFormats::isMultiFileArchive(path);
 }
 
 void MainWindow::scanArchive(const QString& archivePath)
@@ -4415,9 +4416,9 @@ void MainWindow::openRecentFile(const QString& filePath, const FileEncoding& ini
         return;
     }
 
-    // Архив с набором файлов (zip, по имени или сигнатуре) — в Directory
-    // Scanner, а не вкладкой (F-2, шаг 4): недавние, второй экземпляр, zip
-    // под чужим именем.
+    // Архив с набором файлов (zip, tar — по имени или содержимому) — в
+    // Directory Scanner, а не вкладкой (F-2, шаги 4–5): недавние, второй
+    // экземпляр, архив под чужим именем, `.gz` с tar внутри.
     if (isScannerArchive(filePath)) {
         m_lastOpenDir = QFileInfo(filePath).absolutePath();
         addToRecentFiles(filePath);

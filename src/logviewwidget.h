@@ -54,8 +54,8 @@ public:
     // закладки — до файлов (BookmarkStore::restore): строки находятся по ходу
     // загрузки, заметки не теряются.
     void addFilesFrom(const LogViewWidget& other);
-    // Член zip (F-2, шаг 4): извлекается во временную копию
-    // (SourceUnpacker::unpackZipMember; член-gzip — распакованным) и дальше
+    // Член zip или tar (F-2, шаги 4–5): извлекается во временную копию
+    // (SourceUnpacker::unpackArchiveMember; член-gzip — распакованным) и дальше
     // живёт как сжатый файл: LogSource{Archive, архив, member}, F5, память
     // файла по архиву и имени, закладки и сессии с именем члена. Файл из
     // каталога, который сканер извлёк из архива (ArchiveRegistry), addLogFile

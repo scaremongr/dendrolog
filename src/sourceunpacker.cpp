@@ -1,5 +1,6 @@
 #include "sourceunpacker.h"
 
+#include "tararchive.h"
 #include "ziparchive.h"
 
 #include <QDir>
@@ -65,6 +66,80 @@ void SourceUnpacker::onWorkerFinished(const Result& result)
     emit finished(result);
 }
 
+// Цель — сам источник (тот же путь или ссылка на него): открытие на запись
+// обнулило бы источник, а уборка после ошибки — удалила.
+static bool targetIsSource(const QString& sourcePath, const QString& targetPath)
+{
+    const QString srcCanonical = QFileInfo(sourcePath).canonicalFilePath();
+    return !srcCanonical.isEmpty() && QFileInfo(targetPath).canonicalFilePath() == srcCanonical;
+}
+
+// Отбор членов набора (zip и tar): имя члена → путь в каталоге извлечения.
+// Пропуски считаются в Result; правило одно на оба формата.
+struct MemberPlanner {
+    enum class Kind { File, Link, Unsupported };
+    QSet<QString> used;   // занятые пути (без учёта регистра: Windows)
+    QSet<QString> dirs;   // каталоги этих путей
+    QSet<QString> names;  // имена членов: член ищется по имени (unpackArchiveMember)
+
+    // Пусто — член пропущен (и посчитан в r).
+    QString place(const QString& name, Kind kind, SourceUnpacker::Result& r)
+    {
+        // Два члена с одним именем (дописанный архив): вкладка, память и
+        // закладки знают член по имени, и второй открылся бы первым —
+        // извлекается только первый, второй считается пропущенным.
+        if (names.contains(name)) {
+            ++r.skippedUnsafe;
+            return QString();
+        }
+        names.insert(name);
+        if (kind == Kind::Link) {
+            ++r.skippedUnsafe;
+            return QString();
+        }
+        QString relative = ArchiveNames::safeRelativePath(name);
+        if (relative.isEmpty()) {
+            ++r.skippedUnsafe;
+            return QString();
+        }
+        if (kind == Kind::Unsupported) {
+            ++r.skippedEncrypted;
+            return QString();
+        }
+        // Повтор того же пути (другой регистр, хвостовая точка, имя,
+        // занятое каталогом) — суффиксом «~N» перед расширением.
+        const auto taken = [&](const QString& p) {
+            return used.contains(p.toLower()) || dirs.contains(p.toLower());
+        };
+        for (qsizetype at = relative.indexOf(QLatin1Char('/')); at >= 0;
+             at = relative.indexOf(QLatin1Char('/'), at + 1)) {
+            if (used.contains(relative.left(at).toLower())) {
+                ++r.skippedUnsafe; // каталог совпал с именем уже извлекаемого файла
+                return QString();
+            }
+        }
+        if (taken(relative)) {
+            const QFileInfo fi(relative);
+            const QString dir = relative.contains(QLatin1Char('/'))
+                ? relative.left(relative.lastIndexOf(QLatin1Char('/')) + 1) : QString();
+            const QString base = fi.completeBaseName();
+            const QString suffix = fi.suffix().isEmpty() ? QString() : QLatin1Char('.') + fi.suffix();
+            for (int n = 2;; ++n) {
+                const QString candidate = dir + base + QStringLiteral("~%1").arg(n) + suffix;
+                if (!taken(candidate)) {
+                    relative = candidate;
+                    break;
+                }
+            }
+        }
+        used.insert(relative.toLower());
+        for (qsizetype at = relative.indexOf(QLatin1Char('/')); at >= 0;
+             at = relative.indexOf(QLatin1Char('/'), at + 1))
+            dirs.insert(relative.left(at).toLower());
+        return relative;
+    }
+};
+
 // Задание в воркере: снимок настроек, итог и общие проверки (место, отмена,
 // прогресс) для gzip и zip.
 struct SourceUnpacker::Job {
@@ -73,7 +148,7 @@ struct SourceUnpacker::Job {
     FreeSpaceFunction freeSpace;
     qint64 reserve = 0;
     qint64 interval = 0;
-    QString targetDir;       // где проверяется место
+    QString spaceDir;        // где проверяется место
     qint64 sinceCheck = 0;
     qint64 lastProgress = 0;
     bool quietProgress = false; // вложенная стадия (член-gzip): шкала не идёт назад
@@ -92,13 +167,24 @@ struct SourceUnpacker::Job {
     }
     void zipFailed(const ZipArchive& zip)
     {
-        r.error = zip.error() == ZipArchive::Error::Aborted ? Error::Cancelled : Error::SourceError;
+        r.error = zip.error() == ZipArchive::Error::Aborted      ? Error::Cancelled
+                : zip.error() == ZipArchive::Error::WriteError ? Error::WriteFailed
+                                                               : Error::SourceError;
         r.message = r.error == Error::Cancelled ? errorText(Error::Cancelled) : zip.errorString();
+    }
+    void tarFailed(const TarArchive& tar)
+    {
+        if (r.error != Error::None)
+            return; // место или запись — уже названы (Stopped)
+        r.error = tar.error() == TarArchive::Error::Aborted      ? Error::Cancelled
+                : tar.error() == TarArchive::Error::WriteError ? Error::WriteFailed
+                                                               : Error::SourceError;
+        r.message = r.error == Error::Cancelled ? errorText(Error::Cancelled) : tar.errorString();
     }
     // Место ДО начала: estimate распакованного + резерв.
     bool checkSpaceBefore(qint64 estimate, const QString& verb)
     {
-        const qint64 freeBefore = freeSpace(targetDir);
+        const qint64 freeBefore = freeSpace(spaceDir);
         if (freeBefore >= 0 && freeBefore < estimate + reserve) {
             r.error = Error::NoSpace;
             r.requiredBytes = estimate + reserve;
@@ -123,7 +209,7 @@ struct SourceUnpacker::Job {
             r.message = QStringLiteral("Cannot write %1: %2").arg(out.fileName(), out.errorString());
             return false;
         }
-        const qint64 freeNow = freeSpace(targetDir);
+        const qint64 freeNow = freeSpace(spaceDir);
         if (freeNow >= 0 && freeNow < reserve) {
             r.error = Error::NoSpace;
             r.requiredBytes = reserve;
@@ -233,7 +319,341 @@ struct SourceUnpacker::Job {
         }
         out.close();
     }
+
+    // Текущий член tar → targetPath (открывается здесь). Прогресс — по
+    // прочитанному из архива (у .tar.gz — сжатых байт). Частичный файл не
+    // удаляет.
+    void extractTarMember(TarArchive& tar, const QString& targetPath)
+    {
+        QFile out(targetPath);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            r.error = Error::WriteFailed;
+            r.message = QStringLiteral("Cannot create %1: %2").arg(targetPath, out.errorString());
+            return;
+        }
+        qint64 previous = 0;
+        const bool ok = tar.extract(out, [&](qint64 written) {
+            const qint64 n = written - previous;
+            previous = written;
+            if (!wrote(n, out))
+                return false;
+            progress(tar.bytesRead(), tar.archiveSize());
+            return true;
+        });
+        if (!ok)
+            tarFailed(tar);
+        if (r.error == Error::None && !out.flush()) {
+            r.error = Error::WriteFailed;
+            r.message = QStringLiteral("Cannot write %1: %2").arg(targetPath, out.errorString());
+        }
+        out.close();
+    }
+
+    // Извлечённый член — сам gzip (`app.log.gz` в архиве): распаковать
+    // дальше в тот же файл; промежуточный — рядом, удаляется в любом случае.
+    // Итог задания: при ошибке файла нет, иначе прогресс дошёл до конца.
+    void finishMemberFile(const QString& targetPath, qint64 progressTotal)
+    {
+        if (r.error == Error::None && GzipDevice::fileHasSignature(targetPath)) {
+            const QString packed = targetPath + QStringLiteral(".gz-part");
+            QFile::remove(packed);
+            if (!QFile::rename(targetPath, packed)) {
+                r.error = Error::WriteFailed;
+                r.message = QStringLiteral("Cannot write %1").arg(targetPath);
+            } else {
+                // Шкала прогресса уже дошла до конца извлечения — вторая
+                // стадия её не откатывает (запись и место считаются заново).
+                r.bytesWritten = 0;
+                sinceCheck = 0;
+                quietProgress = true;
+                gunzip(packed, targetPath);
+                quietProgress = false;
+                QFile::remove(packed);
+            }
+        }
+        if (r.error != Error::None)
+            QFile::remove(targetPath);
+        else
+            progress(progressTotal, progressTotal, true);
+    }
+
+    void notArchive(const QString& path)
+    {
+        r.error = Error::SourceError;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            r.message = QStringLiteral("Cannot read the archive: %1").arg(file.errorString());
+            return;
+        }
+        r.message = QStringLiteral("%1 is not a zip or tar archive")
+                        .arg(QDir::toNativeSeparators(path));
+    }
+
+    // zip целиком (отобранные члены) в каталог targetDir.
+    void zipSet(const QString& zipPath, const QString& targetDir, const MemberFilter& accept)
+    {
+        spaceDir = targetDir;
+        const auto cleanup = [this, &targetDir]() {
+            if (r.error != Error::None) {
+                QDir(targetDir).removeRecursively();
+                r.extracted.clear();
+            }
+        };
+        ZipArchive zip(zipPath);
+        if (!zip.open()) {
+            zipFailed(zip);
+            cleanup();
+            return;
+        }
+        // Отбор: каталоги — сами появятся; ссылки и опасные имена —
+        // пропущены и посчитаны; пароль и неизвестный метод — тоже.
+        struct Planned { const ZipMember* member; QString relative; };
+        QVector<Planned> planned;
+        MemberPlanner planner;
+        qint64 total = 0;
+        for (const ZipMember& m : zip.members()) {
+            if (m.directory)
+                continue;
+            if (accept && !accept(m.name))
+                continue;
+            const QString relative = planner.place(m.name,
+                m.symlink ? MemberPlanner::Kind::Link
+                          : (m.encrypted || !m.supported) ? MemberPlanner::Kind::Unsupported
+                                                          : MemberPlanner::Kind::File,
+                r);
+            if (relative.isEmpty())
+                continue;
+            planned.append({ &m, relative });
+            total += m.size;
+        }
+
+        if (!QDir().mkpath(targetDir)) {
+            r.error = Error::WriteFailed;
+            r.message = QStringLiteral("Cannot create %1").arg(targetDir);
+            cleanup();
+            return;
+        }
+        if (!checkSpaceBefore(total, QStringLiteral("extract the archive"))) {
+            cleanup();
+            return;
+        }
+        const QString root = QDir::cleanPath(QFileInfo(targetDir).absoluteFilePath());
+        progress(0, total, true);
+        qint64 done = 0;
+        for (const Planned& p : std::as_const(planned)) {
+            if (cancelled()) {
+                setCancelled();
+                break;
+            }
+            // Вторая линия: путь после очистки обязан остаться в каталоге.
+            const QString target = QDir::cleanPath(root + QLatin1Char('/') + p.relative);
+            if (!target.startsWith(root + QLatin1Char('/'))) {
+                ++r.skippedUnsafe;
+                continue;
+            }
+            if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
+                r.error = Error::WriteFailed;
+                r.message = QStringLiteral("Cannot create a folder for %1").arg(p.member->name);
+                break;
+            }
+            extractMember(zip, *p.member, target, done, total);
+            if (r.error != Error::None)
+                break;
+            done += p.member->size;
+            r.extracted.append({ p.member->name, p.relative, p.member->size });
+        }
+        if (r.error == Error::None)
+            progress(total, total, true);
+        cleanup();
+    }
+
+    // Один член zip в файл targetPath.
+    void zipMember(const QString& zipPath, const QString& member, const QString& targetPath)
+    {
+        spaceDir = QFileInfo(targetPath).absolutePath();
+        ZipArchive zip(zipPath);
+        if (!zip.open()) {
+            zipFailed(zip);
+            return;
+        }
+        const int index = zip.find(member);
+        if (index < 0) {
+            r.error = Error::SourceError;
+            r.message = QStringLiteral("%1 is not in the archive").arg(member);
+            return;
+        }
+        const ZipMember& m = zip.members().at(index);
+        if (m.directory || m.symlink) {
+            r.error = Error::SourceError;
+            r.message = QStringLiteral("%1 is not a file").arg(member);
+            return;
+        }
+        if (targetIsSource(zipPath, targetPath)) {
+            r.error = Error::WriteFailed;
+            r.message = QStringLiteral("Cannot extract %1 onto itself").arg(zipPath);
+            return;
+        }
+        if (!checkSpaceBefore(m.size, QStringLiteral("extract the file"))) {
+            return;
+        }
+        progress(0, m.size, true);
+        extractMember(zip, m, targetPath, 0, m.size);
+        zip.close();
+        finishMemberFile(targetPath, m.size);
+    }
+
+    void tarSet(const QString& tarPath, const QString& targetDir, const MemberFilter& accept);
+    void tarMember(const QString& tarPath, const QString& member, const QString& targetPath);
 };
+
+// tar (шаг 5): набор в каталог. Оглавления у tar нет: у `.tar` отбор и
+// размеры берутся предварительным проходом по заголовкам (данные
+// перескакиваются seek), место до начала — сумма отобранных, как у zip;
+// у `.tar.gz` проход стоил бы второй распаковки — оценка до начала —
+// размер архива на диске, остальное ловит проверка по ходу.
+void SourceUnpacker::Job::tarSet(const QString& tarPath, const QString& targetDir, const MemberFilter& accept)
+{
+    spaceDir = targetDir;
+    const auto cleanup = [this, &targetDir]() {
+        if (r.error != Error::None) {
+            QDir(targetDir).removeRecursively();
+            r.extracted.clear();
+        }
+    };
+    const auto kindOf = [](const TarMember& m) {
+        return m.isFile() ? MemberPlanner::Kind::File
+             : m.type == TarMember::Type::Unsupported ? MemberPlanner::Kind::Unsupported
+                                                      : MemberPlanner::Kind::Link;
+    };
+    const auto wanted = [&accept](const TarMember& m) {
+        return m.type != TarMember::Type::Directory && (!accept || accept(m.name));
+    };
+
+    TarArchive tar(tarPath);
+    if (!tar.open(&self->m_cancel)) {
+        tarFailed(tar);
+        cleanup();
+        return;
+    }
+    qint64 estimate = tar.archiveSize();
+    if (!tar.isCompressed()) {
+        TarArchive scan(tarPath);
+        MemberPlanner dry;
+        Result dryResult;
+        TarMember m;
+        estimate = 0;
+        if (scan.open(&self->m_cancel)) {
+            while (scan.next(m)) {
+                if (wanted(m) && !dry.place(m.name, kindOf(m), dryResult).isEmpty())
+                    estimate += m.size;
+            }
+        }
+        if (scan.error() != TarArchive::Error::None) {
+            tarFailed(scan);
+            cleanup();
+            return;
+        }
+    }
+    if (!QDir().mkpath(targetDir)) {
+        r.error = Error::WriteFailed;
+        r.message = QStringLiteral("Cannot create %1").arg(targetDir);
+        cleanup();
+        return;
+    }
+    if (!checkSpaceBefore(estimate, QStringLiteral("extract the archive"))) {
+        cleanup();
+        return;
+    }
+    const QString root = QDir::cleanPath(QFileInfo(targetDir).absoluteFilePath());
+    MemberPlanner planner;
+    progress(0, tar.archiveSize(), true);
+    TarMember m;
+    while (r.error == Error::None && tar.next(m)) {
+        if (!wanted(m))
+            continue;
+        const QString relative = planner.place(m.name, kindOf(m), r);
+        if (relative.isEmpty())
+            continue;
+        // Вторая линия: путь после очистки обязан остаться в каталоге.
+        const QString target = QDir::cleanPath(root + QLatin1Char('/') + relative);
+        if (!target.startsWith(root + QLatin1Char('/'))) {
+            ++r.skippedUnsafe;
+            continue;
+        }
+        if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
+            r.error = Error::WriteFailed;
+            r.message = QStringLiteral("Cannot create a folder for %1").arg(m.name);
+            break;
+        }
+        extractTarMember(tar, target);
+        if (r.error != Error::None) {
+            if (r.error == Error::SourceError)
+                r.message = QStringLiteral("%1: %2").arg(m.name, r.message);
+            break;
+        }
+        r.extracted.append({ m.name, relative, m.size });
+    }
+    if (r.error == Error::None && tar.error() != TarArchive::Error::None)
+        tarFailed(tar);
+    if (r.error == Error::None && !tar.finish([&] { progress(tar.bytesRead(), tar.archiveSize()); }))
+        tarFailed(tar);
+    if (r.error == Error::None)
+        progress(tar.archiveSize(), tar.archiveSize(), true);
+    cleanup();
+}
+
+// Один член tar в файл: проход от начала до первого члена с этим именем
+// (как у набора: повтор имени — извлекается первый).
+void SourceUnpacker::Job::tarMember(const QString& tarPath, const QString& member, const QString& targetPath)
+{
+    spaceDir = QFileInfo(targetPath).absolutePath();
+    TarArchive tar(tarPath);
+    if (!tar.open(&self->m_cancel)) {
+        tarFailed(tar);
+        return;
+    }
+    // Прогресс — по прочитанному из архива на всех стадиях: поиск члена
+    // проходом, извлечение, дочитывание потока (у .tar.gz — сжатые байты).
+    const qint64 total = tar.archiveSize();
+    progress(0, total, true);
+    TarMember m;
+    bool found = false;
+    while (tar.next(m)) {
+        if (m.name == member) {
+            found = true;
+            break;
+        }
+        progress(tar.bytesRead(), total);
+    }
+    if (!found) {
+        if (tar.error() != TarArchive::Error::None) {
+            tarFailed(tar);
+        } else {
+            r.error = Error::SourceError;
+            r.message = QStringLiteral("%1 is not in the archive").arg(member);
+        }
+        return;
+    }
+    if (!m.isFile()) {
+        r.error = Error::SourceError;
+        r.message = QStringLiteral("%1 is not a file").arg(member);
+        return;
+    }
+    if (targetIsSource(tarPath, targetPath)) {
+        r.error = Error::WriteFailed;
+        r.message = QStringLiteral("Cannot extract %1 onto itself").arg(tarPath);
+        return;
+    }
+    if (!checkSpaceBefore(m.size, QStringLiteral("extract the file")))
+        return;
+    extractTarMember(tar, targetPath);
+    // У .tar.gz — дочитать поток до конца: CRC gzip проверен, иначе
+    // повреждение после члена осталось бы незамеченным.
+    if (r.error == Error::None && !tar.finish([&] { progress(tar.bytesRead(), total); }))
+        tarFailed(tar);
+    tar.close();
+    finishMemberFile(targetPath, total);
+}
 
 quint64 SourceUnpacker::start(const std::function<void(Job&)>& body, const QString& sourcePath,
                               const QString& targetPath)
@@ -272,18 +692,11 @@ quint64 SourceUnpacker::start(const std::function<void(Job&)>& body, const QStri
     return job;
 }
 
-// Цель — сам источник (тот же путь или ссылка на него): открытие на запись
-// обнулило бы источник, а уборка после ошибки — удалила.
-static bool targetIsSource(const QString& sourcePath, const QString& targetPath)
-{
-    const QString srcCanonical = QFileInfo(sourcePath).canonicalFilePath();
-    return !srcCanonical.isEmpty() && QFileInfo(targetPath).canonicalFilePath() == srcCanonical;
-}
 
 quint64 SourceUnpacker::unpackGzip(const QString& sourcePath, const QString& targetPath)
 {
     return start([sourcePath, targetPath](Job& j) {
-        j.targetDir = QFileInfo(targetPath).absolutePath();
+        j.spaceDir = QFileInfo(targetPath).absolutePath();
         // 1. Источник — gzip? Без сигнатуры целевой файл даже не создаётся.
         QFile probe(sourcePath);
         if (!probe.open(QIODevice::ReadOnly)) {
@@ -313,189 +726,41 @@ quint64 SourceUnpacker::unpackGzip(const QString& sourcePath, const QString& tar
 
 quint64 SourceUnpacker::unpackZip(const QString& zipPath, const QString& targetDir, MemberFilter accept)
 {
-    return start([zipPath, targetDir, accept](Job& j) {
-        j.targetDir = targetDir;
-        const auto cleanup = [&j, &targetDir]() {
-            if (j.r.error != Error::None) {
-                QDir(targetDir).removeRecursively();
-                j.r.extracted.clear();
-            }
-        };
-        ZipArchive zip(zipPath);
-        if (!zip.open()) {
-            j.zipFailed(zip);
-            cleanup();
-            return;
-        }
-        // Отбор: каталоги — сами появятся; ссылки и опасные имена —
-        // пропущены и посчитаны; пароль и неизвестный метод — тоже.
-        struct Planned { const ZipMember* member; QString relative; };
-        QVector<Planned> planned;
-        QSet<QString> used;   // занятые пути (без учёта регистра: Windows)
-        QSet<QString> dirs;   // каталоги этих путей
-        QSet<QString> names;  // имена членов: член ищется по имени (unpackZipMember)
-        qint64 total = 0;
-        for (const ZipMember& m : zip.members()) {
-            if (m.directory)
-                continue;
-            if (accept && !accept(m.name))
-                continue;
-            // Два члена с одним именем (дописанный архив): вкладка, память и
-            // закладки знают член по имени, и второй открылся бы первым —
-            // извлекается только первый, второй считается пропущенным.
-            if (names.contains(m.name)) {
-                ++j.r.skippedUnsafe;
-                continue;
-            }
-            names.insert(m.name);
-            if (m.symlink) {
-                ++j.r.skippedUnsafe;
-                continue;
-            }
-            QString relative = ArchiveNames::safeRelativePath(m.name);
-            if (relative.isEmpty()) {
-                ++j.r.skippedUnsafe;
-                continue;
-            }
-            if (m.encrypted || !m.supported) {
-                ++j.r.skippedEncrypted;
-                continue;
-            }
-            // Повтор того же пути (другой регистр, хвостовая точка, имя,
-            // занятое каталогом) — суффиксом «~N» перед расширением.
-            const auto taken = [&](const QString& p) {
-                return used.contains(p.toLower()) || dirs.contains(p.toLower());
-            };
-            const auto prefixTaken = [&](const QString& p) {
-                for (qsizetype at = p.indexOf(QLatin1Char('/')); at >= 0; at = p.indexOf(QLatin1Char('/'), at + 1))
-                    if (used.contains(p.left(at).toLower()))
-                        return true;
-                return false;
-            };
-            if (prefixTaken(relative)) {
-                ++j.r.skippedUnsafe; // каталог совпал с именем уже извлекаемого файла
-                continue;
-            }
-            if (taken(relative)) {
-                const QFileInfo fi(relative);
-                const QString dir = relative.contains(QLatin1Char('/'))
-                    ? relative.left(relative.lastIndexOf(QLatin1Char('/')) + 1) : QString();
-                const QString base = fi.completeBaseName();
-                const QString suffix = fi.suffix().isEmpty() ? QString() : QLatin1Char('.') + fi.suffix();
-                for (int n = 2;; ++n) {
-                    const QString candidate = dir + base + QStringLiteral("~%1").arg(n) + suffix;
-                    if (!taken(candidate)) {
-                        relative = candidate;
-                        break;
-                    }
-                }
-            }
-            used.insert(relative.toLower());
-            for (qsizetype at = relative.indexOf(QLatin1Char('/')); at >= 0;
-                 at = relative.indexOf(QLatin1Char('/'), at + 1))
-                dirs.insert(relative.left(at).toLower());
-            planned.append({ &m, relative });
-            total += m.size;
-        }
-
-        if (!QDir().mkpath(targetDir)) {
-            j.r.error = Error::WriteFailed;
-            j.r.message = QStringLiteral("Cannot create %1").arg(targetDir);
-            cleanup();
-            return;
-        }
-        if (!j.checkSpaceBefore(total, QStringLiteral("extract the archive"))) {
-            cleanup();
-            return;
-        }
-        const QString root = QDir::cleanPath(QFileInfo(targetDir).absoluteFilePath());
-        j.progress(0, total, true);
-        qint64 done = 0;
-        for (const Planned& p : std::as_const(planned)) {
-            if (j.cancelled()) {
-                j.setCancelled();
-                break;
-            }
-            // Вторая линия: путь после очистки обязан остаться в каталоге.
-            const QString target = QDir::cleanPath(root + QLatin1Char('/') + p.relative);
-            if (!target.startsWith(root + QLatin1Char('/'))) {
-                ++j.r.skippedUnsafe;
-                continue;
-            }
-            if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
-                j.r.error = Error::WriteFailed;
-                j.r.message = QStringLiteral("Cannot create a folder for %1").arg(p.member->name);
-                break;
-            }
-            j.extractMember(zip, *p.member, target, done, total);
-            if (j.r.error != Error::None)
-                break;
-            done += p.member->size;
-            j.r.extracted.append({ p.member->name, p.relative, p.member->size });
-        }
-        if (j.r.error == Error::None)
-            j.progress(total, total, true);
-        cleanup();
-    }, zipPath, targetDir);
+    return start([zipPath, targetDir, accept](Job& j) { j.zipSet(zipPath, targetDir, accept); },
+                 zipPath, targetDir);
 }
 
 quint64 SourceUnpacker::unpackZipMember(const QString& zipPath, const QString& member,
                                         const QString& targetPath)
 {
-    return start([zipPath, member, targetPath](Job& j) {
-        j.targetDir = QFileInfo(targetPath).absolutePath();
-        ZipArchive zip(zipPath);
-        if (!zip.open()) {
-            j.zipFailed(zip);
-            return;
+    return start([zipPath, member, targetPath](Job& j) { j.zipMember(zipPath, member, targetPath); },
+                 zipPath, targetPath);
+}
+
+quint64 SourceUnpacker::unpackArchive(const QString& archivePath, const QString& targetDir, MemberFilter accept)
+{
+    return start([archivePath, targetDir, accept](Job& j) {
+        switch (ArchiveFormats::detectKnown(archivePath)) {
+        case ArchiveFormats::Format::Zip: j.zipSet(archivePath, targetDir, accept); return;
+        case ArchiveFormats::Format::Tar: j.tarSet(archivePath, targetDir, accept); return;
+        case ArchiveFormats::Format::None: break;
         }
-        const int index = zip.find(member);
-        if (index < 0) {
-            j.r.error = Error::SourceError;
-            j.r.message = QStringLiteral("%1 is not in the archive").arg(member);
-            return;
+        j.notArchive(archivePath);
+        QDir(targetDir).removeRecursively();
+    }, archivePath, targetDir);
+}
+
+quint64 SourceUnpacker::unpackArchiveMember(const QString& archivePath, const QString& member,
+                                            const QString& targetPath)
+{
+    return start([archivePath, member, targetPath](Job& j) {
+        switch (ArchiveFormats::detectKnown(archivePath)) {
+        case ArchiveFormats::Format::Zip: j.zipMember(archivePath, member, targetPath); return;
+        case ArchiveFormats::Format::Tar: j.tarMember(archivePath, member, targetPath); return;
+        case ArchiveFormats::Format::None: break;
         }
-        const ZipMember& m = zip.members().at(index);
-        if (m.directory || m.symlink) {
-            j.r.error = Error::SourceError;
-            j.r.message = QStringLiteral("%1 is not a file").arg(member);
-            return;
-        }
-        if (targetIsSource(zipPath, targetPath)) {
-            j.r.error = Error::WriteFailed;
-            j.r.message = QStringLiteral("Cannot extract %1 onto itself").arg(zipPath);
-            return;
-        }
-        if (!j.checkSpaceBefore(m.size, QStringLiteral("extract the file"))) {
-            return;
-        }
-        j.progress(0, m.size, true);
-        j.extractMember(zip, m, targetPath, 0, m.size);
-        zip.close();
-        if (j.r.error == Error::None && GzipDevice::fileHasSignature(targetPath)) {
-            // Член — сам gzip (`app.log.gz` в архиве): распаковать дальше в
-            // тот же файл; промежуточный — рядом, удаляется в любом случае.
-            const QString packed = targetPath + QStringLiteral(".gz-part");
-            QFile::remove(packed);
-            if (!QFile::rename(targetPath, packed)) {
-                j.r.error = Error::WriteFailed;
-                j.r.message = QStringLiteral("Cannot write %1").arg(targetPath);
-            } else {
-                // Шкала прогресса уже дошла до конца извлечения — вторая
-                // стадия её не откатывает (запись и место считаются заново).
-                j.r.bytesWritten = 0;
-                j.sinceCheck = 0;
-                j.quietProgress = true;
-                j.gunzip(packed, targetPath);
-                j.quietProgress = false;
-                QFile::remove(packed);
-            }
-        }
-        if (j.r.error != Error::None)
-            QFile::remove(targetPath);
-        else
-            j.progress(m.size, m.size, true);
-    }, zipPath, targetPath);
+        j.notArchive(archivePath);
+    }, archivePath, targetPath);
 }
 
 QString SourceUnpacker::errorText(Error error)

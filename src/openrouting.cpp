@@ -87,7 +87,10 @@ static QString absoluteClean(const QString& path)
 
 bool isArchiveName(const QString& path)
 {
-    return path.endsWith(QLatin1String(".zip"), Qt::CaseInsensitive);
+    for (const char* suffix : {".zip", ".tar", ".tar.gz", ".tgz"})
+        if (path.endsWith(QLatin1String(suffix), Qt::CaseInsensitive))
+            return true;
+    return false;
 }
 
 Plan plan(const QStringList& paths)

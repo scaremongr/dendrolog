@@ -72,6 +72,8 @@ set(DENDROLOG_CORE_SOURCES
     src/sourceunpacker.cpp
     src/ziparchive.h
     src/ziparchive.cpp
+    src/tararchive.h
+    src/tararchive.cpp
     src/archiveregistry.h
     src/archiveregistry.cpp
     src/logmodel.h
