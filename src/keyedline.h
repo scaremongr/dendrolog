@@ -1,0 +1,192 @@
+#ifndef KEYEDLINE_H
+#define KEYEDLINE_H
+
+#include <QString>
+#include <QStringList>
+#include <QStringView>
+#include <QVarLengthArray>
+#include <QVector>
+
+// ============================================================================
+// Ключевая схема (F-4, docs/design/F-4.md): строка лога — JSON-объект
+// (JSON Lines) или пары logfmt, поля берутся по ИМЕНАМ ключей, а не по
+// позициям, как у регексной схемы.
+//
+// KeyedDefinition — ключевая часть определения схемы (PatternDefinition::
+// keyed, logpattern.h); LogPattern с ней разбирает строки этим модулем, а
+// не регексным каскадом. Колонки: Timestamp, Level, Message, затем
+// extraColumns по именам ключей.
+//
+// KeyedLine — разбор строки без аллокаций и без регекса: PairReader
+// отдаёт пары верхнего уровня (диапазон ключа, диапазон значения, вид
+// значения, «экранировано»), KeyedLookup ищет колонки. Вложенный объект
+// или массив пропускается счётом скобок с учётом строк, без рекурсии;
+// ключ роли ищется сначала дословно («log.level»), затем как путь во
+// вложенные объекты («log» → «level»). Повторный ключ — берётся первый,
+// значение null — поля нет.
+//
+// «Распознана» (строка начинает запись — LineClassifier::isPrimaryLine):
+//   • JSON: «{» в позиции 0 и хотя бы одна полная пара с ключом роли
+//     (время, уровень, сообщение). Разбор терпимый: оборванный объект
+//     (хвост растущего файла, строка, обрезанная писателем) отдаёт пары до
+//     обрыва;
+//   • logfmt: с позиции 0 идёт пара key=value, и среди пар есть ключ роли.
+//     «Caused by: x=1» не распознаётся — первый токен не пара.
+// Отступ в начале строки — не распознана (тело многострочного JSON и текст
+// исключения остаются продолжениями, F-12). Правило смотрит только на
+// ASCII-структуру — от кодировки файла не зависит.
+//
+// Значение в кавычках с обратной косой — в экранированной форме, как в
+// файле; читателю его раскодирует unescape (JSON: \" \\ \/ \b \f \n \r \t
+// \uXXXX с суррогатными парами; logfmt пишет подмножество того же).
+// ============================================================================
+
+struct KeyedDefinition {
+    enum class Format { JsonObject, Logfmt };
+    // Единица эпохи числом. Auto — по величине |целой части|: < 1e11 —
+    // секунды (дробь — миллисекунды), < 1e14 — мс, < 1e17 — мкс, иначе нс.
+    enum class EpochUnit { Auto, Seconds, Millis, Micros, Nanos };
+    // Числовой уровень. Auto: 0–7 — syslog, от 10 — pino / Bunyan по
+    // десяткам; Python — явной настройкой (10 Debug … 50 Critical).
+    enum class NumericLevels { Auto, Syslog, Python };
+
+    Format        format = Format::JsonObject;
+    QStringList   timeKeys    = defaultTimeKeys();
+    QStringList   levelKeys   = defaultLevelKeys();
+    QStringList   messageKeys = defaultMessageKeys();
+    QStringList   extraColumns;          ///< Ключи, ставшие колонками, в порядке колонок.
+    EpochUnit     epochUnit = EpochUnit::Auto;
+    NumericLevels numericLevels = NumericLevels::Auto;
+
+    static QStringList defaultTimeKeys();
+    static QStringList defaultLevelKeys();
+    static QStringList defaultMessageKeys();
+
+    // Колонки ролей — те же имена, что у встроенных регексных схем: правило
+    // фильтра «Level contains ERROR» и выбор колонок переносятся между ними.
+    static constexpr int kTimestampColumn = 0;
+    static constexpr int kLevelColumn = 1;
+    static constexpr int kMessageColumn = 2;
+    static constexpr int kRoleColumns = 3;
+    QStringList columnNames() const;
+
+    bool operator==(const KeyedDefinition& o) const
+    {
+        return format == o.format && timeKeys == o.timeKeys && levelKeys == o.levelKeys
+            && messageKeys == o.messageKeys && extraColumns == o.extraColumns
+            && epochUnit == o.epochUnit && numericLevels == o.numericLevels;
+    }
+    bool operator!=(const KeyedDefinition& o) const { return !(*this == o); }
+
+    // Имена в файле схемы («json», «logfmt», «auto», «ms», …).
+    static QString formatName(Format f);
+    static bool formatFromName(const QString& name, Format* f);
+    static QString epochUnitName(EpochUnit u);
+    static bool epochUnitFromName(const QString& name, EpochUnit* u);
+    static QString numericLevelsName(NumericLevels n);
+    static bool numericLevelsFromName(const QString& name, NumericLevels* n);
+};
+
+namespace KeyedLine {
+
+enum class ValueKind : quint8 {
+    String,   ///< В кавычках; диапазон — без кавычек.
+    Number,   ///< Голый токен, начинается с цифры или «-».
+    Literal,  ///< true / false и прочие голые токены (logfmt: любое голое значение не-число).
+    Null,     ///< null — поля нет.
+    Object,   ///< {…} целиком, текст как есть.
+    Array,    ///< […] целиком, текст как есть.
+};
+
+struct Pair {
+    int keyStart = 0, keyLength = 0;
+    int valueStart = 0, valueLength = 0;
+    bool keyEscaped = false;
+    bool valueEscaped = false;   ///< Строка в кавычках с обратной косой внутри.
+    ValueKind kind = ValueKind::Literal;
+};
+
+// Пары верхнего уровня строки по порядку. Без аллокаций: диапазоны — в
+// тексте, переданном в конструктор (вложенный объект читается тем же
+// классом по диапазону своего значения).
+class PairReader {
+public:
+    PairReader(QStringView text, KeyedDefinition::Format format);
+    // Строка имеет форму формата: JSON — «{» в позиции 0, logfmt — первый
+    // токен пара key=value. Без формы next() ничего не отдаёт.
+    bool structured() const { return m_structured; }
+    // Следующая ПОЛНАЯ пара; false — пар больше нет (конец, обрыв, мусор).
+    bool next(Pair* pair);
+
+private:
+    bool nextJson(Pair* pair);
+    bool nextLogfmt(Pair* pair);
+
+    QStringView m_text;
+    qsizetype m_pos = 0;
+    KeyedDefinition::Format m_format;
+    bool m_structured = false;
+    bool m_done = false;
+};
+
+// Раскодировать значение (или ключ) с обратной косой. keepControls — для
+// однострочного текста view: \n, \r, \t и прочие управляющие символы
+// остаются escape-последовательностью, как в файле. Неизвестная
+// последовательность и битая \u остаются как есть.
+QString unescape(QStringView escaped, bool keepControls = false);
+
+// Длина того, что вернул бы unescape, без построения строки.
+qsizetype unescapedSize(QStringView escaped, bool keepControls = false);
+
+// Значение пары как текст: строка — раскодированная, объект и массив — их
+// текст, число и литерал — токен.
+QString valueText(QStringView text, const Pair& pair);
+
+// Найденная колонка: значение в тексте строки (абсолютное смещение —
+// вложенные значения тоже).
+struct Hit {
+    int start = -1, length = 0;
+    int rank = 0;   ///< Чем меньше, тем главнее: кандидат * 2 + (путь ? 1 : 0).
+    bool escaped = false;
+    ValueKind kind = ValueKind::Literal;
+    bool isValid() const { return start >= 0; }
+    QStringView view(QStringView line) const { return isValid() ? line.mid(start, length) : QStringView(); }
+};
+
+using Hits = QVarLengthArray<Hit, 8>;
+
+// Колонки ключевой схемы, разобранные один раз (LogPattern::setPattern):
+// у каждой — ключи-кандидаты по приоритету, ключ с точкой — ещё и путь.
+class Lookup {
+public:
+    Lookup() = default;
+    explicit Lookup(const KeyedDefinition& definition);
+
+    KeyedDefinition::Format format() const { return m_format; }
+    int columnCount() const { return m_columnCount; }
+
+    // Пары строки → найденные колонки (hits размером columnCount()).
+    // true — строка распознана (см. блок в начале файла).
+    bool scan(QStringView line, Hits* hits) const;
+
+private:
+    // Кандидат колонки: ключ дословно либо путь (key — первый сегмент).
+    // Лежат корзинами по длине ключа: на пару строки — сравнения только с
+    // кандидатами той же длины (обычно ни одного или один).
+    struct Entry {
+        QString key;
+        QStringList path;   ///< Путь целиком; пусто — дословный ключ.
+        int column = 0;
+        int rank = 0;       ///< Номер кандидата в списке * 2 + (путь ? 1 : 0).
+    };
+    static constexpr int kMaxBucketedKey = 48;   ///< Длиннее — в последней корзине.
+    void consider(QStringView line, QStringView key, const Pair& pair, Hits* hits) const;
+
+    KeyedDefinition::Format m_format = KeyedDefinition::Format::JsonObject;
+    int m_columnCount = 0;
+    QVector<QVector<Entry>> m_byLength;
+};
+
+} // namespace KeyedLine
+
+#endif // KEYEDLINE_H

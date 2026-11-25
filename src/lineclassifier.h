@@ -1,6 +1,7 @@
 #ifndef LINECLASSIFIER_H
 #define LINECLASSIFIER_H
 
+#include "keyedline.h"
 #include "logentry.h"
 #include <QDateTime>
 #include <QString>
@@ -107,6 +108,21 @@ struct ClockDates {
     bool matched = false;
 };
 
+class LogPattern;
+
+// Классификация строки ключевой схемой (F-4) — LineClassifier::classifyKeyed.
+struct KeyedClassification {
+    bool matched = false;        ///< Строку распознала схема (keyedline.h).
+    bool hasTs = false;
+    qint64 tsMs = kNoTimestampMs;
+    bool leading = false;        ///< Метка ведущая (только у эвристики по строке).
+    bool hasLevel = false;
+    LogLevel level = LogLevel::Unknown;
+    bool tsFromKey = false;      ///< Момент взят из значения ключа, а не эвристикой.
+    bool levelFromKey = false;   ///< Уровень взят из значения ключа.
+    bool isPrimary() const;      ///< LineClassifier::isPrimaryLine по этим полям.
+};
+
 class LineClassifier {
 public:
     LineClassifier();
@@ -145,7 +161,7 @@ public:
     // leading (если задан) — метка ВЕДУЩАЯ, см. isPrimaryLine.
     // clock — контекст разбора файла для времени без даты (F-11); метка
     // этой формы ведущая и главнее формы с полной датой дальше в строке.
-    bool detectTimestamp(const QString& line, QDateTime& ts,
+    bool detectTimestamp(QStringView line, QDateTime& ts,
                          const YearReference& year = YearReference(),
                          bool* leading = nullptr, ClockDates* clock = nullptr) const;
     // Как detectTimestamp, но сразу мс epoch БЕЗ построения QDateTime —
@@ -153,11 +169,45 @@ public:
     // на Windows каждая конверсия стоит микросекунды, и именно она (а не
     // поиск формы) доминировала в стоимости индексации. Метка с зоной
     // считается арифметикой и в кэш не ходит.
-    bool detectTimestampMs(const QString& line, qint64& msecs,
+    bool detectTimestampMs(QStringView line, qint64& msecs,
                            const YearReference& year = YearReference(),
                            bool* leading = nullptr, ClockDates* clock = nullptr) const;
     // Распознать уровень логирования (словом). true — level заполнен.
-    bool detectLogLevel(const QString& line, LogLevel& level) const;
+    bool detectLogLevel(QStringView line, LogLevel& level) const;
+
+    // ---- Значение ключа ключевой схемы (F-4, docs/design/F-4.md) ----
+    // Политика времени та же, что у строки: значение-строка читается тем же
+    // сканером, что detectTimestampMs (ISO с зоной, access, syslog с годом по
+    // опорной дате; время без даты — нет, контекста файла у значения нет).
+    // Число или строка из одних цифр с необязательными «-» и дробью — эпоха
+    // (epochFromValue). isNumber — значение было голым числом JSON / logfmt:
+    // тогда только эпоха.
+    bool timestampFromValue(QStringView value, bool isNumber,
+                            KeyedDefinition::EpochUnit unit, const YearReference& year,
+                            qint64& msecs) const;
+    // Эпоха: единица из схемы или по величине |целой части| (Auto: < 1e11 —
+    // секунды, < 1e14 — мс, < 1e17 — мкс, иначе нс). Момент — вниз до
+    // миллисекунды (как дробь строки: -0,5 мс — это -1 мс); отрицательная —
+    // метка до 1970 (F-13). Вне 0001–9999 года, больше 19 цифр целой части,
+    // экспонента, мусор — false.
+    static bool epochFromValue(QStringView value, KeyedDefinition::EpochUnit unit,
+                               qint64& msecs);
+    // Уровень: слово — detectLogLevel по значению (словарь kLevelWords один);
+    // целое число (или строка из цифр) — по шкале: Auto — 0–7 syslog
+    // (0–2 Fatal, 3 Error, 4 Warning, 5–6 Info, 7 Debug), от 10 — pino /
+    // Bunyan по десяткам (10 Trace, 20 Debug, 30 Info, 40 Warning, 50 Error,
+    // 60+ Fatal); Syslog — только 0–7; Python — 10 Debug, 20 Info,
+    // 30 Warning, 40 Error, 50+ Fatal. Не по шкале — false.
+    bool levelFromValue(QStringView value, bool isNumber,
+                        KeyedDefinition::NumericLevels scale, LogLevel& level) const;
+    // Один вызов на строку для обоих путей загрузки вместо пары детекторов,
+    // когда у схемы есть ключевая часть: распознана ли строка, момент и
+    // уровень из ключей; ключа нет или значение не читается — эвристика по
+    // строке (detectTimestampMs с leading и clock, detectLogLevel), как без
+    // схемы. Не ключевая схема — только эвристика (matched = false).
+    KeyedClassification classifyKeyed(const LogPattern& pattern, QStringView line,
+                                      const YearReference& year = YearReference(),
+                                      ClockDates* clock = nullptr) const;
 
     // Правило первичной строки логической записи (F-12, docs/design/F-12.md).
     // Строка первична, если её распознала схема, ИЛИ у неё есть метка и

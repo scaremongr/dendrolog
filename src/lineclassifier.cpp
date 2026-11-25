@@ -1,5 +1,6 @@
 #include "lineclassifier.h"
 #include "logfile.h"
+#include "logpattern.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -469,7 +470,7 @@ qint64 localMomentMs(qint64 day, qint32 timeMs)
 // Ручные фолбэк-форматы (dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy — с позиции 0),
 // за секундами — те же дробная часть и зона, что у ISO-формы.
 // true — c заполнен И дата/время валидны (проверка per-format, как раньше).
-bool scanFallbackFormats(const QString& line, const QStringList& formats,
+bool scanFallbackFormats(QStringView line, const QStringList& formats,
                          TsComponents& c)
 {
     // У всех форм d[2] == d[5] — «/» или «.»: строка без этого отсекается до
@@ -477,7 +478,7 @@ bool scanFallbackFormats(const QString& line, const QStringList& formats,
     if (line.size() < 19 || (line[2] != QLatin1Char('/') && line[2] != QLatin1Char('.'))
         || line[5] != line[2])
         return false;
-    const QStringView lineRef{line};
+    const QStringView lineRef = line;
     bool convOk = true;
 
     for (const QString& formatString : formats) {
@@ -676,7 +677,7 @@ ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
     return run;
 }
 
-bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
+bool LineClassifier::detectTimestamp(QStringView line, QDateTime &ts,
                                      const YearReference& year, bool* leading,
                                      ClockDates* clock) const
 {
@@ -691,7 +692,7 @@ bool LineClassifier::detectTimestamp(const QString &line, QDateTime &ts,
     return false;
 }
 
-bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
+bool LineClassifier::detectTimestampMs(QStringView line, qint64 &msecs,
                                        const YearReference& year, bool* leading,
                                        ClockDates* clock) const
 {
@@ -750,7 +751,7 @@ bool LineClassifier::detectTimestampMs(const QString &line, qint64 &msecs,
     return true;
 }
 
-bool LineClassifier::detectLogLevel(const QString &line, LogLevel &level) const
+bool LineClassifier::detectLogLevel(QStringView line, LogLevel &level) const
 {
     const QChar* d = line.constData();
     const qsizetype n = line.size();
@@ -842,4 +843,210 @@ bool LineClassifier::detectLogLevel(const QString &line, LogLevel &level) const
         i = j;
     }
     return false;
+}
+
+// ============================================================================
+// Ключевая схема (F-4): значения ключей. Правило — в lineclassifier.h.
+// ============================================================================
+
+namespace {
+
+// Границы моментов: 0001-01-01T00:00:00Z … 9999-12-31T23:59:59.999Z.
+constexpr qint64 kMinEpochMs = -62135596800000LL;
+constexpr qint64 kMaxEpochMs = 253402300799999LL;
+
+// Целое без знака из одних ASCII-цифр. До 19 цифр — quint64 (до ~1,8e19)
+// не переполняется; нужны все 19: эпоха в наносекундах после 1973 года.
+bool parseDigits(QStringView s, quint64& out)
+{
+    if (s.isEmpty() || s.size() > 19)
+        return false;
+    quint64 v = 0;
+    for (const QChar c : s) {
+        if (!isAsciiDigit(c.unicode()))
+            return false;
+        v = v * 10 + quint64(c.unicode() - u'0');
+    }
+    out = v;
+    return true;
+}
+
+} // namespace
+
+bool KeyedClassification::isPrimary() const
+{
+    return LineClassifier::isPrimaryLine(matched, hasTs, leading, hasLevel);
+}
+
+bool LineClassifier::epochFromValue(QStringView v, KeyedDefinition::EpochUnit unit, qint64& msecs)
+{
+    using Unit = KeyedDefinition::EpochUnit;
+    bool negative = false;
+    if (!v.isEmpty() && v.front() == QLatin1Char('-')) {
+        negative = true;
+        v = v.mid(1);
+    }
+    const qsizetype dot = v.indexOf(QLatin1Char('.'));
+    const QStringView intText = dot < 0 ? v : v.left(dot);
+    const QStringView fracText = dot < 0 ? QStringView() : v.mid(dot + 1);
+    quint64 whole = 0;
+    if (!parseDigits(intText, whole))
+        return false;
+    if (dot >= 0 && fracText.isEmpty())
+        return false;   // «12.» — не число
+    for (const QChar c : fracText)
+        if (!isAsciiDigit(c.unicode()))
+            return false;
+
+    if (unit == Unit::Auto) {
+        unit = whole < 100000000000ULL         ? Unit::Seconds
+             : whole < 100000000000000ULL      ? Unit::Millis
+             : whole < 100000000000000000ULL   ? Unit::Micros
+                                               : Unit::Nanos;
+    }
+
+    // Момент в мс вниз: scaled — целая часть в мс, rest — есть ли ещё
+    // ненулевой остаток (у отрицательного он сдвигает момент на мс вниз).
+    quint64 scaled = 0;
+    bool rest = false;
+    const auto anyNonZero = [](QStringView digits) {
+        for (const QChar c : digits)
+            if (c != QLatin1Char('0'))
+                return true;
+        return false;
+    };
+    switch (unit) {
+    case Unit::Seconds: {
+        if (whole > 9000000000000000ULL / 1000)
+            return false;
+        int ms = 0;
+        for (int k = 0; k < 3; ++k)
+            ms = ms * 10 + (k < fracText.size() ? fracText[k].unicode() - u'0' : 0);
+        scaled = whole * 1000 + quint64(ms);
+        rest = fracText.size() > 3 && anyNonZero(fracText.mid(3));
+        break;
+    }
+    case Unit::Millis:
+        scaled = whole;
+        rest = anyNonZero(fracText);
+        break;
+    case Unit::Micros:
+        scaled = whole / 1000;
+        rest = whole % 1000 != 0 || anyNonZero(fracText);
+        break;
+    case Unit::Nanos:
+        scaled = whole / 1000000;
+        rest = whole % 1000000 != 0 || anyNonZero(fracText);
+        break;
+    case Unit::Auto:
+        return false;
+    }
+    if (scaled > quint64(std::numeric_limits<qint64>::max() / 2))
+        return false;
+    const qint64 ms = negative ? -qint64(scaled) - (rest ? 1 : 0) : qint64(scaled);
+    if (ms < kMinEpochMs || ms > kMaxEpochMs)
+        return false;
+    msecs = ms;
+    return true;
+}
+
+bool LineClassifier::timestampFromValue(QStringView value, bool isNumber,
+                                        KeyedDefinition::EpochUnit unit,
+                                        const YearReference& year, qint64& msecs) const
+{
+    if (value.isEmpty())
+        return false;
+    // Строка из цифр — тоже эпоха («"ts":"1700000000"»); у неё не бывает
+    // формы с датой, так что сканеру строки её не отдать.
+    const char16_t first = value.front().unicode();
+    const bool numeric = isAsciiDigit(first) || first == u'-';
+    if (numeric && epochFromValue(value, unit, msecs))
+        return true;
+    if (isNumber)
+        return false;
+    return detectTimestampMs(value, msecs, year);
+}
+
+bool LineClassifier::levelFromValue(QStringView value, bool isNumber,
+                                    KeyedDefinition::NumericLevels scale, LogLevel& level) const
+{
+    using Scale = KeyedDefinition::NumericLevels;
+    quint64 n = 0;
+    if (parseDigits(value, n)) {
+        LogLevel found = LogLevel::Unknown;
+        if (scale == Scale::Python) {
+            static constexpr LogLevel byTens[] = {LogLevel::Unknown, LogLevel::Debug, LogLevel::Info,
+                                                  LogLevel::Warn, LogLevel::Error};
+            if (n >= 10)
+                found = n >= 50 ? LogLevel::Fatal : byTens[n / 10];
+        } else if (n <= 7) {
+            static constexpr LogLevel syslog[] = {LogLevel::Fatal, LogLevel::Fatal, LogLevel::Fatal,
+                                                  LogLevel::Error, LogLevel::Warn,  LogLevel::Info,
+                                                  LogLevel::Info,  LogLevel::Debug};
+            found = syslog[n];
+        } else if (scale == Scale::Auto && n >= 10) {
+            static constexpr LogLevel byTens[] = {LogLevel::Unknown, LogLevel::Trace, LogLevel::Debug,
+                                                  LogLevel::Info,    LogLevel::Warn,  LogLevel::Error};
+            found = n >= 60 ? LogLevel::Fatal : byTens[n / 10];
+        }
+        if (found == LogLevel::Unknown)
+            return false;
+        level = found;
+        return true;
+    }
+    if (isNumber)
+        return false;   // дробь, отрицательное — не уровень
+    return detectLogLevel(value, level);
+}
+
+KeyedClassification LineClassifier::classifyKeyed(const LogPattern& pattern, QStringView line,
+                                                  const YearReference& year,
+                                                  ClockDates* clock) const
+{
+    KeyedClassification r;
+    if (const KeyedDefinition* keyed = pattern.keyed()) {
+        KeyedLine::Hits hits;
+        r.matched = pattern.scanKeyed(line, &hits);
+        if (r.matched) {
+            // Экранированное значение (редко: метка и уровень — ASCII без
+            // кавычек внутри) раскодируется во временную строку.
+            QString decoded;
+            const auto valueOf = [&](const KeyedLine::Hit& hit) {
+                if (!hit.escaped)
+                    return hit.view(line);
+                decoded = KeyedLine::unescape(hit.view(line));
+                return QStringView(decoded);
+            };
+            const KeyedLine::Hit& ts = hits[KeyedDefinition::kTimestampColumn];
+            if (ts.isValid()) {
+                qint64 ms = 0;
+                if (timestampFromValue(valueOf(ts), ts.kind == KeyedLine::ValueKind::Number,
+                                       keyed->epochUnit, year, ms)) {
+                    r.hasTs = r.tsFromKey = true;
+                    r.tsMs = ms;
+                }
+            }
+            const KeyedLine::Hit& lv = hits[KeyedDefinition::kLevelColumn];
+            if (lv.isValid()) {
+                LogLevel level = LogLevel::Unknown;
+                if (levelFromValue(valueOf(lv), lv.kind == KeyedLine::ValueKind::Number,
+                                   keyed->numericLevels, level)) {
+                    r.hasLevel = r.levelFromKey = true;
+                    r.level = level;
+                }
+            }
+        }
+    }
+    // Ключа нет или значение не читается — эвристика по строке, как без схемы.
+    if (!r.tsFromKey) {
+        qint64 ms = 0;
+        r.hasTs = detectTimestampMs(line, ms, year, &r.leading, clock);
+        if (r.hasTs)
+            r.tsMs = ms;
+    } else if (clock) {
+        clock->matched = false;
+    }
+    if (!r.levelFromKey)
+        r.hasLevel = detectLogLevel(line, r.level);
+    return r;
 }

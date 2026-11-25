@@ -106,6 +106,10 @@ private:
     void rebuildCards(const PatternDefinition& definition);
     void refreshCardChrome();
     PatternDefinition currentDefinitionFromEditor() const;
+    // Ключевая часть загруженной схемы (F-4): редактора для неё ещё нет
+    // (шаг 4 docs/design/F-4.md), поэтому Apply / Save её не теряют —
+    // currentDefinitionFromEditor возвращает её как есть.
+    std::optional<KeyedDefinition> m_keyed;
     void replaceCurrentBlocks(const PatternDefinition& definition);
 
     void rebuildPresetMenu();

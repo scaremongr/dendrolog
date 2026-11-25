@@ -119,10 +119,18 @@ bool FilterRuleSet::ruleContains(int ruleIndex, QStringView message,
 
     // Область поиска: значение поля (zero-copy view) или вся строка.
     // Строка без запрошенного поля (continuation line) = «не содержит».
+    // Экранированное значение ключевой схемы (F-4: JSON \", \uXXXX) правило
+    // видит раскодированным — аллокация только у таких значений.
     QStringView scope;
+    QString decoded;
     bool scopeAvailable = true;
     if (m_fieldScopeActive && fieldIndex >= 0) {
-        scope = fields.get(fieldIndex, message);
+        if (fields.isEscaped(fieldIndex)) {
+            decoded = fields.value(fieldIndex, message);
+            scope = decoded;
+        } else {
+            scope = fields.get(fieldIndex, message);
+        }
         scopeAvailable = !scope.isEmpty();
     } else {
         scope = message;

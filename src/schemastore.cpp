@@ -91,7 +91,8 @@ bool isSchemaFormatKey(const QString& key)
         || key == QLatin1String("version")
         || key == QLatin1String("type")
         || key == QLatin1String("linePrefix")
-        || key == QLatin1String("blocks");
+        || key == QLatin1String("blocks")
+        || key == QLatin1String("keyed");   // F-4: ключевая часть схемы
 }
 
 QString SchemaEntry::description() const

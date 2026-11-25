@@ -567,7 +567,7 @@ void EntryDetailsPanel::onAnchorClicked(const QUrl& url)
             for (int i = 0; i < count; ++i)
                 if (src->fields().has(i))
                     rows << m_fieldNames.at(i) + QLatin1Char('\t')
-                            + src->fields().get(i, src->message()).toString();
+                            + src->fields().value(i, src->message());
             text = rows.join(QLatin1Char('\n'));
         }
     } else if (what.startsWith(QLatin1String("json"))) {
@@ -680,7 +680,7 @@ QString EntryDetailsPanel::buildHtml()
                 } else if (collapsed) {
                     value = colorSpan(muted, QStringLiteral("…"));
                 } else {
-                    value = src->fields().get(i, src->message()).toString();
+                    value = src->fields().value(i, src->message());
                     if (value.size() > kMaxFieldValueChars)
                         value = value.left(kMaxFieldValueChars) + QStringLiteral("…");
                     value = value.toHtmlEscaped();

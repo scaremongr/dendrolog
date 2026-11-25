@@ -2575,6 +2575,143 @@ static void testEncodingCutWindow(const QDir& dir)
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Значения ключей ключевой схемы (F-4, docs/design/F-4.md, PR 1): эпоха всех
+// единиц и их границы по величине, отрицательная (до 1970, вниз до мс),
+// строка из цифр; строка ISO в значении = та же метка в строке
+// (detectTimestampMs); числовые уровни всех шкал. Ожидаемое — заданные
+// значения, а не второй разборщик.
+// ---------------------------------------------------------------------------
+static void testKeyedValues()
+{
+    using Unit = KeyedDefinition::EpochUnit;
+    using Scale = KeyedDefinition::NumericLevels;
+    const LineClassifier classifier;
+    constexpr qint64 kNone = std::numeric_limits<qint64>::min();
+
+    const struct { const char* value; Unit unit; qint64 expected; } epochs[] = {
+        // Auto: по величине целой части.
+        { "1700000000", Unit::Auto, 1700000000000LL },              // секунды
+        { "1700000000.123456", Unit::Auto, 1700000000123LL },       // дробь — мс, усечение
+        { "1700000000.9", Unit::Auto, 1700000000900LL },
+        { "99999999999", Unit::Auto, 99999999999000LL },            // < 1e11 — ещё секунды
+        { "100000000000", Unit::Auto, 100000000000LL },             // = 1e11 — уже мс
+        { "1700000000123", Unit::Auto, 1700000000123LL },           // мс
+        { "1700000000123.9", Unit::Auto, 1700000000123LL },
+        { "99999999999999", Unit::Auto, 99999999999999LL },         // < 1e14 — мс
+        { "100000000000000", Unit::Auto, 100000000000LL },          // = 1e14 — мкс
+        { "1700000000123456", Unit::Auto, 1700000000123LL },        // мкс
+        { "99999999999999999", Unit::Auto, 99999999999999LL },      // < 1e17 — мкс
+        { "100000000000000000", Unit::Auto, 100000000000LL },       // = 1e17 — нс
+        { "1700000000123456789", Unit::Auto, 1700000000123LL },     // нс, 19 цифр (zerolog, zap)
+        { "9999999999999999999", Unit::Auto, 9999999999999LL },     // наибольшее в 19 цифрах — 2286 год
+        { "17000000001234567890", Unit::Auto, kNone },              // 20 цифр — не читается
+        { "170000000012345678", Unit::Auto, 170000000012LL },       // нс, 18 цифр
+        { "0", Unit::Auto, 0 },                                     // ровно эпоха
+        { "0.0005", Unit::Auto, 0 },
+        // Отрицательная — до 1970, момент вниз до миллисекунды.
+        { "-1", Unit::Auto, -1000 },
+        { "-1.5", Unit::Auto, -1500 },
+        { "-0.0005", Unit::Auto, -1 },
+        { "-86400", Unit::Auto, -86400000 },
+        { "-1700000000123", Unit::Auto, -1700000000123LL },
+        { "-1500", Unit::Micros, -2 },
+        { "-1000", Unit::Micros, -1 },
+        // Явная единица главнее величины.
+        { "1700000000", Unit::Millis, 1700000000 },
+        { "1700000000123", Unit::Seconds, kNone },                  // за 9999 годом
+        { "1700000000123456", Unit::Micros, 1700000000123LL },
+        { "1700000000123456789", Unit::Nanos, 1700000000123LL },
+        { "-1700000000123456789", Unit::Nanos, -1700000000124LL },  // вниз до мс
+        { "1700000000", Unit::Nanos, 1700 },
+        // Границы годов 0001–9999.
+        { "-62135596800", Unit::Seconds, -62135596800000LL },
+        { "-62135596801", Unit::Seconds, kNone },
+        { "253402300799", Unit::Seconds, 253402300799000LL },
+        { "253402300800", Unit::Seconds, kNone },
+        // Не эпоха.
+        { "", Unit::Auto, kNone },
+        { "-", Unit::Auto, kNone },
+        { "12.", Unit::Auto, kNone },
+        { ".5", Unit::Auto, kNone },
+        { "1.7e9", Unit::Auto, kNone },
+        { "17 00", Unit::Auto, kNone },
+        { "+5", Unit::Auto, kNone },
+    };
+    for (const auto& c : epochs) {
+        qint64 ms = kNone;
+        const bool ok = LineClassifier::epochFromValue(QString::fromLatin1(c.value), c.unit, ms);
+        CHECK((ok ? ms : kNone) == c.expected,
+              qPrintable(QStringLiteral("keyed epoch %1 (%2) -> %3, expected %4")
+                  .arg(QLatin1String(c.value), KeyedDefinition::epochUnitName(c.unit))
+                  .arg(ok ? ms : kNone).arg(c.expected)));
+    }
+
+    // timestampFromValue: число и строка из цифр — эпоха; строка с датой —
+    // тот же сканер, что у строки: ISO в значении = ISO в строке.
+    {
+        qint64 ms = 0;
+        CHECK(classifier.timestampFromValue(u"1700000000123", true, Unit::Auto, {}, ms)
+                  && ms == 1700000000123LL, "keyed: number value is epoch");
+        CHECK(classifier.timestampFromValue(u"1700000000", false, Unit::Auto, {}, ms)
+                  && ms == 1700000000000LL, "keyed: digit string value is epoch");
+        CHECK(!classifier.timestampFromValue(u"1.7e9", true, Unit::Auto, {}, ms),
+              "keyed: exponent number is not a timestamp");
+        CHECK(!classifier.timestampFromValue(u"later", false, Unit::Auto, {}, ms),
+              "keyed: word value is not a timestamp");
+        CHECK(!classifier.timestampFromValue(u"13:55:40.016", false, Unit::Auto, {}, ms),
+              "keyed: time without date has no file context in a value (F-11)");
+        const char* isoValues[] = {
+            "2026-11-18T10:00:00Z", "2026-11-18T10:00:00.123+03:00", "2026-11-18 10:00:00,456",
+            "2026/11/18 10:00:00", "18/Nov/2026:13:55:36 +0000", "1969-12-31T23:59:59.999Z",
+            "0001-01-01T00:00:00Z", "Nov 18 13:55:36",
+        };
+        const auto ref = LineClassifier::yearReference(QDate(2026, 11, 20));
+        for (const char* v : isoValues) {
+            const QString value = QString::fromLatin1(v);
+            qint64 fromValue = kNone, fromLine = kNone;
+            const bool a = classifier.timestampFromValue(value, false, Unit::Auto, ref, fromValue);
+            const bool b = classifier.detectTimestampMs(value + QStringLiteral(" INFO x"), fromLine, ref);
+            CHECK(a && b && fromValue == fromLine,
+                  qPrintable(QStringLiteral("keyed: value '%1' -> %2, same text in a line -> %3")
+                      .arg(value).arg(fromValue).arg(fromLine)));
+        }
+    }
+
+    // Числовые уровни всех шкал и слова.
+    const struct { const char* value; bool isNumber; Scale scale; LogLevel expected; } levels[] = {
+        { "0", true, Scale::Auto, LogLevel::Fatal },  { "1", true, Scale::Auto, LogLevel::Fatal },
+        { "2", true, Scale::Auto, LogLevel::Fatal },  { "3", true, Scale::Auto, LogLevel::Error },
+        { "4", true, Scale::Auto, LogLevel::Warn },   { "5", true, Scale::Auto, LogLevel::Info },
+        { "6", true, Scale::Auto, LogLevel::Info },   { "7", true, Scale::Auto, LogLevel::Debug },
+        { "8", true, Scale::Auto, LogLevel::Unknown }, { "9", true, Scale::Auto, LogLevel::Unknown },
+        { "10", true, Scale::Auto, LogLevel::Trace }, { "20", true, Scale::Auto, LogLevel::Debug },
+        { "30", true, Scale::Auto, LogLevel::Info },  { "35", true, Scale::Auto, LogLevel::Info },
+        { "40", true, Scale::Auto, LogLevel::Warn },  { "50", true, Scale::Auto, LogLevel::Error },
+        { "60", true, Scale::Auto, LogLevel::Fatal }, { "70", true, Scale::Auto, LogLevel::Fatal },
+        { "30", false, Scale::Auto, LogLevel::Info }, // строка из цифр — тоже шкала
+        { "7", true, Scale::Syslog, LogLevel::Debug }, { "3", true, Scale::Syslog, LogLevel::Error },
+        { "30", true, Scale::Syslog, LogLevel::Unknown },
+        { "5", true, Scale::Python, LogLevel::Unknown }, { "10", true, Scale::Python, LogLevel::Debug },
+        { "20", true, Scale::Python, LogLevel::Info }, { "30", true, Scale::Python, LogLevel::Warn },
+        { "40", true, Scale::Python, LogLevel::Error }, { "50", true, Scale::Python, LogLevel::Fatal },
+        { "-1", true, Scale::Auto, LogLevel::Unknown }, { "3.5", true, Scale::Auto, LogLevel::Unknown },
+        { "info", false, Scale::Auto, LogLevel::Info }, { "WARNING", false, Scale::Auto, LogLevel::Warn },
+        { "err", false, Scale::Auto, LogLevel::Error }, { "Information", false, Scale::Auto, LogLevel::Unknown },
+        { "true", false, Scale::Auto, LogLevel::Unknown },
+    };
+    for (const auto& c : levels) {
+        LogLevel level = LogLevel::Unknown;
+        const bool ok = classifier.levelFromValue(QString::fromLatin1(c.value), c.isNumber,
+                                                  c.scale, level);
+        CHECK((ok ? level : LogLevel::Unknown) == c.expected,
+              qPrintable(QStringLiteral("keyed level %1 (%2) -> %3, expected %4")
+                  .arg(QLatin1String(c.value), KeyedDefinition::numericLevelsName(c.scale))
+                  .arg(int(ok ? level : LogLevel::Unknown)).arg(int(c.expected))));
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -2598,6 +2735,7 @@ int main(int argc, char** argv)
     testClassifierRegexEquivalence();
     testLevelVocabulary();
     testTimestampGolden();
+    testKeyedValues();
     testPre1970(dir);
     testGolden(dir);
     testNewTimestampFormsBackends(dir);

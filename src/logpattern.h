@@ -1,12 +1,16 @@
 #ifndef LOGPATTERN_H
 #define LOGPATTERN_H
 
+#include "keyedline.h"
 #include "logfield.h"
 
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QVector>
+
+#include <optional>
+#include <utility>
 
 struct PatternBlock {
     // Note: Text and Greedy text allow an empty value — a missing field
@@ -45,6 +49,10 @@ struct PatternBlock {
 struct PatternDefinition {
     QString               linePrefix;
     QVector<PatternBlock> blocks;
+    // Ключевая схема (F-4): строка — JSON-объект или logfmt, поля — по
+    // ключам (keyedline.h). Есть — главнее блоков: blocks тогда только
+    // запасной «Message» для версий без F-4 (их пишет serializeDefinition).
+    std::optional<KeyedDefinition> keyed;
 };
 
 /// Span of one block inside a matched line. Includes non-field blocks
@@ -115,11 +123,30 @@ public:
     QStringList              fieldNames() const;
 
     /// Best-effort match: full match first, then the prefix cascade.
+    /// Keyed schema: ok = the line is recognised (keyedline.h), one span per
+    /// found column, blockIndex = COLUMN index (blocks are only a fallback).
     LineMatchResult matchLine(const QString& line) const;
 
     /// Field extraction for the parser; built on matchLine(), so the
-    /// editor preview shows exactly what the parser will do.
+    /// editor preview shows exactly what the parser will do. Keyed schema:
+    /// spans point at the values as in the file; escaped strings carry the
+    /// FieldSpan escaped bit (read via LogEntryFields::value).
     LogEntryFields extractFields(const QString& line) const;
+
+    // ---- Ключевая схема (F-4) ----
+    bool isKeyed() const noexcept { return m_valid && m_definition.keyed.has_value(); }
+    const KeyedDefinition* keyed() const noexcept
+    {
+        return m_definition.keyed ? &*m_definition.keyed : nullptr;
+    }
+    /// Колонки строки по ключам (hits — по колонке fieldNames()); true —
+    /// строка распознана. Горячий путь: без аллокаций, кроме ключей с
+    /// обратной косой. Не ключевая схема — false.
+    bool scanKeyed(QStringView line, KeyedLine::Hits* hits) const;
+    /// Все пары верхнего уровня строки: ключ и значение раскодированы,
+    /// вложенный объект — его текст, null — «null». ТОЛЬКО для одной записи
+    /// (Entry Details, F-9): аллокации на каждую пару.
+    QVector<std::pair<QString, QString>> keyValuePairs(QStringView line) const;
 
     /// True for kinds that are distinctive enough to be searched for
     /// while skipping arbitrary garbage before them.
@@ -191,6 +218,7 @@ private:
     /// pre-filter that keeps non-matching lines cheap.
     static int anchorProbeSlot(PatternBlock::MatchKind kind);
 
+    KeyedLine::Lookup        m_keyedLookup;   ///< Ключевая схема: колонки по ключам.
     QString                  m_patternString;
     PatternDefinition        m_definition;
     QRegularExpression       m_fullRegex;

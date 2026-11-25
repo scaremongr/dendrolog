@@ -1,0 +1,1 @@
+dendrolog_add_test(keyed_schema LIBRARIES dendrolog_core)
