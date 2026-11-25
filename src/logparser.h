@@ -60,8 +60,19 @@ public:
     };
 
     // This method can be called from a separate thread for stat analysis.
-    // Файл читается БЕЗ QIODevice::Text: все смещения — сырые байты.
-    StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from) const;
+    // Файл читается БЕЗ QIODevice::Text: все смещения — сырые байты. Сжатый
+    // (сигнатура gzip, F-2) читается потоком через GzipDevice: продолжения с
+    // середины нет (next.offset = 0, запрос с from.offset > 0 — parseSuccess
+    // = false), повреждённый поток — parseSuccess = false; fileSize — размер
+    // на диске.
+    //
+    // Строка длиннее kMaxStatsLineBytes считается по голове этой длины
+    // (бинарный файл без '\n' или `.gz`-«бомба» не растит буфер без предела).
+    // cancelled (может быть nullptr) проверяется между кусками по 1 МБ и
+    // внутри распаковки; прерванный разбор — parseSuccess = false.
+    static constexpr qsizetype kMaxStatsLineBytes = 4 * 1024 * 1024;
+    StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from,
+                                  const std::atomic<bool>* cancelled = nullptr) const;
     StatsScan analyzeFileForStats(const QString& filePath) const
     {
         return analyzeFileForStats(filePath, StatsResume());

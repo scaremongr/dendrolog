@@ -13,6 +13,10 @@
 //     кодировка; сверка «сканер нашёл файл ⇔ вкладка нашла строку»; отмена
 //     посреди файла; статистика от кодировки не зависит; дозапись, новый файл
 //     и ротация проверяются кодировкой файла;
+//   • сжатые логи (F-2, PR 3): `.gz` в дереве по имени без `.gz`, счётчики и
+//     фильтр по содержимому через GzipDevice совпадают с несжатым близнецом
+//     (кодировки, размеры блока, предварительное решение), прогресс — в
+//     сжатых байтах до размера файла, отмена, повреждённый архив;
 //   • инкрементальное обновление rescan(): добавленный файл появляется,
 //     удалённый исчезает, а дописанный в хвост пересчитывается «по дельте»
 //     и даёт РОВНО те же цифры, что полный повторный скан.
@@ -23,6 +27,7 @@
 #include "appsettings.h"
 #include "filecontentsearch.h"
 #include "filterruleset.h"
+#include "../common/gzipwriter.h"
 #include "../common/testdocuments.h"
 
 #include <QApplication>
@@ -118,7 +123,7 @@ static bool allScanned(QTreeWidgetItem* parent)
         QTreeWidgetItem* child = parent->child(i);
         if (child->data(ScanCol::Name, ScanRole::IsFile).toBool()) {
             const QString entries = child->text(ScanCol::Entries);
-            if (entries.isEmpty() || !entries.at(0).isDigit())
+            if (entries.isEmpty() || (!entries.at(0).isDigit() && entries != u"Parse Failed"_s))
                 return false;
         }
         if (!allScanned(child))
@@ -448,7 +453,7 @@ static void testRotatedNames()
         u"app.log.2"_s, u"app.log.10"_s, u"app.log.2026-01-01"_s, u"notes.TXT.3"_s,
     };
     const QStringList unwanted{
-        u"app.log.bak"_s, u"app.log.swp"_s, u"app.log.gz"_s, u"app.log.1.gz"_s,
+        u"app.log.bak"_s, u"app.log.swp"_s,
         u"app.log.old"_s, u"app.log~"_s, u"app.logs.1"_s, u"catalog.1"_s, u"app.log."_s,
         u"app.log.1a"_s, u"data.2026"_s,
     };
@@ -1160,6 +1165,431 @@ static void testPre1970Dates()
           "pre-1970: date filter in 1969 keeps only moon.log");
 }
 
+// ---------------------------------------------------------------------------
+// F-2, PR 3. Сжатые логи в сканере: `.gz` в дереве, счётчики и фильтр по
+// содержимому читают его потоком (GzipDevice), без записи на диск. Эталон —
+// несжатый близнец того же содержимого: те же счётчики, тот же ответ фильтра
+// на тех же запросах, размерах блока и кодировках.
+
+static bool sameStats(const LogParser::FileStats& a, const LogParser::FileStats& b)
+{
+    return a.parseSuccess == b.parseSuccess && a.totalEntries == b.totalEntries
+        && a.warnCount == b.warnCount && a.errorCount == b.errorCount
+        && a.fatalCount == b.fatalCount && a.firstEntryTimestamp == b.firstEntryTimestamp
+        && a.lastEntryTimestamp == b.lastEntryTimestamp;
+}
+
+static QString describeStats(const LogParser::FileStats& s)
+{
+    return u"%1 entries W%2 E%3 F%4 [%5 .. %6]%7"_s
+        .arg(s.totalEntries).arg(s.warnCount).arg(s.errorCount).arg(s.fatalCount)
+        .arg(s.firstEntryTimestamp.toString(Qt::ISODateWithMs),
+             s.lastEntryTimestamp.toString(Qt::ISODateWithMs),
+             s.parseSuccess ? QString() : u" (failed)"_s);
+}
+
+// Пишет близнецов `<name>` и `<name>.gz`; gz — одним потоком или частями.
+static void writeTwins(const QString& plainPath, const QByteArray& content, int members = 1)
+{
+    writeFile(plainPath, content);
+    QList<QByteArray> parts;
+    const qsizetype step = members > 1 ? content.size() / members + 1 : content.size();
+    for (qsizetype at = 0; at < content.size(); at += step)
+        parts << content.mid(at, step);
+    if (parts.isEmpty())
+        parts << QByteArray();
+    writeFile(plainPath + u".gz"_s, testgz::members(parts));
+}
+
+static void testGzipNames()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QByteArray line = "2026-01-02 03:04:05 INFO  compressed\n";
+    const QStringList wanted{
+        u"app.log"_s, u"app.log.1.gz"_s, u"app.log.2.gz"_s, u"app.log.gz"_s,
+        u"app.log-20260101.gz"_s, u"notes.TXT.GZ"_s,
+    };
+    const QStringList unwanted{
+        u"app.log.bak.gz"_s, u"data.gz"_s, u"app.log.gz.1"_s, u"app.gz"_s, u"app.log.tgz"_s,
+        u"catalog.1.gz"_s,
+    };
+    for (const QString& name : wanted + unwanted)
+        writeFile(dir + u'/' + name, name.endsWith(u".log"_s) ? line : testgz::member(line));
+
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFileExtensions({ u"log"_s, u"txt"_s });
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() >= 1
+                            && allScanned(tree.invisibleRootItem()); }),
+          "gz names: scan completes");
+    QStringList listed;
+    for (int i = 0; i < tree.topLevelItemCount(); ++i)
+        listed << tree.topLevelItem(i)->text(ScanCol::Name);
+    listed.sort(Qt::CaseInsensitive);
+    QStringList expected = wanted;
+    expected.sort(Qt::CaseInsensitive);
+    if (listed != expected) {
+        ++g_failures;
+        std::fprintf(stderr, "FAIL gz names: listed [%s], expected [%s]\n",
+                     qPrintable(listed.join(u", "_s)), qPrintable(expected.join(u", "_s)));
+    }
+    for (const QString& name : wanted)
+        CHECK(entriesOf(tree, name) == u"1"_s,
+              qPrintable(u"gz names: %1 is analysed through the decompressor"_s.arg(name)));
+
+    // Расширение, заданное в настройках вместе с «.gz», работает как прежде.
+    CHECK(scannerNameMatches(u"app.log.gz", { u"log.gz"_s }), "gz names: a 'log.gz' extension");
+    CHECK(scannerNameMatches(u"app.log.1.gz", { u"log.gz"_s }) == false,
+          "gz names: 'log.gz' is a component followed by a rotation tail, as before");
+    CHECK(scannerNameMatches(u"data.gz", { u"gz"_s }), "gz names: a bare 'gz' extension");
+    CHECK(scannerNameMatches(u"app.log.1.gz", { u"log"_s }), "gz names: a compressed rotation");
+    CHECK(!scannerNameMatches(u"data.gz", { u"log"_s }), "gz names: not a log without .gz");
+}
+
+// Счётчики `.gz` = счётчики близнеца: прямой разбор и дерево сканера.
+static void testGzipCounts()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    QByteArray crlf = kMultilineLog;
+    crlf.replace("\n", "\r\n");
+    const QString cyr = testdocs::cyrillicLogText(3);
+    struct Case {
+        const char* name;
+        QByteArray bytes;
+        int members = 1;
+    };
+    QByteArray big;
+    for (int i = 0; big.size() < 3 * 1024 * 1024; ++i)
+        big += "2026-03-01 10:" + QByteArray::number(10 + i / 60000 % 40) + ":00 "
+             + (i % 97 == 0 ? "ERROR" : i % 13 == 0 ? "WARN " : "INFO ")
+             + " line " + QByteArray::number(i) + "\n"
+             + (i % 50 == 0 ? "    at continuation\n" : "");
+    const QList<Case> cases{
+        { "multiline", kMultilineLog },
+        { "multiline-crlf", crlf },
+        { "torn-tail", kMultilineLog.chopped(1) },
+        { "three-members", kMultilineLog, 3 },
+        { "utf8-bom", QByteArray("\xEF\xBB\xBF") + kMultilineLog },
+        { "utf16le", encodeUtf16(kMultilineLog, QStringConverter::Utf16LE, true) },
+        { "utf16be", encodeUtf16(kMultilineLog, QStringConverter::Utf16BE, true) },
+        { "cp1251", testdocs::encodeText(cyr, TextEncoding::Windows1251) },
+        { "syslog", "Mar  1 10:00:02 web01 sshd[7]: Accepted publickey\n"
+                    "Mar  1 10:00:03 web01 sshd[7]: error: closed\n" },
+        { "empty", QByteArray() },
+        { "big", big, 4 },
+    };
+    for (const Case& c : cases) {
+        const QString plain = dir + u'/' + QString::fromLatin1(c.name) + u".log"_s;
+        writeTwins(plain, c.bytes, c.members);
+        LogParser parser;
+        const LogParser::StatsScan want = parser.analyzeFileForStats(plain);
+        const LogParser::StatsScan got = parser.analyzeFileForStats(plain + u".gz"_s);
+        if (!sameStats(want.stats, got.stats) || !sameStats(want.complete, got.complete)) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL gz counts %s: .gz %s, twin %s\n", c.name,
+                         qPrintable(describeStats(got.stats)), qPrintable(describeStats(want.stats)));
+        }
+        CHECK(got.stats.fileSize == QFileInfo(plain + u".gz"_s).size(),
+              qPrintable(u"gz counts %1: the size is the size on disk"_s.arg(c.name)));
+        CHECK(got.next.offset == 0,
+              qPrintable(u"gz counts %1: a compressed file offers no resume point"_s.arg(c.name)));
+    }
+
+    // Строка без конца длиннее предела считается по голове: буфер не растёт
+    // без предела (`.gz` из одних нулей распаковывается в гигабайты), а
+    // цифры — как у вкладки и у близнеца.
+    {
+        const QByteArray longLine = "2026-03-01 09:00:00 ERROR "
+            + QByteArray(int(LogParser::kMaxStatsLineBytes) * 2 + 12345, 'x') + "\n";
+        const QString plain = dir + u"/long-line.log"_s;
+        writeTwins(plain, longLine + kMultilineLog + longLine.chopped(1), 2);
+        checkAgainstTab(plain, "a line longer than the stats buffer", /*indexedToo=*/false);
+        LogParser parser;
+        const LogParser::StatsScan want = parser.analyzeFileForStats(plain);
+        const LogParser::StatsScan got = parser.analyzeFileForStats(plain + u".gz"_s);
+        CHECK(sameStats(want.stats, got.stats) && want.stats.totalEntries == 7
+                  && want.stats.errorCount == 3,
+              "gz counts: over-long lines count once each, the torn last one too (the banner continues the first)");
+        CHECK(want.next.offset == longLine.size() + kMultilineLog.size(),
+              "over-long lines: the resume point is the start of the torn line");
+        LogParser::StatsResume resume = want.next;
+        appendFile(plain, "\n");
+        const LogParser::StatsScan tail = parser.analyzeFileForStats(plain, resume);
+        CHECK(tail.stats.parseSuccess && tail.stats.totalEntries == 1 && tail.stats.errorCount == 1,
+              "over-long lines: the torn line is read again from its start");
+    }
+
+    // Отменённый разбор (новый скан, закрытие сканера) — без цифр.
+    {
+        std::atomic<bool> cancelled{ true };
+        LogParser parser;
+        for (const QString& path : { dir + u"/big.log"_s, dir + u"/big.log.gz"_s })
+            CHECK(!parser.analyzeFileForStats(path, LogParser::StatsResume(), &cancelled)
+                       .stats.parseSuccess,
+                  "gz counts: a cancelled pass reports no numbers");
+    }
+
+    // Повреждённые: обрыв и неверная CRC — «Parse Failed», а не полсчёта.
+    const QByteArray good = testgz::member(kMultilineLog);
+    QByteArray badCrc = good;
+    badCrc[badCrc.size() - 8] = char(badCrc[badCrc.size() - 8] ^ 0x55);
+    writeFile(dir + u"/broken-cut.log.gz"_s, good.left(good.size() / 2));
+    writeFile(dir + u"/broken-crc.log.gz"_s, badCrc);
+    for (const char* name : { "broken-cut.log.gz", "broken-crc.log.gz" }) {
+        LogParser parser;
+        CHECK(!parser.analyzeFileForStats(dir + u'/' + QString::fromLatin1(name)).stats.parseSuccess,
+              qPrintable(u"gz counts: %1 fails to parse"_s.arg(name)));
+    }
+
+    // Через дерево: колонки близнецов одинаковы, Size — размер на диске.
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.scan(dir);
+    const int files = int(cases.size()) * 2 + 2 + 2;   // + broken-*, long-line twins
+    CHECK(waitFor([&] { return tree.topLevelItemCount() == files
+                            && allScanned(tree.invisibleRootItem()); }),
+          "gz counts: scan completes");
+    for (const Case& c : cases) {
+        const QString name = QString::fromLatin1(c.name) + u".log"_s;
+        QTreeWidgetItem* plain = findItem(tree.invisibleRootItem(), name);
+        QTreeWidgetItem* packed = findItem(tree.invisibleRootItem(), name + u".gz"_s);
+        CHECK(plain && packed, qPrintable(u"gz tree %1: both twins are listed"_s.arg(c.name)));
+        if (!plain || !packed)
+            continue;
+        for (const int col : { int(ScanCol::Entries), int(ScanCol::From), int(ScanCol::To),
+                               int(ScanCol::Alerts) }) {
+            if (plain->text(col) != packed->text(col)) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL gz tree %s column %d: .gz '%s', twin '%s'\n", c.name,
+                             col, qPrintable(packed->text(col)), qPrintable(plain->text(col)));
+            }
+        }
+        CHECK(packed->data(ScanCol::Size, ScanRole::SortKey).toLongLong()
+                  == QFileInfo(dir + u'/' + name + u".gz"_s).size(),
+              qPrintable(u"gz tree %1: Size is the compressed size"_s.arg(c.name)));
+    }
+    CHECK(entriesOf(tree, u"broken-cut.log.gz"_s) == u"Parse Failed"_s,
+          "gz tree: a truncated archive says Parse Failed");
+
+    // Переписанный (дописан ещё один поток, `cat more.gz >> app.log.gz`) —
+    // пересчитывается целиком, цифры = полный разбор.
+    int rescans = 0;
+    QObject::connect(&scanner, &DirectoryScanner::rescanFinished, &tree,
+                     [&](int, int, int) { ++rescans; });
+    const QString grows = dir + u"/multiline.log.gz"_s;
+    appendFile(grows, testgz::member("2026-03-01 10:00:05 ERROR appended as a member\n"));
+    scanner.rescan();
+    CHECK(waitFor([&] { return rescans == 1 && allScanned(tree.invisibleRootItem()); }),
+          "gz rescan finishes");
+    LogParser parser;
+    const LogParser::FileStats whole = parser.analyzeFileForStats(grows).stats;
+    CHECK(whole.totalEntries == 7 && whole.errorCount == 2,
+          "gz rescan: the appended member is part of the file");
+    CHECK(entriesOf(tree, u"multiline.log.gz"_s) == QString::number(whole.totalEntries),
+          "gz rescan: the grown archive is counted again in full");
+}
+
+// Фильтр по содержимому: `.gz` отвечает как близнец — каждая кодировка,
+// каждый размер блока, предварительное решение и его пересмотр; через
+// дерево сканера — те же файлы.
+static void testGzipContent()
+{
+    QTemporaryDir tmp;
+    const QString dir = tmp.path();
+    const QList<ContentProbe> probes = cyrillicProbes();
+    const QString text = testdocs::cyrillicLogText(4);
+
+    const auto compare = [&](const QString& plain, const QList<ContentProbe>& list,
+                             const QList<qint64>& blocks, const QString& what) {
+        for (const ContentProbe& probe : list) {
+            for (const qint64 block : blocks) {
+                const FileContentSearch::Result want = searchFile(plain, probe, block);
+                const FileContentSearch::Result got = searchFile(plain + u".gz"_s, probe, block);
+                if (got.matched != want.matched || got.usedEncoding != want.usedEncoding
+                    || got.dependsOnFallback != want.dependsOnFallback || !got.readable) {
+                    ++g_failures;
+                    std::fprintf(stderr,
+                                 "FAIL gz content %s %s (block %lld): .gz %d as %s, twin %d as %s\n",
+                                 qPrintable(what), qPrintable(describeProbe(probe)),
+                                 (long long)block, int(got.matched),
+                                 qPrintable(TextEncodings::displayName(got.usedEncoding)),
+                                 int(want.matched),
+                                 qPrintable(TextEncodings::displayName(want.usedEncoding)));
+                }
+            }
+        }
+    };
+
+    for (const QString& kind : kEncodingKinds) {
+        const QString plain = dir + u"/enc-"_s + QString(kind).replace(u' ', u'_') + u".log"_s;
+        writeTwins(plain, encodeFixture(text, kind), kind == u"Windows-1251"_s ? 3 : 1);
+        compare(plain, probes, { 16, 61, 4096, FileContentSearch::kReadBlockBytes }, kind);
+    }
+
+    // Предварительное решение и окно 64 КБ за краем блока: у файла окно
+    // дочитывается вторым дескриптором, у потока — тем же чтением вперёд.
+    QByteArray asciiPad;
+    for (int i = 0; asciiPad.size() < 300 * 1024; ++i)
+        asciiPad += "2026-03-01 10:00:00 INFO  padding line " + QByteArray::number(i) + "\n";
+    const QString cyr = testdocs::cyrillicLogText(0);
+    const QList<QPair<const char*, QByteArray>> provisional{
+        { "garbage then UTF-8",
+          QByteArray("2026-03-01 09:59:59 INFO  torn \xFF byte\n") + asciiPad + cyr.toUtf8() },
+        { "UTF-8 word then cp1251",
+          QByteArray("2026-03-01 09:59:59 ERROR сбой\n") + asciiPad
+              + testdocs::encodeText(cyr, TextEncoding::Windows1251) },
+        { "cp1251 word only",
+          QByteArray("2026-03-01 09:59:59 ERROR ")
+              + testdocs::encodeText(u"сбой"_s, TextEncoding::Windows1251) + "\n" + asciiPad },
+        { "cp1251 beyond the first block window",
+          asciiPad.left(250 * 1024) + "2026-03-01 09:59:59 ERROR "
+              + testdocs::encodeText(u"сбой"_s, TextEncoding::Windows1251) + "\n" + asciiPad
+              + testdocs::encodeText(cyr, TextEncoding::Windows1251) },
+    };
+    const QList<ContentProbe> provisionalProbes{
+        { u"сбой"_s, false, false, -1 }, { u"соединения"_s, false, false, -1 },
+        { u"torn"_s, false, false, -1 }, { u"ERROR сбой$"_s, true, true, -1 },
+    };
+    int caseNo = 0;
+    for (const auto& [name, bytes] : provisional) {
+        const QString plain = dir + u"/prov-%1.log"_s.arg(++caseNo);
+        writeTwins(plain, bytes, 2);
+        compare(plain, provisionalProbes, { 64, 4096, 64 * 1024, FileContentSearch::kReadBlockBytes },
+                QString::fromLatin1(name));
+        // Запомненные строки не влезли — пересмотр перечитывает поток с начала.
+        for (const ContentProbe& probe : provisionalProbes) {
+            std::atomic<qint64> done{ 0 };
+            FileContentSearch::Options options;
+            options.fallback = testdocs::kTestFallbackEncoding;
+            options.blockBytes = 4096;
+            options.retainedLimitBytes = 1;
+            options.bytesDone = &done;
+            const ContentQuery query(probe.text, probe.regex,
+                                     probe.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+            const bool reread = FileContentSearch::search(plain + u".gz"_s, query, options).matched;
+            const bool want = searchFile(plain, probe).matched;
+            const qint64 size = QFileInfo(plain + u".gz"_s).size();
+            if (reread != want || done.load() > size) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL gz content %s %s (reread): %d vs %d, %lld of %lld bytes\n",
+                             name, qPrintable(describeProbe(probe)), int(reread), int(want),
+                             (long long)done.load(), (long long)size);
+            }
+        }
+    }
+
+    // Прогресс — в сжатых байтах и доходит до размера файла на диске.
+    {
+        const QString plain = dir + u"/enc-Windows-1251.log"_s;
+        std::atomic<qint64> done{ 0 };
+        FileContentSearch::Options options;
+        options.fallback = testdocs::kTestFallbackEncoding;
+        options.blockBytes = 4096;
+        options.bytesDone = &done;
+        const ContentQuery query(u"зззнетничего"_s, false, Qt::CaseInsensitive);
+        const FileContentSearch::Result r = FileContentSearch::search(plain + u".gz"_s, query, options);
+        const qint64 size = QFileInfo(plain + u".gz"_s).size();
+        if (r.matched || r.bytesRead != size || done.load() != size) {
+            ++g_failures;
+            std::fprintf(stderr, "FAIL gz progress: read %lld, counted %lld, file %lld bytes\n",
+                         (long long)r.bytesRead, (long long)done.load(), (long long)size);
+        }
+    }
+
+    // Повреждённый архив: нечитаемый, совпадения нет.
+    {
+        const QByteArray good = testgz::member(text.toUtf8());
+        writeFile(dir + u"/broken.log.gz"_s, good.left(good.size() / 2));
+        const FileContentSearch::Result r = searchFile(dir + u"/broken.log.gz"_s,
+                                                       { u"зззнетничего"_s, false, false });
+        CHECK(!r.readable && !r.matched, "gz content: a truncated archive is reported unreadable");
+    }
+
+    // Через сканер: каждый запрос находит одни и те же близнецы.
+    QTreeWidget tree;
+    DirectoryScanner scanner(&tree);
+    scanner.setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner.setFallbackEncoding(testdocs::kTestFallbackEncoding);
+    scanner.scan(dir);
+    CHECK(waitFor([&] { return tree.topLevelItemCount() > 2 * kEncodingKinds.size()
+                            && allScanned(tree.invisibleRootItem()); }),
+          "gz content: scan completes");
+    int matched = -1;
+    QObject::connect(&scanner, &DirectoryScanner::contentFilterFinished,
+                     [&](int m, int) { matched = m; });
+    for (const ContentProbe& probe : probes) {
+        matched = -1;
+        scanner.setContentFilter(probe.text, probe.regex, probe.caseSensitive);
+        scanner.applyFilters();
+        CHECK(waitFor([&] { return matched >= 0; }), "gz content: search finishes");
+        for (const QString& kind : kEncodingKinds) {
+            const QString name = u"enc-"_s + QString(kind).replace(u' ', u'_') + u".log"_s;
+            QTreeWidgetItem* plain = findItem(tree.invisibleRootItem(), name);
+            QTreeWidgetItem* packed = findItem(tree.invisibleRootItem(), name + u".gz"_s);
+            if (!plain || !packed || plain->isHidden() != packed->isHidden()
+                || packed->isHidden() == (probe.expect == 1)) {
+                ++g_failures;
+                std::fprintf(stderr, "FAIL gz scanner %s %s: .gz %s, twin %s\n",
+                             qPrintable(kind), qPrintable(describeProbe(probe)),
+                             packed && !packed->isHidden() ? "shown" : "hidden",
+                             plain && !plain->isHidden() ? "shown" : "hidden");
+            }
+        }
+    }
+}
+
+// Отмена посреди `.gz`: воркер выходит между блоками, совпадения не сообщает;
+// флаг доходит и до распаковщика (вход без вывода не держит read()).
+static void testGzipCancel()
+{
+    QTemporaryDir tmp;
+    const QString path = tmp.path() + u"/huge.log.gz"_s;
+    QByteArray body;
+    {
+        // Не повторяющийся текст: сжатое — мегабайты, а не килобайты, иначе
+        // «остановился посреди» не отличить от «дочитал».
+        quint32 seed = 12345;
+        while (body.size() < 24 * 1024 * 1024) {
+            seed = seed * 1664525u + 1013904223u;
+            body += "2026-03-01 10:00:00 INFO  nothing to see here " + QByteArray::number(seed, 16)
+                  + "\n";
+        }
+        body += testdocs::encodeText(u"2026-03-01 10:00:01 ERROR сбой в самом конце\n"_s,
+                                     TextEncoding::Windows1251);
+    }
+    writeFile(path, testgz::members({ body.left(body.size() / 2), body.mid(body.size() / 2) }, 1));
+    const qint64 size = QFileInfo(path).size();
+    const FileContentSearch::Result whole = searchFile(path, { u"сбой"_s, false, false });
+    CHECK(whole.matched && whole.bytesRead == size,
+          "gz cancel: the needle is at the end, and the whole archive is accounted for");
+
+    std::atomic<bool> cancelled{ false };
+    std::atomic<qint64> bytesDone{ 0 };
+    qint64 cancelAt = -1;
+    FileContentSearch::Options options;
+    options.fallback = TextEncoding::Windows1251;
+    options.blockBytes = 64 * 1024;
+    options.cancelled = &cancelled;
+    options.bytesDone = &bytesDone;
+    options.afterBlock = [&](qint64 end) {
+        if (end >= 1024 * 1024 && cancelAt < 0) {
+            cancelAt = bytesDone.load();
+            cancelled.store(true);
+        }
+    };
+    const ContentQuery query(u"сбой"_s, false, Qt::CaseInsensitive);
+    const FileContentSearch::Result result = FileContentSearch::search(path, query, options);
+    CHECK(result.cancelled, "gz cancel: the search reports cancellation");
+    CHECK(!result.matched, "gz cancel: a cancelled search matches nothing");
+    CHECK(result.bytesRead == bytesDone.load() && result.bytesRead < size / 2,
+          "gz cancel: the worker stops at the next block, and reports what it read");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1187,6 +1617,10 @@ int main(int argc, char** argv)
     testStatsAcrossEncodings();
     testContentIncremental();
     testPre1970Dates();
+    testGzipNames();
+    testGzipCounts();
+    testGzipContent();
+    testGzipCancel();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =

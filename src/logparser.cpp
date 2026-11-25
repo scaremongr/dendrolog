@@ -1,6 +1,7 @@
 #include "logparser.h"
 #include "patternheuristics.h"
 #include "bytelinereader.h"
+#include "gzipdevice.h"
 #include <QFile>
 #include <QStringDecoder>
 #include <QTextStream>
@@ -412,7 +413,8 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
 }
 
 LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
-                                                    const StatsResume& from) const
+                                                    const StatsResume& from,
+                                                    const std::atomic<bool>* cancelled) const
 {
     StatsScan scan;
     FileStats& stats = scan.stats;
@@ -428,13 +430,31 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         return scan;
     }
 
+    // Сжатый лог (F-2, PR 3) — по сигнатуре, потоком распакованных байтов,
+    // без записи на диск. Продолжения с середины у него нет: поток не
+    // перематывается, а дозаписи у архива не бывает — изменившийся файл
+    // разбирается заново (next.offset остаётся 0).
+    std::optional<GzipDevice> gzip;
+    if (GzipDevice::hasSignature(file.peek(2))) {
+        gzip.emplace(&file);
+        if (from.offset != 0 || !gzip->open(QIODevice::ReadOnly)) {
+            stats.parseSuccess = false;
+            scan.complete = stats;
+            return scan;
+        }
+    }
+    QIODevice& input = gzip ? static_cast<QIODevice&>(*gzip) : file;
+
     // Кодировка: с начала файла — по BOM, как автоопределение QTextStream у
     // разбора вкладки; хвост — в кодировке, известной по прошлому разбору.
     QStringConverter::Encoding encoding = from.encoding;
     qint64 offset = from.offset;
+    QByteArray pending;           // байты начатой, ещё не законченной строки
     if (offset == 0) {
-        const QByteArray head = file.read(4);
-        const auto detected = QStringConverter::encodingForData(head);
+        // Голова читается и остаётся в разборе (не перечитывается seek'ом:
+        // поток `.gz` назад не ходит).
+        pending = input.read(4);
+        const auto detected = QStringConverter::encodingForData(pending);
         if (detected) {
             // Строки начинаются за BOM: в UTF-8 он три байта, в UTF-16/32 —
             // одна кодовая единица.
@@ -443,9 +463,10 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         } else {
             encoding = QStringConverter::Utf8;
         }
+        pending.remove(0, offset);
     }
     const CodeUnit unit = codeUnitOf(encoding);
-    if (offset % unit.width != 0 || !file.seek(offset)) {
+    if (offset % unit.width != 0 || (from.offset != 0 && !file.seek(offset))) {
         stats.parseSuccess = false;
         scan.complete = stats;
         return scan;
@@ -504,17 +525,40 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         return -1;
     };
 
+    const auto isCancelled = [cancelled] {
+        return cancelled && cancelled->load(std::memory_order_relaxed);
+    };
+    if (gzip)
+        gzip->setAbortFlag(cancelled);
+
     constexpr qint64 kChunk = 1 << 20;
-    QByteArray pending;           // байты начатой, ещё не законченной строки
     qint64 lineStart = offset;    // сырое смещение начала pending
-    while (true) {
-        const QByteArray chunk = file.read(kChunk);
-        if (chunk.isEmpty())
-            break;
-        pending += chunk;
+    qsizetype searchFrom = 0;     // pending до этого места '\n' уже не содержит
+    qint64 dropped = 0;           // > 0: строка длиннее kMaxStatsLineBytes, в pending — её голова
+    while (!isCancelled()) {
+        // Последний проход — с пустым чтением: голова, прочитанная до цикла,
+        // тоже режется на строки.
+        const QByteArray chunk = input.read(kChunk);
+        if (dropped > 0) {
+            // Хвост слишком длинной строки: только найти её конец.
+            const qsizetype newline = findNewline(chunk, 0);
+            if (newline < 0) {
+                dropped += chunk.size();
+                if (chunk.isEmpty())
+                    break;
+                continue;
+            }
+            countLine(pending);
+            lineStart += pending.size() + dropped + newline + unit.width;
+            pending = chunk.mid(newline + unit.width);
+            dropped = 0;
+            searchFrom = 0;
+        } else {
+            pending += chunk;
+        }
         qsizetype pos = 0;
         while (true) {
-            const qsizetype newline = findNewline(pending, pos);
+            const qsizetype newline = findNewline(pending, std::max(pos, searchFrom));
             if (newline < 0)
                 break;
             countLine(pending.mid(pos, newline - pos));
@@ -522,13 +566,38 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
             pos = newline + unit.width;
         }
         pending.remove(0, pos);
+        // Поиск продолжится с конца прочитанного (по кодовым единицам), а не
+        // с начала строки: длинная строка не перечитывается на каждый кусок.
+        searchFrom = pending.size() - pending.size() % unit.width;
+        // Строка без конца (бинарный файл, `.gz` из одних нулей) не растит
+        // буфер без предела: для счёта нужна голова — метка и уровень.
+        if (pending.size() > kMaxStatsLineBytes) {
+            dropped = pending.size() - kMaxStatsLineBytes;
+            pending.truncate(kMaxStatsLineBytes);
+        }
+        if (chunk.isEmpty())
+            break;
+    }
+
+    if (isCancelled()) {
+        stats.parseSuccess = false;
+        scan.complete = stats;
+        return scan;
+    }
+
+    // Поток `.gz` оборвался или не сошёлся с CRC: цифры не описывают файл
+    // («Parse Failed», как у вкладки, которая такой архив не откроет).
+    if (gzip && gzip->error() != GzipDevice::Error::None) {
+        stats.parseSuccess = false;
+        scan.complete = stats;
+        return scan;
     }
 
     // Целые строки кончились: это точка продолжения. Оборванная последняя
     // строка (писатель не дописал '\n') считается в показанных цифрах, но не
     // в базе — при дозаписи она перечитается целиком.
     scan.complete = stats;
-    scan.next.offset = lineStart;
+    scan.next.offset = gzip ? 0 : lineStart;
     scan.next.encoding = encoding;
     scan.next.inRecord = inRecord;
     if (pending.size() >= unit.width)

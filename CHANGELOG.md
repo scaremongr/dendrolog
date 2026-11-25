@@ -8,7 +8,8 @@ All notable changes to DendroLog are documented here. The format follows
 
 ### Added
 - **Compressed logs.** A `.gz` file opens in a tab like any log — from the
-  Open dialog, a drop, the command line or Recent Files; gzip is recognised
+  Open dialog, a drop, the command line, Recent Files or the Directory
+  Scanner; gzip is recognised
   by its bytes, concatenated gzip files included. It is unpacked in the
   background to a temporary file in the application's cache folder: the
   status bar shows the progress and **Cancel Unpacking** stops it. The tab,
@@ -48,6 +49,13 @@ All notable changes to DendroLog are documented here. The format follows
 - **Wrap / Unwrap Current Line** in the `View` menu (`Space` while the log
   has the focus, can be reassigned in Settings). In a field or on a panel
   button `Space` keeps its usual meaning.
+- **Compressed logs in the Directory Scanner.** `app.log.gz`, `app.log.1.gz`
+  and other `.gz` files whose name without `.gz` is a log are listed in the
+  tree. Entry counts, W/E/F, From / To and the content filter read them
+  decompressed on the fly (nothing is written to disk) and give the same
+  results as the uncompressed file, in every encoding; the content filter's
+  progress counts compressed bytes, Size shows the size on disk, a damaged
+  archive shows “Parse Failed”.
 
 ### Changed
 - The file badge no longer sits at the right of every line of a merged tab:
