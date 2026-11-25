@@ -144,8 +144,13 @@ LogListView::LogListView(QWidget *parent)
         rebuildHeightCache();
         updateScrollbar();
 
-        // Восстанавливаем позицию скролла по якорной строке
+        // Восстанавливаем позицию скролла по якорной строке. rebuildHeightCache
+        // даёт ОЦЕНКИ высот (перенос строк) — над якорем они уточняются, иначе
+        // накопленная ошибка оценки (высокая строка в несколько экранов)
+        // уводит якорь далеко от прежнего места.
         if (savedAnchorRow >= 0 && model() && savedAnchorRow < model()->rowCount()) {
+            refineHeightsAbove(savedAnchorRow);
+            updateScrollbar();
             verticalScrollBar()->setValue(
                 contentYToScrollValue(rowYOffset(savedAnchorRow) - savedAnchorOffset));
         }
@@ -967,15 +972,40 @@ void LogListView::applyLeftColumns()
         viewport()->update();   // метки могли смениться при той же ширине
         return;
     }
-    // Ширина текста сменилась — как смена ширины вьюпорта: состояния и
-    // высоты строк заново, вид держит якорь (первую видимую строку).
-    if (m_anchorRow < 0)
-        captureResizeAnchor();
+    // Ширина текста сменилась: состояния и высоты строк заново, вид держит
+    // якорь — выбранную строку, если она на экране (перенос по новой ширине
+    // меняет высоты строк над ней, и она главнее якоря отложенного resize),
+    // иначе якорь отложенного resize или первая видимая строка. Пересчёт — сразу, как у
+    // setWordWrap: отложенный ждал бы, пока скроллбар, урезанный по новой
+    // высоте контента, сдвинет вид, — и снял бы якорь заново по уже
+    // неверной геометрии.
+    int anchorRow = -1;
+    int anchorOffset = 0;
+    const int selected = userSelectedRow();
+    if (selected >= 0 && captureVisibleRowOffset(selected, anchorOffset)) {
+        anchorRow = selected;
+        anchorOffset = qMax(0, anchorOffset);
+    } else {
+        if (m_anchorRow < 0)
+            captureResizeAnchor();
+        anchorRow = m_anchorRow;
+        anchorOffset = m_anchorOffsetInViewport;
+    }
+    m_resizeDebounceTimer->stop();
+    m_anchorRow = -1;
+    m_anchorOffsetInViewport = 0;
     m_fileColumnWidth = width;
     m_lineNumberWidth = numbers;
     ++m_leftColumnRelayouts;
     invalidateRowState(-1, /*preserveTextLengths=*/true);
-    m_resizeDebounceTimer->start(0);
+    rebuildHeightCache();
+    updateScrollbar();
+    if (anchorRow >= 0 && model() && anchorRow < model()->rowCount()) {
+        refineHeightsAbove(anchorRow);
+        updateScrollbar();
+        verticalScrollBar()->setValue(targetScrollValueForRowOffset(anchorRow, anchorOffset));
+    }
+    markNewLinesSeen();
     viewport()->update();
 }
 

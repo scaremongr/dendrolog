@@ -52,6 +52,7 @@
 #include <QSettings>
 #include <QHelpEvent>
 #include <QMouseEvent>
+#include <QScopeGuard>
 #include <QScreen>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -631,11 +632,18 @@ static void checkLegendCounts(LogViewWidget& tab, const QString& label)
     }
 }
 
-static void checkMergedTab(const QDir& dir, bool indexed)
+// fontSize > 0 — тот же сценарий крупным шрифтом: колонка шире, перенос
+// сильнее (так на Windows CI, где моноширинный шрифт шире).
+static void checkMergedTab(const QDir& dir, bool indexed, int fontSize = 0)
 {
-    const QString label = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
+    const QString label = QString(indexed ? QStringLiteral("indexed") : QStringLiteral("resident"))
+                        + (fontSize > 0 ? QStringLiteral("-%1pt").arg(fontSize) : QString());
     section(indexed ? "merged tab, indexed: file column and legend" : "merged tab, resident: file column and legend");
     AppSettings& settings = AppSettings::instance();
+    const int fontBefore = settings.fontSize();
+    if (fontSize > 0)
+        settings.setFontSize(fontSize);
+    const auto restoreFont = qScopeGuard([&] { settings.setFontSize(fontBefore); });
     settings.setIndexedThresholdMB(indexed ? 0 : 512);
     settings.setFileLabelMode(FileLabelMode::Name);
     const QString a = testdocs::writeFile(dir, QStringLiteral("payment-service-prod-eu-1-%1.log").arg(label),
@@ -810,6 +818,15 @@ static void checkMergedTab(const QDir& dir, bool indexed)
                   && shortA.size() == 1 && shortA.first() != nameA && shortA.first().size() <= 16,
               QStringLiteral("%1: auto width — 16 characters, a long name is shortened: '%2'").arg(label, shortA.join('|')));
         CHECK(view.fileLabelRect(rowA).right() < view.textLeft(), label + ": the label stays inside its column");
+        // Колонка не шире половины вида: шире — предел.
+        view.setFileColumnChars(400);
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
+        const qreal charW = QFontMetricsF(view.font()).horizontalAdvance(QLatin1Char('0'));
+        CHECK(view.effectiveFileColumnChars() * charW <= view.viewport()->width() / 2 + charW,
+              QStringLiteral("%1: the column is at most half the view (%2 chars)").arg(label).arg(view.effectiveFileColumnChars()));
+        // Вид достаточно широк, чтобы имя поместилось (шрифт на Windows шире).
+        const int tabWidth = tab.width();
+        tab.resize(qMax(tabWidth, int(2 * (nameA.size() + 6) * charW) + 200), tab.height());
         view.setFileColumnChars(int(nameA.size()) + 2);
         testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
         CHECK(view.fileColumnWidth() > autoWidth && view.fileLabelLines(rowA) == QStringList{nameA},
@@ -849,6 +866,8 @@ static void checkMergedTab(const QDir& dir, bool indexed)
         testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
         CHECK(view.fileColumnChars() == 0 && settings.fileColumnChars() == 0 && view.fileColumnWidth() == autoWidth,
               label + ": a double click on the edge returns the automatic width");
+        tab.resize(tabWidth, tab.height());
+        testdocs::waitFor([&] { return !view.hasPendingLayout(); }, 5000);
     }
 
     // Строка в несколько линий (резидентный бэкенд, перенос): имя файла —
@@ -1292,6 +1311,7 @@ int main(int argc, char** argv)
     checkFileLabelsTable();
     checkMergedTab(dir, false);
     checkMergedTab(dir, true);
+    checkMergedTab(dir, false, 16);
     checkLineNumbers(dir, false);
     checkLineNumbers(dir, true);
     checkFileFilter(dir, false);
