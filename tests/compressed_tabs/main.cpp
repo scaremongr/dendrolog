@@ -204,7 +204,7 @@ static void checkCloseAndCancel(const QDir& dir)
     QByteArray big;
     big.reserve(24 << 20);
     for (int i = 0; big.size() < (24 << 20); ++i)
-        big += record(i, "INFO", "a fairly long line of text to unpack " + QByteArray::number(i * 7919));
+        big += record(i, "INFO", "a fairly long line of text to unpack " + QByteArray::number(qint64(i) * 7919));
     const QString gz = testdocs::writeFile(dir, "big.log.gz", testgzip::gzip(big, 1));
     {
         auto tab = newTab();
