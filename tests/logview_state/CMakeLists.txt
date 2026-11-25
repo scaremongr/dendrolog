@@ -1,1 +1,1 @@
-dendrolog_add_test(logview_state LIBRARIES dendrolog_widgets TIMEOUT 900 COST 100)
+dendrolog_add_test(logview_state LIBRARIES dendrolog_widgets TIMEOUT 900 COST 37)

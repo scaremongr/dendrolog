@@ -47,6 +47,7 @@
 #include "logviewwidget.h"
 #include "navhistory.h"
 #include "testdocuments.h"
+#include "viewidle.h"
 
 #include <QApplication>
 #include <QFrame>
@@ -104,6 +105,11 @@ static void setContext(const QString& context)
     g_context = context;
     g_contextFailures = 0;
 }
+
+// Ожидание — по состоянию, а не по времени (P-6): модель не фильтрует,
+// отложенное доставлено, все view доделали раскладку (viewidle.h).
+static bool settleAll(LogModel& model) { return settleViews(model); }
+static void idle() { CHECK(idleViews(), QStringLiteral("view не пришли в покой")); }
 
 // ---------------------------------------------------------------------------
 // Наблюдение за view
@@ -263,7 +269,7 @@ static int pickRow(const LogModel& model, double position)
 
 static void settleChecked(LogModel& model)
 {
-    CHECK(settle(model), QStringLiteral("модель не пришла в покой"));
+    CHECK(settleAll(model), QStringLiteral("модель не пришла в покой"));
 }
 
 static void clearFilters(LogModel& model)
@@ -360,9 +366,9 @@ static QVector<Trigger> triggers()
                   [](Backend& b, const EntryInfo& e) {
                       LogModel& m = *b.doc.model;
                       m.setLogLevelFilter({ LogLevel::Fatal });
-                      settle(m);
+                      settleAll(m);
                       m.setLogLevelFilter({ LogLevel::Fatal, LogLevel::Error });
-                      settle(m);
+                      settleAll(m);
                       m.setLogLevelFilter({ LogLevel::Fatal, LogLevel::Error, e.level });
                   },
                   clearLevels };
@@ -498,12 +504,12 @@ static QVector<Trigger> triggers()
     list.append({ QStringLiteral("полный лог: показать из фильтра уровней (запись видна)"),
                   [](Backend& b, const EntryInfo& e) {
                       b.doc.model->setLogLevelFilter({ e.level, LogLevel::Error });
-                      settle(*b.doc.model);
+                      settleAll(*b.doc.model);
                       fullLogOf(b).show();
                   },
                   [](Backend& b) {
                       fullLogOf(b).returnToFiltered();
-                      settle(*b.doc.model);
+                      settleAll(*b.doc.model);
                       b.doc.model->setLogLevelFilter({});
                   } });
 
@@ -513,12 +519,12 @@ static QVector<Trigger> triggers()
         Trigger t{ QStringLiteral("полный лог: показать, когда запись скрыта (Exclude)"),
                    [](Backend& b, const EntryInfo& e) {
                        b.doc.model->setFilterRules(singleRule(FilterRule::Action::Exclude, e.text));
-                       settle(*b.doc.model);
+                       settleAll(*b.doc.model);
                        fullLogOf(b).show();
                    },
                    [](Backend& b) {
                        fullLogOf(b).returnToFiltered();
-                       settle(*b.doc.model);
+                       settleAll(*b.doc.model);
                        b.doc.model->setFilterRules(FilterRuleSet());
                    } };
         t.multiStep = true;
@@ -530,7 +536,7 @@ static QVector<Trigger> triggers()
         Trigger t{ QStringLiteral("полный лог: показ, возврат и показ до конца фильтра"),
                    [](Backend& b, const EntryInfo& e) {
                        b.doc.model->setLogLevelFilter({ e.level, LogLevel::Warn });
-                       settle(*b.doc.model);
+                       settleAll(*b.doc.model);
                        FullLogController& fl = fullLogOf(b);
                        fl.show();
                        fl.returnToFiltered();
@@ -578,18 +584,13 @@ static void checkEntryPreserved(const LogListView& view, const LogModel& model,
     }
 }
 
-// Отложенные таймеры view: пересчёт после resize — 150 мс, уточнение высот
-// строк — 0–50 мс. Проверять геометрию раньше — значит ловить промежуточное
-// состояние, а не поведение.
-static constexpr int kViewTimersMs = 250;
-
 static std::unique_ptr<LogListView> makeView(LogModel& model)
 {
     auto view = std::make_unique<LogListView>();
     view->resize(kViewWidth, kViewHeight);
     view->setModel(&model);
     view->show();
-    pump(kViewTimersMs);
+    idle();
     return view;
 }
 
@@ -601,7 +602,7 @@ static void activateWindowFocus(LogListView& view)
 {
     QFocusEvent event(QEvent::FocusIn, Qt::ActiveWindowFocusReason);
     QApplication::sendEvent(&view, &event);
-    pump(30);
+    idle();
 }
 
 static void selectRow(LogListView& view, int row)
@@ -609,7 +610,7 @@ static void selectRow(LogListView& view, int row)
     const QModelIndex index = view.model()->index(row, 0);
     view.setCurrentIndex(index);
     view.scrollTo(index, QAbstractItemView::PositionAtCenter);
-    pump(30);
+    idle();
 }
 
 static const QVector<double> kPositions = { 0.35, 0.6, 0.97 };
@@ -638,8 +639,6 @@ static void runSelectionScenario(Backend& b, LogListView& view, const Trigger& t
     const QRect placeBefore = rowRect(view, start);
     t.apply(b, e);
     settleChecked(model);
-    if (t.rowPlaceUnchanged)
-        pump(kViewTimersMs); // отложенное уточнение высот после reset
     checkEntryPreserved(view, model, e, QStringLiteral("после изменения"));
     if (t.rowPlaceUnchanged) {
         const int cur = currentRow(view);
@@ -684,7 +683,7 @@ static void runViewportScenario(Backend& b, const Trigger& t, double position)
     // ползунком — ни одной строки не выбрал.
     activateWindowFocus(*view);
     view->scrollTo(model.index(start, 0), QAbstractItemView::PositionAtTop);
-    pump(30);
+    idle();
 
     const int top = topVisibleRow(*view);
     CHECK(view->selectionModel()->selectedRows().isEmpty(),
@@ -750,10 +749,9 @@ static void runAddFileScenario(Backend& b, LogListView& view, const QString& sec
 // ---------------------------------------------------------------------------
 
 // G1: собственная геометрия согласована сама с собой.
-// settleMs — пауза после каждой прокрутки: высоты строк уточняются лениво
+// После каждой прокрутки — покой view: высоты строк уточняются лениво
 // (отрисовка + таймер), а без переноса строк они и так точные.
-static void checkGeometry(const QString& name, LogListView& view, int settleMs = 60,
-                          bool lastRowReachable = true)
+static void checkGeometry(const QString& name, LogListView& view, bool lastRowReachable = true)
 {
     setContext(name + QStringLiteral(" / геометрия"));
     const QAbstractItemModel* model = view.model();
@@ -766,7 +764,7 @@ static void checkGeometry(const QString& name, LogListView& view, int settleMs =
             return;
         const QModelIndex index = model->index(row, 0);
         view.scrollTo(index, QAbstractItemView::PositionAtTop);
-        pump(settleMs);
+        idle();
 
         const QRect r = view.visualRect(index);
         CHECK(r.height() > 0,
@@ -797,7 +795,7 @@ static void checkGeometry(const QString& name, LogListView& view, int settleMs =
 
     // Последняя строка достижима и видна целиком.
     view.scrollTo(model->index(rows - 1, 0), QAbstractItemView::PositionAtBottom);
-    pump(kViewTimersMs);
+    idle();
     if (lastRowReachable) {
         CHECK(rowFullyVisible(view, rows - 1),
               QStringLiteral("последняя строка недостижима %1").arg(viewState(view)));
@@ -808,7 +806,7 @@ static void pressKey(LogListView& view, int key)
 {
     QKeyEvent event(QEvent::KeyPress, key, Qt::NoModifier);
     QApplication::sendEvent(&view, &event);
-    pump(kViewTimersMs);
+    idle();
 }
 
 // G2: навигация с клавиатуры двигает текущую строку, выделяет и показывает её.
@@ -879,11 +877,9 @@ static int contextRowNear(const LogModel& model, int row, const QSet<LogLevel>& 
     return -1;
 }
 
-static void settleView(LogModel& model, LogListView& view)
+static void settleView(LogModel& model, LogListView&)
 {
     settleChecked(model);
-    waitFor([&] { return !view.hasPendingLayout(); }, 5000);
-    pump(30);
 }
 
 // Выбранная запись e и верх её строки на экране.
@@ -924,7 +920,7 @@ static void runFullLogChecks(Backend& b, double position)
     CHECK(fl.canShow(), QStringLiteral("фильтр скрывает строки — показывать есть что"));
     view->goToRow(entryRow(model, e));
     view->verticalScrollBar()->setValue(view->verticalScrollBar()->value() + 3 * rowH);
-    pump(30);
+    idle();
     const int top0 = rowRect(*view, entryRow(model, e)).top();
     CHECK(view->userSelectedRow() == entryRow(model, e) && top0 >= 0
               && top0 + rowH <= view->viewport()->height(),
@@ -957,7 +953,7 @@ static void runFullLogChecks(Backend& b, double position)
     if (ctx >= 0) {
         const RecordKey ctxKey = model.keyAt(ctx);
         view->goToRow(ctx);
-        pump(30);
+        idle();
         fl.returnToFiltered();
         settleView(model, *view);
         CHECK(model.logLevelFilter() == levels, QStringLiteral("фильтры вернулись"));
@@ -974,7 +970,7 @@ static void runFullLogChecks(Backend& b, double position)
         // Не уходили со строки — восстановление места, не переход.
         const qsizetype entries = history.entries().size();
         view->goToRow(entryRow(model, e));
-        pump(30);
+        idle();
         const qsizetype afterGo = history.entries().size();
         fl.show();
         settleView(model, *view);
@@ -1015,7 +1011,7 @@ static void runFullLogChecks(Backend& b, double position)
         clearFilters(model);
         view->goToRow(entryRow(model, e));
         view->verticalScrollBar()->setValue(view->verticalScrollBar()->value() - 2 * rowH);
-        pump(30);
+        idle();
         int top1 = rowRect(*view, entryRow(model, e)).top();
         model.setLogLevelFilter(levels);
         const bool filtering = model.isFiltering();
@@ -1052,7 +1048,7 @@ static void runFullLogChecks(Backend& b, double position)
             bar->triggerAction(QAbstractSlider::SliderPageStepAdd);
             settleView(model, *view);
             const int value = bar->value();
-            pump(50);
+            idle();
             CHECK(!fl.isPlacementPending() && bar->value() == value,
                   QStringLiteral("вид остался, где его оставил пользователь: %1 против %2")
                       .arg(bar->value()).arg(value));
@@ -1071,7 +1067,7 @@ static void runFullLogChecks(Backend& b, double position)
         settleView(model, *view);
         view->goToRow(entryRow(model, e));
         view->setFollowTail(true);
-        pump(30);
+        idle();
         CHECK(view->followTail() && view->userSelectedRow() == entryRow(model, e),
               QStringLiteral("предусловие: follow-tail, запись выбрана"));
         fl.show();
@@ -1091,7 +1087,7 @@ static void runFullLogChecks(Backend& b, double position)
         activateWindowFocus(*plain);
         plain->scrollTo(model.index(qMin(entryRow(model, e), model.rowCount() - 1), 0),
                         QAbstractItemView::PositionAtTop);
-        pump(30);
+        idle();
         const int top = topVisibleRow(*plain);
         const EntryInfo t = infoAt(model, top);
         const int topY = rowRect(*plain, top).top();
@@ -1142,7 +1138,7 @@ static void runFullLogTab(const QDir& dir, const QString& schema, bool indexed)
     CHECK(tabSettled(*tab), QStringLiteral("фильтр"));
     const int row = model.rowCount() / 2;
     tab->view()->goToRow(row);
-    pump(30);
+    idle();
     const RecordKey e = model.keyAt(row);
     const auto selectedLine = [&]() {
         const int r = tab->view()->userSelectedRow();
@@ -1248,11 +1244,10 @@ static int lineRow(const LogModel& model, qint64 line)
 
 static bool tabSettled(LogViewWidget& tab)
 {
-    const bool ok = waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); })
-        && settle(*tab.model());
-    waitFor([&] { return !tab.view()->hasPendingLayout(); }, 5000);
-    pump(30);
-    return ok;
+    return waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); })
+        && settleViews(*tab.model(), [&] {
+               return tab.isLoading() || tab.isPositionPending() || tab.fullLog().isPlacementPending();
+           });
 }
 
 static void runRestoreVsUser(const QString& path, const QString& schema, bool indexed)
@@ -1273,7 +1268,7 @@ static void runRestoreVsUser(const QString& path, const QString& schema, bool in
         tab->addLogFile(path);
         CHECK(tabSettled(*tab), QStringLiteral("загрузка"));
         tab->view()->goToRow(lineRow(*tab->model(), 900));
-        pump(20);
+        idle();
         state = tab->captureState();
     }
     setContext(name + QStringLiteral(" / восстановление: без действий пользователя"));
@@ -1444,17 +1439,17 @@ int main(int argc, char** argv)
         auto view = makeView(*b.doc.model);
         view->resize(320, kViewHeight);
         view->setWordWrap(true);
-        pump(400); // дебаунс resize + отложенный пересчёт высот
+        idle(); // дебаунс resize + отложенный пересчёт высот
         // Скроллбар сразу в самый низ, пока высоты последних строк ещё
         // оценки: после их уточнения вид обязан остаться у конца.
         setContext(b.name + QStringLiteral(", перенос строк / скроллбар до конца"));
         view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
-        pump(kViewTimersMs);
+        idle();
         CHECK(rowFullyVisible(*view, b.doc.model->rowCount() - 1),
               QStringLiteral("последняя строка не видна %1").arg(viewState(*view)));
         // Высоты строк уточняются лениво, но навигация и прокрутка обязаны
         // держать текущую строку на экране, а последняя строка — достижима.
-        checkGeometry(b.name + QStringLiteral(", перенос строк"), *view, kViewTimersMs);
+        checkGeometry(b.name + QStringLiteral(", перенос строк"), *view);
         checkKeyboard(b.name + QStringLiteral(", перенос строк"), *view);
     }
 

@@ -41,6 +41,8 @@
 #include "sessioncontroller.h"
 #include "stdinspooler.h"
 #include "testdocuments.h"
+#include "viewidle.h"
+#include "fulllogcontroller.h"
 
 #include "LogListView.h"
 #include "indexedlogstore.h"
@@ -75,10 +77,12 @@ static QByteArray record(int second, const char* level, const QByteArray& text)
          + level + " - " + text + '\n';
 }
 
+// Покой по состоянию (P-6): загрузка кончилась, модель не фильтрует,
+// отложенное доставлено, view доделали раскладку — без окна тишины.
 static bool settled(LogViewWidget& tab)
 {
     return testdocs::waitFor([&] { return !tab.isLoading(); }, 60000)
-        && testdocs::settle(*tab.model());
+        && testdocs::settleViews(*tab.model(), [&] { return tab.isLoading(); });
 }
 
 static QStringList rows(const LogModel& model)
@@ -246,7 +250,7 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": jumps: initial load");
-    testdocs::pump(300);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     CHECK(model.rowCount() == 400, name + ": jumps: fixture loaded");
@@ -259,7 +263,7 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
         ++appended;
         tab.reloadChangedFiles(/*force=*/true);
         CHECK(settled(tab), name + ": jumps: reload settles");
-        testdocs::pump(50);
+        CHECK(testdocs::idleViews(), "views settle");
     };
     const auto rowOnScreen = [&](int row) {
         return view.viewport()->rect().intersects(view.visualRect(model.index(row, 0)));
@@ -302,7 +306,7 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
           name + ": jump to a hidden record lands on the next visible row");
     model.setLogLevelFilter({});
     CHECK(settled(tab), name + ": jumps: filter reset settles");
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
 
     // --- Переход в последние полэкрана (Q-14) ------------------------------
     // Центрировать такую строку нельзя — вид встаёт у самого низа. Это не
@@ -338,14 +342,14 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
     const auto hideSelected = [&] {
         model.setLogLevelFilter({LogLevel::Error});
         CHECK(settled(tab), name + ": start: filter settles");
-        testdocs::pump(50);
+        CHECK(testdocs::idleViews(), "views settle");
         QFocusEvent focus(QEvent::FocusIn, Qt::ActiveWindowFocusReason);
         QApplication::sendEvent(&view, &focus);
     };
     const auto showAll = [&] {
         model.setLogLevelFilter({});
         CHECK(settled(tab), name + ": start: filter reset settles");
-        testdocs::pump(50);
+        CHECK(testdocs::idleViews(), "views settle");
     };
     view.goToRow(100);
     hideSelected();
@@ -388,7 +392,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": new lines: initial load");
-    testdocs::pump(300);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     QScrollBar* bar = view.verticalScrollBar();
@@ -409,11 +413,11 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
         CHECK(testdocs::appendToFile(path, bytes), name + ": new lines: append");
         tab.reloadChangedFiles(/*force=*/true);
         CHECK(settled(tab), name + ": new lines: reload settles");
-        testdocs::pump(50);
+        CHECK(testdocs::idleViews(), "views settle");
     };
     const auto toTop = [&] {
         bar->setValue(0);
-        testdocs::pump(20);
+        CHECK(testdocs::idleViews(), "views settle");
     };
 
     // --- Дозапись при выключенном Follow Tail увеличивает счёт ------------
@@ -431,7 +435,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
 
     // --- Прокрутка к низу сбрасывает ----------------------------------------
     bar->setValue(bar->maximum());
-    testdocs::pump(20);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(view.newLinesBelow() == 0 && !shown(), name + ": reaching the bottom clears the count");
     append(2);
     CHECK(view.newLinesBelow() == 0 && !shown() && view.isScrolledToBottom(),
@@ -442,7 +446,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     append(4);
     CHECK(view.newLinesBelow() == 4, name + ": counting again after leaving the bottom");
     view.setFollowTail(true);
-    testdocs::pump(20);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(view.newLinesBelow() == 0 && !shown(), name + ": Follow Tail clears the count");
     append(2);
     CHECK(view.newLinesBelow() == 0 && !shown(), name + ": Follow Tail shows the lines itself");
@@ -455,7 +459,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     const int firstNew = model.rowCount() - 60;
     CHECK(view.firstNewLineRow() == firstNew, name + ": jump target is the first new line");
     indicator->click();
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(view.currentIndex().row() == firstNew
               && view.selectionModel()->isRowSelected(firstNew, QModelIndex()),
           name + ": the click goes to the first new line and selects it");
@@ -467,12 +471,12 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
           name + QStringLiteral(": lines seen on screen are no longer counted: %1 left").arg(left));
     CHECK(view.firstNewLineRow() > firstNew, name + ": the next unseen line is below the screen");
     view.goToNewLines(); // команда (шорткат) — тот же путь
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(view.newLinesBelow() < left, name + ": the command pages through the rest");
     while (view.newLinesBelow() > 0 && view.firstNewLineRow() >= 0) {
         const int before = view.newLinesBelow();
         view.goToNewLines();
-        testdocs::pump(20);
+        CHECK(testdocs::idleViews(), "views settle");
         if (view.newLinesBelow() >= before)
             break;
     }
@@ -481,7 +485,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     // --- Фильтр: считаются только видимые строки ---------------------------
     model.setLogLevelFilter({LogLevel::Error});
     CHECK(settled(tab), name + ": new lines: filter settles");
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
     toTop();
     CHECK(view.newLinesBelow() == 0, name + ": a filter change starts the count afresh");
     append(3, "INFO");
@@ -493,7 +497,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
           name + ": the first new visible line is the first new ERROR");
     model.setLogLevelFilter({});
     CHECK(settled(tab), name + ": new lines: filter reset settles");
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(view.newLinesBelow() == 0 && !shown(), name + ": a model reset leaves no stale count");
 
     // --- Файл переписан: полная перезагрузка, ложного счёта нет --------------
@@ -506,7 +510,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     testdocs::writeFile(dir, name + "-newlines.log", rewritten);
     tab.reloadChangedFiles(/*force=*/true);
     CHECK(settled(tab), name + ": new lines: rewrite settles");
-    testdocs::pump(100);
+    CHECK(testdocs::idleViews(), "views settle");
     CHECK(model.rowCount() == 300, name + ": the rewritten file is reloaded");
     CHECK(view.newLinesBelow() == 0 && !shown(), name + ": a rewritten file leaves no stale count");
     toTop();
@@ -643,7 +647,7 @@ static void checkWideAboveThreshold(const QDir& dir, const QString& schema)
     tab.setExtractionEnabled(true);
     tab.addLogFile(path);
     CHECK(settled(tab), "utf16 threshold: initial load");
-    testdocs::pump(50);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     CHECK(!model.isIndexedBackend(), "utf16 threshold: the tab fell back to resident");
     CHECK(model.rowCount() == 12000
@@ -655,7 +659,7 @@ static void checkWideAboveThreshold(const QDir& dir, const QString& schema)
     for (int tick = 0; tick < 5; ++tick) {
         tab.reloadChangedFiles(/*force=*/tick % 2 == 1);
         CHECK(settled(tab), "utf16 threshold: tick settles");
-        testdocs::pump(20);
+        CHECK(testdocs::idleViews(), "views settle");
     }
     CHECK(fullReads == readsAfterLoad,
           QStringLiteral("utf16 threshold: idle ticks do not reread the file (%1 extra full reads)")
@@ -670,7 +674,7 @@ static void checkWideAboveThreshold(const QDir& dir, const QString& schema)
               "utf16 threshold: append");
         tab.reloadChangedFiles(/*force=*/false);
         CHECK(settled(tab), "utf16 threshold: append settles");
-        testdocs::pump(20);
+        CHECK(testdocs::idleViews(), "views settle");
     }
     CHECK(fullReads == readsAfterLoad,
           QStringLiteral("utf16 threshold: appends read only the tail (%1 extra full reads)")
@@ -727,7 +731,7 @@ static void checkEncodingSwitch(const QDir& dir, const QString& schema)
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), "encoding: initial load");
-    testdocs::pump(200);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     IndexedLogStore* store = model.indexedOrNull();
@@ -754,14 +758,14 @@ static void checkEncodingSwitch(const QDir& dir, const QString& schema)
     const auto switchTo = [&](TextEncoding encoding, const QString& what) {
         const int row = 700;
         view.goToRow(row);
-        testdocs::pump(100);
+        CHECK(testdocs::idleViews(), "views settle");
         const auto entry = model.entryAt(view.currentIndex().row());
         const qint64 lineNumber = entry ? entry->originalLineNumber() : -1;
         const int scroll = view.verticalScrollBar()->value();
         const QRect rect = view.visualRect(view.currentIndex());
         store->setFileEncoding(file, TextDecoder(encoding));
         CHECK(settled(tab), what + ": settles");
-        testdocs::pump(100);
+        CHECK(testdocs::idleViews(), "views settle");
         const QModelIndex cur = view.currentIndex();
         const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
         CHECK(now && lineNumber == 701 && now->originalLineNumber() == lineNumber,
@@ -1027,7 +1031,7 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), "resident switch: initial load");
-    testdocs::pump(200);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     const LogFilePtr file = tab.loadedFiles().value(0);
@@ -1035,14 +1039,14 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
 
     const auto switchTo = [&](TextEncoding encoding, const QString& what) {
         view.goToRow(700);
-        testdocs::pump(100);
+        CHECK(testdocs::idleViews(), "views settle");
         const auto entry = model.entryAt(view.currentIndex().row());
         const qint64 lineNumber = entry ? entry->originalLineNumber() : -1;
         const int scroll = view.verticalScrollBar()->value();
         const QRect rect = view.visualRect(view.currentIndex());
         tab.setFileEncoding(file, encoding);
         CHECK(settled(tab), what + ": settles");
-        testdocs::pump(200);
+        CHECK(testdocs::idleViews(), "views settle");
         const QModelIndex cur = view.currentIndex();
         const auto now = cur.isValid() ? model.entryAt(cur.row()) : nullptr;
         CHECK(now && lineNumber == 701 && now->originalLineNumber() == lineNumber,
@@ -1084,7 +1088,7 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
         const LogFilePtr earlyFile = early.loadedFiles().value(0);
         early.setFileEncoding(earlyFile, TextEncoding::Koi8R);
         CHECK(settled(early), "resident switch during load: settles");
-        testdocs::pump(50);
+        CHECK(testdocs::idleViews(), "views settle");
         CHECK(settled(early), "resident switch during load: the reread settles");
         const FileEncoding enc = early.fileEncoding(earlyFile);
         CHECK(enc.source == FileEncoding::Source::User && enc.decoder.encoding() == TextEncoding::Koi8R,
@@ -1130,7 +1134,7 @@ static void checkProvisionalRevision(const QDir& dir, const QString& name, const
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + " provisional: initial load");
-    testdocs::pump(200);
+    CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     const LogFilePtr file = tab.loadedFiles().value(0);
@@ -1150,7 +1154,7 @@ static void checkProvisionalRevision(const QDir& dir, const QString& name, const
     spyIndexers();
 
     view.goToRow(700);
-    testdocs::pump(100);
+    CHECK(testdocs::idleViews(), "views settle");
     const QModelIndex start = view.currentIndex();
     const auto entry = start.isValid() ? model.entryAt(start.row()) : nullptr;
     const int lineNumber = entry ? entry->originalLineNumber() : -1;
@@ -1170,7 +1174,7 @@ static void checkProvisionalRevision(const QDir& dir, const QString& name, const
         CHECK(testdocs::appendToFile(path, bytes), what + ": append");
         tab.reloadChangedFiles(/*force=*/true);
         CHECK(settled(tab), what + ": settles");
-        testdocs::pump(100);
+        CHECK(testdocs::idleViews(), "views settle");
         spyIndexers();
     };
 
@@ -1250,7 +1254,7 @@ static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, co
         QObject::connect(&tab, &LogViewWidget::fileParsingStarted, &spies, [&] { ++out.indexerStarts; });
         tab.addLogFile(path);
         CHECK(settled(tab), name + " no extra work: load " + tag);
-        testdocs::pump(100);
+        CHECK(testdocs::idleViews(), "views settle");
         out.parsers = int(tab.findChildren<LogParser*>().size());
         out.encoding = tab.fileEncoding(tab.loadedFiles().value(0));
         out.row = tab.model()->messageAt(tab.model()->rowCount() - 1);
@@ -1563,7 +1567,7 @@ static void checkLocatorLive(const QDir& dir, const QString& schema)
             QHash<int, SavedId> waiting;
             for (const SavedId& s : saved)
                 waiting.insert(tab.model()->recordLocator().request(s.source, s.id), s);
-            testdocs::pump(20);
+            CHECK(testdocs::idleViews(), "views settle");
             CHECK(late.resolved.isEmpty() && late.refused.isEmpty(),
                   tag + ": пока файла нет — запросы ждут (не SourceMissing)");
             QFile f(path);
@@ -1645,7 +1649,7 @@ static void checkLocatorLive(const QDir& dir, const QString& schema)
                                            && locator->stats().feeds > 0; }, 10000);
             caughtBusy = locator && locator->isBusy() && locator->stats().feeds > 0;
             tab.reset(); // закрыли посреди проверки
-            testdocs::pump(300);
+            testdocs::waitFor([&] { return !locator; }, 10000);
             CHECK(!locator, "locator/closing: локатор ушёл вместе с вкладкой");
         }
         CHECK(caughtBusy, "locator/closing: вкладку закрыли, пока шла фоновая проверка");
@@ -1677,7 +1681,7 @@ static std::unique_ptr<LogViewWidget> memoryTab(FileMemoryStore& store, const QS
     tab->show();
     tab->addLogFile(path);
     CHECK(testdocs::waitFor([&] { return !tab->isLoading() && !tab->isPositionPending(); }, 60000)
-              && testdocs::settle(*tab->model()),
+              && testdocs::settleViews(*tab->model(), [&] { return tab->isLoading() || tab->isPositionPending(); }),
           QStringLiteral("memory: load %1").arg(path));
     return tab;
 }
@@ -1786,11 +1790,10 @@ static int rowOfPathLine(const LogModel& model, const QString& path, qint64 line
 
 static bool tabSettled(LogViewWidget& tab)
 {
-    const bool ok = testdocs::waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); }, 60000)
-        && testdocs::settle(*tab.model());
-    testdocs::waitFor([&] { return !tab.view()->hasPendingLayout(); }, 5000);
-    testdocs::pump(30);
-    return ok;
+    return testdocs::waitFor([&] { return !tab.isLoading() && !tab.isPositionPending(); }, 60000)
+        && testdocs::settleViews(*tab.model(), [&] {
+               return tab.isLoading() || tab.isPositionPending() || tab.fullLog().isPlacementPending();
+           });
 }
 
 // Ряд вкладок окна: QTabWidget, контроллер, создание вкладки на месте.
@@ -1882,10 +1885,10 @@ static void checkReopenClosedTab(const QDir& dir, const QString& name, const QSt
     const int currentRow = rowOfPathLine(ma, a, 150);
     CHECK(currentRow >= 0, prefix + "A: line 150 visible");
     ta->view()->goToRow(currentRow);
-    testdocs::pump(20);
+    CHECK(testdocs::idleViews(), "views settle");
     QScrollBar* bar = ta->view()->verticalScrollBar();
     bar->setValue(bar->value() + bar->singleStep() * 3);
-    testdocs::pump(20);
+    CHECK(testdocs::idleViews(), "views settle");
     const int savedTop = ta->view()->visualRect(ma.index(rowOfPathLine(ma, a, 150), 0)).top();
     const int rowsA = ma.rowCount();
 
@@ -2175,7 +2178,7 @@ static void checkHeadRewrite(const QDir& dir, const QString& name, const QString
 
             tab.reloadChangedFiles(f5);
             CHECK(settled(tab), label + ": reload settles");
-            testdocs::pump(5);
+            CHECK(testdocs::idleViews(), "views settle");
 
             const int row3 = rowOfPathLine(model, path, 3);
             CHECK(row3 >= 0 && model.messageAt(row3).endsWith("old line 0003 omega"),

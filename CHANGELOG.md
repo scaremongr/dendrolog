@@ -111,6 +111,10 @@ All notable changes to DendroLog are documented here. The format follows
 - A line with a very long word (a base64 blob, a dump without spaces) could
   freeze the window while it was drawn: highlighting looked for a URL from
   every letter of the word.
+- On Windows, a second launch with files sometimes opened its own window with
+  those files although the running window had already opened them too.
+- Save View As started right after a quick export finished could run as a
+  second export, and the first one never reported that it was done.
 
 ## [0.6.0] — 2026-11-19
 
