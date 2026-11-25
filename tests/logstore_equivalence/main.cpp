@@ -1929,7 +1929,7 @@ static void checkKeyedExpectations(const QString& what, const LogModel& m,
     const int messageColumn = fieldNames.indexOf(QStringLiteral("Message"));
     QHash<QString, int> idOfRecord;      // «путь#запись» → id записи
     QHash<QString, QString> recordOfId;  // «путь#id» → «путь#запись»
-    qint64 previousMs = std::numeric_limits<qint64>::min();
+    qint64 previousMs = (std::numeric_limits<qint64>::min)();
     for (int row = 0; row < m.rowCount(); ++row) {
         if (g_contextFailures > kFailuresPerContext)
             return;
