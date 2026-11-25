@@ -61,8 +61,11 @@ int scannerCompareNames(QStringView a, QStringView b);
 // tail only: a separator ('.', '-' or '_') and digit groups joined by the same
 // separators. So app.log, app.log.1, app.log.10, app.log-20260101,
 // app.log.2026-01-01 and app-2026-01-01.log match; app.log.bak, app.log.swp,
-// app.log.gz, app.log.1.gz, app.log~ and app.logs.1 do not (compressed
-// rotations are F-2). Case-insensitive.
+// app.log~ and app.logs.1 do not. A gzip-compressed log (F-2, PR 3) matches
+// when the name without its last ".gz" does: app.log.gz, app.log.1.gz,
+// app.log-20260101.gz — but not app.log.bak.gz, app.log.gz.1 or app.tgz (an
+// archive with several files is PR 5). An extension configured as "gz" or
+// "log.gz" keeps matching the full name as before. Case-insensitive.
 bool scannerNameMatches(QStringView fileName, const QStringList& extensions);
 
 // ─── Tree item with numeric / composite sort support ────────────────────────
@@ -368,6 +371,10 @@ private:
     QHash<QString, QTreeWidgetItem*> m_dirMap;           // dirPath  → tree item (dirs only)
     QHash<QString, ScanState>       m_scanState;         // last analysis result per file
     int                             m_activeScans = 0;
+    // Stats workers of the current tree poll this; scan() and the destructor
+    // raise it and drop it, so an abandoned pass (a huge `.gz` decompresses at
+    // ~170 MB/s) stops instead of holding a pool thread.
+    std::shared_ptr<std::atomic<bool>> m_statsCancel = std::make_shared<std::atomic<bool>>(false);
     // Bumped by every scan(); async results tagged with an older generation are
     // dropped instead of being written into a tree that no longer owns them.
     int                             m_generation  = 0;

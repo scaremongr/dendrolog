@@ -1,5 +1,6 @@
 #include "filecontentsearch.h"
 
+#include "gzipdevice.h"
 #include "userregex.h"
 
 #include <QFile>
@@ -7,6 +8,7 @@
 #include <QStringDecoder>
 
 #include <algorithm>
+#include <optional>
 
 // ─── ContentQuery ────────────────────────────────────────────────────────────
 
@@ -75,45 +77,108 @@ qsizetype completeCharsEnd(QByteArrayView bytes)
     return length > 1 && n - (i - 1) < length ? i - 1 : n;
 }
 
+// Чтение блоками: файл как есть или поток распакованных байтов `.gz` (F-2,
+// PR 3). Смещения, которые видит поиск, — в распакованном потоке; прогресс —
+// в байтах файла на диске (у `.gz` — сжатых, как и колонка Size сканера).
 class Reader
 {
 public:
-    Reader(QFile& file, const Options& options) : m_file(file), m_options(options) {}
+    Reader(QFile& file, GzipDevice* gzip, const Options& options)
+        : m_file(file), m_gzip(gzip), m_options(options)
+    {
+    }
 
     bool cancelled() const
     {
         return m_options.cancelled && m_options.cancelled->load(std::memory_order_relaxed);
     }
 
-    // Следующий блок; пустой — конец файла. Вид в буфер читателя, живёт до
-    // следующего вызова (буфер один на файл: без выделения на блок).
-    // Прогресс — только байты, прочитанные впервые (перечитывание после
-    // пересмотра его не двигает).
+    // Следующий блок; пустой — конец файла (или ошибка потока). Вид в буфер
+    // читателя, живёт до следующего вызова (буфер один на файл: без выделения
+    // на блок). Прогресс — только байты, прочитанные впервые (перечитывание
+    // после пересмотра его не двигает).
     QByteArrayView next()
     {
-        const qint64 at = m_file.pos();
-        m_buffer.resize(m_options.blockBytes);
-        const qint64 got = m_file.read(m_buffer.data(), m_options.blockBytes);
-        m_buffer.resize(std::max<qint64>(got, 0));
-        const qint64 end = at + m_buffer.size();
-        if (end > m_counted) {
-            if (m_options.bytesDone)
-                m_options.bytesDone->fetch_add(end - std::max(at, m_counted),
-                                               std::memory_order_relaxed);
-            m_counted = end;
-        }
+        m_buffer.resize(0);
+        readMore(m_options.blockBytes);
         if (m_options.afterBlock)
-            m_options.afterBlock(end);
+            m_options.afterBlock(m_pos);
+        return m_buffer;
+    }
+
+    // Дочитать в текущий блок ещё до `more` байтов (окно определения
+    // кодировки у потока, которому второй дескриптор не поможет). Вид — на
+    // весь блок, с прежним началом.
+    QByteArrayView extend(qint64 more)
+    {
+        readMore(more);
         return m_buffer;
     }
 
     qint64 counted() const { return m_counted; }
-    bool seek(qint64 offset) { return m_file.seek(offset); }
+
+    // Перечитать с offset (смещение в потоке). У `.gz` — заново с начала и
+    // пропустить offset байтов: поток не перематывается.
+    bool seek(qint64 offset)
+    {
+        if (!m_gzip) {
+            if (!m_file.seek(offset))
+                return false;
+            m_pos = offset;
+            return true;
+        }
+        m_gzip->close();
+        if (!m_file.seek(0) || !m_gzip->open(QIODevice::ReadOnly))
+            return false;
+        m_pos = 0;
+        QByteArray skip;
+        while (m_pos < offset) {
+            if (cancelled())
+                return false;
+            skip.resize(qMin<qint64>(m_options.blockBytes, offset - m_pos));
+            const qint64 got = m_gzip->read(skip.data(), skip.size());
+            if (got <= 0)
+                return false;
+            m_pos += got;
+            account();
+        }
+        return true;
+    }
 
 private:
+    QIODevice& device() { return m_gzip ? static_cast<QIODevice&>(*m_gzip) : m_file; }
+
+    void readMore(qint64 more)
+    {
+        const qsizetype had = m_buffer.size();
+        m_buffer.resize(had + more);
+        qsizetype filled = had;
+        while (filled < m_buffer.size()) {
+            const qint64 got = device().read(m_buffer.data() + filled, m_buffer.size() - filled);
+            if (got <= 0)
+                break;
+            filled += got;
+        }
+        m_buffer.resize(filled);
+        m_pos += filled - had;
+        account();
+    }
+
+    void account()
+    {
+        const qint64 progress = m_gzip ? m_gzip->compressedBytesRead() : m_pos;
+        if (progress > m_counted) {
+            if (m_options.bytesDone)
+                m_options.bytesDone->fetch_add(progress - m_counted, std::memory_order_relaxed);
+            m_counted = progress;
+        }
+    }
+
     QFile& m_file;
+    GzipDevice* m_gzip;
     const Options& m_options;
-    qint64 m_counted = 0;
+    qint64 m_pos = 0;       // смещение в (распакованном) потоке
+    qint64 m_counted = 0;   // байтов файла, учтённых в прогрессе
     QByteArray m_buffer;
 };
 
@@ -342,15 +407,30 @@ Result search(const QString& path, const ContentQuery& query, const Options& opt
         result.readable = false;
         return result;
     }
+    // Сжатый лог (F-2) узнаётся по сигнатуре, а не по имени — как вкладка
+    // узнаёт его при открытии. Читается потоком, без записи на диск.
+    std::optional<GzipDevice> gzip;
+    if (GzipDevice::hasSignature(file.peek(2))) {
+        gzip.emplace(&file);
+        gzip->setAbortFlag(options.cancelled);
+        if (!gzip->open(QIODevice::ReadOnly)) {
+            result.readable = false;
+            return result;
+        }
+    }
 
     Options opts = options;
     opts.blockBytes = std::max<qint64>(opts.blockBytes, 16);  // BOM целиком в первом блоке
     // Кусок длинной строки обязан быть длиннее перекрытия подстроки, иначе
     // flushOverlong ничего не отбросит и буфер будет расти.
     opts.maxLineBytes = std::max<qsizetype>(opts.maxLineBytes, 8 * query.text().size() + 16);
-    Reader reader(file, opts);
+    Reader reader(file, gzip ? &*gzip : nullptr, opts);
     const auto finishResult = [&] {
         result.bytesRead = reader.counted();
+        if (gzip && gzip->error() == GzipDevice::Error::Aborted)
+            result.cancelled = true;
+        else if (gzip && gzip->error() != GzipDevice::Error::None)
+            result.readable = false;   // обрыв, CRC, мусор: ответ по прочитанному до ошибки
         if (result.cancelled)
             result.matched = false;
         return result;
@@ -376,8 +456,13 @@ Result search(const QString& path, const ContentQuery& query, const Options& opt
     }
 
     FileEncoding& state = result.encoding;
-    ByteSearch scan(path, query, opts, state);
+    // Окно решения о кодировке, не уместившееся в блок, advance дочитывает
+    // вторым дескриптором по пути файла. У потока пути нет (в файле — сжатые
+    // байты): окно дочитывается в сам блок, и advance его не открывает.
+    const QString windowPath = gzip ? QString() : path;
+    ByteSearch scan(windowPath, query, opts, state);
     qint64 offset = start;
+    qsizetype skip = start;   // начало блока в буфере читателя (BOM первого блока)
     while (true) {
         if (reader.cancelled()) {
             result.cancelled = true;
@@ -388,8 +473,15 @@ Result search(const QString& path, const ContentQuery& query, const Options& opt
             result.matched = scan.finish() == ByteSearch::Step::Found;
             break;
         }
+        if (gzip && !state.decided()) {
+            const qsizetype high = EncodingDetector::firstHighByte(block);
+            if (high >= 0 && block.size() - high < EncodingDetector::kWindowBytes)
+                block = reader.extend(EncodingDetector::kWindowBytes - (block.size() - high))
+                            .sliced(skip);
+        }
         const ByteSearch::Step step = scan.feed(block, offset);
         offset += block.size();
+        skip = 0;
         if (step == ByteSearch::Step::Found) {
             result.matched = true;
             break;
@@ -398,8 +490,10 @@ Result search(const QString& path, const ContentQuery& query, const Options& opt
             // Запомненные строки не влезли: перечитать с первой из них.
             const qint64 from = std::max(start, scan.restartOffset());
             scan.restart();
-            if (!reader.seek(from))
+            if (!reader.seek(from)) {
+                result.cancelled = reader.cancelled();
                 break;
+            }
             offset = from;
         }
         block = reader.next();

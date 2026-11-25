@@ -36,6 +36,13 @@ All notable changes to DendroLog are documented here. The format follows
 - **Wrap / Unwrap Current Line** in the `View` menu (`Space` while the log
   has the focus, can be reassigned in Settings). In a field or on a panel
   button `Space` keeps its usual meaning.
+- **Compressed logs in the Directory Scanner.** `app.log.gz`, `app.log.1.gz`
+  and other `.gz` files whose name without `.gz` is a log are listed in the
+  tree. Entry counts, W/E/F, From / To and the content filter read them
+  decompressed on the fly (nothing is written to disk) and give the same
+  results as the uncompressed file, in every encoding; the content filter's
+  progress counts compressed bytes, Size shows the size on disk, a damaged
+  archive shows “Parse Failed”.
 
 ### Changed
 - The file badge no longer sits at the right of every line of a merged tab:

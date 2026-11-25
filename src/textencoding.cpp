@@ -557,8 +557,11 @@ bool advance(FileEncoding& state, QByteArrayView data, qint64 dataFileOffset,
         } else {
             // Окно выходит за порцию: дочитываем вторым дескриптором — позиция
             // основного чтения вызывающего не трогается.
+            // Пустой путь — потока без файла (`.gz` сканера): окно только из
+            // порции, вызывающий кладёт его туда сам.
             QFile windowFile(filePath);
-            if (windowFile.open(QIODevice::ReadOnly) && windowFile.seek(windowStart))
+            if (!filePath.isEmpty() && windowFile.open(QIODevice::ReadOnly)
+                && windowFile.seek(windowStart))
                 windowBytes = windowFile.read(kWindowBytes);
             if (windowBytes.size() < data.size() - high) // файл укоротили — что есть в порции
                 windowBytes = data.sliced(high).toByteArray();

@@ -209,15 +209,22 @@ bool scannerNameMatches(QStringView fileName, const QStringList& extensions)
     if (extensions.isEmpty())
         return true;
     const QString name = fileName.toString().toLower();
-    for (const QString& ext : extensions) {
-        const QString component = u'.' + ext;
-        for (qsizetype at = name.indexOf(component); at >= 0;
-             at = name.indexOf(component, at + 1)) {
-            if (isRotationTail(QStringView(name).sliced(at + component.size())))
-                return true;
+    const auto matches = [&extensions](QStringView candidate) {
+        for (const QString& ext : extensions) {
+            const QString component = u'.' + ext;
+            for (qsizetype at = candidate.indexOf(component); at >= 0;
+                 at = candidate.indexOf(component, at + 1)) {
+                if (isRotationTail(candidate.sliced(at + component.size())))
+                    return true;
+            }
         }
-    }
-    return false;
+        return false;
+    };
+    if (matches(name))
+        return true;   // в том числе расширение из настроек вида «gz» или «log.gz»
+    // Сжатый лог — по имени без «.gz» (содержимое читается через GzipDevice).
+    static const QString kGzip = QStringLiteral(".gz");
+    return name.endsWith(kGzip) && matches(QStringView(name).chopped(kGzip.size()));
 }
 
 // ─── Constructor / destructor ────────────────────────────────────────────────
@@ -263,6 +270,7 @@ DirectoryScanner::DirectoryScanner(QTreeWidget* tree, QObject* parent)
 
 DirectoryScanner::~DirectoryScanner()
 {
+    m_statsCancel->store(true);
     cancelContentSearch();
     m_contentPool.clear();
     m_contentPool.waitForDone();
@@ -296,8 +304,11 @@ void DirectoryScanner::scan(const QString& rootPath)
     m_dirMap.clear();
     m_scanState.clear();
     m_pending.clear();
-    // Already-running workers will finish and call applyStats(), which silently
-    // discards results because m_itemMap no longer contains their paths.
+    // Already-running workers stop at their next chunk and call applyStats(),
+    // which silently discards results because m_itemMap no longer contains
+    // their paths.
+    m_statsCancel->store(true);
+    m_statsCancel = std::make_shared<std::atomic<bool>>(false);
 
     // Reset accumulated date bounds and the content-filter result cache; the
     // date-filter window itself is left to the panel to re-seed from the new
@@ -561,7 +572,7 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         applyStats(res);
         scheduleScans();  // fill the freed slot from the queue
     });
-    watcher->setFuture(QtConcurrent::run([request]() -> ScanResult {
+    watcher->setFuture(QtConcurrent::run([request, cancel = m_statsCancel]() -> ScanResult {
         // Records are counted the way a tab without field extraction splits
         // them (timestamp + level), so the scanner needs no schema.
         LogParser parser;
@@ -577,7 +588,7 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         if (request.resume.offset > 0) {
             if (FileChangeDetector::classify(request.path, request.anchor)
                 == FileChangeDetector::Change::Appended) {
-                scan = parser.analyzeFileForStats(request.path, request.resume);
+                scan = parser.analyzeFileForStats(request.path, request.resume, cancel.get());
                 if (scan.stats.parseSuccess) {
                     scan.stats    = LogParser::mergeStats(request.base, scan.stats);
                     scan.complete = LogParser::mergeStats(request.base, scan.complete);
@@ -586,7 +597,7 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
             }
         }
         if (!resumed)
-            scan = parser.analyzeFileForStats(request.path);
+            scan = parser.analyzeFileForStats(request.path, LogParser::StatsResume(), cancel.get());
 
         result.state.stats    = scan.stats;
         result.state.complete = scan.complete;
