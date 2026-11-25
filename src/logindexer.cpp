@@ -175,6 +175,8 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // как у LogParser: дозапись после Нового года получает новый год.
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
+    // Ключевая схема (F-4) — как у LogParser: только с извлечением полей.
+    const LogPattern* const keyedSchema = (extraction && pattern.isKeyed()) ? &pattern : nullptr;
     // Дата времени без даты (F-11) — как у LogParser: дозапись продолжает
     // состояние прошлого прохода, предпросмотр — от начала этого прохода.
     ClockDates clock;
@@ -208,22 +210,26 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     const auto processLine = [&](const char* data, qint64 len, quint8 eol) {
         text = encoding.decoder.decode(data, qsizetype(len));
 
-        qint64 tsMs = kNoTimestampMs;
-        LogLevel lvl = LogLevel::Unknown;
-        // detectTimestampMs: мс epoch без построения QDateTime на строку.
-        bool leadingTs = false;
-        const bool hasTs = m_classifier.detectTimestampMs(text, tsMs, yearRef, &leadingTs, &clock);
-        const bool hasLvl = m_classifier.detectLogLevel(text, lvl);
-        // extractFields здесь нужен ТОЛЬКО для решения primary/continuation
+        // Метка (мс epoch, без QDateTime), уровень и граница записи —
+        // LineClassifier::classifyLine, то же правило, что у LogParser:
+        // ключевая схема (F-4) берёт их из ключей (поля — по требованию в
+        // сторе, здесь не нужны), без неё — эвристика по строке.
+        const KeyedClassification cls = m_classifier.classifyLine(keyedSchema, text, yearRef, &clock);
+        const bool hasTs = cls.hasTs;
+        const qint64 tsMs = cls.tsMs;
+        const LogLevel lvl = cls.hasLevel ? cls.level : LogLevel::Unknown;
+        // Регексная схема нужна ТОЛЬКО для решения primary/continuation
         // (спаны выбрасываются). Строка, первичная и без схемы (метка с
         // уровнем или ведущая метка), схему не спрашивает — регекс схемы
         // (самая дорогая часть, минуты на десятках миллионов строк) гоняем
         // только там, где он реально решает.
         const bool primaryWithoutSchema =
-            LineClassifier::isPrimaryLine(false, hasTs, leadingTs, hasLvl);
-        const bool schemaMatched = (!primaryWithoutSchema && extraction && pattern.isValid())
-            ? !pattern.extractFields(text).isEmpty()
-            : false;
+            LineClassifier::isPrimaryLine(false, cls.hasTs, cls.leading, cls.hasLevel);
+        const bool schemaMatched = keyedSchema
+            ? cls.matched
+            : (!primaryWithoutSchema && extraction && pattern.isValid())
+                ? !pattern.extractFields(text).isEmpty()
+                : false;
 
         LineIndex::LineRecord rec;
         rec.byteLength = quint32(len);

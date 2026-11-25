@@ -180,11 +180,19 @@ private:
         int rank = 0;       ///< Номер кандидата в списке * 2 + (путь ? 1 : 0).
     };
     static constexpr int kMaxBucketedKey = 48;   ///< Длиннее — в последней корзине.
-    void consider(QStringView line, QStringView key, const Pair& pair, Hits* hits) const;
+    // Первые символы ключей корзины: ASCII — битами, остальные — одним флагом.
+    struct FirstChars {
+        quint64 bits[2] = {0, 0};
+        bool nonAscii = false;
+    };
+    // settled — счётчик колонок, получивших первого кандидата (rank 0).
+    void consider(QStringView line, QStringView key, const Pair& pair, Hits* hits,
+                  int* settled) const;
 
     KeyedDefinition::Format m_format = KeyedDefinition::Format::JsonObject;
     int m_columnCount = 0;
     QVector<QVector<Entry>> m_byLength;
+    QVector<FirstChars> m_firstChars;   ///< По корзинам m_byLength.
 };
 
 } // namespace KeyedLine

@@ -1096,6 +1096,18 @@ bool LogPattern::scanKeyed(QStringView line, KeyedLine::Hits* hits) const
     return m_keyedLookup.scan(line, hits);
 }
 
+LogEntryFields LogPattern::keyedFields(const KeyedLine::Hits& hits) const
+{
+    LogEntryFields result;
+    if (!isKeyed())
+        return result;
+    result.resize(m_fieldCount);
+    for (int c = 0; c < hits.size() && c < m_fieldCount; ++c)
+        if (hits[c].isValid())
+            result.spans[c].set(hits[c].start, hits[c].length, hits[c].escaped);
+    return result;
+}
+
 QVector<std::pair<QString, QString>> LogPattern::keyValuePairs(QStringView line) const
 {
     QVector<std::pair<QString, QString>> pairs;
@@ -1121,11 +1133,7 @@ LogEntryFields LogPattern::extractFields(const QString& line) const
         KeyedLine::Hits hits;
         if (!m_keyedLookup.scan(line, &hits))
             return result;   // не распознана — полей нет, view показывает сырую строку
-        result.resize(m_fieldCount);
-        for (int c = 0; c < hits.size() && c < m_fieldCount; ++c)
-            if (hits[c].isValid())
-                result.spans[c].set(hits[c].start, hits[c].length, hits[c].escaped);
-        return result;
+        return keyedFields(hits);
     }
 
     const LineMatchResult match = matchLine(line);

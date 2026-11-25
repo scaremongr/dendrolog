@@ -602,8 +602,10 @@ inline bool appendToFile(const QString& path, const QByteArray& bytes)
     return f.open(QIODevice::WriteOnly | QIODevice::Append) && f.write(bytes) == bytes.size();
 }
 
+// markNew = false — дописанные строки не помечаются «новыми» (сравнение с
+// вкладкой, загрузившей те же байты разом).
 inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& bytes,
-                              const QString& schema)
+                              const QString& schema, bool markNew = true)
 {
     IndexedLogStore* store = doc.model->indexedOrNull();
     const LogFilePtr logFile = doc.files.value(fileIndex);
@@ -620,8 +622,8 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
     configureIndexer(indexer, store, schema, &relay);
     LogModel* model = doc.model.get();
     QObject::connect(&indexer, &LogIndexer::indexBatchReady, &relay,
-                     [store, model](const LogFilePtr& lf, qint64 first, qint64 count) {
-                         store->appendIndexedRows(lf, first, count, /*markNew*/ true);
+                     [store, model, markNew](const LogFilePtr& lf, qint64 first, qint64 count) {
+                         store->appendIndexedRows(lf, first, count, markNew);
                          model->recordLocator().indexedRange(lf, first, count);
                      });
     QObject::connect(&indexer, &LogIndexer::indexingFinished, &relay,

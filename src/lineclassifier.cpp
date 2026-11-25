@@ -959,7 +959,9 @@ bool LineClassifier::timestampFromValue(QStringView value, bool isNumber,
     // Строка из цифр — тоже эпоха («"ts":"1700000000"»); у неё не бывает
     // формы с датой, так что сканеру строки её не отдать.
     const char16_t first = value.front().unicode();
-    const bool numeric = isAsciiDigit(first) || first == u'-';
+    // «yyyy-» — дата, а не эпоха: epochFromValue её всё равно отверг бы.
+    const bool numeric = (isAsciiDigit(first) || first == u'-')
+        && !(value.size() > 4 && value[4] == u'-' && first != u'-');
     if (numeric && epochFromValue(value, unit, msecs))
         return true;
     if (isNumber)
@@ -1003,11 +1005,22 @@ KeyedClassification LineClassifier::classifyKeyed(const LogPattern& pattern, QSt
                                                   const YearReference& year,
                                                   ClockDates* clock) const
 {
+    return classifyLine(&pattern, line, year, clock);
+}
+
+KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, QStringView line,
+                                                 const YearReference& year, ClockDates* clock,
+                                                 LogEntryFields* fields) const
+{
+    if (fields)
+        *fields = LogEntryFields();
     KeyedClassification r;
-    if (const KeyedDefinition* keyed = pattern.keyed()) {
+    if (const KeyedDefinition* keyed = keyedSchema ? keyedSchema->keyed() : nullptr) {
         KeyedLine::Hits hits;
-        r.matched = pattern.scanKeyed(line, &hits);
+        r.matched = keyedSchema->scanKeyed(line, &hits);
         if (r.matched) {
+            if (fields)
+                *fields = keyedSchema->keyedFields(hits);
             // Экранированное значение (редко: метка и уровень — ASCII без
             // кавычек внутри) раскодируется во временную строку.
             QString decoded;

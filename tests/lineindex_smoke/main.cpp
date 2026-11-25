@@ -25,6 +25,7 @@
 #include "sequentiallinereader.h"
 #include "textchunkcache.h"
 #include "textencoding.h"
+#include "keyedfixtures.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -82,7 +83,8 @@ static void appendToFile(const QString& path, const QByteArray& bytes)
 
 // Полная индексация файла; блокирует до завершения.
 static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
-                                            bool* fallback = nullptr)
+                                            bool* fallback = nullptr,
+                                            const QString& schema = QString())
 {
     auto index = std::make_shared<LineIndex>();
     // Флаги объявлены ДО индексатора: при таймауте его деструктор дожидается
@@ -99,6 +101,10 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
     QObject::connect(&indexer, &LogIndexer::needsResidentFallback, &indexer,
                      [&](const LogFilePtr&, const QString&) { fb = true; done = true; },
                      Qt::DirectConnection);
+    if (!schema.isEmpty()) {
+        indexer.setPattern(schema);
+        indexer.setExtractionEnabled(true);
+    }
     indexer.startIndexing(lf, index);
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
@@ -127,7 +133,8 @@ static void indexAppend(LogIndexer& indexer, const LogFilePtr& lf,
 }
 
 // Резидентный парсинг файла; блокирует до завершения.
-static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf)
+static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf,
+                                                    const QString& schema = QString())
 {
     QVector<std::shared_ptr<LogEntry>> all;
     std::atomic_bool done{false}; // до парсера — см. indexFile()
@@ -142,6 +149,10 @@ static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf)
     QObject::connect(&parser, &LogParser::parsingFailed, &parser,
                      [&](const LogFilePtr&) { done = true; },
                      Qt::DirectConnection);
+    if (!schema.isEmpty()) {
+        parser.setPattern(schema);
+        parser.setExtractionEnabled(true);
+    }
     parser.startParsing(lf);
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
@@ -1949,8 +1960,27 @@ static void testPre1970(const QDir& dir)
           "pre1970_grow.log: the appended continuation of a -1 ms record is not plain text");
 }
 
-// Бенчмарк-режим: lineindex_smoke --bench <файл> [строка-схемы] — чистая
+// Схема для замеров: «jsonl» / «logfmt» — ключевая схема с ключами по
+// умолчанию (F-4), путь к существующему файлу — его текст, иначе сама строка.
+static QString benchSchema(const QString& arg)
+{
+    if (arg == QLatin1String("jsonl") || arg == QLatin1String("logfmt")) {
+        PatternDefinition def;
+        KeyedDefinition k;
+        k.format = arg == QLatin1String("jsonl") ? KeyedDefinition::Format::JsonObject
+                                                 : KeyedDefinition::Format::Logfmt;
+        def.keyed = k;
+        return LogPattern::serializeDefinition(def);
+    }
+    QFile f(arg);
+    if (!arg.isEmpty() && f.open(QIODevice::ReadOnly))
+        return QString::fromUtf8(f.readAll());
+    return arg;
+}
+
+// Бенчмарк-режим: lineindex_smoke --bench <файл> [схема] — чистая
 // скорость LogIndexer без GUI (для локализации узких мест индексации).
+// Схема — см. benchSchema; с ней включено извлечение полей.
 static int runBench(const QString& path, const QString& patternString)
 {
     auto lf = std::make_shared<LogFile>(path);
@@ -1981,13 +2011,18 @@ static int runBench(const QString& path, const QString& patternString)
     return 0;
 }
 
-// Бенчмарк резидентного пути: lineindex_smoke --bench-resident <файл> —
-// чистая скорость LogParser (разбор в записи, без модели): время до
-// parsingFinished. Замер цены транспорта байтов F-1 (шаг 3).
-static int runBenchResident(const QString& path)
+// Бенчмарк резидентного пути: lineindex_smoke --bench-resident <файл>
+// [схема] — чистая скорость LogParser (разбор в записи, без модели): время
+// до parsingFinished. Замер цены транспорта байтов F-1 (шаг 3) и ключевой
+// схемы F-4 (схема — см. benchSchema; с ней включено извлечение полей).
+static int runBenchResident(const QString& path, const QString& patternString)
 {
     auto lf = std::make_shared<LogFile>(path);
     LogParser parser;
+    if (!patternString.isEmpty()) {
+        parser.setPattern(patternString);
+        parser.setExtractionEnabled(true);
+    }
     std::atomic_bool done{false};
     std::atomic<qint64> entries{0};
     QObject::connect(&parser, &LogParser::entriesParsed, &parser,
@@ -2712,15 +2747,127 @@ static void testKeyedValues()
     }
 }
 
+// F-4, PR 2: ключевая схема на загрузке. Парсер и индексатор берут момент,
+// уровень и границу записи из ключей одним правилом (classifyLine):
+// золотое сравнение на фикстурах JSON Lines и logfmt с заданными моментами
+// и уровнями (tests/common/keyedfixtures.h), дозапись объекта частями (обрыв
+// посреди строки в кавычках, \u и вложенного) = индекс, построенный разом;
+// без извлечения полей схема инертна (эвристика); счётчики сканера
+// (analyzeFileForStats) с той же схемой — те же записи, уровни и From/To.
+static void testKeyedLoad(const QDir& dir)
+{
+    using Format = KeyedDefinition::Format;
+    for (const Format format : {Format::JsonObject, Format::Logfmt}) {
+        const bool json = format == Format::JsonObject;
+        const QString tag = json ? QStringLiteral("keyed jsonl") : QStringLiteral("keyed logfmt");
+        const QString schema = keyedfx::schema(format);
+        const keyedfx::Fixture fx = keyedfx::make(format, 64);
+        const QString path = writeFile(dir, tag + ".log", fx.bytes);
+        auto lf = std::make_shared<LogFile>(path);
+        const auto entries = parseFile(lf, schema);
+        const auto index = indexFile(lf, nullptr, schema);
+        compareParserVsIndex(tag, path, lf, entries, *index);
+
+        // Заданные значения: момент и уровень каждой строки, записи.
+        CHECK(index->lineCount() == fx.lineRecord.size(), qPrintable(tag + ": line count"));
+        for (qint64 i = 0; i < qMin<qint64>(index->lineCount(), fx.lineRecord.size()); ++i) {
+            const keyedfx::Record want = fx.records[fx.lineRecord[int(i)]];
+            CHECK(index->timestampMs(index->logicalId(i)) == want.ms,
+                  qPrintable(QString("%1: line %2 moment %3, expected %4").arg(tag).arg(i + 1)
+                                 .arg(index->timestampMs(index->logicalId(i))).arg(want.ms)));
+            CHECK(index->level(i) == want.level,
+                  qPrintable(QString("%1: line %2 level").arg(tag).arg(i + 1)));
+            const bool first = i == 0 || fx.lineRecord[int(i)] != fx.lineRecord[int(i) - 1];
+            CHECK(index->isPrimary(i) == first,
+                  qPrintable(QString("%1: line %2 primary").arg(tag).arg(i + 1)));
+        }
+        CHECK(index->logicalEntryCount() == fx.records.size(),
+              qPrintable(tag + ": one logical record per fixture record"));
+
+        // Без извлечения полей схема не действует — те же строки, что без схемы.
+        {
+            const auto heuristic = parseFile(lf);
+            const auto heuristicIndex = indexFile(lf);
+            compareParserVsIndex(tag + " (extraction off)", path, lf, heuristic, *heuristicIndex);
+            CHECK(heuristicIndex->logicalEntryCount() != fx.records.size(),
+                  qPrintable(tag + ": the heuristic splits this file differently (fixture sanity)"));
+        }
+
+        // Дозапись частями: объект, оборванный посреди вложенного, строки и
+        // \u, — индекс тот же, что построенный разом по итоговому файлу.
+        {
+            const QByteArray last = json
+                ? "{\"ts\":\"" + keyedfx::iso(70, 0) + "\",\"ctx\":{\"a\":{\"b\":\"x\\\"y\"}},"
+                  "\"level\":40,\"msg\":\"\\u041a\\u044d\\u0448 end\"}\n"
+                : "ts=" + keyedfx::iso(70, 0) + " level=40 msg=\"Кэш \\\"end\\\"\"\n";
+            const QVector<int> cuts = json
+                ? QVector<int>{int(last.indexOf("\"b\"")) + 2, int(last.indexOf("x\\")) + 2,
+                               int(last.indexOf("\\u041a")) + 4, int(last.size())}
+                : QVector<int>{int(last.indexOf("level=")) + 3, int(last.indexOf("\\\"end")) + 1,
+                               int(last.size())};
+            const QString growPath = writeFile(dir, tag + "-grow.log", fx.bytes);
+            auto growLf = std::make_shared<LogFile>(growPath);
+            const auto grow = indexFile(growLf, nullptr, schema);
+            LogIndexer indexer;
+            indexer.setPattern(schema);
+            indexer.setExtractionEnabled(true);
+            int done = 0;
+            for (const int to : cuts) {
+                appendToFile(growPath, last.mid(done, to - done));
+                done = to;
+                indexAppend(indexer, growLf, grow, grow->lastLineProvisional());
+                const QString wholePath = writeFile(dir, tag + QString("-whole-%1.log").arg(to),
+                                                    fx.bytes + last.left(to));
+                auto wholeLf = std::make_shared<LogFile>(wholePath);
+                const auto whole = indexFile(wholeLf, nullptr, schema);
+                compareIndexes(tag + QString(" append up to %1").arg(to), *grow, *whole);
+                compareParserVsIndex(tag + QString(" whole up to %1").arg(to), wholePath, wholeLf,
+                                     parseFile(wholeLf, schema), *whole);
+            }
+            const qint64 lastLine = grow->lineCount() - 1;
+            CHECK(grow->timestampMs(grow->logicalId(lastLine)) == keyedfx::baseMs() + 70000
+                      && grow->level(lastLine) == LogLevel::Warn && grow->isPrimary(lastLine),
+                  qPrintable(tag + ": the completed object is a record with its key moment and pino level"));
+        }
+
+        // Счётчики сканера: то же правило, что у вкладки с этой схемой.
+        {
+            LogParser scanner;
+            scanner.setPattern(schema);
+            scanner.setExtractionEnabled(true);
+            const LogParser::FileStats st = scanner.analyzeFileForStats(path).stats;
+            int warn = 0, error = 0, fatal = 0;
+            for (const keyedfx::Record& r : fx.records) {
+                warn += r.level == LogLevel::Warn;
+                error += r.level == LogLevel::Error;
+                fatal += r.level == LogLevel::Fatal;
+            }
+            CHECK(st.totalEntries == fx.records.size(),
+                  qPrintable(QString("%1: scanner records %2, expected %3").arg(tag)
+                                 .arg(st.totalEntries).arg(fx.records.size())));
+            CHECK(st.warnCount == warn && st.errorCount == error && st.fatalCount == fatal,
+                  qPrintable(tag + ": scanner level counts"));
+            CHECK(st.firstEntryTimestamp.toMSecsSinceEpoch() == fx.records.first().ms
+                      && st.lastEntryTimestamp.toMSecsSinceEpoch() == fx.records.last().ms,
+                  qPrintable(tag + ": scanner From/To from the keys"));
+            // Сканер каталога схему не задаёт — счётчики по эвристике.
+            LogParser noSchema;
+            CHECK(noSchema.analyzeFileForStats(path).stats.totalEntries != fx.records.size(),
+                  qPrintable(tag + ": without the schema the scanner counts by the heuristic"));
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
     if (argc >= 3 && qstrcmp(argv[1], "--bench") == 0)
         return runBench(QString::fromLocal8Bit(argv[2]),
-                        argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
+                        benchSchema(argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString()));
     if (argc >= 3 && qstrcmp(argv[1], "--bench-resident") == 0)
-        return runBenchResident(QString::fromLocal8Bit(argv[2]));
+        return runBenchResident(QString::fromLocal8Bit(argv[2]),
+                                benchSchema(argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString()));
     if (argc >= 3 && qstrcmp(argv[1], "--bench-stages") == 0)
         return runBenchStages(QString::fromLocal8Bit(argv[2]),
                               argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
@@ -2736,6 +2883,7 @@ int main(int argc, char** argv)
     testLevelVocabulary();
     testTimestampGolden();
     testKeyedValues();
+    testKeyedLoad(dir);
     testPre1970(dir);
     testGolden(dir);
     testNewTimestampFormsBackends(dir);

@@ -53,6 +53,54 @@ qsizetype findQuoteOrBackslash(const char16_t* d, qsizetype i, qsizetype n)
     return n;
 }
 
+// Конец ключа logfmt с позиции i: первый юнит не isLogfmtKeyChar (≤ ' ',
+// «=» или «"»); n — если нет. SSE2 — как findQuoteOrBackslash; сравнение
+// «≤ ' '» беззнаковое: знаковое сравнение после сдвига на 0x8000.
+qsizetype findLogfmtKeyEnd(const char16_t* d, qsizetype i, qsizetype n)
+{
+#if KEYEDLINE_SSE2
+    const __m128i bias = _mm_set1_epi16(short(0x8000));
+    const __m128i above = _mm_set1_epi16(short(0x8000 + 0x21));   // u ≤ ' ' ⇔ u + 0x8000 < 0x8021
+    const __m128i equals = _mm_set1_epi16(short(u'='));
+    const __m128i quote = _mm_set1_epi16(short(u'"'));
+    for (; i + 8 <= n; i += 8) {
+        const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + i));
+        const __m128i low = _mm_cmplt_epi16(_mm_xor_si128(v, bias), above);
+        const int mask = _mm_movemask_epi8(_mm_or_si128(
+            low, _mm_or_si128(_mm_cmpeq_epi16(v, equals), _mm_cmpeq_epi16(v, quote))));
+        if (mask)
+            return i + qCountTrailingZeroBits(quint32(mask)) / 2;
+    }
+#endif
+    for (; i < n; ++i)
+        if (!isLogfmtKeyChar(QChar(d[i])))
+            return i;
+    return n;
+}
+
+// Первый разделитель logfmt (isLogfmtSpace) с позиции i; n — если нет.
+qsizetype findLogfmtSpace(const char16_t* d, qsizetype i, qsizetype n)
+{
+#if KEYEDLINE_SSE2
+    const __m128i space = _mm_set1_epi16(short(u' '));
+    const __m128i tab = _mm_set1_epi16(short(u'\t'));
+    const __m128i cr = _mm_set1_epi16(short(u'\r'));
+    const __m128i lf = _mm_set1_epi16(short(u'\n'));
+    for (; i + 8 <= n; i += 8) {
+        const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(d + i));
+        const int mask = _mm_movemask_epi8(
+            _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi16(v, space), _mm_cmpeq_epi16(v, tab)),
+                         _mm_or_si128(_mm_cmpeq_epi16(v, cr), _mm_cmpeq_epi16(v, lf))));
+        if (mask)
+            return i + qCountTrailingZeroBits(quint32(mask)) / 2;
+    }
+#endif
+    for (; i < n; ++i)
+        if (isLogfmtSpace(QChar(d[i])))
+            return i;
+    return n;
+}
+
 qsizetype scanString(QStringView t, qsizetype pos, bool* escaped)
 {
     const char16_t* const d = t.utf16();
@@ -101,7 +149,9 @@ qsizetype scanNested(QStringView t, qsizetype pos)
 
 KeyedLine::ValueKind bareKind(QStringView token)
 {
-    if (token == QLatin1String("null"))
+    // Свой цикл, а не сравнение с QLatin1String: на каждое голое значение.
+    const char16_t* t = token.utf16();
+    if (token.size() == 4 && t[0] == u'n' && t[1] == u'u' && t[2] == u'l' && t[3] == u'l')
         return KeyedLine::ValueKind::Null;
     const char16_t c = token.front().unicode();
     if ((c >= u'0' && c <= u'9') || c == u'-')
@@ -236,9 +286,7 @@ PairReader::PairReader(QStringView text, KeyedDefinition::Format format)
         m_structured = !text.isEmpty() && text.front() == QLatin1Char('{');
         m_pos = 1;
     } else {
-        qsizetype i = 0;
-        while (i < text.size() && isLogfmtKeyChar(text[i]))
-            ++i;
+        const qsizetype i = findLogfmtKeyEnd(text.utf16(), 0, text.size());
         m_structured = i > 0 && i < text.size() && text[i] == QLatin1Char('=');
         m_pos = 0;
     }
@@ -336,8 +384,7 @@ bool PairReader::nextLogfmt(Pair* pair)
         if (pos >= n)
             return false;
         const qsizetype keyStart = pos;
-        while (pos < n && isLogfmtKeyChar(t[pos]))
-            ++pos;
+        pos = findLogfmtKeyEnd(t.utf16(), pos, n);
         if (pos == keyStart || pos >= n || t[pos] != QLatin1Char('=')) {
             // Не пара (голый ключ, «"…"» без ключа) — токен пропускается.
             if (pos < n && t[pos] == QLatin1Char('"')) {
@@ -347,8 +394,7 @@ bool PairReader::nextLogfmt(Pair* pair)
                     return false;
                 pos = end;
             }
-            while (pos < n && !isLogfmtSpace(t[pos]))
-                ++pos;
+            pos = findLogfmtSpace(t.utf16(), pos, n);
             continue;
         }
         Pair p;
@@ -367,8 +413,7 @@ bool PairReader::nextLogfmt(Pair* pair)
             pos = end;
         } else {
             const qsizetype start = pos;
-            while (pos < n && !isLogfmtSpace(t[pos]))
-                ++pos;
+            pos = findLogfmtSpace(t.utf16(), pos, n);
             p.valueStart = int(start);
             p.valueLength = int(pos - start);
             p.kind = p.valueLength > 0 ? bareKind(t.mid(start, pos - start))
@@ -501,6 +546,7 @@ QString valueText(QStringView text, const Pair& pair)
 Lookup::Lookup(const KeyedDefinition& def)
     : m_format(def.format)
     , m_byLength(kMaxBucketedKey + 1)
+    , m_firstChars(kMaxBucketedKey + 1)
 {
     const auto add = [this](const QString& key, const QStringList& path, int column, int rank) {
         Entry e;
@@ -508,7 +554,14 @@ Lookup::Lookup(const KeyedDefinition& def)
         e.path = path;
         e.column = column;
         e.rank = rank;
-        m_byLength[qMin(int(key.size()), int(kMaxBucketedKey))].append(e);
+        const int bucket = qMin(int(key.size()), int(kMaxBucketedKey));
+        m_byLength[bucket].append(e);
+        const char16_t first = key.isEmpty() ? 0 : key.front().unicode();
+        FirstChars& mask = m_firstChars[bucket];
+        if (first >= 128)
+            mask.nonAscii = true;
+        else
+            mask.bits[first / 64] |= quint64(1) << (first % 64);
     };
     const auto column = [&](const QStringList& keys) {
         const int col = m_columnCount++;
@@ -601,9 +654,17 @@ inline bool sameKey(QStringView a, const QString& b)
 
 } // namespace
 
-void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits* hits) const
+void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits* hits,
+                      int* settled) const
 {
-    const QVector<Entry>& bucket = m_byLength[qMin(int(key.size()), int(kMaxBucketedKey))];
+    const int length = qMin(int(key.size()), int(kMaxBucketedKey));
+    // Ключ, не начинающийся ни с одной первой буквы кандидатов своей длины, —
+    // мимо без прохода по корзине (большинство ключей строки — не колонки).
+    const FirstChars& mask = m_firstChars[length];
+    const char16_t first = key.isEmpty() ? 0 : key.front().unicode();
+    if (first < 128 ? !(mask.bits[first / 64] & (quint64(1) << (first % 64))) : !mask.nonAscii)
+        return;
+    const QVector<Entry>& bucket = m_byLength[length];
     for (const Entry& e : bucket) {
         Hit& best = (*hits)[e.column];
         if (best.isValid() && e.rank >= best.rank)
@@ -613,6 +674,8 @@ void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits*
         if (e.path.isEmpty()) {
             if (!usableValue(pair))
                 continue;   // null или пусто — поля нет
+            if (e.rank == 0)
+                ++*settled;   // лучше первого кандидата не будет
             best.start = pair.valueStart;
             best.length = pair.valueLength;
             best.escaped = pair.valueEscaped;
@@ -637,13 +700,16 @@ bool Lookup::scan(QStringView line, Hits* hits) const
     PairReader reader(line, m_format);
     if (!reader.structured())
         return false;
+    // Колонки, у которых уже найден первый кандидат: когда это все, дальше
+    // строку читать незачем — ни один следующий ключ ничего не поменяет.
+    int settled = 0;
     Pair p;
-    while (reader.next(&p)) {
+    while (settled < m_columnCount && reader.next(&p)) {
         const QStringView key = line.mid(p.keyStart, p.keyLength);
         if (p.keyEscaped)
-            consider(line, unescape(key), p, hits);
+            consider(line, unescape(key), p, hits, &settled);
         else
-            consider(line, key, p, hits);
+            consider(line, key, p, hits, &settled);
     }
     for (int c = 0; c < KeyedDefinition::kRoleColumns && c < hits->size(); ++c)
         if ((*hits)[c].isValid())

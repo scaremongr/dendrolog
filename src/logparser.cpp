@@ -238,6 +238,8 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // дозапись после Нового года получает новый год (LineClassifier).
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
+    // Ключевая схема (F-4) действует, как любая схема, только с извлечением полей.
+    const LogPattern* const keyedSchema = (extraction && pattern.isKeyed()) ? &pattern : nullptr;
     // Дата времени без даты (F-11): дозапись продолжает состояние прошлого
     // прохода (LogFile::clockState), проход с начала файла — с нуля; первая
     // такая строка при пустом состоянии зовёт предпросмотр от начала прохода.
@@ -323,21 +325,22 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         bytesRead = bytes ? bytes->pos() : bytesRead + line.length() + 1;
         fileLineNumber++;
 
-        QDateTime lineTs;
-        LogLevel lineLevel = LogLevel::Unknown;
-
-        bool leadingTimestamp = false;
+        // Метка, уровень и граница записи — LineClassifier::classifyLine, то же
+        // правило, что у индексатора: ключевая схема (F-4) берёт их из ключей
+        // и сразу отдаёт поля, без неё — эвристика по строке. Регексная схема
+        // решает только «первичная ли» (и даёт поля).
         clockBeforeLine = clock.state;
-        bool hasTimestamp = m_classifier.detectTimestamp(line, lineTs, yearRef, &leadingTimestamp,
-                                                         &clock);
-        bool hasLevel = m_classifier.detectLogLevel(line, lineLevel);
         LogEntryFields extractedFields;
-        const bool schemaMatched = (extraction && pattern.isValid())
-            ? !(extractedFields = pattern.extractFields(line)).isEmpty()
-            : false;
+        const KeyedClassification cls =
+            m_classifier.classifyLine(keyedSchema, line, yearRef, &clock, &extractedFields);
+        const QDateTime lineTs = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
+        const LogLevel lineLevel = cls.hasLevel ? cls.level : LogLevel::Unknown;
+        bool schemaMatched = cls.matched;
+        if (!keyedSchema && extraction && pattern.isValid())
+            schemaMatched = !(extractedFields = pattern.extractFields(line)).isEmpty();
 
         std::shared_ptr<LogEntry> currentEntry;
-        if (LineClassifier::isPrimaryLine(schemaMatched, hasTimestamp, leadingTimestamp, hasLevel)) {
+        if (LineClassifier::isPrimaryLine(schemaMatched, cls.hasTs, cls.leading, cls.hasLevel)) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
@@ -500,6 +503,10 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
 
     QStringDecoder decoder(encoding, QStringConverter::Flag::Stateless);
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(filePath);
+    // Схема — своя у этого парсера (сканер заводит парсер на скан и схему не
+    // ставит); вызывающий не меняет её во время разбора.
+    const LogPattern* const keyedSchema =
+        (m_extractionEnabled && m_pattern.isKeyed()) ? &m_pattern : nullptr;
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
     // Время без даты (F-11): предпросмотра нет (`.gz` пришлось бы
@@ -514,15 +521,15 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         QString line = decoder.decode(bytes);
         if (line.endsWith(u'\r'))
             line.chop(1);
-        QDateTime ts;
-        LogLevel level = LogLevel::Unknown;
-        bool leadingTimestamp = false;
-        const bool hasTimestamp = m_classifier.detectTimestamp(line, ts, yearRef, &leadingTimestamp,
-                                                               &clock);
-        const bool hasLevel = m_classifier.detectLogLevel(line, level);
-        // Схема полей здесь не участвует: вкладка решает по ней, только когда
-        // включено извлечение полей, а по умолчанию — по метке и уровню.
-        if (LineClassifier::isPrimaryLine(false, hasTimestamp, leadingTimestamp, hasLevel)) {
+        // То же правило, что у загрузки вкладки (LineClassifier::classifyLine):
+        // ключевая схема с извлечением полей — метка, уровень и граница из
+        // ключей. Регексная схема здесь не участвует (её цена — регекс на
+        // каждую строку); сканер каталога схему не задаёт вовсе — счётчики
+        // по эвристике, как у вкладки без схемы.
+        const KeyedClassification cls = m_classifier.classifyLine(keyedSchema, line, yearRef, &clock);
+        const QDateTime ts = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
+        const LogLevel level = cls.hasLevel ? cls.level : LogLevel::Unknown;
+        if (LineClassifier::isPrimaryLine(cls.matched, cls.hasTs, cls.leading, cls.hasLevel)) {
             recordLevel = level;
             if (!stats.firstEntryTimestamp.isValid()) {
                 stats.firstEntryTimestamp = ts;

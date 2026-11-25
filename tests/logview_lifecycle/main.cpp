@@ -41,6 +41,7 @@
 #include "sessioncontroller.h"
 #include "stdinspooler.h"
 #include "testdocuments.h"
+#include "keyedfixtures.h"
 #include "viewidle.h"
 #include "fulllogcontroller.h"
 
@@ -2217,6 +2218,75 @@ static void checkHeadRewrite(const QDir& dir, const QString& name, const QString
     }
 }
 
+// F-4, PR 2: ключевая схема на живой вкладке. Объект JSON Lines, дописанный
+// частями (обрыв посреди вложенного, посреди строки за «\» и посреди \u), —
+// после каждой порции вкладка та же, что открытая на тех же байтах разом:
+// резидентный путь перечитывает оборванную строку (tailState), индексный —
+// предварительный хвост. Моменты и уровни — из ключей.
+struct KeyedRow {
+    QString text;
+    qint64 ms;
+    LogLevel level;
+    int line;
+    bool operator==(const KeyedRow& o) const
+    {
+        return text == o.text && ms == o.ms && level == o.level && line == o.line;
+    }
+};
+
+static QVector<KeyedRow> keyedRows(const LogModel& model)
+{
+    QVector<KeyedRow> out;
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const QDateTime ts = model.visibleTimestampAt(row);
+        out.append({model.messageAt(row), ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs,
+                    model.visibleLevelAt(row), model.entryAt(row)->originalLineNumber()});
+    }
+    return out;
+}
+
+static void checkKeyedTail(const QDir& dir, const QString& name)
+{
+    const QString schema = keyedfx::schema(KeyedDefinition::Format::JsonObject);
+    const keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 16);
+    const QByteArray last = "{\"ts\":\"" + keyedfx::iso(30, 0) + "\",\"ctx\":{\"a\":{\"b\":\"x\\\"y\"}},"
+                            "\"level\":50,\"msg\":\"\\u041a\\u044d\\u0448 end\"}\n";
+    const QVector<int> cuts = {int(last.indexOf("\"b\"")) + 2, int(last.indexOf("x\\")) + 2,
+                               int(last.indexOf("\\u041a")) + 4, int(last.size())};
+    const QString path = testdocs::writeFile(dir, name + "-keyed.jsonl", fx.bytes);
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    tab.addLogFile(path);
+    CHECK(settled(tab), name + " keyed: initial load");
+    int done = 0;
+    QByteArray bytes = fx.bytes;
+    for (const int to : cuts) {
+        const QByteArray part = last.mid(done, to - done);
+        done = to;
+        bytes += part;
+        CHECK(testdocs::appendToFile(path, part), name + " keyed: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + " keyed: reload settles");
+        const QString wholePath = testdocs::writeFile(dir, name + QString("-keyed-whole-%1.jsonl").arg(to), bytes);
+        LogViewWidget whole;
+        whole.setParserPattern(schema);
+        whole.setExtractionEnabled(true);
+        whole.addLogFile(wholePath);
+        CHECK(settled(whole), name + " keyed: whole file loads");
+        CHECK(tab.model()->isIndexedBackend() == whole.model()->isIndexedBackend(),
+              name + " keyed: same backend");
+        const QVector<KeyedRow> got = keyedRows(*tab.model());
+        const QVector<KeyedRow> want = keyedRows(*whole.model());
+        CHECK(got == want, name + QString(" keyed: rows after the part up to %1 match the file read at once (%2 vs %3 rows)")
+                                   .arg(to).arg(got.size()).arg(want.size()));
+    }
+    const QVector<KeyedRow> rowsNow = keyedRows(*tab.model());
+    CHECK(!rowsNow.isEmpty() && rowsNow.last().ms == keyedfx::baseMs() + 30000
+              && rowsNow.last().level == LogLevel::Error,
+          name + " keyed: the completed object has its key moment and level");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2231,6 +2301,7 @@ int main(int argc, char** argv)
 
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
+    checkKeyedTail(dir, QStringLiteral("resident"));
     checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("resident merged"), schema, HeadScenario::Merged);
     checkHeadRewrite(dir, QStringLiteral("crossed threshold"), schema, HeadScenario::CrossedThreshold);
@@ -2256,6 +2327,7 @@ int main(int argc, char** argv)
     checkProvisionalNoExtraWork(dir, QStringLiteral("indexed"), schema);
     checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
+    checkKeyedTail(dir, QStringLiteral("indexed"));
     checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("indexed merged"), schema, HeadScenario::Merged);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);

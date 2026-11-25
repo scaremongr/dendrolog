@@ -143,6 +143,9 @@ public:
     /// строка распознана. Горячий путь: без аллокаций, кроме ключей с
     /// обратной косой. Не ключевая схема — false.
     bool scanKeyed(QStringView line, KeyedLine::Hits* hits) const;
+    /// Поля распознанной строки по найденным scanKeyed колонкам — то же, что
+    /// extractFields, без второго разбора строки (загрузка, F-4 PR 2).
+    LogEntryFields keyedFields(const KeyedLine::Hits& hits) const;
     /// Все пары верхнего уровня строки: ключ и значение раскодированы,
     /// вложенный объект — его текст, null — «null». ТОЛЬКО для одной записи
     /// (Entry Details, F-9): аллокации на каждую пару.

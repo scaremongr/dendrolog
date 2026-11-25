@@ -49,6 +49,7 @@
 #include "logscan.h"
 #include "recordid.h"
 #include "filterconfigs.h"
+#include "keyedfixtures.h"
 #include "testdocuments.h"
 #include "textmatchhighlighter.h"
 
@@ -1907,6 +1908,291 @@ static QByteArray makeNoLevelBytes(int records, int form, const QDateTime& base,
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// F-4, PR 2. Ключевая схема на загрузке: момент, уровень и граница записи из
+// ключей — одним правилом (LineClassifier::classifyLine) у парсера и
+// индексатора. Фикстуры JSON Lines и logfmt (tests/common/keyedfixtures.h)
+// прогоняются во всех конфигурациях фильтров (правила по колонкам Level,
+// Message, Thread — с раскодированными значениями), моменты, уровни, записи
+// и значение Message каждой строки сверяются с заданными в фикстуре; слитая
+// вкладка с обычным логом — против заданного порядка моментов; дозапись —
+// с объектом, оборванным посреди строки, \u-последовательности и вложенного.
+// ---------------------------------------------------------------------------
+struct KeyedFile {
+    QString path;
+    keyedfx::Fixture fixture;
+};
+
+static void checkKeyedExpectations(const QString& what, const LogModel& m,
+                                   const QVector<KeyedFile>& files, const QStringList& fieldNames)
+{
+    const int messageColumn = fieldNames.indexOf(QStringLiteral("Message"));
+    QHash<QString, int> idOfRecord;      // «путь#запись» → id записи
+    QHash<QString, QString> recordOfId;  // «путь#id» → «путь#запись»
+    qint64 previousMs = std::numeric_limits<qint64>::min();
+    for (int row = 0; row < m.rowCount(); ++row) {
+        if (g_contextFailures > kFailuresPerContext)
+            return;
+        const std::shared_ptr<LogEntry> e = m.entryAt(row);
+        if (!e || !e->sourceFile()) {
+            CHECK(false, what + QStringLiteral(": строка %1 без записи").arg(row));
+            continue;
+        }
+        const QString path = e->sourceFile()->filePath;
+        const KeyedFile* file = nullptr;
+        for (const KeyedFile& f : files)
+            if (f.path == path)
+                file = &f;
+        if (!file)
+            continue;   // обычный лог слитой вкладки — его проверяет порядок
+        const int line = e->originalLineNumber() - 1;
+        const QString at = what + QStringLiteral(": %1:%2").arg(QFileInfo(path).fileName()).arg(line + 1);
+        if (line < 0 || line >= file->fixture.lineRecord.size()) {
+            CHECK(false, at + QStringLiteral(" — строки нет в фикстуре"));
+            continue;
+        }
+        const int rec = file->fixture.lineRecord[line];
+        const keyedfx::Record expected = rec >= 0 ? file->fixture.records[rec] : keyedfx::Record{};
+        const QDateTime ts = m.visibleTimestampAt(row);
+        const qint64 ms = ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
+        CHECK(ms == expected.ms, at + QStringLiteral(": момент %1, ожидается %2")
+                                      .arg(describe(ts), describe(QDateTime::fromMSecsSinceEpoch(expected.ms))));
+        CHECK(m.visibleLevelAt(row) == expected.level,
+              at + QStringLiteral(": уровень %1, ожидается %2")
+                       .arg(describe(m.visibleLevelAt(row)), describe(expected.level)));
+        // Слитая вкладка — по времени; одно-файловая фикстура и так монотонна.
+        if (ms != kNoTimestampMs) {
+            CHECK(ms >= previousMs, at + QStringLiteral(": момент меньше предыдущей строки"));
+            previousMs = ms;
+        }
+        const QString recordKey = path + u'#' + QString::number(rec);
+        const QString idKey = path + u'#' + QString::number(e->logicalEntryId());
+        if (idOfRecord.contains(recordKey))
+            CHECK(idOfRecord.value(recordKey) == e->logicalEntryId(),
+                  at + QStringLiteral(": строка не в своей записи"));
+        else
+            idOfRecord.insert(recordKey, e->logicalEntryId());
+        if (recordOfId.contains(idKey))
+            CHECK(recordOfId.value(idKey) == recordKey,
+                  at + QStringLiteral(": две записи фикстуры слиплись в одну"));
+        else
+            recordOfId.insert(idKey, recordKey);
+        const bool firstOfRecord = line == 0 || file->fixture.lineRecord[line - 1] != rec;
+        if (firstOfRecord && !expected.message.isEmpty() && messageColumn >= 0) {
+            const QString got = e->fields().value(messageColumn, e->message());
+            CHECK(got == expected.message,
+                  at + QStringLiteral(": Message %1, ожидается %2")
+                           .arg(describe(got), describe(expected.message)));
+        }
+    }
+}
+
+// Обычный лог с явной зоной: строки встают между записями ключевой фикстуры
+// (момент base + i секунд + 500 мс).
+static QByteArray keyedNeighbourLog(int records)
+{
+    QByteArray b;
+    for (int i = 0; i < records; ++i)
+        b += keyedfx::iso(i, 500) + " [p] INFO - plain neighbour " + QByteArray::number(i) + '\n';
+    return b;
+}
+
+// Слитая вкладка ключевого и обычного лога: заданный порядок — строки по
+// моменту; у равных моментов разных файлов порядок дал бы путь, здесь их нет.
+static void checkKeyedMergeOrder(const QString& what, const LogModel& m,
+                                 const keyedfx::Fixture& fx, const QString& keyedPath,
+                                 int neighbourRecords)
+{
+    // Ожидаемая последовательность первичных строк: (момент, путь, строка).
+    struct Primary { qint64 ms; bool keyed; int index; };
+    QVector<Primary> expected;
+    for (int r = 0; r < fx.records.size(); ++r)
+        expected.append({fx.records[r].ms, true, r});
+    for (int i = 0; i < neighbourRecords; ++i)
+        expected.append({keyedfx::baseMs() + i * 1000LL + 500, false, i});
+    std::stable_sort(expected.begin(), expected.end(),
+                     [](const Primary& a, const Primary& b) { return a.ms < b.ms; });
+    QVector<Primary> got;
+    int lastId = -1;
+    const LogFile* lastFile = nullptr;
+    for (int row = 0; row < m.rowCount(); ++row) {
+        const std::shared_ptr<LogEntry> e = m.entryAt(row);
+        if (!e)
+            continue;
+        if (e->logicalEntryId() == lastId && e->sourceFile().get() == lastFile)
+            continue;
+        lastId = e->logicalEntryId();
+        lastFile = e->sourceFile().get();
+        const bool keyed = e->sourceFile()->filePath == keyedPath;
+        const QDateTime ts = m.visibleTimestampAt(row);
+        got.append({ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs, keyed,
+                    keyed ? fx.lineRecord.value(e->originalLineNumber() - 1, -1)
+                          : e->originalLineNumber() - 1});
+    }
+    CHECK(got.size() == expected.size(),
+          what + QStringLiteral(": записей %1, ожидается %2").arg(got.size()).arg(expected.size()));
+    for (int k = 0; k < qMin(got.size(), expected.size()); ++k) {
+        if (got[k].ms != expected[k].ms || got[k].keyed != expected[k].keyed
+            || got[k].index != expected[k].index) {
+            CHECK(false, what + QStringLiteral(": запись %1 — %2 #%3, ожидается %4 #%5")
+                                    .arg(k)
+                                    .arg(got[k].keyed ? "ключевая" : "обычная").arg(got[k].index)
+                                    .arg(expected[k].keyed ? "ключевая" : "обычная")
+                                    .arg(expected[k].index));
+            return;
+        }
+    }
+}
+
+// Без фильтров: весь API и заданные значения.
+static void compareKeyedUnfiltered(const QString& what, Document& res, Document& idx,
+                                   const QVector<KeyedFile>& files, const QStringList& fieldNames)
+{
+    g_context = what;
+    g_contextFailures = 0;
+    FilterConfig none;
+    none.name = QStringLiteral("без фильтров");
+    applyChecked(*res.model, none, fieldNames);
+    applyChecked(*idx.model, none, fieldNames);
+    compareAll(res, idx);
+    checkKeyedExpectations(what + QStringLiteral(" / резидентный"), *res.model, files, fieldNames);
+    checkKeyedExpectations(what + QStringLiteral(" / индексный"), *idx.model, files, fieldNames);
+}
+
+static QString writeKeyedIn(const QDir& dir, const QString& sub, const QString& name,
+                            const QByteArray& bytes)
+{
+    dir.mkpath(sub);
+    return writeFile(QDir(dir.filePath(sub)), name, bytes);
+}
+
+static void testKeyedSchemas(const QDir& dir)
+{
+    using Format = KeyedDefinition::Format;
+    for (const Format format : {Format::JsonObject, Format::Logfmt}) {
+        const bool json = format == Format::JsonObject;
+        const QString tag = json ? QStringLiteral("JSON Lines") : QStringLiteral("logfmt");
+        const QString ext = json ? QStringLiteral(".jsonl") : QStringLiteral(".logfmt");
+        const QString keyedSchema = keyedfx::schema(format);
+        const LogPattern keyedPattern(keyedSchema);
+        CHECK(keyedPattern.isValid() && keyedPattern.isKeyed(), tag + QStringLiteral(": схема"));
+        const QStringList fieldNames = keyedPattern.fieldNames();
+
+        const keyedfx::Fixture fx = keyedfx::make(format, 96);
+        const QString path = writeFile(dir, QStringLiteral("keyed") + ext, fx.bytes);
+        const QVector<KeyedFile> files = {{path, fx}};
+
+        // Все конфигурации фильтров, весь API.
+        runFixture(tag + QStringLiteral(", один файл"), {path}, keyedSchema, fieldNames);
+        {
+            Document res = loadResident({path}, keyedSchema);
+            Document idx = loadIndexed({path}, keyedSchema);
+            compareKeyedUnfiltered(tag + QStringLiteral(" / заданные значения"), res, idx, files,
+                                   fieldNames);
+        }
+
+        // Слитая вкладка с обычным логом.
+        const QString neighbour = writeFile(dir, QStringLiteral("keyed-neighbour-%1.log").arg(json),
+                                            keyedNeighbourLog(60));
+        for (const IndexedLoad mode : {IndexedLoad::Sequential, IndexedLoad::Concurrent}) {
+            runFixture(tag + QStringLiteral(" + обычный лог, ") + describe(mode), {path, neighbour},
+                       keyedSchema, fieldNames, mode);
+            Document res = loadResident({path, neighbour}, keyedSchema);
+            Document idx = loadIndexed({path, neighbour}, keyedSchema, mode);
+            const QString what = tag + QStringLiteral(" + обычный лог / порядок, ") + describe(mode);
+            compareKeyedUnfiltered(what, res, idx, files, fieldNames);
+            checkKeyedMergeOrder(what + QStringLiteral(" / резидентный"), *res.model, fx, path, 60);
+            checkKeyedMergeOrder(what + QStringLiteral(" / индексный"), *idx.model, fx, path, 60);
+        }
+
+        // Дозапись целыми строками на обоих бэкендах: продолжение в начале
+        // порции остаётся в записи перед ним. Файлы бэкендов — под одним
+        // именем в разных каталогах, сверяется имя (g_fileNameOnly).
+        {
+            const keyedfx::Fixture whole = keyedfx::make(format, 40);
+            // Голова — до первого продолжения многострочной записи 36 (форма 4).
+            int cut = 0;
+            for (int line = 0; line < whole.lineRecord.size(); ++line) {
+                if (line > 0 && whole.lineRecord[line] == 36 && whole.lineRecord[line - 1] == 36)
+                    break;
+                cut = int(whole.bytes.indexOf('\n', cut)) + 1;
+            }
+            const QByteArray head = whole.bytes.left(cut);
+            const QString name = QStringLiteral("keyed-append") + ext;
+            const QString resPath = writeKeyedIn(dir, QStringLiteral("res"), name, head);
+            const QString idxPath = writeKeyedIn(dir, QStringLiteral("idx"), name, head);
+            Document res = loadResident({resPath}, keyedSchema);
+            Document idx = loadIndexed({idxPath}, keyedSchema);
+            const QByteArray rest = whole.bytes.mid(cut);
+            CHECK(appendResidentTail(res, 0, rest, keyedSchema), tag + QStringLiteral(": резидентная дозапись"));
+            CHECK(appendIndexedTail(idx, 0, rest, keyedSchema), tag + QStringLiteral(": индексная дозапись"));
+            settleChecked(*res.model);
+            settleChecked(*idx.model);
+            g_fileNameOnly = true;
+            compareKeyedUnfiltered(tag + QStringLiteral(" / дозапись строками"), res, idx,
+                                   {{resPath, whole}, {idxPath, whole}}, fieldNames);
+            g_fileNameOnly = false;
+        }
+
+        // Хвост без '\n', дописанный частями: обрыв посреди вложенного
+        // объекта, посреди строки в кавычках и посреди \u-последовательности.
+        // Индексная вкладка после каждой порции = резидентная, загрузившая
+        // те же байты разом; в конце — заданные значения.
+        {
+            keyedfx::Fixture whole = keyedfx::make(format, 24);
+            const QByteArray last = json
+                ? "{\"ts\":\"" + keyedfx::iso(30, 0) + "\",\"ctx\":{\"a\":{\"b\":\"x\\\"y\"}},"
+                  "\"level\":\"fatal\",\"msg\":\"\\u041a\\u044d\\u0448 end\",\"Thread\":\"worker-1\"}"
+                : "ts=" + keyedfx::iso(30, 0) + " level=fatal msg=\"Кэш \\\"end\\\"\" Thread=worker-1";
+            const QString lastMessage = json ? QStringLiteral("Кэш end") : QStringLiteral("Кэш \"end\"");
+            QVector<int> cuts;
+            if (json) {
+                cuts << int(last.indexOf("\"b\"")) + 2         // внутри вложенного
+                     << int(last.indexOf("x\\\"")) + 2        // внутри строки, за «\»
+                     << int(last.indexOf("\\u041a")) + 4;      // внутри \u
+            } else {
+                cuts << int(last.indexOf("level=")) + 3
+                     << int(last.indexOf("\\\"end")) + 1;     // внутри строки, за «\»
+            }
+            const QString name = QStringLiteral("keyed-tail") + ext;
+            QByteArray bytes = whole.bytes;
+            const QString idxPath = writeKeyedIn(dir, QStringLiteral("idx"), name, bytes);
+            Document idx = loadIndexed({idxPath}, keyedSchema);
+            Document res;
+            QString resPath;
+            int done = 0;
+            for (int k = 0; k <= cuts.size(); ++k) {
+                const int to = k < cuts.size() ? cuts[k] : int(last.size());
+                QByteArray part = last.mid(done, to - done);
+                if (k == cuts.size())
+                    part += '\n';
+                done = to;
+                bytes += part;
+                CHECK(appendIndexedTail(idx, 0, part, keyedSchema, /*markNew=*/false),
+                      tag + QStringLiteral(": хвост, порция %1").arg(k));
+                settleChecked(*idx.model);
+                resPath = writeKeyedIn(dir, QStringLiteral("res%1").arg(k), name, bytes);
+                res = loadResident({resPath}, keyedSchema);
+                const QString what = tag + QStringLiteral(" / хвост частями, порция %1").arg(k);
+                g_context = what;
+                g_contextFailures = 0;
+                g_fileNameOnly = true;
+                compareVisibleRows(*res.model, *idx.model);
+                compareLogicalRecords(*res.model, *idx.model);
+                g_fileNameOnly = false;
+            }
+            whole.bytes = bytes;
+            whole.records.append(keyedfx::Record{keyedfx::baseMs() + 30 * 1000, LogLevel::Fatal,
+                                                 lastMessage});
+            whole.lineRecord.append(int(whole.records.size()) - 1);
+            g_fileNameOnly = true;
+            compareKeyedUnfiltered(tag + QStringLiteral(" / хвост частями, итог"), res, idx,
+                                   {{resPath, whole}, {idxPath, whole}}, fieldNames);
+            g_fileNameOnly = false;
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -1986,6 +2272,7 @@ int main(int argc, char** argv)
         }
     }
 
+    if (qEnvironmentVariableIsSet("EQ_ONLY_KEYED")) { testKeyedSchemas(dir); return g_failures ? 1 : 0; }
     if (qEnvironmentVariableIsSet("EQ_ONLY_PROV")) { testProvisionalEncodings(dir, schema, fieldNames); return g_failures ? 1 : 0; }
     runFixture(QStringLiteral("один файл (LF)"), { fileA }, schema, fieldNames);
     runFixture(QStringLiteral("один файл (CRLF, без \\n в конце)"), { fileB }, schema, fieldNames);
@@ -2020,6 +2307,7 @@ int main(int argc, char** argv)
     testEncodings(dir, schema, fieldNames);
     testResidentEncodings(dir, schema, fieldNames);
     testProvisionalEncodings(dir, schema, fieldNames);
+    testKeyedSchemas(dir);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

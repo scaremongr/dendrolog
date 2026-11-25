@@ -3,6 +3,11 @@
 
 Emits lines in the primary format the parser detects without a schema:
     yyyy-MM-dd HH:mm:ss,zzz LEVEL [component] message
+or, with --format jsonl / logfmt, the same records as JSON Lines / logfmt
+(keys ts, level, logger, msg; stack traces stay plain continuation lines):
+    {"ts":"2026-07-10T09:00:00.001Z","level":"info","logger":"core","msg":"..."}
+    ts=2026-07-10T09:00:00.001Z level=info logger=core msg="..."
+--epoch writes ts as epoch milliseconds, --numeric-levels as pino numbers.
 
 Examples:
     python generate_test_log.py out.log --lines 100000
@@ -10,6 +15,7 @@ Examples:
     python generate_test_log.py grow.log --lines 1000 --append-batches 20 \
         --append-lines 50 --append-interval 1.0
     python generate_test_log.py - --lines 500 --append-batches 100  # stdout stream
+    python generate_test_log.py app.jsonl --lines 2000000 --format jsonl --epoch
 """
 
 import argparse
@@ -64,6 +70,22 @@ def parse_size(text: str) -> int:
     return int(float(text) * mult)
 
 
+PINO_LEVELS = {"TRACE": 10, "DEBUG": 20, "INFO": 30, "WARN": 40, "ERROR": 50, "FATAL": 60}
+
+
+def json_string(text: str) -> str:
+    out = ['"']
+    for ch in text:
+        if ch == '"' or ch == "\\":
+            out.append("\\" + ch)
+        elif ord(ch) < 0x20:
+            out.append("\\u%04x" % ord(ch))
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def fill(template: str, rng: random.Random) -> str:
     return template.format(
         rid="%08x" % rng.getrandbits(32),
@@ -102,8 +124,7 @@ class Generator:
             msg = fill(rng.choice(ERROR_TEMPLATES), rng)
         else:
             msg = fill(rng.choice(TEMPLATES), rng)
-        stamp = self.ts.strftime("%Y-%m-%d %H:%M:%S,") + "%03d" % (self.ts.microsecond // 1000)
-        lines = [f"{stamp} {level} [{comp}] {msg}"]
+        lines = [self.primary_line(level, comp, msg)]
         if rng.random() * 100 < self.args.multiline_pct:
             depth = rng.randint(2, 6)
             lines.append("com.dendro.errors.ProcessingException: " + msg)
@@ -113,6 +134,27 @@ class Generator:
         self.level_counts[level] += 1
         self.lines_written += len(lines)
         return lines
+
+
+    def primary_line(self, level: str, comp: str, msg: str) -> str:
+        fmt = self.args.format
+        if fmt == "text":
+            stamp = self.ts.strftime("%Y-%m-%d %H:%M:%S,") + "%03d" % (self.ts.microsecond // 1000)
+            return f"{stamp} {level} [{comp}] {msg}"
+        if self.args.epoch:
+            # Naive local time, as the text form; the epoch is its UTC reading.
+            ts = str((self.ts - datetime(1970, 1, 1)) // timedelta(milliseconds=1))
+        else:
+            ts = json_string(self.ts.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (self.ts.microsecond // 1000))
+        lvl = str(PINO_LEVELS[level]) if self.args.numeric_levels else json_string(level.lower())
+        if fmt == "jsonl":
+            return '{"ts":%s,"level":%s,"logger":%s,"msg":%s}' % (ts, lvl, json_string(comp), json_string(msg))
+        # logfmt: bare values where possible, quoted message.
+        if not self.args.epoch:
+            ts = ts.strip('"')
+        if not self.args.numeric_levels:
+            lvl = level.lower()
+        return "ts=%s level=%s logger=%s msg=%s" % (ts, lvl, comp, json_string(msg))
 
 
 def open_out(args):
@@ -132,6 +174,10 @@ def main():
     ap.add_argument("--bom", action="store_true", help="write UTF-8 BOM")
     ap.add_argument("--no-trailing-newline", action="store_true", help="omit EOL after the last line")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--format", choices=["text", "jsonl", "logfmt"], default="text",
+                    help="line format of the primary line of a record")
+    ap.add_argument("--epoch", action="store_true", help="jsonl/logfmt: ts as epoch milliseconds")
+    ap.add_argument("--numeric-levels", action="store_true", help="jsonl/logfmt: pino numeric levels")
     ap.add_argument("--append-batches", type=int, default=0, help="after initial write, append N batches")
     ap.add_argument("--append-lines", type=int, default=50, help="lines per append batch")
     ap.add_argument("--append-interval", type=float, default=1.0, help="seconds between batches")

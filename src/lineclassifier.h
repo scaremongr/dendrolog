@@ -208,6 +208,17 @@ public:
     KeyedClassification classifyKeyed(const LogPattern& pattern, QStringView line,
                                       const YearReference& year = YearReference(),
                                       ClockDates* clock = nullptr) const;
+    // Классификация строки при ЗАГРУЗКЕ — одно место правила для LogParser
+    // (резидентный путь и счётчики сканера) и LogIndexer (F-4, PR 2):
+    // keyedSchema — ключевая схема, если у вкладки включено извлечение полей
+    // и схема ключевая (LogPattern::isKeyed), иначе nullptr — тогда только
+    // эвристика по строке, как без схемы. fields (может быть nullptr) —
+    // поля распознанной строки ключевой схемы (LogPattern::keyedFields) без
+    // второго разбора; у нераспознанной — пусто. Регексную схему вызывающий
+    // спрашивает сам (extractFields): она решает только «первичная ли».
+    KeyedClassification classifyLine(const LogPattern* keyedSchema, QStringView line,
+                                     const YearReference& year, ClockDates* clock,
+                                     LogEntryFields* fields = nullptr) const;
 
     // Правило первичной строки логической записи (F-12, docs/design/F-12.md).
     // Строка первична, если её распознала схема, ИЛИ у неё есть метка и
