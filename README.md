@@ -32,8 +32,9 @@
 - **Compressed logs** — `.gz` files (rotated `app.log.1.gz` too) open in a tab
   with progress and cancel: unpacked to a temporary copy that is removed with the
   tab. The Directory Scanner lists them and counts and searches them without
-  unpacking to disk. A `.zip` of logs opens in the Directory Scanner as a folder
-  tree; bookmarks and sessions remember the archive and the file inside it.
+  unpacking to disk. A `.zip`, `.tar`, `.tar.gz` or `.tgz` of logs opens in the
+  Directory Scanner as a folder tree; bookmarks and sessions remember the archive
+  and the file inside it.
 - **Directory scanner** — scan a whole folder of logs into a sortable tree:
   per-file entry counts, time ranges, warn/error/fatal counts and sizes;
   narrow it down by content or date range and open files right from the results.

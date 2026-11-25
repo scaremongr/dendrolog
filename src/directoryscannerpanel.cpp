@@ -400,7 +400,7 @@ void DirectoryScannerPanel::openArchive(const QString& archivePath)
         return;
     }
     m_pendingArchive = archivePath;
-    m_job = m_unpacker->unpackZip(archivePath, m_pendingItem->path(), [extensions](const QString& member) {
+    m_job = m_unpacker->unpackArchive(archivePath, m_pendingItem->path(), [extensions](const QString& member) {
         return scannerNameMatches(QFileInfo(member).fileName(), extensions);
     });
     m_pathLabel->setStyleSheet(QString());
@@ -447,9 +447,9 @@ void DirectoryScannerPanel::onArchiveExtracted(const SourceUnpacker::Result& r)
     if (r.extracted.isEmpty())
         notes << tr("%1 has no log files (names are matched by the scanner's extensions).").arg(name);
     if (r.skippedUnsafe > 0)
-        notes << tr("%n entry(ies) of %1 skipped: unsafe names or links.", nullptr, r.skippedUnsafe).arg(name);
+        notes << tr("%n entry(ies) of %1 skipped: unsafe names, links or devices.", nullptr, r.skippedUnsafe).arg(name);
     if (r.skippedEncrypted > 0)
-        notes << tr("%n entry(ies) of %1 skipped: password-protected or compressed with an unsupported method.",
+        notes << tr("%n entry(ies) of %1 skipped: password-protected or of an unsupported kind.",
                     nullptr, r.skippedEncrypted).arg(name);
     if (!notes.isEmpty())
         emit statusMessage(notes.join(QLatin1Char(' ')));

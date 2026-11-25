@@ -49,6 +49,19 @@
 //     который сам gzip (`app.log.gz` в архиве), распаковывается дальше в тот
 //     же файл — вкладка получает текст.
 // Прогресс у zip — распакованные байты из суммы размеров оглавления.
+//
+// tar (шаг 5, tararchive.h): `.tar`, `.tar.gz`, `.tgz` — тем же путём
+// (unpackArchive / unpackArchiveMember выбирают формат по содержимому).
+// Отбор членов и обезвреживание имён — общие с zip (MemberPlanner):
+// ссылки (символические и жёсткие), устройства и FIFO — пропуск как
+// опасные, разреженные и прочие неизвестные типы — как неподдерживаемые.
+// Оглавления нет: место ДО начала у `.tar` — сумма отобранных по
+// предварительному проходу заголовков, у `.tar.gz` — размер архива на
+// диске (точного не узнать без второй распаковки), по ходу — как у gzip.
+// Член ищется проходом от начала архива, у `.tar.gz` поток после него
+// дочитывается (CRC gzip). Прогресс — прочитанные байты архива (у
+// `.tar.gz` — сжатые) из его размера, у члена — на всех стадиях. Формат —
+// ArchiveFormats::detectKnown: открытый по имени v7 и пустой tar — тоже tar.
 // ============================================================================
 class SourceUnpacker : public QObject {
     Q_OBJECT
@@ -115,6 +128,11 @@ public:
     quint64 unpackZip(const QString& zipPath, const QString& targetDir, MemberFilter accept);
     // Один член zip в файл targetPath; член-gzip — распакованным.
     quint64 unpackZipMember(const QString& zipPath, const QString& member, const QString& targetPath);
+    // Архив с набором файлов любого формата (zip, tar, tar.gz — по
+    // содержимому, ArchiveFormats::detectKnown): то же, что unpackZip /
+    // unpackZipMember. Не архив — SourceError, каталог убран.
+    quint64 unpackArchive(const QString& archivePath, const QString& targetDir, MemberFilter accept);
+    quint64 unpackArchiveMember(const QString& archivePath, const QString& member, const QString& targetPath);
 
     // Отменить идущее задание (finished придёт с Cancelled, файла не будет).
     // Прерывание срабатывает на ближайшем блоке входа (GzipDevice::setAbortFlag).

@@ -7,7 +7,7 @@
 #include "stdinspooler.h"
 #include "archiveregistry.h"
 #include "gzipdevice.h"
-#include "ziparchive.h"
+#include "tararchive.h"
 #include "sourceunpacker.h"
 #include "spooldir.h"
 #include "quicksearch.h"
@@ -666,17 +666,18 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
         }
     }
 
+    // Архив с набором файлов (zip, tar, `.tar.gz`) вкладкой не читается:
+    // двоичные байты вместо строк. Его открывает Directory Scanner (окно
+    // направляет туда). Проверка — до gzip: `.tar.gz` тоже gzip.
+    if (!StdinSpooler::isSpoolFilePath(filePath) && ArchiveFormats::isMultiFileArchive(filePath)) {
+        emit statusMessage(tr("%1 is an archive: open it in the Directory Scanner to see its files.")
+                               .arg(QFileInfo(filePath).fileName()));
+        return;
+    }
     // Сжатый источник (F-2): по сигнатуре, а не по имени. Память файла —
     // после распаковки (continueArchive).
     if (!StdinSpooler::isSpoolFilePath(filePath) && GzipDevice::fileHasSignature(filePath)) {
         addArchive(filePath, initial);
-        return;
-    }
-    // Архив с набором файлов (zip) вкладкой не читается: двоичные байты
-    // вместо строк. Его открывает Directory Scanner (окно направляет туда).
-    if (ZipArchive::fileHasSignature(filePath)) {
-        emit statusMessage(tr("%1 is a zip archive: open it in the Directory Scanner to see its files.")
-                               .arg(QFileInfo(filePath).fileName()));
         return;
     }
 
@@ -970,12 +971,12 @@ void LogViewWidget::startUnpack(const LogFilePtr& logFile)
     as.archiveStamp = DiskStamp::of(logFile->source().path);
     as.unpacked = false;
     as.error.clear();
-    // .gz — распаковать; член zip (F-2, шаг 4) — извлечь (член-gzip —
-    // распакованным).
+    // .gz — распаковать; член zip или tar (F-2, шаги 4–5) — извлечь
+    // (член-gzip — распакованным).
     const auto run = [&as, &logFile]() {
         const LogSource& src = logFile->source();
         return src.member.isEmpty() ? as.unpacker->unpackGzip(src.path, logFile->filePath)
-                                    : as.unpacker->unpackZipMember(src.path, src.member, logFile->filePath);
+                                    : as.unpacker->unpackArchiveMember(src.path, src.member, logFile->filePath);
     };
     as.job = run();
     if (as.job == 0) {
@@ -1063,7 +1064,7 @@ bool LogViewWidget::reloadArchive(const LogFilePtr& logFile)
     const QString archivePath = logFile->source().path;
     const DiskStamp stamp = DiskStamp::of(archivePath);
     const bool signature = logFile->source().member.isEmpty() ? GzipDevice::fileHasSignature(archivePath)
-                                                              : ZipArchive::fileHasSignature(archivePath);
+                                                              : ArchiveFormats::detectKnown(archivePath) != ArchiveFormats::Format::None;
     if (!stamp.exists() || !signature) {
         // Копия самодостаточна: строки остаются. Копии нет (распаковка не
         // удалась или отменена) — показывать нечего.

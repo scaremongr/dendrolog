@@ -40,6 +40,7 @@
 #include "sessionfile.h"
 #include "testdocuments.h"
 #include "viewexport.h"
+#include "tarbytes.h"
 #include "zipbytes.h"
 
 #include <QApplication>
@@ -687,7 +688,7 @@ static void checkMemoryFirstArchive(const QDir& dir)
 
 
 // ---------------------------------------------------------------------------
-// F-2, шаг 4: член zip во вкладке.
+// F-2, шаги 4–5: член zip, tar и .tar.gz во вкладке — один путь.
 
 static QByteArray readAll(const QString& path)
 {
@@ -695,10 +696,16 @@ static QByteArray readAll(const QString& path)
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
 }
 
-static void checkZipMember(const QDir& dir, const QString& name)
+enum class ArchiveKind { Zip, Tar, TarGz };
+
+static void checkArchiveMember(const QDir& dir, const QString& name, ArchiveKind kind)
 {
-    const QString label = QStringLiteral("zip/%1").arg(name);
-    QDir work(dir.filePath(QStringLiteral("zip-") + name));
+    const QString kindName = kind == ArchiveKind::Zip ? QStringLiteral("zip")
+                           : kind == ArchiveKind::Tar ? QStringLiteral("tar") : QStringLiteral("tgz");
+    const QString archiveName = kind == ArchiveKind::Zip ? QStringLiteral("bundle.zip")
+                              : kind == ArchiveKind::Tar ? QStringLiteral("bundle.tar") : QStringLiteral("bundle.tar.gz");
+    const QString label = QStringLiteral("%1/%2").arg(kindName, name);
+    QDir work(dir.filePath(kindName + QLatin1Char('-') + name));
     QDir().mkpath(work.path() + QStringLiteral("/a"));
     FileMemoryStore store(work.filePath(QStringLiteral("memory")));
     const QByteArray bytes = logBytes("member", 300);
@@ -706,10 +713,15 @@ static void checkZipMember(const QDir& dir, const QString& name)
     const QByteArray nestedBytes = logBytes("nested", 70);
     const QString plain = testdocs::writeFile(work, "plain-twin.log", bytes);
     const auto bundle = [&](const QByteArray& twin) {
-        return testzip::zip({ testzip::file("logs/twin.log", twin), testzip::file("logs/other.log", otherBytes),
-                              testzip::file("logs/nested.log.gz", testgzip::gzip(nestedBytes)) });
+        if (kind == ArchiveKind::Zip)
+            return testzip::zip({ testzip::file("logs/twin.log", twin), testzip::file("logs/other.log", otherBytes),
+                                  testzip::file("logs/nested.log.gz", testgzip::gzip(nestedBytes)) });
+        const QByteArray tar = testtar::tar({ testtar::file("logs/twin.log", twin),
+                                              testtar::file("logs/other.log", otherBytes),
+                                              testtar::file("logs/nested.log.gz", testgzip::gzip(nestedBytes)) });
+        return kind == ArchiveKind::Tar ? tar : testgzip::gzip(tar);
     };
-    const QString zip = testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(bytes));
+    const QString zip = testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), archiveName, bundle(bytes));
     const QString member = QStringLiteral("logs/twin.log");
 
     QStringList expected;
@@ -753,11 +765,11 @@ static void checkZipMember(const QDir& dir, const QString& name)
         tab->addArchiveMember(zip, QStringLiteral("logs/nested.log.gz"));
         CHECK(settled(*tab) && tab->fileCount() == 2, label + QStringLiteral(": .gz member loads"));
         CHECK(tab->model()->rowCount() == expected.size() + int(nestedBytes.count('\n')),
-              label + QStringLiteral(": .gz inside zip shows text rows"));
-        // Сам zip вкладкой не читается.
+              label + QStringLiteral(": .gz inside the archive shows text rows"));
+        // Сам архив вкладкой не читается (и .tar.gz — не одиночный лог).
         Spy status(tab.get(), &LogViewWidget::statusMessage);
         tab->addLogFile(zip);
-        CHECK(tab->fileCount() == 2 && status.size() == 1, label + QStringLiteral(": zip itself is not opened as text"));
+        CHECK(tab->fileCount() == 2 && status.size() == 1, label + QStringLiteral(": the archive itself is not opened as text"));
         // Слияние: копия делится.
         auto target = newTab();
         Spy unpacking(target.get(), &LogViewWidget::unpackingStarted);
@@ -796,7 +808,7 @@ static void checkZipMember(const QDir& dir, const QString& name)
 
         // F5: архив изменился — новое содержимое; пропал — строки остаются.
         const QByteArray changed = logBytes("changed", 20);
-        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(changed));
+        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), archiveName, bundle(changed));
         tab->reloadChangedFiles(false);
         CHECK(!tab->isUnpacking(), label + QStringLiteral(": tick skips the archive"));
         CHECK(tab->reloadChangedFiles(true) && settled(*tab)
@@ -808,7 +820,7 @@ static void checkZipMember(const QDir& dir, const QString& name)
                   && tab->model()->rowCount() == int(changed.count('\n')),
               label + QStringLiteral(": F5 on a missing archive keeps the rows"));
         QFile::rename(zip + QStringLiteral(".away"), zip);
-        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), "bundle.zip", bundle(bytes));
+        testdocs::writeFile(QDir(work.filePath(QStringLiteral("a"))), archiveName, bundle(bytes));
     }
     const QString moved = work.filePath(QStringLiteral("b"));
     CHECK(QDir().rename(work.filePath(QStringLiteral("a")), moved), label + QStringLiteral(": move the folder"));
@@ -831,7 +843,7 @@ static void checkZipMember(const QDir& dir, const QString& name)
     }
 
     // Файл из каталога, который извлёк сканер (реестр), — член архива.
-    const QString movedZip = moved + QStringLiteral("/bundle.zip");
+    const QString movedZip = moved + QLatin1Char('/') + archiveName;
     const QString extracted = work.filePath(QStringLiteral("extracted"));
     QDir().mkpath(extracted + QStringLiteral("/logs"));
     testdocs::writeFile(QDir(extracted + QStringLiteral("/logs")), "twin.log", bytes);
@@ -875,7 +887,9 @@ int main(int argc, char** argv)
         checkMerge(work);
         checkMemory(work, name);
         checkSession(work, name);
-        checkZipMember(work, name);
+        checkArchiveMember(work, name, ArchiveKind::Zip);
+        checkArchiveMember(work, name, ArchiveKind::Tar);
+        checkArchiveMember(work, name, ArchiveKind::TarGz);
     }
     settings.setIndexedThresholdMB(512);
     checkCloseAndCancel(dir);

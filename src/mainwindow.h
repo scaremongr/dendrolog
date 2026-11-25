@@ -375,11 +375,11 @@ private:
     void addToRecentFiles(const QString& filePath);
     // Запустить скан каталога и показать панель Directory Scanner.
     void scanDirectory(const QString& dirPath);
-    // zip (F-2, шаг 4): в Directory Scanner извлечённым — из диалога Open,
+    // zip и tar (F-2, шаги 4–5): в Directory Scanner извлечённым — из диалога Open,
     // броска, командной строки, второго экземпляра и недавних.
     void scanArchive(const QString& archivePath);
     // Архив с набором файлов: по имени (OpenRouting::isArchiveName) или по
-    // сигнатуре zip.
+    // содержимому (ArchiveFormats::detect: zip, tar, gzip с tar внутри).
     static bool isScannerArchive(const QString& path);
     void updateRecentFilesMenu();
 

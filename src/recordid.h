@@ -270,8 +270,8 @@ struct SourceIdentity {
     // (SavedPath::isForeign) — Missing без обращения к диску.
     // Сжатый источник (compressed) проверяется по отпечаткам архива: тот же
     // архив — Valid, другой gzip — Changed (откроется, закладки сверит
-    // локатор по копии), нет или не gzip — Missing. Член zip (member) — то же
-    // с сигнатурой zip. Без отпечатков архива —
+    // локатор по копии), нет или не gzip — Missing. Член zip или tar (member) — то же
+    // с сигнатурой архива (ArchiveFormats::detect). Без отпечатков архива —
     // «есть и gzip» = Valid. Содержимое сверяется по распакованной копии
     // (checkContentAt), когда она готова.
     State checkAt(const QString& filePath) const;

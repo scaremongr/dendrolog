@@ -34,6 +34,7 @@
 #include "filecontentsearch.h"
 #include "filterruleset.h"
 #include "../common/gzipwriter.h"
+#include "../common/tarbytes.h"
 #include "../common/zipbytes.h"
 #include "../common/testdocuments.h"
 
@@ -1785,6 +1786,115 @@ static void testZipArchive()
     QThreadPool::globalInstance()->waitForDone();
 }
 
+// tar (F-2, шаг 5): тот же путь, что у zip — извлечённый каталог в
+// сканере, реестр членов, опасные имена, ошибки и возврат.
+static void testTarArchive()
+{
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        ++g_failures;
+        return;
+    }
+    const QString folder = tmp.path() + u"/folder"_s;
+    const QString spool = tmp.path() + u"/spool"_s;
+    QDir().mkpath(folder);
+    writeFile(folder + u"/one.log"_s, "2026-04-01 10:00:00 INFO  one\n");
+    const QByteArray appLog = "2026-04-01 10:00:00 INFO  tarred\n2026-04-01 10:00:01 ERROR tarred boom\n";
+    testtar::Entry longName = testtar::file(QByteArray("logs/") + QByteArray(120, 'n') + ".log",
+                                            "2026-04-01 11:30:00 INFO  long name\n");
+    longName.gnuLongName = true;
+    const QByteArray bundle = testtar::tar({
+        testtar::file("logs/app.log", appLog),
+        testtar::file("logs/deep/x.log", "2026-04-01 11:00:00 WARN  deep\n"),
+        longName,
+        testtar::file("../evil.log", "evil\n"),
+        testtar::file("/abs.log", "abs\n"),
+        testtar::special("link.log", '2'),
+        testtar::special("dev.log", '3'),
+        testtar::file("readme.md", "not a log\n"),
+        testtar::file("rotated.log.gz", testgzip::gzip("2026-04-01 13:00:00 INFO  gz in tar\n")),
+    }, testtar::Format::Gnu);
+    const QString tgzPath = tmp.path() + u"/bundle.tar.gz"_s;
+    writeFile(tgzPath, testgzip::gzip(bundle));
+    const QString tarPath = tmp.path() + u"/plain.tar"_s;
+    writeFile(tarPath, bundle);
+    const QString badTgz = tmp.path() + u"/broken.tgz"_s;
+    QByteArray broken = testgzip::gzip(bundle);
+    broken[broken.size() - 6] = char(broken[broken.size() - 6] ^ 0x55); // CRC gzip
+    writeFile(badTgz, broken);
+    const QString plainGz = tmp.path() + u"/single.log.gz"_s;
+    writeFile(plainGz, testgzip::gzip("2026-04-01 10:00:00 INFO  just a log\n"));
+
+    DirectoryScannerPanel panel;
+    panel.setSpoolRoot(spool);
+    DirectoryScanner* scanner = panel.scanner();
+    scanner->setRefreshMode(DirectoryScanner::RefreshMode::Off);
+    scanner->setFileExtensions({ u"log"_s });
+    QTreeWidget* tree = panel.findChild<QTreeWidget*>();
+    auto* back = panel.findChild<QToolButton*>(u"scannerBackButton"_s);
+    auto* label = panel.findChild<QLabel*>(u"scannerPathLabel"_s);
+    CHECK(tree && back && label, "tar: panel exposes tree, back button and path label");
+    if (!tree || !back || !label)
+        return;
+    QStringList messages;
+    QObject::connect(&panel, &DirectoryScannerPanel::statusMessage,
+                     [&messages](const QString& m) { messages << m; });
+    panel.scanDirectory(folder);
+    CHECK(waitFor([&] { return tree->topLevelItemCount() == 1 && allScanned(tree->invisibleRootItem()); }),
+          "tar: folder scanned");
+
+    for (const QString& archive : {tgzPath, tarPath}) {
+        messages.clear();
+        panel.openArchive(archive);
+        CHECK(waitFor([&] { return !panel.isExtractingArchive() && panel.archivePath() == archive; }),
+              "tar: archive extracted and shown");
+        const QString root = scanner->rootPath();
+        CHECK(root.startsWith(QDir(spool).absolutePath()), "tar: archive root lives in the spool");
+        CHECK(label->text().contains(QFileInfo(archive).fileName()), "tar: path label names the archive");
+        CHECK(!back->isHidden(), "tar: back button is shown");
+        CHECK(waitFor([&] { return findItem(tree->invisibleRootItem(), u"logs"_s) != nullptr
+                                && allScanned(tree->invisibleRootItem()); }),
+              "tar: archive tree populated");
+        if (QTreeWidgetItem* logs = findItem(tree->invisibleRootItem(), u"logs"_s))
+            tree->expandItem(logs);
+        CHECK(waitFor([&] { return findItem(tree->invisibleRootItem(), u"app.log"_s) != nullptr
+                                && findItem(tree->invisibleRootItem(), u"deep"_s) != nullptr
+                                && allScanned(tree->invisibleRootItem()); }),
+              "tar: nested members shown as a tree");
+        CHECK(entriesOf(*tree, u"app.log"_s) == u"2"_s, "tar: member counted like a file");
+        CHECK(entriesOf(*tree, u"rotated.log.gz"_s) == u"1"_s, "tar: .gz inside stays a .gz and is counted");
+        CHECK(findItem(tree->invisibleRootItem(), QString(120, u'n') + u".log"_s) != nullptr,
+              "tar: GNU long name extracted");
+        CHECK(findItem(tree->invisibleRootItem(), u"readme.md"_s) == nullptr, "tar: non-log members not extracted");
+        CHECK(findItem(tree->invisibleRootItem(), u"link.log"_s) == nullptr
+                  && findItem(tree->invisibleRootItem(), u"dev.log"_s) == nullptr,
+              "tar: links and devices not extracted");
+        for (const QString& f : allFilesUnder(spool))
+            CHECK(f.endsWith(u".lock"_s) || QDir(spool).absoluteFilePath(f).startsWith(root + u'/'),
+                  qPrintable(u"tar: file outside the extraction folder: "_s + f));
+        CHECK(!QFileInfo::exists(tmp.path() + u"/evil.log"_s), "tar: ../evil.log not written next to the archive");
+        CHECK(messages.join(u' ').contains(u"skipped"_s), "tar: skipped entries are reported");
+        const auto member = ArchiveRegistry::instance().locate(root + u"/logs/app.log"_s);
+        CHECK(member && member->archivePath == archive && member->member == u"logs/app.log"_s,
+              "tar: registry maps an extracted file to the archive and member");
+    }
+    const QString shownRoot = scanner->rootPath();
+
+    // Повреждённый .tar.gz (CRC gzip) и .gz без tar внутри: сообщение, вид прежний.
+    for (const QString& bad : {badTgz, plainGz}) {
+        messages.clear();
+        panel.openArchive(bad);
+        CHECK(waitFor([&] { return !panel.isExtractingArchive(); }), "tar: broken archive finishes");
+        CHECK(!messages.isEmpty() && messages.last().contains(QFileInfo(bad).fileName()), "tar: broken archive reported");
+        CHECK(panel.archivePath() == tarPath && scanner->rootPath() == shownRoot, "tar: broken archive keeps the view");
+    }
+
+    back->click();
+    CHECK(scanner->rootPath() == QDir::cleanPath(folder), "tar: back returns to the folder");
+    CHECK(waitFor([&] { return !QFileInfo::exists(shownRoot); }), "tar: extraction folder removed");
+    QThreadPool::globalInstance()->waitForDone();
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1817,6 +1927,7 @@ int main(int argc, char** argv)
     testGzipContent();
     testGzipCancel();
     testZipArchive();
+    testTarArchive();
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =
