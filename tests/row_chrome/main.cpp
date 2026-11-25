@@ -709,14 +709,20 @@ static void checkMergedTab(const QDir& dir, bool indexed, int fontSize = 0)
         const QImage image = view.viewport()->grab().toImage();
         const QPalette& pal = view.viewport()->palette();
         bool colors = true;
+        int checked = 0;
         for (int r = 0; r < 8; ++r) {
             const QRect vr = view.visualRect(model.index(r, 0));
+            // Крупный шрифт (16 pt, а на Windows он ещё шире): не все восемь
+            // строк помещаются на экран — проверяются видимые.
+            if (vr.top() + vr.height() / 2 >= image.height() / int(image.devicePixelRatio()))
+                break;
+            ++checked;
             const LogModel::LabeledFile* f = model.labeledFile(model.keyAt(r).file.get());
             const QColor expected = AppTheme::fileColor(f ? f->colorOrdinal : -1, pal);
             colors = colors && f && image.pixelColor(view.textLeft() - view.fileColumnWidth() + 1,
                                                      vr.top() + vr.height() / 2) == expected;
         }
-        CHECK(colors, label + ": stripes are painted in the file colours");
+        CHECK(colors && checked >= 2, QStringLiteral("%1: stripes are painted in the file colours (%2 rows)").arg(label).arg(checked));
     }
 
     // Колонка появляется и уходит — текущая строка и её место на экране
