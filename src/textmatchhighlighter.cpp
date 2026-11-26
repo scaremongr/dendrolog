@@ -42,7 +42,7 @@ void TextMatchHighlighter::setPatterns(const QVector<HighlightPattern>& patterns
 {
     m_patterns = patterns;
 
-    // Регексы компилируются один раз здесь, а не при каждом сканировании.
+    // Регексы компилируются (с JIT) один раз здесь, а не при сканировании.
     m_regexes.clear();
     m_regexes.resize(m_patterns.size());
     for (int i = 0; i < m_patterns.size(); ++i) {

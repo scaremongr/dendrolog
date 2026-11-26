@@ -12,6 +12,9 @@
 //     логе с кириллицей в UTF-8 и cp1251, резидентный и индексный бэкенды;
 //   • «слово целиком» быстрого поиска и \b находят одни и те же строки.
 // ASCII-запросы находят то же, что и раньше (регрессия профилей и маркеров).
+// S-11: регекс правила компилируется (с JIT) там, где правило собрано, а
+// фильтр-воркер его не компилирует — счёт вызовов pcre2 по потокам (Linux,
+// только при pcre2 отдельной библиотекой; у Qt со встроенным pcre2 — пропуск).
 // ============================================================================
 
 #include "filecontentsearch.h"
@@ -25,7 +28,14 @@
 #include <QElapsedTimer>
 #include <QSet>
 #include <QTemporaryDir>
+#include <atomic>
 #include <cstdio>
+
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 using namespace Qt::StringLiterals;
 
@@ -280,6 +290,70 @@ static int bench(const QString& path)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// S-11: где компилируется регекс правила
+// ---------------------------------------------------------------------------
+//
+// Признака «шаблон уже скомпилирован» у QRegularExpression нет, поэтому тест
+// перехватывает сам вызов: определение pcre2_compile_16 в исполняемом файле
+// главнее определения в libpcre2-16, на которое ссылается QtCore (символ,
+// нужный разделяемой библиотеке со строки линковки, ld экспортирует из exe
+// сам). Если QtCore собран со встроенным pcre2 (так у Qt с download.qt.io —
+// CI), перехват молчит, и проверка пропускается: смотреть можно только там,
+// где он сработал хоть раз.
+
+#if defined(__linux__)
+static std::atomic<int> g_compilesMain{0};
+static std::atomic<int> g_compilesWorker{0};
+
+extern "C" void* pcre2_compile_16(const void* pattern, size_t length, uint32_t options,
+                                  int* errorCode, size_t* errorOffset, void* context)
+{
+    using Fn = void* (*)(const void*, size_t, uint32_t, int*, size_t*, void*);
+    static const Fn real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "pcre2_compile_16"));
+    if (syscall(SYS_gettid) == getpid())
+        ++g_compilesMain;
+    else
+        ++g_compilesWorker;
+    return real(pattern, length, options, errorCode, errorOffset, context);
+}
+#endif
+
+static void checkCompiledBeforeWorker()
+{
+#if defined(__linux__)
+    QTemporaryDir tmp;
+    const QDir dir(tmp.path());
+    const QString path = testdocs::writeFile(dir, u"compile.log"_s,
+        testdocs::encodeText(testdocs::cyrillicLogText(4), TextEncoding::Utf8));
+    // Индексный бэкенд фильтрует всегда в воркере.
+    auto doc = testdocs::buildIndexed({ path }, QString());
+    for (const QString& pattern : { u"ERROR.*timeout"_s, u"пользовател\\w+"_s }) {
+        FilterRuleSet rules;
+        FilterRule rule;
+        rule.action = FilterRule::Action::Include;
+        rule.text = pattern;
+        rule.isRegex = true;
+        rules.rules.append(rule);
+        g_compilesMain = 0;
+        g_compilesWorker = 0;
+        rules.bindFields({}, false);
+        doc.model->setFilterRules(rules);
+        testdocs::settle(*doc.model, 0);
+        doc.model->setFilterRules(FilterRuleSet());
+        testdocs::settle(*doc.model, 0);
+        if (g_compilesMain + g_compilesWorker == 0) {
+            std::printf("compile hook: pcre2 is built into QtCore, check skipped\n");
+            return;
+        }
+        CHECK(g_compilesMain >= 1, u"rule compiled by bindFields: "_s + pattern);
+        CHECK(g_compilesWorker == 0,
+              u"filter worker compiled the rule regex %1 time(s): "_s.arg(g_compilesWorker.load())
+                  + pattern);
+    }
+#endif
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -287,6 +361,7 @@ int main(int argc, char** argv)
         return bench(QString::fromLocal8Bit(argv[2]));
     checkFunction();
     checkDocuments();
+    checkCompiledBeforeWorker();
     if (failures) {
         std::fprintf(stderr, "user_regex: %d failure(s)\n", failures);
         return 1;

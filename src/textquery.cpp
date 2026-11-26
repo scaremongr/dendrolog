@@ -74,10 +74,8 @@ TextMatcher::TextMatcher(const TextQuery& query)
     if (m_useRegex) {
         // Тот же диалект, что у Text Filters, подсветки и сканера каталога.
         m_regex = UserRegex::compile(query.patternText(), query.caseSensitivity());
+        // Компиляция (и JIT) — уже здесь, в compile(), а не на первой строке скана.
         m_usable = m_regex.isValid();
-        // Компиляция (и JIT) — здесь, а не на первой строке скана.
-        if (m_usable)
-            m_regex.optimize();
     } else {
         m_usable = true;
     }

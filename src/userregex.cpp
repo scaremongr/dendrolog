@@ -20,7 +20,9 @@ QRegularExpression::PatternOptions options(Qt::CaseSensitivity cs)
 
 QRegularExpression compile(const QString& pattern, Qt::CaseSensitivity cs)
 {
-    return QRegularExpression(pattern, options(cs));
+    QRegularExpression re(pattern, options(cs));
+    re.optimize();
+    return re;
 }
 
 } // namespace UserRegex
