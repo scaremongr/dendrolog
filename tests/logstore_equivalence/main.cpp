@@ -989,7 +989,7 @@ static void testSingleFileOrdering(const QString& monotonicPath,
 // ---------------------------------------------------------------------------
 struct BruteRange {
     bool   has = false;
-    qint64 lo = std::numeric_limits<qint64>::max();
+    qint64 lo = (std::numeric_limits<qint64>::max)();
     qint64 hi = kNoTimestampMs;
 };
 
@@ -1087,7 +1087,7 @@ static void checkTimeRangeAgainstScan(const QString& what, const LogModel& m)
         const qint64 farFuture = QDateTime(QDate(200000, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
         const struct { qint64 from, to; const char* name; } filters[] = {
             { farPast, farFuture, "годы -200000…200000" },
-            { std::numeric_limits<qint64>::min() + 1, std::numeric_limits<qint64>::max(), "края qint64" },
+            { (std::numeric_limits<qint64>::min)() + 1, (std::numeric_limits<qint64>::max)(), "края qint64" },
             { farPast, want.lo + 1, "только начало вне диапазона" },
         };
         for (const auto& f : filters) {

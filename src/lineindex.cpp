@@ -285,7 +285,7 @@ void LineIndex::truncateFrom(qint64 line)
     // Минимум и максимум уцелевших записей: целые блоки — по своим полям,
     // частичный (уже COW-копия) — пересчётом по его записям до cutLogical,
     // хвост копии — «метки нет» (будет переписан). O(число блоков + 4096).
-    qint64 minMs = std::numeric_limits<qint64>::max();
+    qint64 minMs = (std::numeric_limits<qint64>::max)();
     qint64 maxMs = kNoTimestampMs;
     const int fullTsBlocks = int(qMin<qint64>(cutLogical / kTsBlockEntries, m_tsBlocks.size()));
     for (int i = 0; i < fullTsBlocks; ++i) {
@@ -297,7 +297,7 @@ void LineIndex::truncateFrom(qint64 line)
     if (partial > 0 && fullTsBlocks < m_tsBlocks.size()) {
         TsBlock* b = m_tsBlocks[fullTsBlocks].get(); // копия, снапшотам не видна
         std::fill(b->ms + partial, b->ms + kTsBlockEntries, kNoTimestampMs);
-        b->minMs = std::numeric_limits<qint64>::max();
+        b->minMs = (std::numeric_limits<qint64>::max)();
         b->maxMs = kNoTimestampMs;
         for (int k = 0; k < partial; ++k) {
             if (hasTimestampMs(b->ms[k])) {

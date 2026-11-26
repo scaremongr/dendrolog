@@ -873,7 +873,7 @@ static void testTimeRangeTracking()
     index.beginAppend(0);
 
     const auto bruteCheck = [&](const char* what) {
-        qint64 lo = std::numeric_limits<qint64>::max();
+        qint64 lo = (std::numeric_limits<qint64>::max)();
         qint64 hi = kNoTimestampMs;
         for (quint32 id = 0; id < index.logicalEntryCount(); ++id) {
             const qint64 ts = index.timestampMs(id);
