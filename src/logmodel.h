@@ -74,6 +74,7 @@ public:
     EntryKey keyForRow(int visibleRow) const;
 
     // Метаданные видимой строки без обращения к тексту; O(1).
+    LogEntryMeta visibleMetaAt(int row) const;
     QDateTime visibleTimestampAt(int row) const;
     LogLevel visibleLevelAt(int row) const;
 
@@ -250,6 +251,27 @@ public:
                           bool* visible = nullptr) const;
     // Видимая строка для строки lineNumber (с 1) файла; см. LogStore.
     int nearestVisibleRowForLine(qint64 lineNumber, const LogFile* sourceFile) const;
+    // «Нулевая» строка дельты времени (F-8, docs/design/F-8.md): от её
+    // МОМЕНТА колонка Δ и Entry Details считают время. Хранится моментом,
+    // путём файла и номером строки — переживает фильтр (скрытая работает),
+    // дозапись, полную перезагрузку и конверсию бэкенда (модель та же). На
+    // диск не пишется.
+    struct TimeZero {
+        qint64 ms = kNoTimestampMs;
+        QString filePath;   // LogFile::orderKey() — у сжатого не путь копии
+        qint64 line = 0;
+        bool isSet() const { return hasTimestampMs(ms); }
+    };
+    const TimeZero& timeZero() const { return m_timeZero; }
+    bool hasTimeZero() const { return m_timeZero.isSet(); }
+    // Строка становится «нулевой»; false — строки нет или у неё нет метки.
+    bool setTimeZero(int row);
+    void clearTimeZero();
+    // Повтор на «нулевой» снимает её, на другой строке — переносит.
+    bool toggleTimeZero(int row);
+    // Строка row — «нулевая» (тот же файл по пути и номер строки).
+    bool isTimeZeroRow(int row) const;
+
     // Ключ строки (R-1, recordid.h): LogStore::keyAt / rowForKey /
     // nearestRowForKey.
     RecordKey keyAt(int visibleRow) const;
@@ -329,6 +351,8 @@ signals:
     // любым из сеттеров, ДО перефильтрации. Маркеры строк сюда не входят.
     // Показ полного лога (FullLogController) по нему узнаёт о правке фильтра.
     void filterSettingsChanged();
+    // «Нулевая» строка дельты времени поставлена, перенесена или снята (F-8).
+    void timeZeroChanged();
     // Прогресс асинхронной фильтрации индексного бэкенда (он читает диск и
     // может занимать секунды); 100 — фильтр применён.
     void filterProgress(int progressPercentage);
@@ -397,6 +421,7 @@ private:
     FileSchemaSet m_fileSchemas;
     bool m_fieldFilterEnabled = false;
 
+    TimeZero m_timeZero;                  // F-8
     RecordLocator* m_locator = nullptr;   // child QObject
     BookmarkStore* m_bookmarks = nullptr; // child QObject
     mutable NavHistory* m_navHistory = nullptr; // child QObject, лениво

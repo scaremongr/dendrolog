@@ -42,6 +42,8 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("toggleBookmark"), tr("Add / remove bookmark"),  QKeySequence(Qt::CTRL | Qt::Key_F2) },
         { QStringLiteral("nextBookmark"),   tr("Next bookmark"),          QKeySequence(Qt::Key_F2) },
         { QStringLiteral("prevBookmark"),   tr("Previous bookmark"),      QKeySequence(Qt::SHIFT | Qt::Key_F2) },
+        // Дельта времени (F-8): «нулевая» на выбранной строке, повтор снимает.
+        { QStringLiteral("timeZero"),    tr("Set / clear time zero (time delta)"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D) },
         { QStringLiteral("goToNewLines"), tr("Go to new lines (below the screen)"), QKeySequence(Qt::ALT | Qt::Key_End) },
         // Полный лог (R-3): фильтры вкладки приостановлены и обратно.
         { QStringLiteral("fullLog"),     tr("Show in full log / return to filtered view"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L) },
@@ -55,6 +57,8 @@ ShortcutManager::ShortcutManager()
         { QStringLiteral("fileLabelsHidden"),    tr("File labels: hidden"),     QKeySequence() },
         // Номера строк (U-23, часть 3): View → Line Numbers, без сочетания.
         { QStringLiteral("lineNumbers"), tr("Show / hide line numbers"), QKeySequence() },
+        // Колонка дельты времени (F-8): View → Time Delta, без сочетания.
+        { QStringLiteral("timeDelta"),   tr("Show / hide time delta column"), QKeySequence() },
         { QStringLiteral("zoomIn"),      tr("Larger font"),               QKeySequence(QKeySequence::ZoomIn) },
         { QStringLiteral("zoomOut"),     tr("Smaller font"),              QKeySequence(QKeySequence::ZoomOut) },
         { QStringLiteral("zoomReset"),   tr("Default font size"),         QKeySequence(Qt::CTRL | Qt::Key_0) },

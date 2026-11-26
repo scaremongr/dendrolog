@@ -124,6 +124,7 @@ void AppSettings::load()
     s.beginGroup(QStringLiteral("View"));
     m_fileLabelMode = FileLabels::modeFromName(s.value(QStringLiteral("fileLabels")).toString());
     m_lineNumbers = s.value(QStringLiteral("lineNumbers"), false).toBool();
+    m_timeDelta = s.value(QStringLiteral("timeDelta"), false).toBool();
     m_ansiColors = s.value(QStringLiteral("ansiColors"), true).toBool();
     m_fileColumnChars = qBound(0, s.value(QStringLiteral("fileColumnChars"), 0).toInt(), 400);
     s.endGroup();
@@ -186,6 +187,7 @@ void AppSettings::save()
     s.beginGroup(QStringLiteral("View"));
     s.setValue(QStringLiteral("fileLabels"), FileLabels::modeName(m_fileLabelMode));
     s.setValue(QStringLiteral("lineNumbers"), m_lineNumbers);
+    s.setValue(QStringLiteral("timeDelta"), m_timeDelta);
     s.setValue(QStringLiteral("ansiColors"), m_ansiColors);
     s.setValue(QStringLiteral("fileColumnChars"), m_fileColumnChars);
     s.endGroup();
@@ -336,6 +338,14 @@ void AppSettings::setLineNumbers(bool visible)
     if (m_lineNumbers == visible)
         return;
     m_lineNumbers = visible;
+    emit settingsChanged();
+}
+
+void AppSettings::setTimeDelta(bool visible)
+{
+    if (m_timeDelta == visible)
+        return;
+    m_timeDelta = visible;
     emit settingsChanged();
 }
 

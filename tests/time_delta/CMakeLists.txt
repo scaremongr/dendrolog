@@ -1,0 +1,1 @@
+dendrolog_add_test(time_delta LIBRARIES dendrolog_widgets TIMEOUT 300)

@@ -60,6 +60,9 @@
   moment; with filters on it lands on the nearest shown line.
 - **Next / previous error** — `F8` / `Shift+F8` step through Error and Fatal
   lines, `F7` / `Shift+F7` through warnings, without freezing the window on a huge log.
+- **Time delta** — `View → Time Delta` shows the time from the previous shown
+  line (`+1.234 s`, `+2 m 03 s`); **Set as Time Zero** (`Ctrl+Shift+D`) makes
+  every line count from a line you pick.
 - **Bookmarks with notes** — `Ctrl+F2` marks a line, `F2` / `Shift+F2` jump
   between bookmarks, the Bookmarks panel lists them with a note each; they stay
   through filters, reloads and the switch to the large-file mode.

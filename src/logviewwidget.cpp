@@ -202,6 +202,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
 
     // Контекстное меню строки: закладка и заметка к ней.
     m_view->setBookmarkActionsEnabled(true);
+    m_view->setTimeZeroActionsEnabled(true);
     connect(m_view, &LogListView::bookmarkActionRequested, this,
             [this](int row, LogListView::BookmarkAction action) {
         if (action == LogListView::BookmarkAction::Toggle) {

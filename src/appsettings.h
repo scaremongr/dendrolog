@@ -114,6 +114,9 @@ public:
     // Номера строк в логе (U-23), [View] lineNumbers, по умолчанию выключены.
     bool lineNumbers() const { return m_lineNumbers; }
     void setLineNumbers(bool visible);
+    // Колонка дельты времени (F-8), [View] timeDelta, по умолчанию выключена.
+    bool timeDelta() const { return m_timeDelta; }
+    void setTimeDelta(bool visible);
     // Цвета ANSI в строках лога (F-3), [View] ansiColors, по умолчанию
     // включены. Выключено — коды всё равно сняты, строка раскрашивается как
     // обычная.
@@ -254,6 +257,7 @@ private:
     FileLabelMode m_fileLabelMode { FileLabelMode::Name };
     int m_fileColumnChars { 0 };
     bool        m_lineNumbers     { false };
+    bool        m_timeDelta       { false };
     bool        m_ansiColors      { true };
     ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };

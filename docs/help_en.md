@@ -210,6 +210,13 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - Going back selects the line and switches Follow tail off, like any jump, and adds nothing to the history. A place hidden by filters leads to the nearest shown line. Places stay through tail updates, a reload of the same content and the switch to the large-file mode; a place whose line is gone (the file was rewritten or removed) is skipped.
 - Each tab has its own history; it is not saved and goes away when the tab is closed.
 
+## Time delta
+
+- **`View → Time Delta`** (off by default) adds a column right after the line numbers: the time from the previous shown line with a timestamp — `+12 ms`, `+1.234 s`, `+2 m 03 s`, `+5 h 07 m`, `+3 d 04 h`. Only the lines on screen are counted, from the line index, so the column costs nothing on a very large log.
+- "Previous" means the previous line the tab shows: under a filter the delta is measured between the shown lines. The delta stands on the first shown line of an entry; the other lines of a multi-line entry (a stack trace) share its time and stay blank, and so does a line without a timestamp. A line earlier than the one above it (a merged tab, a large log in file order) gets a negative delta: `−1 h 01 m`.
+- **Time zero:** right-click a line → **Set as Time Zero**, or select it and press `Ctrl+Shift+D` (`View → Set / Clear Time Zero`). While a time zero is set, the column shows the time from it on every entry (lines before it — with `−`); the zero line itself shows `= 0`. The same command on the zero line — or **Clear Time Zero** in any line's context menu — clears it. A line without a timestamp cannot be the zero. The zero stays through filters (a hidden zero still counts), tail updates, reloads and the switch to the large-file mode; each tab has its own, and it is not saved.
+- **Entry Details** always shows both deltas of the selected line under its header: `Δ previous` and `Δ time zero` (from a minute on — with the exact milliseconds). The tooltip of a delta cell shows the same.
+
 ## Next and previous error
 
 - `F8` / `Shift+F8` (`View → Next Error` / `Previous Error`) jump from the selected line to the nearest entry of level **Error** or **Fatal**; `F7` / `Shift+F7` do the same for **Warn**. With nothing selected the search starts from the top (or, backwards, from the bottom).
@@ -354,6 +361,8 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 | Wrap / unwrap current line | `Space` |
 | File labels: Name / Color Only / Hidden | — (menu View → File Labels) |
 | Show / hide line numbers | — (menu View → Line Numbers) |
+| Show / hide the time delta column | — (menu View → Time Delta) |
+| Set / clear time zero | `Ctrl+Shift+D` |
 | Extend selection by character | `Shift+←/→` |
 | Extend selection by token | `Ctrl+Shift+←/→` |
 | Show/Hide panels | `Ctrl+F1`, `Ctrl+F3…F11` |

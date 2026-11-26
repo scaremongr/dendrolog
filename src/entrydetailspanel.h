@@ -5,6 +5,7 @@
 #include <QSet>
 #include <QStringList>
 #include "fieldlayout.h"
+#include "timedelta.h"
 #include <QVector>
 #include <QWidget>
 #include <memory>
@@ -60,6 +61,12 @@ public:
                    const QStringList& fieldNames,
                    const FileSchemaPtr& schema = FileSchemaPtr());
     void clearEntry();
+    // Дельта времени строки (F-8): от предыдущей строки и от «нулевой» —
+    // строкой под заголовком. Окно ставит её после showEntry и при смене
+    // «нулевой».
+    void setTimeDelta(const TimeDelta::RowDelta& delta);
+    // Та же строка простым текстом (тестам).
+    QString timeDeltaSummary() const;
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -102,6 +109,7 @@ private:
     QVector<std::shared_ptr<LogEntry>> m_logicalLines;
     QStringList m_fieldNames;
     FileSchemaPtr m_schema;
+    TimeDelta::RowDelta m_delta;
     // Ключи строки ключевой схемы (LogPattern::keyValuePairs) — для одной
     // записи; пусто — схема не ключевая или строка не распознана.
     QVector<std::pair<QString, QString>> keyPairs() const;

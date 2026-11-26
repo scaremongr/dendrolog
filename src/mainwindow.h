@@ -51,6 +51,7 @@ class EntryDetailsPanel;
 class StatisticsPanel;
 class BookmarkPanelWidget;
 class LogModel;
+struct LogFile;
 class LogListView;
 class LogPattern;
 class SearchResultsController;
@@ -134,6 +135,8 @@ private slots:
     void handleFileParsingFailed(const LogFilePtr& logFile);
     void handleTotalRowCountChanged(int totalRows);
     void updateLineInfoLabel(int currentRow, int totalRows);
+    // Дельты выбранной строки активной вкладки в Entry Details (F-8).
+    void updateEntryDetailsTimeDelta(bool force);
     void onApplyTimeFilterClicked();
     void onResetTimeFilterClicked();
     // Подстановка таймстампа (из контекстного меню LogView) в поле фильтра по времени.
@@ -218,6 +221,22 @@ private:
     // Widgets not fully managed by .ui (e.g. added to statusbar or dynamic content)
     QProgressBar* m_progressBar;
     QLabel* m_statusLabel;
+    // Дельта времени в Entry Details (F-8): подписка на «нулевую» активной
+    // вкладки и строка, для которой дельта посчитана полным проходом (без
+    // владения файлом: только сравнение).
+    QMetaObject::Connection m_timeZeroConnection;
+    struct DetailsDeltaLine {
+        const LogModel* model = nullptr;
+        const LogFile* file = nullptr;
+        qint64 line = 0;
+        qint64 timestampMs = 0;
+        int entryId = -1;
+        bool operator==(const DetailsDeltaLine& o) const
+        {
+            return model == o.model && file == o.file && line == o.line
+                && timestampMs == o.timestampMs && entryId == o.entryId;
+        }
+    } m_detailsDeltaLine;
     QLabel* m_lineInfoLabel;
     // Поле быстрого поиска: запрос, переключатели «Aa» / слово / «.*», история.
     QuickSearchField* m_searchLineEdit = nullptr;
