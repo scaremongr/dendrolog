@@ -13,18 +13,21 @@
 #include "linetemplate.h"
 
 #include <QCoreApplication>
-#include <QMutex>
 #include <QThread>
-#include <QWaitCondition>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 
 namespace testdocs {
 
+// std::mutex / std::condition_variable, а не QMutex / QWaitCondition: Qt не
+// инструментирован, и TSan не видит, что QWaitCondition::wait отпускает
+// мьютекс («double lock», гонка на open).
 struct Gate {
-    QMutex mutex;
-    QWaitCondition cond;
+    std::mutex mutex;
+    std::condition_variable cond;
     bool open = true;
     std::atomic<qint64> calls{0};       // вызовов extract всего
     std::atomic<qint64> guiCalls{0};    // из них на GUI-потоке (обязано быть 0)
@@ -32,21 +35,22 @@ struct Gate {
 
     void close()
     {
-        QMutexLocker lock(&mutex);
+        std::lock_guard<std::mutex> lock(mutex);
         open = false;
     }
     void release()
     {
-        QMutexLocker lock(&mutex);
-        open = true;
-        cond.wakeAll();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            open = true;
+        }
+        cond.notify_all();
     }
     void pass()
     {
-        QMutexLocker lock(&mutex);
+        std::unique_lock<std::mutex> lock(mutex);
         ++waiting;
-        while (!open)
-            cond.wait(&mutex);
+        cond.wait(lock, [this] { return open; });
         --waiting;
     }
 };
