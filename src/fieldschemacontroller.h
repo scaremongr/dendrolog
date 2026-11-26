@@ -91,6 +91,9 @@ public:
     void load(QSettings& view);
     void save(QSettings& view) const;
     const SchemaStore::SchemaList& schemas() const { return m_list; }
+    // Файлы версии 3, которые перевод при последнем load не перевёл («файл:
+    // почему»): файлы целы, в каталоге их нет — окно говорит об этом.
+    const QStringList& conversionFailures() const { return m_conversionFailures; }
     // Перечитать каталог (файлы могли добавить или поправить руками),
     // сохранив порядок списка.
     void reloadCatalogue();
@@ -179,6 +182,8 @@ signals:
 private:
     QList<LogViewWidget*> views() const;
     QStringList listOrder() const;
+    // Пресеты редактора из ini — схемами каталога (один раз); true — каталог изменился.
+    static bool migratePresets(QSettings& s);
     int indexOf(const FieldSettings& settings) const;
     void reload(const QString& extraName);
     // Выбор колонок для схемы: выбранные имена, которые в ней есть; ни
@@ -197,6 +202,7 @@ private:
 
     Window m_window;
     SchemaStore::SchemaList m_list;
+    QStringList m_conversionFailures;
     FieldSettings m_defaults;
     QPointer<LogViewWidget> m_current;
     QString m_targetFile; // «Applies to»: пусто — все файлы

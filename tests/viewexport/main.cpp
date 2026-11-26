@@ -113,7 +113,7 @@ static void testBackgroundExport(const QDir& dir)
     const QString path = testdocs::writeFile(dir, "export-source.log", bytes);
     auto resident = testdocs::buildResident({path}, schema);
     auto indexed = testdocs::buildIndexed({path}, schema);
-    const QStringList fieldNames = LogPattern(schema).fieldNames();
+    const QStringList fieldNames = testdocs::schemaColumns(schema);
 
     struct { const char* name; LogModel* model; } models[] = {
         {"resident", resident.model.get()}, {"indexed", indexed.model.get()}};
@@ -513,7 +513,7 @@ static void testTableExport(const QDir& dir)
     using ViewExport::Format;
     // Регексная схема: Timestamp, Thread, Level, Message.
     const QString schema = testdocs::buildSchema();
-    const QStringList fieldNames = LogPattern(schema).fieldNames();
+    const QStringList fieldNames = testdocs::schemaColumns(schema);
     QByteArray a, b;
     for (int i = 0; i < 400; ++i) {
         const QByteArray sec = QByteArray::number(i / 10 % 60).rightJustified(2, '0');
@@ -527,7 +527,8 @@ static void testTableExport(const QDir& dir)
         b += "2026-03-05 10:00:" + sec + ".200 [b-" + QByteArray::number(i % 2) + "] "
            + (i % 3 ? "WARN" : "ERROR") + " - второй файл " + QByteArray::number(i) + '\n';
     }
-    // Схема узнаёт метку, поток и уровень, но не Message (префиксный вариант).
+    // Строка без сообщения: шаблон (F-17, шаг 9) узнаёт метку, поток и уровень,
+    // Message пуст — поля строки экспортируются, текст не теряется.
     const QString partial = QString::fromUtf8("2026-03-05 10:00:59.900 [поток-9] ERROR");
     a += partial.toUtf8() + '\n';
     a += "строка без метки в конце\n";
@@ -602,10 +603,12 @@ static void testTableExport(const QDir& dir)
                         bool ok = false, bom = false;
                         const auto csv = parseCsv(read(csvPath), &ok, &bom);
                         const int at = int(want.headers.indexOf(QStringLiteral("Message")));
+                        const int th = int(want.headers.indexOf(QStringLiteral("Thread")));
                         bool found = false;
                         for (const QStringList& rec : csv)
-                            found = found || rec.value(at) == partial;
-                        CHECK(found, qPrintable(label + QStringLiteral(": a partly matched line keeps its text in Message")));
+                            found = found || (th >= 0 ? rec.value(th) == QString::fromUtf8("поток-9") && rec.value(at).isEmpty()
+                                                      : rec.value(at) == partial);
+                        CHECK(found, qPrintable(label + QStringLiteral(": a line without a message exports its fields")));
                     }
 
                     // Ключевая схема: Message первой строки записи — заданное

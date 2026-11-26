@@ -289,3 +289,65 @@ bool FilterRuleSet::operator==(const FilterRuleSet& other) const
     }
     return true;
 }
+
+int FilterRuleSet::countField(const QString& field) const
+{
+    int n = 0;
+    for (const FilterRule& rule : rules)
+        n += (!field.isEmpty() && rule.fieldName == field) ? 1 : 0;
+    return n;
+}
+
+int FilterRuleSet::renameField(const QString& field, const QString& to)
+{
+    int n = 0;
+    for (FilterRule& rule : rules) {
+        if (!field.isEmpty() && rule.fieldName == field) {
+            rule.fieldName = to;
+            ++n;
+        }
+    }
+    return n;
+}
+
+int FilterRuleSet::countFieldInJson(const QJsonValue& json, const QString& field)
+{
+    QJsonValue copy = json;
+    return renameFieldInJson(copy, field, field);
+}
+
+int FilterRuleSet::renameFieldInJson(QJsonValue& json, const QString& field, const QString& to)
+{
+    int n = 0;
+    if (json.isArray()) {
+        QJsonArray a = json.toArray();
+        for (qsizetype i = 0; i < a.size(); ++i) {
+            QJsonValue v = a.at(i);
+            if (const int k = renameFieldInJson(v, field, to)) {
+                a.replace(i, v);
+                n += k;
+            }
+        }
+        if (n)
+            json = a;
+    } else if (json.isObject()) {
+        QJsonObject o = json.toObject();
+        for (auto it = o.begin(); it != o.end(); ++it) {
+            if (it.key() == QLatin1String("field") && it.value().isString()) {
+                if (!field.isEmpty() && it.value().toString() == field) {
+                    it.value() = to;
+                    ++n;
+                }
+                continue;
+            }
+            QJsonValue v = it.value();
+            if (const int k = renameFieldInJson(v, field, to)) {
+                it.value() = v;
+                n += k;
+            }
+        }
+        if (n)
+            json = o;
+    }
+    return n;
+}

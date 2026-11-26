@@ -94,7 +94,6 @@ function(dendrolog_add_test test_name)
     endif()
 endfunction()
 
-add_subdirectory(pattern_smoke)
 add_subdirectory(keyed_schema)
 add_subdirectory(lineindex_smoke)
 add_subdirectory(dirscanner_smoke)

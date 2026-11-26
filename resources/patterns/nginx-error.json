@@ -1,58 +1,7 @@
 {
     "name": "nginx error",
     "description": "nginx error_log: yyyy/mm/dd hh:mm:ss [level] pid#tid: *connection message.",
-    "version": 3,
-    "type": "dynamic-block-schema",
-    "linePrefix": "",
-    "blocks": [
-        {
-            "name": "Timestamp",
-            "kind": "timestamp",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "",
-            "customRegex": ""
-        },
-        {
-            "name": "Level",
-            "kind": "regex",
-            "leadingText": "[",
-            "closingText": "]",
-            "separator": "",
-            "customRegex": "debug|info|notice|warn|error|crit|alert|emerg"
-        },
-        {
-            "name": "PID",
-            "kind": "integer",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "#",
-            "customRegex": ""
-        },
-        {
-            "name": "TID",
-            "kind": "integer",
-            "leadingText": "",
-            "closingText": "",
-            "separator": ":[ \\t]*\\*?",
-            "customRegex": "",
-            "separatorIsRegex": true
-        },
-        {
-            "name": "Connection",
-            "kind": "regex",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "",
-            "customRegex": "(?<=\\*)\\d+|"
-        },
-        {
-            "name": "Message",
-            "kind": "remainder",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "",
-            "customRegex": ""
-        }
-    ]
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} [{Level:of(debug|info|notice|warn|error|crit|alert|emerg)}] {PID:int}#{TID:int}: {?*{Connection:int} ?}{Message}"
 }

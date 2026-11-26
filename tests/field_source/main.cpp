@@ -43,8 +43,8 @@
 #include "indexedlogstore.h"
 #include "linetemplate.h"
 #include "logmodel.h"
-#include "logpattern.h"
 #include "testdocuments.h"
+#include "v3schema.h"
 #include "viewidle.h"
 
 #include <QApplication>
@@ -350,11 +350,8 @@ void testSchemaSwitchAndCache(Backend b, const QDir& dir)
     for (int r = 0; r < screen; ++r)
         m.data(m.index(r), Qt::DisplayRole);
     CHECK(source.cachedLines() > 0, label + ": cache filled again");
-    PatternDefinition def;
-    def.blocks = { patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-                   patternBlock(PatternBlock::MatchKind::Remainder, QStringLiteral("Rest")) };
     FileSchemaSet other;
-    other.fallback = layout.schemaFor(LogPattern::serializeDefinition(def));
+    other.fallback = layout.schemaFor(LineTemplateSchema::definition(QStringLiteral("{Timestamp:time} {Rest}")));
     m.setAvailableFields(layout.columns);
     m.setFileSchemas(other);
     CHECK(source.cachedLines() == 0, label + ": schema switch clears the cache");
@@ -599,7 +596,16 @@ void testTemplateDefinition()
 {
     const QString def = LineTemplateSchema::definition(QStringLiteral("{Timestamp:time} {Level:level} {Message}"));
     CHECK(FieldLayout::isTemplateDefinition(def), "template definition recognised");
-    CHECK(!FieldLayout::isTemplateDefinition(buildSchema()), "block schema is not a template");
+    CHECK(!FieldLayout::isTemplateDefinition(v3schema::fixtureDefinition()), "block schema is not a template");
+    // Блочная схема прежнего формата (F-17, шаг 9) читается переведённой тем
+    // же конвертером, что каталог: извлекатель — шаблон.
+    {
+        FieldLayout layout;
+        const FileSchemaPtr legacy = layout.schemaFor(v3schema::fixtureDefinition());
+        CHECK(legacy && legacy->isValid()
+                  && layout.columns == (QStringList{"Timestamp", "Thread", "Level", "Message"}),
+              "a block definition is read through the converter");
+    }
     FieldLayout layout;
     const FileSchemaPtr s = layout.schemaFor(def);
     CHECK(s && s->isValid() && s->definition == def, "template schema: extractor and its definition");

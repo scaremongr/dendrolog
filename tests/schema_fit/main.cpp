@@ -15,12 +15,15 @@
 //   6. SchemaFitJob на обоих бэкендах = синхронный расчёт по тем же строкам;
 //      строки набора — строки файла с их номерами; отмена; reset модели
 //      посреди расчёта.
-//   7. Одна мера: счётчики редактора схем (подпись образцов и файла) равны
-//      счётчикам SchemaFit::evaluate на тех же строках.
+//   (Одна мера в редакторе схем — счётчики окна = SchemaFit::evaluate —
+//   проверяет tests/schema_store, F-17, шаг 9.)
+//
+// Схемы — шаблоны строки (F-17, шаг 9: блочной модели нет).
 
 #include "builtinsamples.h"
 #include "builtinschemas.h"
-#include "conversionpatterndialog.h"
+#include "fieldlayout.h"
+#include "linetemplate.h"
 #include "logscan.h"
 #include "schemafit.h"
 #include "testdocuments.h"
@@ -55,14 +58,39 @@ void check(bool ok, const QString& what)
     }
 }
 
-using K = PatternBlock::MatchKind;
-using testdocs::patternBlock;
-
 QString messageOnlySchema()
 {
-    PatternDefinition def;
-    def.blocks = {patternBlock(K::Remainder, QStringLiteral("Message"))};
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(QStringLiteral("{Message}"));
+}
+
+QString templateSchema(const QString& text)
+{
+    return LineTemplateSchema::definition(text);
+}
+
+// Схема по определению за интерфейсом извлекателя; пустая — невалидная.
+class Schema {
+public:
+    explicit Schema(const QString& definition = QString())
+        : m_ptr(definition.isEmpty() ? nullptr : FieldLayout::extractorFor(definition))
+    {
+        if (!m_ptr)
+            m_ptr = std::make_shared<const TemplateExtractor>(QString());
+    }
+    bool isValid() const { return m_ptr->isValid(); }
+    operator const FieldExtractor&() const { return *m_ptr; }
+    FieldExtractorPtr ptr() const { return m_ptr; }
+
+private:
+    FieldExtractorPtr m_ptr;
+};
+
+QVector<FieldExtractorPtr> ptrs(const QVector<Schema>& schemas)
+{
+    QVector<FieldExtractorPtr> out;
+    for (const Schema& s : schemas)
+        out.append(s.ptr());
+    return out;
 }
 
 QString describe(const SchemaFit::Result& r)
@@ -94,8 +122,8 @@ void expectCounts(const QString& name, const SchemaFit::Result& r, const Counts&
 
 void testTable()
 {
-    const LogPattern schema(testdocs::buildSchema());   // Timestamp [Thread] Level - Message
-    const LogPattern message(messageOnlySchema());
+    const Schema schema(testdocs::buildSchema());   // Timestamp [Thread] Level - Message
+    const Schema message(messageOnlySchema());
     check(schema.isValid() && message.isValid(), QStringLiteral("таблица: схемы валидны"));
 
     const QStringList lines = {
@@ -109,12 +137,6 @@ void testTable()
         QStringLiteral("2026-03-05 10:00:03.000 restart marker"),               // ведущая метка
         QStringLiteral("10:00:04.000 time only, no date"),                      // F-11: кандидат
     };
-    if (qEnvironmentVariableIsSet("SCHEMA_FIT_DEBUG"))
-        for (const QString& l : lines) {
-            const LineMatchResult m = schema.matchLine(l);
-            std::fprintf(stderr, "  ok %d matched %d unparsed %d skipped %d..%d | %s\n", m.ok,
-                         m.matchedBlockCount, m.unparsedStart, m.skippedFrom, m.skippedTo, qPrintable(l));
-        }
     const SchemaFit::Result r = SchemaFit::evaluate(schema, lines);
     std::fprintf(stderr, "таблица/логическая схема: %s\n", qPrintable(describe(r)));
     // Кандидаты: три полные (разделитель «-» после уровня необязателен —
@@ -125,7 +147,7 @@ void testTable()
           QStringLiteral("filled по колонкам: Timestamp и Message у пяти, Thread у трёх"));
     check(r.misses.size() == 2, QStringLiteral("misses: две частичные — %1").arg(r.misses.size()));
     if (r.misses.size() == 2) {
-        check(r.misses[0].partial && r.misses[0].text == lines[7] && r.misses[0].afterBlock == 0
+        check(r.misses[0].partial && r.misses[0].text == lines[7] && r.misses[0].afterBlock >= 0
                   && r.misses[0].stopOffset == 24,
               QStringLiteral("первая в misses — «restart marker»: после метки, с позиции 24"));
         check(r.misses[1].partial && r.misses[1].text == lines[8], QStringLiteral("вторая — время без даты"));
@@ -135,13 +157,7 @@ void testTable()
           QStringLiteral("specificity: (3·3 + 1 + 1) / 5 = %1").arg(r.specificity()));
 
     // Константа в начале: строки без неё — промахи.
-    PatternDefinition prefixed;
-    PatternBlock app = patternBlock(K::ConstantText, QString());
-    app.customRegex = QStringLiteral("APP:");
-    prefixed.blocks = {app, patternBlock(K::Timestamp, QStringLiteral("Timestamp")),
-                       patternBlock(K::Level, QStringLiteral("Level")),
-                       patternBlock(K::Remainder, QStringLiteral("Message"))};
-    const LogPattern prefixedPattern(LogPattern::serializeDefinition(prefixed));
+    const Schema prefixedPattern(templateSchema(QStringLiteral("APP: {Timestamp:time} {Level:level} {Message}")));
     check(prefixedPattern.isValid(), QStringLiteral("схема с константой валидна"));
     const QStringList appLines = {
         QStringLiteral("APP: 2026-03-05 10:00:00.000 INFO started"),
@@ -149,12 +165,6 @@ void testTable()
         QStringLiteral("2026-03-05 10:00:02.000 ERROR other component"),
         QStringLiteral("  continuation"),
     };
-    if (qEnvironmentVariableIsSet("SCHEMA_FIT_DEBUG"))
-        for (const QString& l : appLines) {
-            const LineMatchResult m = prefixedPattern.matchLine(l);
-            std::fprintf(stderr, "  ok %d matched %d unparsed %d skipped %d..%d | %s\n", m.ok,
-                         m.matchedBlockCount, m.unparsedStart, m.skippedFrom, m.skippedTo, qPrintable(l));
-        }
     const SchemaFit::Result a = SchemaFit::evaluate(prefixedPattern, appLines);
     expectCounts(QStringLiteral("константа в начале"), a, {4, 3, 2, 0, 1, 0});
     check(a.misses.size() == 1 && !a.misses[0].partial && a.misses[0].afterBlock == -1
@@ -178,12 +188,7 @@ void testTable()
 
     // Запасное правило кандидатов: строк с метками меньше 20 % — кандидаты
     // все непустые без отступа.
-    PatternDefinition py;
-    py.blocks = {patternBlock(K::Level, QStringLiteral("Level"), QString(), QString(), QStringLiteral(":")),
-                 patternBlock(K::TextUntilSeparator, QStringLiteral("Logger"), QString(), QString(),
-                              QStringLiteral(":")),
-                 patternBlock(K::Remainder, QStringLiteral("Message"))};
-    const LogPattern pyPattern(LogPattern::serializeDefinition(py));
+    const Schema pyPattern(templateSchema(QStringLiteral("{Level:level}:{Logger}:{Message}")));
     check(pyPattern.isValid(), QStringLiteral("схема WARNING:root:… валидна"));
     const QStringList pyLines = {
         QStringLiteral("WARNING:root:disk is almost full"),
@@ -245,7 +250,7 @@ void testTable()
     }
 
     // Невалидная схема — результат не годен.
-    check(!SchemaFit::evaluate(LogPattern(), lines).valid, QStringLiteral("невалидная схема — !valid"));
+    check(!SchemaFit::evaluate(Schema(), lines).valid, QStringLiteral("невалидная схема — !valid"));
     // Без строк — нет кандидатов, покрытие 0, вердикт «не подходит».
     const SchemaFit::Result empty = SchemaFit::evaluate(schema, QStringList());
     check(empty.valid && empty.candidates == 0 && SchemaFit::verdict(empty) == SchemaFit::Verdict::NoFit,
@@ -258,8 +263,8 @@ void testTable()
 
 void testRank()
 {
-    const LogPattern schema(testdocs::buildSchema());
-    const LogPattern message(messageOnlySchema());
+    const Schema schema(testdocs::buildSchema());
+    const Schema message(messageOnlySchema());
     QStringList lines;
     for (int i = 0; i < 40; ++i)
         lines << QStringLiteral("2026-03-05 10:00:%1.000 [w%2] INFO - line %3")
@@ -268,14 +273,14 @@ void testRank()
     const SchemaFit::Corpus corpus = SchemaFit::corpus(lines);
 
     // Message-only первым в каталоге, но не выигрывает.
-    const QVector<SchemaFit::Ranked> ranked = SchemaFit::rank({message, schema}, corpus);
+    const QVector<SchemaFit::Ranked> ranked = SchemaFit::rank(ptrs({message, schema}), corpus);
     check(ranked.size() == 2 && ranked[0].index == 1,
           QStringLiteral("rank: логическая схема раньше схемы из одного Message"));
     check(SchemaFit::better(ranked[0].result, ranked[1].result)
               && !SchemaFit::better(ranked[1].result, ranked[0].result),
           QStringLiteral("better несимметричен"));
     // Равные — порядок списка (устойчивость).
-    const QVector<SchemaFit::Ranked> same = SchemaFit::rank({schema, schema}, corpus);
+    const QVector<SchemaFit::Ranked> same = SchemaFit::rank(ptrs({schema, schema}), corpus);
     check(same.size() == 2 && same[0].index == 0 && same[1].index == 1,
           QStringLiteral("rank устойчив на равных"));
     check(!SchemaFit::better(same[0].result, same[1].result), QStringLiteral("равные — не лучше"));
@@ -324,11 +329,15 @@ const QMap<QPair<QString, QString>, SchemaFit::Verdict>& knownOverlaps()
     // Program / PID разбирают и строку nginx error («[error] 1234#1234:»),
     // но там выигрывает nginx error (rank — своя первая). JSON Lines и logfmt
     // — формат строк файла, а не схема (F-17, шаг 7): в корпусе их нет.
+    // Шаблон Serilog file «{Timestamp:time} [{Level:level}] {Message}» (F-17,
+    // шаг 9) читает и строку nginx error («2026/11/18 … [error] …»): там он
+    // «сомнителен» (нет PID#TID — частичная), выигрывает nginx error.
     static const QMap<QPair<QString, QString>, SchemaFit::Verdict> overlaps = {
         {{QStringLiteral("syslog-iso.json"), QStringLiteral("syslog-rfc3164.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-rfc3164.json"), QStringLiteral("syslog-iso.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-rfc3164.json"), QStringLiteral("nginx-error.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-iso.json"), QStringLiteral("nginx-error.json")}, SchemaFit::Verdict::Fits},
+        {{QStringLiteral("serilog-file.json"), QStringLiteral("nginx-error.json")}, SchemaFit::Verdict::Doubtful},
     };
     return overlaps;
 }
@@ -346,17 +355,20 @@ const char* verdictName(SchemaFit::Verdict v)
 void testBuiltinCorpus()
 {
     const QString dir = QStringLiteral(DENDROLOG_PATTERNS_SOURCE_DIR);
-    QVector<LogPattern> schemas;
+    QVector<Schema> schemas;
     QStringList files;
     for (const builtinsamples::SchemaCase& sc : builtinsamples::cases()) {
+        // Две syslog-схемы прежнего выпуска — один шаблон syslog.json (F-17,
+        // шаг 9): у обоих корпусов одна и та же схема.
+        const QString file = sc.file.startsWith(QLatin1String("syslog-")) ? QStringLiteral("syslog.json") : sc.file;
         QString name, canonical;
-        BuiltinSchemas::parseSchemaFile(readAll(QDir(dir).filePath(sc.file)), sc.file, &name, &canonical);
-        schemas.append(LogPattern(canonical));
+        BuiltinSchemas::parseSchemaFile(readAll(QDir(dir).filePath(file)), file, &name, &canonical);
+        schemas.append(Schema(canonical));
         files.append(sc.file);
         check(schemas.constLast().isValid(), QStringLiteral("встроенная схема %1 валидна").arg(sc.file));
     }
     // Схема из одного Message в начале каталога — не мешает никому.
-    schemas.prepend(LogPattern(messageOnlySchema()));
+    schemas.prepend(Schema(messageOnlySchema()));
     files.prepend(QStringLiteral("(message only)"));
 
     const QVector<builtinsamples::SchemaCase> all = builtinsamples::cases();
@@ -366,7 +378,7 @@ void testBuiltinCorpus()
         for (const builtinsamples::Sample& s : sc.samples)
             lines.append(s.line);
         const SchemaFit::Corpus corpus = SchemaFit::corpus(lines);
-        const QVector<SchemaFit::Ranked> ranked = SchemaFit::rank(schemas, corpus);
+        const QVector<SchemaFit::Ranked> ranked = SchemaFit::rank(ptrs(schemas), corpus);
         const int own = ci + 1;
         // Своя — первая; одинаковое определение (Syslog RFC 3164 и ISO —
         // одна цепочка блоков) делит место, порядок решает каталог.
@@ -404,41 +416,32 @@ void testBuiltinCorpus()
 
 void testExplain()
 {
-    const LogPattern schema(testdocs::buildSchema());
-    const PatternDefinition& def = schema.definition();
+    const Schema schema(testdocs::buildSchema());
     const auto reasonOf = [&](const QString& line) {
-        return SchemaFit::explain(def, line, schema.matchLine(line));
+        return SchemaFit::explain(static_cast<const FieldExtractor&>(schema), line);
     };
     using E = SchemaFit::Reason::Expect;
 
     const SchemaFit::Reason ok = reasonOf(QStringLiteral("2026-03-05 10:00:00.000 [w1] INFO - hello"));
     check(ok.expect == E::Nothing, QStringLiteral("explain: принятая строка — Nothing"));
 
-    // После метки ожидалась обёртка «[» поля Thread.
+    // После метки ожидалась обёртка «[» поля Thread (номер — элемента шаблона).
     const SchemaFit::Reason bracket = reasonOf(QStringLiteral("2026-03-05 10:00:03.000 restart marker"));
-    check(bracket.afterBlock == 0 && bracket.expectedBlock == 1 && bracket.expect == E::Literal
+    check(bracket.afterBlock >= 0 && bracket.expectedBlock > bracket.afterBlock && bracket.expect == E::Literal
               && bracket.literal == QStringLiteral("[") && bracket.stopOffset == 24
               && bracket.found == QStringLiteral("restart marker"),
           QStringLiteral("explain: после метки — «[», в строке «%1» (after %2, expect %3, literal %4)")
               .arg(bracket.found).arg(bracket.afterBlock).arg(int(bracket.expect)).arg(bracket.literal));
 
-    // Разделитель-текст после поля: Logger до « - », в строке его нет.
-    PatternDefinition sepDef;
-    sepDef.blocks = {patternBlock(K::Timestamp, QStringLiteral("Timestamp")),
-                     patternBlock(K::Level, QStringLiteral("Level")),
-                     patternBlock(K::TextUntilSeparator, QStringLiteral("Logger"), QString(), QString(),
-                                  QStringLiteral(" - ")),
-                     patternBlock(K::Remainder, QStringLiteral("Message"))};
-    const LogPattern sep(LogPattern::serializeDefinition(sepDef));
+    // Литерал после поля: Logger до « - », в строке его нет.
+    const Schema sep(templateSchema(QStringLiteral("{Timestamp:time} {Level:level} {Logger} - {Message}")));
     const QString sepLine = QStringLiteral("2026-03-05 10:00:00.000 INFO component without dash");
-    const LineMatchResult sepMatch = sep.matchLine(sepLine);
-    const SchemaFit::Reason afterLevel = SchemaFit::explain(sep.definition(), sepLine, sepMatch);
-    check(sepMatch.ok && afterLevel.afterBlock == 1 && afterLevel.expectedBlock == 2
-              && afterLevel.expect == E::Literal && afterLevel.literal == QStringLiteral(" - ")
-              && afterLevel.found == QStringLiteral("component without dash"),
-          QStringLiteral("explain: после Level поле Logger до « - », разделителя в строке нет"));
+    const SchemaFit::Reason afterLevel = SchemaFit::explain(static_cast<const FieldExtractor&>(sep), sepLine);
+    check(afterLevel.partial && afterLevel.expect == E::Literal && afterLevel.literal.trimmed() == QStringLiteral("-"),
+          QStringLiteral("explain: после Level поле Logger до « - », разделителя в строке нет (expect %1, «%2», found «%3»)")
+              .arg(int(afterLevel.expect)).arg(afterLevel.literal, afterLevel.found));
 
-    // Ни один блок не сошёлся — ожидалась метка с начала строки.
+    // Ни один элемент не сошёлся — ожидалась метка с начала строки.
     const SchemaFit::Reason none = reasonOf(QStringLiteral("restart marker"));
     check(none.afterBlock == -1 && none.expectedBlock == 0 && none.expect == E::Timestamp
               && none.stopOffset == 0 && none.found == QStringLiteral("restart marker"),
@@ -459,7 +462,7 @@ void testExplain()
 
 void testBudget()
 {
-    const LogPattern schema(testdocs::buildSchema());
+    const Schema schema(testdocs::buildSchema());
     QStringList lines;
     for (int i = 0; i < 1000; ++i)
         lines << QStringLiteral("2026-03-05 10:00:00.000 [w1] INFO - line %1").arg(i);
@@ -497,11 +500,7 @@ void testBudget()
     // каждая строка упирается в предел PCRE2. Время — настоящее, но решает
     // счётчик: проход обязан остановиться задолго до конца набора.
     {
-        PatternDefinition def;
-        PatternBlock re = patternBlock(K::CustomRegex, QStringLiteral("Bad"));
-        re.customRegex = QStringLiteral("(\\w|\\w\\w)+\\d");
-        def.blocks = {re, patternBlock(K::Remainder, QStringLiteral("Message"))};
-        const LogPattern bad(LogPattern::serializeDefinition(def));
+        const Schema bad(templateSchema(QStringLiteral("{Bad:/(\\w|\\w\\w)+\\d/} {Message}")));
         check(bad.isValid(), QStringLiteral("катастрофическая схема компилируется"));
         QStringList slow;
         for (int i = 0; i < 4000; ++i)
@@ -513,7 +512,7 @@ void testBudget()
               QStringLiteral("катастрофический регекс — timedOut до конца набора (%1)").arg(describe(r)));
         // rank ставит такую схему в конец.
         const QVector<SchemaFit::Ranked> ranked =
-            SchemaFit::rank({bad, LogPattern(messageOnlySchema())}, SchemaFit::corpus(slow.mid(0, 200)), budget);
+            SchemaFit::rank(ptrs({bad, Schema(messageOnlySchema())}), SchemaFit::corpus(slow.mid(0, 200)), budget);
         check(ranked.size() == 2 && ranked[0].index == 1 && ranked[1].result.timedOut,
               QStringLiteral("rank: схема с timedOut — в конце"));
     }
@@ -556,8 +555,8 @@ void testJob(const QDir& tmp)
                                                     /*monotonic=*/true);
     const QString path = testdocs::writeFile(tmp, QStringLiteral("job.log"), bytes);
     const QStringList physical = testdocs::expectedPhysicalLines(bytes);
-    const QVector<LogPattern> schemas = {LogPattern(testdocs::buildSchema()),
-                                         LogPattern(messageOnlySchema())};
+    const QVector<Schema> schemaList = {Schema(testdocs::buildSchema()), Schema(messageOnlySchema())};
+    const QVector<FieldExtractorPtr> schemas = ptrs(schemaList);
 
     QVector<QVector<SchemaFit::Sample>> sampleSets;
     for (int backend = 0; backend < 2; ++backend) {
@@ -596,8 +595,8 @@ void testJob(const QDir& tmp)
         noLimit.maxMs = 0;
         const SchemaFit::Corpus corpus = SchemaFit::corpus(samples);
         QVector<SchemaFit::Result> expected;
-        for (const LogPattern& p : schemas)
-            expected.append(SchemaFit::evaluate(p, corpus, noLimit));
+        for (const FieldExtractorPtr& p : schemas)
+            expected.append(SchemaFit::evaluate(*p, corpus, noLimit));
 
         SchemaFitJob job;
         job.setModel(doc.model.get());
@@ -650,8 +649,6 @@ void testJob(const QDir& tmp)
 
 } // namespace
 
-void testDialog(const QDir& tmp);   // ниже: окно редактора схем
-
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -664,125 +661,7 @@ int main(int argc, char** argv)
     testExplain();
     testBudget();
     testJob(QDir(tmpDir.path()));
-    testDialog(QDir(tmpDir.path()));
 
     std::fprintf(stderr, "schema_fit: %d проверок, %d провалов\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
-}
-
-// ---------------------------------------------------------------------------
-// 7. Одна мера: окно редактора схем
-// ---------------------------------------------------------------------------
-
-void testDialog(const QDir& tmp)
-{
-    const QString dir = QStringLiteral(DENDROLOG_PATTERNS_SOURCE_DIR);
-    ConversionPatternDialog::PatternList list;
-    int springRow = -1;
-    QStringList springLines;
-    QString springSchema;
-    for (const builtinsamples::SchemaCase& sc : builtinsamples::cases()) {
-        SchemaStore::SchemaEntry entry;
-        BuiltinSchemas::parseSchemaFile(readAll(QDir(dir).filePath(sc.file)), sc.file, &entry.name,
-                                        &entry.schema);
-        if (sc.file == QLatin1String("spring-boot.json")) {
-            springRow = int(list.size());
-            springSchema = entry.schema;
-            for (const builtinsamples::Sample& smp : sc.samples)
-                springLines << smp.line;
-        }
-        list.append(entry);
-    }
-    SchemaStore::SchemaEntry fixture;
-    fixture.name = QStringLiteral("Fixture");
-    fixture.schema = LogPattern(testdocs::buildSchema()).patternString();
-    const int fixtureRow = int(list.size());
-    list.append(fixture);
-
-    ConversionPatternDialog dlg(list);
-    SchemaFit::Budget noLimit;
-    noLimit.maxMs = 0;
-    dlg.setFitBudget(noLimit);
-    auto* table = dlg.findChild<QTableWidget*>(QStringLiteral("schemaTable"));
-    auto* sample = dlg.findChild<QPlainTextEdit*>(QStringLiteral("sampleEdit"));
-    auto* status = dlg.findChild<QLabel*>(QStringLiteral("previewStatusLabel"));
-    auto* fileLabel = dlg.findChild<QLabel*>(QStringLiteral("fileCoverageLabel"));
-    auto* menuBtn = dlg.findChild<QToolButton*>(QStringLiteral("suggestMenuBtn"));
-    check(table && sample && status && fileLabel && menuBtn && menuBtn->menu(),
-          QStringLiteral("окно: элементы на месте"));
-    if (!table || !sample || !status || !fileLabel || !menuBtn || !menuBtn->menu())
-        return;
-    check(fileLabel->isHidden(), QStringLiteral("окно без вкладки: подписи файла нет"));
-
-    // Образцы: подпись — та же мера на тех же строках.
-    table->setCurrentCell(springRow, 0);
-    sample->setPlainText(springLines.join(QLatin1Char('\n')));
-    const SchemaFit::Result expectedSamples = SchemaFit::evaluate(LogPattern(springSchema), springLines);
-    check(testdocs::waitFor([&]() { return sameResult(dlg.sampleFit(), expectedSamples); }, 10000),
-          QStringLiteral("окно: счётчики образцов = SchemaFit::evaluate (%1 / %2)")
-              .arg(describe(dlg.sampleFit()), describe(expectedSamples)));
-    check(status->text().startsWith(SchemaFit::summary(expectedSamples)),
-          QStringLiteral("окно: подпись образцов — «%1»").arg(status->text()));
-
-    // Подбор из каталога по образцам: Spring Boot — первым; пункт меню
-    // выбирает его в списке.
-    // Ранжирование по образцам — в воркере: до итога меню говорит «Checking».
-    QVector<SchemaFit::Ranked> bySamples;
-    check(testdocs::waitFor([&]() {
-              bool pending = true;
-              bySamples = dlg.catalogueSuggestions(&pending);
-              return !pending;
-          }, 10000),
-          QStringLiteral("окно: ранжирование каталога по образцам закончилось"));
-    check(!bySamples.isEmpty() && bySamples[0].index == springRow,
-          QStringLiteral("окно: по образцам первая — Spring Boot"));
-    table->setCurrentCell(0, 0);
-    emit menuBtn->menu()->aboutToShow();
-    QAction* first = menuBtn->menu()->findChild<QAction*>(QStringLiteral("suggestCatalogue0"));
-    check(first && first->text().startsWith(list[springRow].name),
-          QStringLiteral("окно: первый пункт меню — %1").arg(first ? first->text() : QString()));
-    if (first)
-        first->trigger();
-    check(table->currentRow() == springRow, QStringLiteral("окно: пункт меню выбрал схему в списке"));
-    check(menuBtn->menu()->findChild<QAction*>(QStringLiteral("suggestDraft")) != nullptr,
-          QStringLiteral("окно: в меню есть черновик по образцам"));
-
-    // Вкладка: образцы — с текущей строки, покрытие — на строках файла.
-    const QByteArray bytes = testdocs::makeLogBytes(3000, 5, "\n", testdocs::fixtureBaseTime(),
-                                                    false, true, true);
-    const QString path = testdocs::writeFile(tmp, QStringLiteral("dialog.log"), bytes);
-    for (int backend = 0; backend < 2; ++backend) {
-        const QString label = backend == 0 ? QStringLiteral("окно, резидентный") : QStringLiteral("окно, индексный");
-        testdocs::Document doc = backend == 0 ? testdocs::buildResident({path}, QString())
-                                              : testdocs::buildIndexed({path}, QString());
-        table->setCurrentCell(fixtureRow, 0);
-        sample->clear();
-        dlg.setSource(doc.model.get(), 10);
-        const QStringList shown = sample->toPlainText().split(QLatin1Char('\n'));
-        check(!shown.isEmpty() && shown.first() == doc.model->messageAt(10),
-              label + QStringLiteral(": образцы — с текущей строки вкладки"));
-        check(!fileLabel->isHidden(), label + QStringLiteral(": подпись файла видна"));
-        check(testdocs::waitFor([&]() { return dlg.fileFitReady(); }, 30000),
-              label + QStringLiteral(": покрытие на файле посчитано"));
-        const QVector<SchemaFit::Sample> lines =
-            SchemaFitJob::sampleLines(doc.model->scanSnapshot(false), nullptr);
-        const SchemaFit::Result expected = SchemaFit::evaluate(LogPattern(fixture.schema), lines, noLimit);
-        check(sameResult(dlg.fileFit(), expected),
-              label + QStringLiteral(": счётчики файла = SchemaFit::evaluate (%1 / %2)")
-                          .arg(describe(dlg.fileFit()), describe(expected)));
-        check(fileLabel->text().contains(SchemaFit::summary(expected)),
-              label + QStringLiteral(": подпись файла — «%1»").arg(fileLabel->text()));
-        const QVector<SchemaFit::Ranked> byFile = dlg.catalogueSuggestions();
-        check(!byFile.isEmpty() && byFile[0].index == fixtureRow,
-              label + QStringLiteral(": по файлу первая — схема фикстуры"));
-
-        // Reset вкладки — проверка заново, по новым строкам.
-        doc.model->clear();
-        check(!dlg.fileFitReady(), label + QStringLiteral(": reset — прежний итог снят"));
-        check(testdocs::waitFor([&]() { return dlg.fileFitReady(); }, 30000)
-                  && dlg.fileFit().candidates == 0,
-              label + QStringLiteral(": после reset — заново"));
-        dlg.setSource(nullptr, -1);
-        check(fileLabel->isHidden(), label + QStringLiteral(": без вкладки подпись скрыта"));
-    }
 }

@@ -2,7 +2,8 @@
 
 #include "appsettings.h"
 #include "builtinschemas.h"
-#include "logpattern.h"
+#include "linetemplate.h"
+#include "schemaconverter.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -86,7 +87,8 @@ namespace SchemaStore {
 
 bool isSchemaFormatKey(const QString& key)
 {
-    // What LogPattern::serializeDefinition writes, plus the display name.
+    // Keys of a schema definition (version 4 template; version 3 blocks — only
+    // ever read, F-17 step 9), plus the display name.
     return key == QLatin1String("name")
         || key == QLatin1String("version")
         || key == QLatin1String("type")
@@ -120,6 +122,15 @@ bool parseEntry(const QByteArray& bytes, const QString& fallbackName, SchemaEntr
     if (!BuiltinSchemas::parseSchemaFile(bytes, fallbackName, &parsed.name, &parsed.schema,
                                          /*strict=*/false))
         return false;
+    // A schema of the previous format (version 3 blocks, F-17 step 9) is read
+    // translated into a line template; one that does not translate is not a
+    // schema of the catalogue (its file is left alone, see sync()).
+    if (SchemaConverter::isBlockDefinition(parsed.schema)) {
+        const SchemaConverter::Result converted = SchemaConverter::translate(parsed.schema);
+        if (!converted.ok)
+            return false;
+        parsed.schema = LineTemplateSchema::definition(converted.templateText);
+    }
     // Same text parseSchemaFile looks at (trimmed, BOM-safe).
     const QJsonDocument doc =
         QJsonDocument::fromJson(QString::fromUtf8(bytes).trimmed().toUtf8());
@@ -197,6 +208,76 @@ BuiltinSchemas::InstallReport installBuiltins()
         BuiltinSchemas::install(QStringLiteral(":/patterns"), dirPath);
     for (const QString& error : std::as_const(report.errors))
         qWarning().noquote() << "Built-in schemas:" << error;
+    return report;
+}
+
+MigrationReport migrateToTemplates(const QString& dirPath)
+{
+    MigrationReport report;
+    QDir dir(dirPath);
+    if (dirPath.isEmpty() || !dir.exists())
+        return report;
+    const QStringList files =
+        dir.entryList(QStringList() << QString::fromLatin1(kSchemaGlob), QDir::Files, QDir::Name);
+    for (const QString& file : files) {
+        bool ok = false;
+        const QByteArray bytes = readAllFrom(dir.filePath(file), &ok);
+        if (!ok)
+            continue;
+        // Cheap test first: a version 4 file (every file after the first run)
+        // never reaches the converter.
+        const QJsonDocument doc = QJsonDocument::fromJson(QString::fromUtf8(bytes).trimmed().toUtf8());
+        if (doc.isObject() && doc.object().value(QStringLiteral("version")).toInt() >= LineTemplateSchema::kVersion)
+            continue;
+        const QString text = QString::fromUtf8(bytes);
+        if (!SchemaConverter::isBlockDefinition(text))
+            continue;   // not a schema of the previous format
+        const SchemaConverter::Result converted = SchemaConverter::translate(text);
+        if (!converted.ok) {
+            report.failed << QStringLiteral("%1: %2").arg(file, converted.error);
+            continue;
+        }
+        SchemaEntry entry;
+        if (!parseEntry(bytes, QFileInfo(file).completeBaseName(), &entry))
+            continue;
+        // The original goes to converted-from-v3/ first: nothing is lost if
+        // writing the new file fails (the next launch converts it again).
+        if (!dir.mkpath(QString::fromLatin1(kConvertedDirName))) {
+            report.failed << QStringLiteral("%1: cannot create %2").arg(file, QString::fromLatin1(kConvertedDirName));
+            continue;
+        }
+        QDir keep(dir.filePath(QString::fromLatin1(kConvertedDirName)));
+        QString kept = file;
+        bool alreadyKept = false;   // прежний запуск сохранил ровно его (запись не удалась)
+        for (int i = 2; keep.exists(kept); ++i) {
+            bool same = false;
+            if (readAllFrom(keep.filePath(kept), &same) == bytes && same) {
+                alreadyKept = true;
+                break;
+            }
+            kept = QFileInfo(file).completeBaseName() + QStringLiteral("_%1.json").arg(i);
+        }
+        if (!alreadyKept && !QFile::copy(dir.filePath(file), keep.filePath(kept))) {
+            report.failed << QStringLiteral("%1: cannot copy to %2").arg(file, QString::fromLatin1(kConvertedDirName));
+            continue;
+        }
+        QString writeError;
+        if (!writeFileAtomic(dir.filePath(file), fileBytes(entry), &writeError)) {
+            report.failed << writeError;
+            continue;
+        }
+        report.converted << file;
+        for (const QString& note : converted.notes)
+            report.notes << QStringLiteral("%1: %2").arg(file, note);
+    }
+    return report;
+}
+
+MigrationReport migrateToTemplates()
+{
+    MigrationReport report = migrateToTemplates(patternsDir());
+    for (const QString& error : std::as_const(report.failed))
+        qWarning().noquote() << "Schema conversion:" << error;
     return report;
 }
 

@@ -1,0 +1,66 @@
+{
+    "name": "Spring Boot",
+    "description": "Spring Boot default console/file format: timestamp, level, PID --- [app] [thread] logger : message (Boot 2.x and 3.x).",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "timestamp",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Level",
+            "kind": "level",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "PID",
+            "kind": "integer",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "---",
+            "customRegex": ""
+        },
+        {
+            "name": "Application",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": "(?:\\[[^\\]]*\\](?=[ \\t]+\\[))?",
+            "ignored": true
+        },
+        {
+            "name": "Thread",
+            "kind": "text",
+            "leadingText": "[",
+            "closingText": "]",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Logger",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": ":",
+            "customRegex": "\\S+"
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

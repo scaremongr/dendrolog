@@ -2,6 +2,7 @@
 #include "lineformat.h"
 #include "linetemplate.h"
 #include "logfile.h"
+#include "schemaconverter.h"
 
 
 bool FileSchema::hasAnyOf(const QVector<int>& columns) const noexcept
@@ -54,19 +55,15 @@ bool FieldLayout::isTemplateDefinition(const QString& definition)
     return LineTemplateSchema::templateOf(definition, nullptr);
 }
 
-FieldExtractorPtr FieldLayout::extractorFor(const LogPattern& pattern)
+FieldExtractorPtr FieldLayout::extractorFor(const QString& definition)
 {
     QString templateText;
-    if (LineTemplateSchema::templateOf(pattern.patternString(), &templateText))
+    if (LineTemplateSchema::templateOf(definition, &templateText))
         return std::make_shared<const TemplateExtractor>(templateText);
-    if (!pattern.isValid())
-        return nullptr;
-    return std::make_shared<const LegacyPatternExtractor>(pattern);
-}
-
-FileSchemaPtr FieldLayout::schemaFor(const LogPattern& pattern)
-{
-    return schemaFor(extractorFor(pattern), pattern.patternString());
+    const QString upgraded = SchemaConverter::upgradeDefinition(definition);
+    if (upgraded != definition && LineTemplateSchema::templateOf(upgraded, &templateText))
+        return std::make_shared<const TemplateExtractor>(templateText);
+    return nullptr;
 }
 
 FileSchemaPtr FieldLayout::schemaFor(const QString& definition)
@@ -74,7 +71,7 @@ FileSchemaPtr FieldLayout::schemaFor(const QString& definition)
     KeyedDefinition keys;
     if (LineFormat::keysFromFieldDefinition(definition, &keys))
         return schemaFor(std::make_shared<const KeyedExtractor>(keys), definition);
-    return schemaFor(LogPattern(definition));
+    return schemaFor(extractorFor(definition), definition);
 }
 
 FileSchemaPtr FieldLayout::schemaFor(FieldExtractorPtr extractor, const QString& definition)

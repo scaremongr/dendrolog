@@ -78,8 +78,9 @@ struct InstallReport {
 InstallReport install(const QString& sourceDir, const QString& targetDir);
 
 /// Разбирает файл схемы: отображаемое имя (ключ "name", иначе \a fallbackName)
-/// и каноническая сериализация. strict — с проверкой LogPattern::
-/// validateDefinition (так проверяются встроенные схемы).
+/// и каноническая сериализация (шаблон — LineTemplateSchema::definition, прежний
+/// формат — SchemaConverter::canonicalBlocks). strict — с проверкой шаблона
+/// (так проверяются встроенные схемы).
 bool parseSchemaFile(const QByteArray& bytes, const QString& fallbackName,
                      QString* name, QString* canonical, bool strict = false);
 

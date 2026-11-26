@@ -19,7 +19,8 @@
 #include "logindexer.h"
 #include "logmodel.h"
 #include "logparser.h"
-#include "logpattern.h"
+#include "fieldlayout.h"
+#include "linetemplate.h"
 #include "recordlocator.h"
 #include "textencoding.h"
 
@@ -46,35 +47,22 @@ namespace testdocs {
 // Схема полей и генерация фикстур
 // ---------------------------------------------------------------------------
 
-inline PatternBlock patternBlock(PatternBlock::MatchKind kind, const QString& name,
-                                 const QString& lead = QString(),
-                                 const QString& closing = QString(),
-                                 const QString& sep = QString())
-{
-    PatternBlock b;
-    b.matchKind   = kind;
-    b.name        = name;
-    b.leadingText = lead;
-    b.closingText = closing;
-    b.separator   = sep;
-    return b;
-}
-
 // Схема, под которую генерируются фикстуры:
 //   2026-03-05 10:00:00.000 [worker-1] INFO - текст
-// Поля: 0 Timestamp, 1 Thread, 2 Level, 3 Message.
+// Поля: 0 Timestamp, 1 Thread, 2 Level, 3 Message. Шаблон строки (F-17):
+// прежняя блочная схема тех же колонок (дефис после уровня необязателен).
 inline QString buildSchema()
 {
-    PatternDefinition def;
-    def.blocks = {
-        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Thread"),
-                     QStringLiteral("["), QStringLiteral("]")),
-        patternBlock(PatternBlock::MatchKind::Level, QStringLiteral("Level"), QString(),
-                     QString(), QStringLiteral("-")),
-        patternBlock(PatternBlock::MatchKind::Remainder, QStringLiteral("Message")),
-    };
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(
+        QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {?- ?}{Message}"));
+}
+
+// Колонки схемы по определению; не компилируется — пусто.
+inline QStringList schemaColumns(const QString& definition)
+{
+    FieldLayout layout;
+    const FileSchemaPtr schema = layout.schemaFor(definition);
+    return schema && schema->isValid() ? layout.columns : QStringList();
 }
 
 inline QDateTime fixtureBaseTime()

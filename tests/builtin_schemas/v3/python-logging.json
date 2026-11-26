@@ -1,0 +1,42 @@
+{
+    "name": "Python logging",
+    "description": "Python logging: %(asctime)s - %(name)s - %(levelname)s - %(message)s; tracebacks stay in their record.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "timestamp",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "-",
+            "customRegex": ""
+        },
+        {
+            "name": "Logger",
+            "kind": "text",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "[ \\t]-[ \\t]",
+            "customRegex": "",
+            "separatorIsRegex": true
+        },
+        {
+            "name": "Level",
+            "kind": "level",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "-",
+            "customRegex": ""
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

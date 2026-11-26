@@ -40,6 +40,8 @@
 #include "openrouting.h"
 #include "schemastore.h"
 #include "schemacandidateswindow.h"
+#include "schemaeditorwindow.h"
+#include "schemasamplemodel.h"
 #include "secretstore.h"
 #include "linetemplate.h"
 #include "sessionreportdialog.h"
@@ -3552,12 +3554,13 @@ void scenarioScannerPanel(MainWindow& win, const Fixtures& fx)
     check(showDock(win, scannerDock, false), QStringLiteral("the scanner dock hides"));
 }
 
-// Редактор схем (Tools → Field Schemas…): образцы — строки активной
-// вкладки, новая схема по автоопределению, «Use Selected» — схема вкладки и
-// файл в каталоге схем.
+// Редактор схем (Tools → Field Schemas…, F-17, шаг 9): немодальное окно;
+// образцы — строки активной вкладки с выбранной; новая схема по образцам
+// (вывод структуры), Save — файл в каталоге, Apply to Tab — схема вкладки и
+// пункт дока, без перечитывания; закрытие без правок не спрашивает.
 void scenarioFieldSchemasDialog(MainWindow& win, const Fixtures& fx)
 {
-    section(QStringLiteral("field schemas dialog"));
+    section(QStringLiteral("field schemas editor"));
     const int ia = tabIndexForFile(win, fx.a);
     tabs(win)->setCurrentIndex(ia);
     LogViewWidget* tab = currentTab(win);
@@ -3568,48 +3571,52 @@ void scenarioFieldSchemasDialog(MainWindow& win, const Fixtures& fx)
     const QString before = tab->fieldSettings().schemaName;
     const QString beforeSchema = tab->parserPattern();
     const QString created = QStringLiteral("Smoke Detected");
-    bool shown = false;
-    QString samples;
-    g_driver->expect([&](QWidget* w) {
-        shown = true;
-        auto* sampleEdit = w->findChild<QPlainTextEdit*>(QStringLiteral("sampleEdit"));
-        auto* add = w->findChild<QPushButton*>(QStringLiteral("addSchemaBtn"));
-        auto* name = w->findChild<QLineEdit*>(QStringLiteral("nameEdit"));
-        auto* detect = w->findChild<QPushButton*>(QStringLiteral("autoDetectBtn"));
-        auto* applyBtn = w->findChild<QPushButton*>(QStringLiteral("applyBtn"));
-        auto* use = w->findChild<QPushButton*>(QStringLiteral("useBtn"));
-        if (!sampleEdit || !add || !name || !detect || !applyBtn || !use) {
-            check(false, QStringLiteral("Field Schemas has its controls"));
-            DialogDriver::close(w);
-            return;
-        }
-        samples = sampleEdit->toPlainText();
-        add->click();
-        name->setText(created);
-        emit name->textEdited(created);
-        detect->click();
-        check(applyBtn->isEnabled(), QStringLiteral("Auto-detect leaves an unsaved schema (Apply enabled)"));
-        applyBtn->click();
-        use->click(); // принять схему и закрыть
-    });
     if (QAction* item = menuAction(win, QStringLiteral("Field Schemas")))
         item->trigger();
-    check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 10000), QStringLiteral("Field Schemas opens and closes"));
-    g_driver->dropExpectations();
-    check(samples.startsWith(sample), QStringLiteral("the preview starts at the selected line: %1").arg(samples.left(80)));
-    check(waitAllLoaded(win), QStringLiteral("tabs settle after the schema"));
-    check(tab->fieldSettings().schemaName == created, QStringLiteral("Use Selected sets the schema of the tab (%1)").arg(tab->fieldSettings().schemaName));
-    check(model->rowCount() == allRows, QStringLiteral("the tab keeps its rows"));
-    auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
-    check(combo && combo->currentText() == created, QStringLiteral("Log Fields shows the new schema"));
+    auto* editor = win.findChild<SchemaEditorWindow*>();
+    check(editor && editor->isVisible() && !QApplication::activeModalWidget(),
+          QStringLiteral("Field Schemas opens a non-modal window"));
+    if (!editor)
+        return;
+    check(editor->view() == tab, QStringLiteral("the editor takes the active tab"));
+    check(!editor->sampleModel()->lines().isEmpty() && editor->sampleModel()->lines().first().text == sample,
+          QStringLiteral("the sample lines start at the selected line"));
+    SchemaFit::Budget noLimit;
+    noLimit.maxMs = 0;
+    editor->setFitBudget(noLimit);
+    check(editor->newFromSampleLines(), QStringLiteral("New ▾ → From Sample Lines infers a template"));
+    editor->setSchemaName(created);
+    check(waitFor([&]() { return !editor->isComputing() && editor->fileFitReady(); }, 30000)
+              && editor->fileFit().valid && editor->fileFit().full > 0,
+          QStringLiteral("the inferred schema is checked on the file of the tab"));
+    auto* save = editor->findChild<QPushButton*>(QStringLiteral("saveBtn"));
+    auto* apply = editor->findChild<QPushButton*>(QStringLiteral("applyToTabBtn"));
+    check(save && save->isEnabled() && apply && apply->isEnabled(), QStringLiteral("Save and Apply to Tab are enabled"));
+    if (save)
+        save->click();
+    check(editor->savedName() == created && !editor->isModified(), QStringLiteral("Save saves the schema"));
     bool saved = false;
     for (const QString& f : QDir(SchemaStore::patternsDir()).entryList({ QStringLiteral("*.json") }, QDir::Files)) {
         QFile file(QDir(SchemaStore::patternsDir()).filePath(f));
-        saved = saved || (file.open(QIODevice::ReadOnly) && file.readAll().contains(created.toUtf8()));
+        if (file.open(QIODevice::ReadOnly)) {
+            const QJsonObject o = QJsonDocument::fromJson(file.readAll()).object();
+            saved = saved || (o.value(QStringLiteral("name")).toString() == created
+                              && o.value(QStringLiteral("version")).toInt() == 4);
+        }
     }
-    check(saved, QStringLiteral("the new schema is saved in the patterns folder"));
+    check(saved, QStringLiteral("the new schema is saved in the patterns folder (version 4)"));
+    if (apply)
+        apply->click();
+    check(waitAllLoaded(win), QStringLiteral("tabs settle after the schema"));
+    check(tab->fieldSettings().schemaName == created && tab->parserPattern() == editor->definition(),
+          QStringLiteral("Apply to Tab sets the schema of the tab (%1)").arg(tab->fieldSettings().schemaName));
+    check(model->rowCount() == allRows, QStringLiteral("the tab keeps its rows"));
+    auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
+    check(combo && combo->currentText() == created, QStringLiteral("Log Fields shows the new schema"));
     check(tab->fieldSettings().hasSchema() && tab->parserPattern() != beforeSchema,
-          QStringLiteral("the tab parses with the detected schema"));
+          QStringLiteral("the tab parses with the inferred schema"));
+    editor->close();
+    check(!editor->isVisible(), QStringLiteral("Close without changes closes without a question"));
     // Как было: прежняя схема вкладки.
     if (combo && combo->findText(before) >= 0)
         combo->setCurrentIndex(combo->findText(before));

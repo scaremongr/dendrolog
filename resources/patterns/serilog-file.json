@@ -1,33 +1,7 @@
 {
     "name": "Serilog (file, with date)",
     "description": "Serilog file sink default: yyyy-MM-dd HH:mm:ss.fff zzz [LVL] message, exception on the following lines.",
-    "version": 3,
-    "type": "dynamic-block-schema",
-    "linePrefix": "",
-    "blocks": [
-        {
-            "name": "Timestamp",
-            "kind": "regex",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "",
-            "customRegex": "\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?: ?(?:[+-]\\d{2}:?\\d{2}|Z))?"
-        },
-        {
-            "name": "Level",
-            "kind": "level",
-            "leadingText": "[",
-            "closingText": "]",
-            "separator": "",
-            "customRegex": ""
-        },
-        {
-            "name": "Message",
-            "kind": "remainder",
-            "leadingText": "",
-            "closingText": "",
-            "separator": "",
-            "customRegex": ""
-        }
-    ]
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} [{Level:level}] {Message}"
 }

@@ -1,7 +1,0 @@
-{
-    "name": "Logback / Log4j",
-    "description": "Java: %d [%thread] %-5level %logger - %msg (Logback, Log4j 1/2 PatternLayout). Date may be omitted (%d{HH:mm:ss.SSS}). Stack traces stay in their record.",
-    "version": 4,
-    "type": "line-template",
-    "template": "{Timestamp:time} [{Thread}] {Level:level} {Logger:word} -{?-?} {Message}"
-}

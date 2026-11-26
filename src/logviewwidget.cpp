@@ -282,7 +282,7 @@ void LogViewWidget::setParserPattern(const QString& pattern)
     const SchemaChange change = beginSchemaChange();
     if (pattern != parserPattern())
         m_schemaName.clear(); // имя каталога описывало прежнюю схему
-    m_pattern.setPattern(pattern);
+    m_schemaDefinition = pattern;
     m_fileSchemas = normalizedFileSchemas(m_fileSchemas);
     refreshSchemas();
     endSchemaChange(change);
@@ -292,7 +292,7 @@ QStringList LogViewWidget::layoutInputs() const
 {
     // Схема вкладки, затем свои схемы файлов в порядке файлов вкладки —
     // порядок колонок раскладки (объединение по имени).
-    QStringList inputs{ m_pattern.patternString() };
+    QStringList inputs{ m_schemaDefinition };
     for (const LogFilePtr& f : m_loadedFiles) {
         if (!f)
             continue;
@@ -336,9 +336,9 @@ void LogViewWidget::rebuildFieldLayout()
         return;
     m_fieldLayout.clear();
     m_layoutSchemas.clear();
-    m_tabSchema = m_fieldLayout.schemaFor(m_pattern);
-    m_layoutSchemas.insert(m_pattern.patternString(), m_tabSchema);
-    m_layoutInputs = { m_pattern.patternString() };
+    m_tabSchema = m_fieldLayout.schemaFor(m_schemaDefinition);
+    m_layoutSchemas.insert(m_schemaDefinition, m_tabSchema);
+    m_layoutInputs = { m_schemaDefinition };
     for (int i = 1; i < inputs.size(); ++i) {
         layoutSchema(inputs[i]);
         if (!m_layoutInputs.contains(inputs[i]))
@@ -394,7 +394,7 @@ LogViewWidget::normalizedFileSchemas(const QHash<QString, FieldSettings>& files)
     // FieldSettings — имя и определение.
     QHash<QString, FieldSettings> out;
     for (auto it = files.cbegin(); it != files.cend(); ++it) {
-        if (it->schema == m_pattern.patternString())
+        if (it->schema == m_schemaDefinition)
             continue;
         const bool loaded = std::any_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
             [&it](const LogFilePtr& f) { return f && f->filePath == it.key(); });
@@ -532,7 +532,7 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings,
     const SchemaChange change = beginSchemaChange();
     m_showFieldsFlag = settings.showFields;
     if (settings.schema != parserPattern())
-        m_pattern.setPattern(settings.schema);
+        m_schemaDefinition = settings.schema;
     m_fileSchemas = normalizedFileSchemas(files);
     m_schemaName = settings.schema.isEmpty() ? QString() : settings.schemaName;
     m_visibleFields = settings.visibleFields;
@@ -1251,7 +1251,7 @@ void LogViewWidget::captureEncodingsFromIndexed()
 
 QString LogViewWidget::parserPattern() const
 {
-    return m_pattern.patternString();
+    return m_schemaDefinition;
 }
 
 QStringList LogViewWidget::parserFieldNames() const

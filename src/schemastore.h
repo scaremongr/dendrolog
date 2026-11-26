@@ -11,10 +11,17 @@
 // ---------------------------------------------------------------------------
 // SchemaStore — file-based persistence for field schemas.
 //
-// Each schema is one *.json file in <exeDir>/patterns/. A file holds the
-// serialized LogPattern schema (see LogPattern::serializeDefinition) plus a
-// top-level "name" key carrying the display name, so a schema file is fully
-// self-describing and portable between machines.
+// Each schema is one *.json file in <configDir>/patterns/. A file holds a line
+// template (version 4: {"type":"line-template","version":4,"template":…},
+// linetemplate.h) plus a top-level "name" key carrying the display name and
+// metadata ("description", unknown keys — kept verbatim), so a schema file is
+// fully self-describing and portable between machines.
+//
+// Files of the previous format (version 3 blocks) are translated once at
+// start-up (migrateToTemplates, F-17 step 9): the original goes to
+// converted-from-v3/, the file becomes version 4 under the same name with
+// the same description and unknown keys. Until then (a file dropped in by
+// hand) parseEntry reads it translated.
 //
 // The folder is the single source of truth for the schema *list*; the INI
 // file only remembers the display order and which schema is active. Any
@@ -23,14 +30,14 @@
 // ---------------------------------------------------------------------------
 namespace SchemaStore {
 
-/// Top-level keys written by LogPattern::serializeDefinition (plus "name"):
-/// never metadata.
+/// Top-level keys of a schema definition (version 4, and version 3 when one is
+/// read) plus "name": never metadata.
 bool isSchemaFormatKey(const QString& key);
 
 /// A single schema entry.
 struct SchemaEntry {
     QString name;        ///< Display name ("name" key of the file).
-    QString schema;      ///< Serialized schema JSON (canonical, compact — what LogPattern consumes).
+    QString schema;      ///< Definition (canonical, compact: LineTemplateSchema::definition).
     QJsonObject meta;    ///< "description" and unknown top-level keys, kept verbatim.
     /// File in patternsDir() the entry was loaded from (basename, with .json);
     /// empty for a schema that has no file yet. sync() rewrites this file in
@@ -70,6 +77,20 @@ QString patternsDir();
 /// overwritten, deleted built-ins are not resurrected). Errors are logged and
 /// returned in the report.
 BuiltinSchemas::InstallReport installBuiltins();
+
+/// Sub-folder of the catalogue with the originals of translated files.
+inline constexpr const char* kConvertedDirName = "converted-from-v3";
+
+struct MigrationReport {
+    QStringList converted;   ///< files rewritten as version 4 (basenames)
+    QStringList failed;      ///< "file: why" — left as they were
+    QStringList notes;       ///< "file: what changed in meaning" (SchemaConverter notes)
+};
+/// Translates every version 3 file of \a dirPath into version 4 (see the
+/// header); version 4 files are not touched, so a second run does nothing.
+MigrationReport migrateToTemplates(const QString& dirPath);
+/// The same on patternsDir(); failures are logged.
+MigrationReport migrateToTemplates();
 
 /// Every readable schema in the folder, normalised to canonical JSON.
 /// Files that do not parse as a schema are skipped. Entries whose display

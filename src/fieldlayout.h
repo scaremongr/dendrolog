@@ -3,7 +3,6 @@
 
 #include "fieldextractor.h"
 #include "logfield.h"
-#include "logpattern.h"
 
 #include <QBitArray>
 #include <QHash>
@@ -31,8 +30,8 @@ struct LogFile;
 // FieldSource / FieldScanner (fieldsource.h). У вкладки с одной схемой
 // columnOf тождественен (identity) — поля те же, байт в байт.
 //
-// Значение неизменяемое и делится между потоками через FileSchemaPtr (как
-// LogPattern копией сейчас): воркер получает указатель на старте прохода.
+// Значение неизменяемое и делится между потоками через FileSchemaPtr:
+// воркер получает указатель на старте прохода.
 // Ловушка MSVC: FileSchema, FieldLayout и FileSchemaSet — struct везде,
 // forward-декларации совпадают.
 // ============================================================================
@@ -89,15 +88,18 @@ struct FieldLayout {
     // Схема файла в этой раскладке; недостающие колонки дописываются в
     // конец. k-е поле схемы с именем N — k-я колонка с именем N (схема с
     // повторяющимся именем не склеивает свои поля в одну колонку).
-    // Определение — блочная схема (LogPattern), шаблон строки версии 4
-    // (LineTemplateSchema, F-17: TemplateExtractor) либо колонки формата
-    // строк JSON / logfmt (LineFormat::fieldDefinition: KeyedExtractor по
-    // ключам ролей и ключам начала файла, F-17, шаг 7).
-    FileSchemaPtr schemaFor(const LogPattern& pattern);
+    // Определение — шаблон строки версии 4 (LineTemplateSchema, F-17:
+    // TemplateExtractor) либо колонки формата строк JSON / logfmt
+    // (LineFormat::fieldDefinition: KeyedExtractor по ключам ролей и ключам
+    // начала файла, F-17, шаг 7). Определение прежней блочной схемы
+    // (версия 3) переводится тем же конвертером, что каталог
+    // (SchemaConverter, шаг 9) — страховка: сохранённые состояния
+    // переводятся при чтении.
     FileSchemaPtr schemaFor(const QString& definition);
     FileSchemaPtr schemaFor(FieldExtractorPtr extractor, const QString& definition);
-    // Извлекатель по определению схемы (шаблон версии 4 или LogPattern).
-    static FieldExtractorPtr extractorFor(const LogPattern& pattern);
+    // Извлекатель по определению схемы-шаблона (или переведённой блочной);
+    // не шаблон — nullptr.
+    static FieldExtractorPtr extractorFor(const QString& definition);
     // Определение — файл шаблона строки версии 4.
     static bool isTemplateDefinition(const QString& definition);
     void clear() { columns.clear(); }

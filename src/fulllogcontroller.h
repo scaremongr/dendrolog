@@ -75,6 +75,12 @@ public:
     // Приостановленные фильтры (nullopt — показа нет): их снимает
     // captureState вкладки вместо пустых фильтров модели.
     const std::optional<Filters>& suspendedFilters() const { return m_suspended; }
+    // Переименовать привязку правил приостановленных фильтров к колонке
+    // (редактор схем переименовал поле, F-17, шаг 9); сколько правил.
+    int renameSuspendedField(const QString& from, const QString& to)
+    {
+        return m_suspended ? m_suspended->rules.renameField(from, to) : 0;
+    }
 
     // Показать полный лог. row >= 0 — строка под курсором (контекстное меню):
     // она становится выбором пользователя на своём месте экрана. false —

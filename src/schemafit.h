@@ -2,7 +2,6 @@
 #define SCHEMAFIT_H
 
 #include "fieldextractor.h"
-#include "logpattern.h"
 
 #include <QFutureWatcher>
 #include <QMetaObject>
@@ -52,10 +51,9 @@ class LogScanSnapshot;
 //     ограничена пределом PCRE2 (match limit), так что проверка не опаздывает
 //     больше чем на 32 таких строки.
 //
-// Потоки: функции чистые, без состояния; извлекатель (FieldExtractor) и
-// LogPattern можно разделять между потоками (как FileSchemaPtr у загрузки).
-// Шаг 2 F-17: мера считается на интерфейсе FieldExtractor; блочная схема
-// приходит через LegacyPatternExtractor. SchemaFitJob — на GUI-потоке,
+// Потоки: функции чистые, без состояния; извлекатель (FieldExtractor) можно
+// разделять между потоками (как FileSchemaPtr у загрузки). Шаг 2 F-17: мера
+// считается на интерфейсе FieldExtractor. SchemaFitJob — на GUI-потоке,
 // считает в пуле (QtConcurrent::run + QFutureWatcher).
 // ============================================================================
 
@@ -146,15 +144,6 @@ struct Result {
 Result evaluate(const FieldExtractor& schema, const Corpus& lines, const Budget& budget = {});
 Result evaluate(const FieldExtractor& schema, const QStringList& lines, const Budget& budget = {});
 Result evaluate(const FieldExtractor& schema, const QVector<Sample>& lines, const Budget& budget = {});
-/// Прежняя блочная схема — через LegacyPatternExtractor (до шага 9).
-/// matches (может быть nullptr) — результат matchLine каждой строки набора
-/// (пустой строки и строк после остановки по бюджету — пустой): редактор
-/// красит по ним предпросмотр без второго прохода.
-Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& budget = {},
-                QVector<LineMatchResult>* matches = nullptr);
-Result evaluate(const LogPattern& schema, const QStringList& lines, const Budget& budget = {});
-Result evaluate(const LogPattern& schema, const QVector<Sample>& lines, const Budget& budget = {});
-
 enum class Verdict { Fits, Doubtful, NoFit };
 Verdict verdict(const Result& result);
 
@@ -170,8 +159,6 @@ struct Ranked {
 };
 /// Все схемы по одним строкам, лучшая первой (устойчиво: равные — в
 /// порядке списка); timedOut — в конце.
-QVector<Ranked> rank(const QVector<LogPattern>& schemas, const Corpus& lines,
-                     const Budget& budget = {});
 QVector<Ranked> rank(const QVector<FieldExtractorPtr>& schemas, const Corpus& lines,
                      const Budget& budget = {});
 
@@ -179,9 +166,6 @@ QVector<Ranked> rank(const QVector<FieldExtractorPtr>& schemas, const Corpus& li
 /// fieldextractor.h: у шаблона — номер элемента шаблона, у блочной схемы —
 /// блока).
 using Reason = MatchReport;
-/// Прежняя блочная схема по готовому результату каскада.
-Reason explain(const PatternDefinition& definition, const QString& line,
-               const LineMatchResult& match);
 /// Любой извлекатель (одна строка, не горячий путь).
 Reason explain(const FieldExtractor& extractor, const QString& line);
 
@@ -225,8 +209,6 @@ public:
 
     /// Запуск на снапшоте модели; идущий расчёт отменяется. file — файл,
     /// чьи строки берутся (nullptr — файл первой строки). Номер поколения.
-    int start(const QVector<LogPattern>& schemas, const LogFile* file = nullptr,
-              const SchemaFit::Budget& budget = {});
     int start(const QVector<FieldExtractorPtr>& schemas, const LogFile* file = nullptr,
               const SchemaFit::Budget& budget = {});
     void cancel(bool wait = false);

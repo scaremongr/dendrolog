@@ -1,0 +1,33 @@
+{
+    "name": "Serilog (console)",
+    "description": "Serilog default output template: [HH:mm:ss LVL] message, exception on the following lines.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Timestamp",
+            "kind": "timestamp",
+            "leadingText": "[",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Level",
+            "kind": "level",
+            "leadingText": "",
+            "closingText": "]",
+            "separator": "",
+            "customRegex": ""
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

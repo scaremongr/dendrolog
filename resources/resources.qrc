@@ -22,7 +22,6 @@
         <file alias="serilog-console.json">patterns/serilog-console.json</file>
         <file alias="serilog-file.json">patterns/serilog-file.json</file>
         <file alias="spring-boot.json">patterns/spring-boot.json</file>
-        <file alias="syslog-iso.json">patterns/syslog-iso.json</file>
-        <file alias="syslog-rfc3164.json">patterns/syslog-rfc3164.json</file>
+        <file alias="syslog.json">patterns/syslog.json</file>
     </qresource>
 </RCC>

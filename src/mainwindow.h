@@ -17,6 +17,7 @@
 #include "logviewwidget.h"
 #include "filterruleset.h"
 #include "openrouting.h"
+#include "schemaeditorwindow.h"
 #include "schemastore.h"
 
 // Forward declarations for Qt classes used in members or method signatures
@@ -37,7 +38,6 @@ class QDir;
 class QMenu;
 class QComboBox;
 class QInputDialog; // For scan extensions
-class ConversionPatternDialog;
 class DirectoryScanner;
 class DirectoryScannerPanel;
 class QCloseEvent;
@@ -53,7 +53,7 @@ class BookmarkPanelWidget;
 class LogModel;
 struct LogFile;
 class LogListView;
-class LogPattern;
+
 class SearchResultsController;
 class SessionReportDialog;
 class SearchResultsNavigator;
@@ -198,6 +198,7 @@ private slots:
     void onFieldVisibilityChanged();
     void onPatternComboChanged(int index);
     void onManagePatterns();
+    SchemaEditorWindow::FieldUses schemaFieldUses();
     // «Find a Schema» (F-17, шаг 5): окно подбора схемы для активной вкладки.
     void openSchemaCandidates();
     void openSettings(bool aiPage);
@@ -348,6 +349,7 @@ private:
     SessionController* m_sessionController = nullptr;
     QPointer<SessionReportDialog> m_sessionReport;
     QPointer<class SchemaCandidatesWindow> m_schemaCandidates;
+    QPointer<SchemaEditorWindow> m_schemaEditor;   // редактор схем (F-17, шаг 9), немодальный
     QLabel* m_sessionReportLink = nullptr;
     void saveSessionAs();
     void openSession(const SessionState& session, const QString& path, SessionController::Origin origin);

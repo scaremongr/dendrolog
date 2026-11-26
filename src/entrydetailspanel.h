@@ -136,7 +136,7 @@ private:
     void watchFields(LogModel* model);
     void onFieldsReady();
     TimeDelta::RowDelta m_delta;
-    // Ключи строки ключевой схемы (LogPattern::keyValuePairs) — для одной
+    // Ключи строки ключевой схемы (KeyedLine::keyValuePairs) — для одной
     // записи; пусто — схема не ключевая или строка не распознана.
     QVector<std::pair<QString, QString>> keyPairs() const;
     QVector<QJsonDocument> m_jsonBlocks; // найденные при последнем buildHtml

@@ -1504,7 +1504,7 @@ int main(int argc, char** argv)
     }
     const QDir dir(tmp.path());
     const QString schema = buildSchema();
-    const QStringList fieldNames = LogPattern(schema).fieldNames();
+    const QStringList fieldNames = testdocs::schemaColumns(schema);
     const QDateTime base = fixtureBaseTime();
 
     // Малый документ — синхронный резидентный фильтр и индексный путь;

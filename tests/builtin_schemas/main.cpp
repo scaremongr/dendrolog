@@ -10,20 +10,25 @@
 //      пользователем схема, чужой файл того же имени, новая схема в новой
 //      версии, потерянный манифест.
 //   4. Каждый файл схемы перечислен в resources/resources.qrc.
-//   5. Метки времени форматов распознаёт LineClassifier (F-10), а схемы,
-//      исправленные ради этого после Q-5 (q5/ — их прежние версии),
-//      доезжают до пользователя, который их не трогал.
+//   5. Метки времени форматов распознаёт LineClassifier (F-10). Встроенные
+//      схемы — шаблоны строки (F-17, шаг 9): у пользователя прежнего выпуска
+//      (v3/ — последние блочные версии, q5/ — версии до Q-5) нетронутые
+//      копии обновляются шаблонами по манифесту, две syslog-схемы — одним
+//      шаблоном syslog.json, изменённые пользователем не трогаются.
 //   6. Снятые с поставки «JSON Lines» и «logfmt» (F-17, шаг 7: формат
 //      строк файла, f17/ — их последние версии): нетронутые удаляются и не
 //      воскресают, изменённые и свои — целы; образцы этих форматов читаются
 //      без схемы (форматом строк) — моменты, уровни, границы и поля из ключей.
 //
-// Каталог схем в исходниках передаётся define DENDROLOG_PATTERNS_SOURCE_DIR.
+// Каталог схем в исходниках передаётся define DENDROLOG_PATTERNS_SOURCE_DIR,
+// блочные версии прежнего выпуска — DENDROLOG_V3_PATTERNS_DIR.
 
 #include "builtinschemas.h"
 #include "lineclassifier.h"
 #include "lineformat.h"
-#include "logpattern.h"
+#include "fieldlayout.h"
+#include "linetemplate.h"
+#include "schemaconverter.h"
 #include "patternheuristics.h"
 #include "builtinsamples.h"
 #include "testdocuments.h"
@@ -57,6 +62,36 @@ void check(bool ok, const QString& what)
 }
 
 const QString kSourceDir = QStringLiteral(DENDROLOG_PATTERNS_SOURCE_DIR);
+const QString kV3Dir = QStringLiteral(DENDROLOG_V3_PATTERNS_DIR);
+
+// Схема (шаблон строки) с интерфейсом прежних проверок: колонки и поля
+// принятой строки; не принятая — без полей.
+struct Pattern {
+    FieldExtractorPtr x;
+    explicit Pattern(const QString& definition = QString())
+        : x(definition.isEmpty() ? nullptr : FieldLayout::extractorFor(definition)) {}
+    bool isValid() const { return x && x->isValid(); }
+    QStringList fieldNames() const { return x ? x->fields() : QStringList(); }
+    LogEntryFields extractFields(const QString& line) const
+    {
+        LogEntryFields f;
+        if (!x || !FieldExtractor::accepted(x->extract(line, &f)))
+            return {};
+        return f;
+    }
+};
+
+// Файл поставки для формата корпуса: две syslog-схемы версии 3 — один
+// шаблон syslog.json.
+QString shippedFile(const QString& caseFile)
+{
+    return caseFile.startsWith(QLatin1String("syslog-")) ? QStringLiteral("syslog.json") : caseFile;
+}
+
+QString shippedName(const builtinsamples::SchemaCase& sc)
+{
+    return shippedFile(sc.file) == QLatin1String("syslog.json") ? QStringLiteral("Syslog") : sc.name;
+}
 
 // Образцы строк форматов — общий корпус, tests/common/builtinsamples.h.
 using namespace builtinsamples;
@@ -76,22 +111,22 @@ bool writeAll(const QString& path, const QByteArray& bytes)
 QString schemaOf(const QString& file, QString* name = nullptr)
 {
     QString canonical;
-    BuiltinSchemas::parseSchemaFile(readAll(QDir(kSourceDir).filePath(file)),
+    BuiltinSchemas::parseSchemaFile(readAll(QDir(kSourceDir).filePath(shippedFile(file))),
                                     QString(), name, &canonical, true);
     return canonical;
 }
 
-QString describeFields(const LogPattern& pattern, const QString& line, const LogEntryFields& f)
+QString describeFields(const Pattern& pattern, const QString& line, const LogEntryFields& f)
 {
     QStringList parts;
     const QStringList names = pattern.fieldNames();
     for (int i = 0; i < names.size(); ++i)
-        parts << QStringLiteral("%1=«%2»").arg(names[i], f.value(i, line));
+        parts << QStringLiteral("%1=«%2»").arg(names[i], f.get(i, line).toString());
     return parts.join(QStringLiteral(", "));
 }
 
 // Поля строки против ожидаемых; пустой результат — совпало.
-QString compareFields(const LogPattern& pattern, const QString& line,
+QString compareFields(const Pattern& pattern, const QString& line,
                       const LogEntryFields& f, const Fields& expected)
 {
     const QStringList names = pattern.fieldNames();
@@ -100,7 +135,7 @@ QString compareFields(const LogPattern& pattern, const QString& line,
             return QStringLiteral("в схеме нет поля %1").arg(it.key());
     }
     for (int i = 0; i < names.size(); ++i) {
-        const QString got = f.value(i, line);
+        const QString got = f.get(i, line).toString();   // ожидания — сырой текст поля
         const QString want = expected.value(names[i]);
         if (got != want)
             return QStringLiteral("поле %1: «%2», ожидалось «%3»; все поля: %4")
@@ -119,7 +154,8 @@ void testSchemaFiles()
         QDir(kSourceDir).entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
     QStringList covered;
     for (const SchemaCase& sc : cases())
-        covered << sc.file;
+        if (!covered.contains(shippedFile(sc.file)))
+            covered << shippedFile(sc.file);
     covered.sort();
     check(files == covered,
           QStringLiteral("каждая встроенная схема покрыта образцами: файлы %1, в тесте %2")
@@ -132,7 +168,8 @@ void testSchemaFiles()
               QStringLiteral("%1: есть описание").arg(file));
         QString name;
         const QString canonical = schemaOf(file, &name);
-        check(!canonical.isEmpty(), QStringLiteral("%1: строгая проверка схемы").arg(file));
+        check(!canonical.isEmpty() && FieldLayout::isTemplateDefinition(canonical),
+              QStringLiteral("%1: шаблон строки, строгая проверка").arg(file));
         check(!name.isEmpty() && !names.contains(name),
               QStringLiteral("%1: имя «%2» задано и уникально").arg(file, name));
         names << name;
@@ -143,8 +180,8 @@ void testSamples(const SchemaCase& sc)
 {
     QString name;
     const QString schema = schemaOf(sc.file, &name);
-    check(name == sc.name, QStringLiteral("%1: имя «%2», ожидалось «%3»").arg(sc.file, name, sc.name));
-    const LogPattern pattern(schema);
+    check(name == shippedName(sc), QStringLiteral("%1: имя «%2», ожидалось «%3»").arg(sc.file, name, shippedName(sc)));
+    const Pattern pattern(schema);
     check(pattern.isValid(), QStringLiteral("%1: схема компилируется").arg(sc.file));
     if (!pattern.isValid())
         return;
@@ -297,7 +334,7 @@ struct RowInfo {
 
 // Строки документа по номеру строки файла (порядок вкладки у бэкендов может
 // различаться: резидентный сортирует по времени).
-QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const LogPattern& pattern)
+QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const Pattern& pattern)
 {
     QMap<int, RowInfo> rows;
     const int n = doc.model->rowCount();
@@ -320,7 +357,7 @@ QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const LogPattern& pattern
 void testBackends(const SchemaCase& sc, const QDir& tmp)
 {
     const QString schema = schemaOf(sc.file);
-    const LogPattern pattern(schema);
+    const Pattern pattern(schema);
 
     const QString path = testdocs::writeFile(tmp, sc.file + QStringLiteral(".log"), sampleBytes(sc));
     const int total = int(sc.samples.size()) * sampleRepeats(sc);
@@ -395,7 +432,7 @@ void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
     testdocs::Document indexed = testdocs::buildIndexed({path}, QString());
     check(resident.errors.isEmpty() && indexed.errors.isEmpty(),
           QStringLiteral("%1 без схемы: загрузка без ошибок").arg(sc.file));
-    const LogPattern none;
+    const Pattern none;
     const QMap<int, RowInfo> res = rowsByLine(resident, none);
     const QMap<int, RowInfo> idx = rowsByLine(indexed, none);
     if (res.size() != sc.samples.size() || idx.size() != sc.samples.size()) {
@@ -449,9 +486,13 @@ bool patchSchema(const QString& path, const QString& key, const QJsonValue& valu
     return writeAll(path, QJsonDocument(obj).toJson());
 }
 
-// Добавляет в начало схемы файла линейный префикс — изменение самой схемы.
+// Добавляет в начало схемы файла литерал — изменение самой схемы (шаблон
+// строки; у файла версии 3 — префикс строки).
 bool changeSchema(const QString& path, const QString& prefix)
 {
+    const QJsonObject obj = QJsonDocument::fromJson(readAll(path)).object();
+    if (obj.contains(QStringLiteral("template")))
+        return patchSchema(path, QStringLiteral("template"), prefix + obj.value(QStringLiteral("template")).toString());
     return patchSchema(path, QStringLiteral("linePrefix"), prefix);
 }
 
@@ -576,28 +617,24 @@ void testInstall()
 // 4. Ресурсы
 // ---------------------------------------------------------------------------
 
-// Автоопределение схемы (редактор) узнаёт метки новых видов как блок
-// Timestamp: syslog в начале строки, access-лог в скобках, nginx error.
+// Вид time шаблона узнаёт метки новых видов: syslog в начале строки,
+// access-лог в скобках, nginx error (вывод структуры и редактор берут его).
 void testAutoDetectTimestamp()
 {
-    const struct { const char* line; int block; } cases[] = {
-        { "Nov 18 13:55:36 web01 sshd[2231]: Accepted publickey for deploy", 0 },
-        { "Nov  8 03:04:05 web01 kernel: usb 1-1: new device", 0 },
-        { "127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326", -1 },
-        { "2026/11/18 13:55:36 [error] 1234#1234: *99 open() failed", 0 },
+    const struct { const char* line; const char* tpl; const char* ts; } cases[] = {
+        { "Nov 18 13:55:36 web01 sshd[2231]: Accepted publickey for deploy", "{T:time} {Rest}", "Nov 18 13:55:36" },
+        { "Nov  8 03:04:05 web01 kernel: usb 1-1: new device", "{T:time} {Rest}", "Nov  8 03:04:05" },
+        { "127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326",
+          "{_:ip} {_:word} {_:word} [{T:time}] {Rest}", "10/Oct/2026:13:55:36 -0700" },
+        { "2026/11/18 13:55:36 [error] 1234#1234: *99 open() failed", "{T:time} {Rest}", "2026/11/18 13:55:36" },
     };
     for (const auto& c : cases) {
         const QString line = QString::fromUtf8(c.line);
-        const PatternDefinition def = PatternHeuristics::suggestSchema(line);
-        int found = -1;
-        for (int b = 0; b < def.blocks.size(); ++b) {
-            if (def.blocks[b].matchKind == PatternBlock::MatchKind::Timestamp) {
-                found = b;
-                break;
-            }
-        }
-        check(c.block >= 0 ? found == c.block : found > 0,
-              QStringLiteral("автоопределение: блок Timestamp (%1): %2").arg(found).arg(line));
+        const TemplateExtractor x{QString::fromUtf8(c.tpl)};
+        LogEntryFields f;
+        const bool ok = FieldExtractor::accepted(x.extract(line, &f));
+        check(ok && f.get(0, line).toString() == QString::fromUtf8(c.ts),
+              QStringLiteral("вид time: «%1» в «%2»").arg(ok ? f.get(0, line).toString() : QString(), line));
     }
     // Блок Timestamp берёт всю метку access-лога вместе с зоной.
     const QRegularExpression re(QRegularExpression::anchoredPattern(PatternHeuristics::timestampRegex()));
@@ -611,56 +648,77 @@ void testAutoDetectTimestamp()
               QStringLiteral("timestampRegex не принимает «%1»").arg(QString::fromLatin1(t)));
 }
 
-// Схемы, исправленные после Q-5 ради блока Timestamp (F-10): у
-// пользователя, который поставил их прежние версии и не трогал, они
-// заменяются новыми; изменённая пользователем прежняя версия остаётся.
-void testUpgradeFromQ5()
+// Встроенные схемы — шаблоны строки (F-17, шаг 9). У пользователя прежнего
+// выпуска (блочные версии 3: v3/ — последние, q5/ — версии до Q-5, F-10)
+// нетронутые копии заменяются шаблонами по манифесту, две syslog-схемы
+// снимаются (нетронутые — удаляются) в пользу одного шаблона syslog.json, и
+// выбранная схема следует за заменой (replaced); изменённая пользователем
+// остаётся как была (её переводит каталог, SchemaStore::migrateToTemplates).
+void testUpgradeFromV3()
 {
     const QString q5Dir = QStringLiteral(DENDROLOG_Q5_PATTERNS_DIR);
     const QStringList fixed = jsonFiles(q5Dir);
     check(fixed == QStringList({QStringLiteral("access-combined.json"),
                                 QStringLiteral("syslog-rfc3164.json")}),
-          QStringLiteral("прежние версии исправленных схем: %1").arg(fixed.join(QLatin1Char(' '))));
+          QStringLiteral("версии до Q-5: %1").arg(fixed.join(QLatin1Char(' '))));
     for (const QString& f : fixed)
-        check(readAll(QDir(q5Dir).filePath(f)) != readAll(QDir(kSourceDir).filePath(f)),
-              QStringLiteral("%1 в этом выпуске изменена").arg(f));
+        check(readAll(QDir(q5Dir).filePath(f)) != readAll(QDir(kV3Dir).filePath(f)),
+              QStringLiteral("%1 исправлена после Q-5").arg(f));
+    const QStringList v3Files = jsonFiles(kV3Dir);
+    check(v3Files.size() == 10, QStringLiteral("блочных встроенных прежнего выпуска — десять (%1)").arg(v3Files.size()));
+    const QStringList retiredSyslog = {QStringLiteral("syslog-iso.json"), QStringLiteral("syslog-rfc3164.json")};
 
     QTemporaryDir tmpDir;
     const QDir tmp(tmpDir.path());
-    const QString v0 = makeSource(tmp, QStringLiteral("q5"));
-    for (const QString& f : fixed) {
-        QFile::remove(QDir(v0).filePath(f));
-        QFile::copy(QDir(q5Dir).filePath(f), QDir(v0).filePath(f));
-    }
-    for (const bool userEdited : {false, true}) {
-        const QString target = tmp.filePath(userEdited ? QStringLiteral("edited/patterns")
-                                                       : QStringLiteral("untouched/patterns"));
-        BuiltinSchemas::InstallReport r = BuiltinSchemas::install(v0, target);
-        check(r.errors.isEmpty() && r.installed.size() == jsonFiles(kSourceDir).size(),
-              QStringLiteral("прежний выпуск установлен"));
-        const QString edited = QDir(target).filePath(fixed.first());
-        if (userEdited)
-            check(changeSchema(edited, QStringLiteral("APP ")), QStringLiteral("правка прежней схемы"));
-        const QByteArray editedBytes = readAll(edited);
+    for (const bool beforeQ5 : {false, true}) {
+        for (const bool userEdited : {false, true}) {
+            const QString label = QStringLiteral("%1%2").arg(beforeQ5 ? QStringLiteral("до Q-5, ") : QString(),
+                                                              userEdited ? QStringLiteral("с правкой") : QStringLiteral("нетронутые"));
+            const QString v0 = tmp.filePath(QStringLiteral("v3-%1-%2").arg(beforeQ5).arg(userEdited));
+            QDir().mkpath(v0);
+            for (const QString& f : v3Files)
+                QFile::copy(QDir(beforeQ5 && fixed.contains(f) ? q5Dir : kV3Dir).filePath(f), QDir(v0).filePath(f));
+            const QString target = tmp.filePath(QStringLiteral("t-%1-%2/patterns").arg(beforeQ5).arg(userEdited));
+            BuiltinSchemas::InstallReport r = BuiltinSchemas::install(v0, target);
+            check(r.errors.isEmpty() && r.installed == v3Files, label + QStringLiteral(": прежний выпуск установлен"));
+            const QString edited = QStringLiteral("logback.json");
+            if (userEdited)
+                check(changeSchema(QDir(target).filePath(edited), QStringLiteral("APP ")),
+                      label + QStringLiteral(": правка прежней схемы"));
+            const QByteArray editedBytes = readAll(QDir(target).filePath(edited));
+            QString oldSyslog;
+            BuiltinSchemas::parseSchemaFile(readAll(QDir(target).filePath(retiredSyslog[0])), QString(), nullptr,
+                                            &oldSyslog, false);
 
-        r = BuiltinSchemas::install(kSourceDir, target);
-        check(r.errors.isEmpty(), QStringLiteral("обновление без ошибок: %1").arg(r.errors.join(QStringLiteral("; "))));
-        check(r.installed.isEmpty(), QStringLiteral("новых схем нет"));
-        const QStringList expectedUpdated = userEdited ? fixed.mid(1) : fixed;
-        check(r.updated == expectedUpdated,
-              QStringLiteral("обновлены %1, ожидалось %2")
-                  .arg(r.updated.join(QLatin1Char(' ')), expectedUpdated.join(QLatin1Char(' '))));
-        for (const QString& f : expectedUpdated) {
-            check(readAll(QDir(target).filePath(f)) == readAll(QDir(kSourceDir).filePath(f)),
-                  QStringLiteral("%1 заменена исправленной").arg(f));
-            QString name;
-            const QString canonical = schemaOf(f, &name);
-            check(LogPattern(canonical).isValid()
-                      && canonical.contains(QStringLiteral("timestamp")),
-                  QStringLiteral("%1: поле времени — блок Timestamp").arg(f));
+            r = BuiltinSchemas::install(kSourceDir, target);
+            check(r.errors.isEmpty(), label + QStringLiteral(": обновление без ошибок: ") + r.errors.join(QStringLiteral("; ")));
+            check(r.installed == QStringList{QStringLiteral("syslog.json")},
+                  label + QStringLiteral(": новый шаблон syslog.json: ") + r.installed.join(QLatin1Char(' ')));
+            QStringList expectedUpdated;
+            for (const QString& f : v3Files)
+                if (!retiredSyslog.contains(f) && !(userEdited && f == edited))
+                    expectedUpdated << f;
+            check(r.updated == expectedUpdated,
+                  label + QStringLiteral(": обновлены %1, ожидалось %2")
+                              .arg(r.updated.join(QLatin1Char(' ')), expectedUpdated.join(QLatin1Char(' '))));
+            check(r.retired == retiredSyslog,
+                  label + QStringLiteral(": syslog-схемы сняты: ") + r.retired.join(QLatin1Char(' ')));
+            for (const QString& f : expectedUpdated)
+                check(readAll(QDir(target).filePath(f)) == readAll(QDir(kSourceDir).filePath(f)),
+                      label + QStringLiteral(": %1 заменена шаблоном").arg(f));
+            for (const QString& f : retiredSyslog)
+                check(!QFile::exists(QDir(target).filePath(f)), label + QStringLiteral(": %1 удалена").arg(f));
+            if (userEdited)
+                check(readAll(QDir(target).filePath(edited)) == editedBytes,
+                      label + QStringLiteral(": изменённая пользователем цела"));
+            // Выбранная схема следует за заменой: прежняя syslog — шаблон syslog.
+            bool syslogFollows = false;
+            for (const auto& pr : r.replaced)
+                syslogFollows |= pr.first == oldSyslog && pr.second == schemaOf(QStringLiteral("syslog.json"));
+            check(syslogFollows, label + QStringLiteral(": выбранная syslog-схема следует за шаблоном"));
+            r = BuiltinSchemas::install(kSourceDir, target);
+            check(!r.changed() && r.errors.isEmpty(), label + QStringLiteral(": повторный запуск ничего не делает"));
         }
-        if (userEdited)
-            check(readAll(edited) == editedBytes, QStringLiteral("изменённая пользователем прежняя схема цела"));
     }
 }
 
@@ -674,10 +732,10 @@ void testRetiredSchemas()
     const QString f17 = QStringLiteral(DENDROLOG_F17_PATTERNS_DIR);
     for (const QString& f : retired) {
         check(!QFile::exists(QDir(kSourceDir).filePath(f)), QStringLiteral("%1 больше не поставляется").arg(f));
-        const LogPattern old(QString::fromUtf8(readAll(QDir(f17).filePath(f))));
-        check(old.isValid() && old.fieldNames() == QStringList{QStringLiteral("Message")},
-              QStringLiteral("%1: прежняя ключевая схема читается запасным блоком Message").arg(f));
-        check(LogPattern::isRetiredKeyedDefinition(QString::fromUtf8(readAll(QDir(f17).filePath(f)))),
+        const SchemaConverter::Result old = SchemaConverter::fromBlocks(QString::fromUtf8(readAll(QDir(f17).filePath(f))));
+        check(old.ok && LineTemplate(old.templateText).columns() == QStringList{QStringLiteral("Message")},
+              QStringLiteral("%1: прежняя ключевая схема переводится запасным блоком Message").arg(f));
+        check(SchemaConverter::isRetiredKeyedDefinition(QString::fromUtf8(readAll(QDir(f17).filePath(f)))),
               QStringLiteral("%1: определение узнаётся как снятая ключевая схема").arg(f));
     }
 
@@ -723,7 +781,7 @@ void testRetiredSchemas()
     check(r.retired == QStringList{retired[1]},
           QStringLiteral("снята только нетронутая: %1").arg(r.retired.join(QLatin1Char(' '))));
     check(readAll(QDir(target2).filePath(retired[0])) == edited, QStringLiteral("изменённая пользователем цела"));
-    check(LogPattern(QString::fromUtf8(edited)).isValid(), QStringLiteral("изменённая читается (Message)"));
+    check(SchemaConverter::fromBlocks(QString::fromUtf8(edited)).ok, QStringLiteral("изменённая переводится (Message)"));
 
     // 3. Свой файл того же имени (declined) — не трогается.
     const QString target3 = tmp.filePath(QStringLiteral("own/patterns"));
@@ -747,17 +805,6 @@ void testQrc()
     check(qrc.contains(QStringLiteral("<qresource prefix=\"/patterns\">")), QStringLiteral("префикс /patterns"));
 }
 
-// Что предлагает автоопределение на первой записи — для сравнения в отчёте
-// (не проверка: встроенная схема должна быть не хуже, это видно глазами).
-void printAutodetect(const SchemaCase& sc)
-{
-    if (qEnvironmentVariableIsEmpty("DENDRO_SHOW_AUTODETECT"))
-        return;
-    const LogPattern p(LogPattern::serializeDefinition(PatternHeuristics::suggestSchema(sc.samples.first().line)));
-    std::fprintf(stderr, "%s: автоопределение: %s\n", qPrintable(sc.file),
-                 qPrintable(describeFields(p, sc.samples.first().line, p.extractFields(sc.samples.first().line))));
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -767,7 +814,6 @@ int main(int argc, char** argv)
     testSchemaFiles();
     QTemporaryDir tmpDir;
     for (const SchemaCase& sc : cases()) {
-        printAutodetect(sc);
         testSamples(sc);
         testBackends(sc, QDir(tmpDir.path()));
         testBackendsWithoutExtraction(sc, QDir(tmpDir.path()));
@@ -777,7 +823,7 @@ int main(int argc, char** argv)
     for (const SchemaCase& sc : formatCases())
         testFormatCase(sc, QDir(tmpDir.path()));
     testInstall();
-    testUpgradeFromQ5();
+    testUpgradeFromV3();
     testRetiredSchemas();
     testAutoDetectTimestamp();
     testQrc();
