@@ -6,6 +6,7 @@
 
 class LogModel;
 class LogListView;
+class QuickSearch;
 struct LogFile;
 
 // ============================================================================
@@ -21,7 +22,15 @@ struct LogFile;
 // в поле постоянной ширины: чипы не меняют размер и легенда не «скачет».
 // Контекстное меню чипа: следующая / предыдущая строка файла (от выбранной
 // строки, через LogListView::goToRow — в историю переходов), Copy Path,
-// Show in Folder. Цвета — AppTheme::fileColor, как у полос строк.
+// Show in Folder. Строка файла ищется по снапшоту видимых строк
+// (LogScanSnapshot::findRowOfFile): до fileJumpSyncRows видимых строк —
+// сразу, больше — в пуле (QuickSearch::startFile, S-14), как F8: на слитой
+// вкладке в сотни миллионов строк проход на GUI-потоке был бы фризом.
+// Фоновый поиск уступает пользователю (действие во view после старта —
+// результат отброшен); модель перестроилась посреди поиска, а пользователь
+// ничего не делал — поиск заново от того же выбора, как у F3 (у загружающейся
+// слитой индексной вкладки reset на каждый батч). Ход и «строк нет» —
+// statusMessage. Цвета — AppTheme::fileColor, как у полос строк.
 // ============================================================================
 class FileLegend : public QWidget {
     Q_OBJECT
@@ -39,8 +48,13 @@ public:
     QString chipText(int i) const;
     const LogFile* chipFile(int i) const;
     int chipAt(const QPoint& pos) const;
-    // Действия контекстного меню (тестам — без меню).
+    // Действия контекстного меню (тестам — без меню). true — перешли
+    // (синхронный путь) или поиск ушёл в фон (isFileJumpRunning).
     bool goToFileLine(int chip, bool forward);
+    bool isFileJumpRunning() const;
+    void cancelFileJump();
+    // Порог синхронного поиска строки файла (видимых строк; тестам — 0).
+    void setFileJumpSyncRows(int rows) { m_fileJumpSyncRows = rows; }
     // Фильтр по файлу (U-23, часть 4) — то же, что щелчок по чипу: скрыть
     // или вернуть файл; only (Ctrl+щелчок) — оставить только этот файл,
     // повторно — вернуть все. Последний видимый файл не скрывается; false —
@@ -56,6 +70,9 @@ public:
 signals:
     // Набор чипов или их размер сменился: вкладке — показать или спрятать.
     void visibilityWanted(bool show);
+    // Сообщение для строки статуса: ход фонового поиска, у файла нет
+    // видимых строк.
+    void statusMessage(const QString& text);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -92,4 +109,13 @@ private:
     QMetaObject::Connection m_linesConnection;
     QMetaObject::Connection m_filterConnection;
     QString m_pressedFile;   // чип под нажатием (щелчок — на том же)
+    bool startFileJump(const LogFile* file, bool forward);
+    void finishFileJump(int row, bool background);
+
+    QuickSearch* m_fileJump = nullptr;
+    int m_fileJumpSyncRows = 1000000;
+    QString m_fileJumpName;          // имя файла идущего фонового поиска
+    const LogFile* m_fileJumpFile = nullptr;   // только сравнивается, не разыменовывается
+    bool m_fileJumpForward = true;
+    quint64 m_fileJumpUserActions = 0;   // LogListView::userActionCount на старте
 };

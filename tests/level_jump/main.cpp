@@ -15,9 +15,11 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "filelegend.h"
 #include "logviewwidget.h"
 #include "quicksearch.h"
 #include "testdocuments.h"
+#include "viewidle.h"
 
 #include <QApplication>
 #include <QFuture>
@@ -174,6 +176,44 @@ static void compareWithOracle(const QString& name, LogModel& model)
     }
     CHECK(mismatches == 0, name + ": findRowWithLevel matches the oracle");
     CHECK(hits > 0 && continuations > 0, name + ": the fixture has errors and continuation lines");
+}
+
+// Переход к строке файла (S-14): LogModel::findRowOfFile и снапшот против
+// того же эталона — кандидаты в порядке обхода, первая строка файла.
+static void compareFileOracle(const QString& name, LogModel& model,
+                              const QVector<const LogFile*>& files)
+{
+    const int n = model.rowCount();
+    QVector<const LogFile*> rowFile(n);
+    for (int row = 0; row < n; ++row)
+        rowFile[row] = model.keyAt(row).file.get();
+    const LogScanSnapshot snapshot = model.scanSnapshot(/*filteredOnly=*/true);
+    const QVector<int> starts = {-1, 0, 1, 100, n / 2, n - 2, n - 1, n, n + 5};
+    int mismatches = 0;
+    for (const LogFile* file : files) {
+        QVector<bool> target(n);
+        for (int row = 0; row < n; ++row)
+            target[row] = rowFile[row] == file;
+        for (const bool forward : {true, false}) {
+            for (const int start : starts) {
+                const int expected = expectedRow(target, start, forward, /*wrap=*/true);
+                const int actual = model.findRowOfFile(file, start, forward);
+                if (actual != expected && ++mismatches <= 5)
+                    std::fprintf(stderr, "  %s file=%p forward=%d start=%d: model %d, expected %d\n",
+                                 qPrintable(name), static_cast<const void*>(file), int(forward),
+                                 start, actual, expected);
+                for (const bool wrap : {true, false}) {
+                    const int want = expectedRow(target, start, forward, wrap);
+                    const qint64 got = snapshot.findRowOfFile(file, start, forward, wrap);
+                    if (got != want && ++mismatches <= 5)
+                        std::fprintf(stderr, "  %s snapshot forward=%d wrap=%d start=%d: %lld, expected %d\n",
+                                     qPrintable(name), int(forward), int(wrap), start,
+                                     static_cast<long long>(got), want);
+                }
+            }
+        }
+    }
+    CHECK(mismatches == 0, name + ": findRowOfFile matches the oracle");
 }
 
 static bool settled(LogViewWidget& tab)
@@ -348,6 +388,128 @@ static void checkTraces(const QString& name, const QString& path, const QString&
     CHECK(jump(true).endsWith("ERROR - trace 102"), name + ": from inside a trace on to the next record");
 }
 
+// Легенда слитой вкладки (S-14): «Go to Next / Previous Line of This File»
+// до порога — сразу, выше — в пуле; переход — goToRow (выбор пользователя),
+// действие пользователя раньше итога главнее, перестройка модели —
+// сообщение «ещё раз».
+static void checkLegend(const QString& name, const QStringList& paths, const QString& schema,
+                        bool background)
+{
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.setExtractionEnabled(true);
+    for (const QString& path : paths)
+        tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab) && testdocs::settleViews(*tab.model()), name + ": load settles");
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    FileLegend& legend = *tab.fileLegend();
+    legend.setFileJumpSyncRows(background ? 0 : 1000000);
+    QStringList messages;
+    QObject::connect(&tab, &LogViewWidget::statusMessage, [&](const QString& text) { messages << text; });
+    int small = -1;
+    for (int i = 0; i < legend.chipCount(); ++i)
+        if (legend.chipFile(i) && legend.chipFile(i)->filePath == paths.last())
+            small = i;
+    CHECK(legend.chipCount() == paths.size() && small >= 0, name + ": a chip per file");
+    if (small < 0)
+        return;
+    const LogFile* smallFile = legend.chipFile(small);
+    const auto selected = [&]() {
+        const QModelIndex cur = view.currentIndex();
+        return cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex())
+            ? cur.row() : -1;
+    };
+    const auto go = [&](bool forward) {
+        const bool started = legend.goToFileLine(small, forward);
+        CHECK(started, name + ": the jump starts");
+        CHECK(legend.isFileJumpRunning() == background,
+              name + (background ? ": a big tab searches in the pool" : ": a small tab jumps at once"));
+        CHECK(testdocs::waitFor([&] { return !legend.isFileJumpRunning(); }, 20000),
+              name + ": the jump finishes");
+        return selected();
+    };
+    // Эталон — перебор видимых строк.
+    const auto oracle = [&](int from, bool forward) {
+        const int n = model.rowCount();
+        for (int step = 1; step <= n; ++step) {
+            const int row = (((forward ? from + step : from - step) % n) + n) % n;
+            if (model.keyAt(row).file.get() == smallFile)
+                return row;
+        }
+        return -1;
+    };
+    view.goToRow(10);
+    int expected = oracle(10, true);
+    CHECK(expected >= 0 && go(true) == expected, name + ": next line of the small file");
+    const int first = expected;
+    expected = oracle(first, true);
+    CHECK(go(true) == expected, name + ": and the next one");
+    CHECK(go(false) == first, name + ": previous line of the small file");
+    CHECK(model.keyAt(selected()).file.get() == smallFile, name + ": the selected row is of that file");
+    // Через край.
+    view.goToRow(model.rowCount() - 1);
+    expected = oracle(model.rowCount() - 1, true);
+    CHECK(go(true) == expected, name + ": wraps past the end");
+
+    // Файл скрыт фильтром по файлу — строк нет, выбор на месте, сообщение.
+    model.setHiddenFiles({paths.last()});
+    CHECK(testdocs::settleViews(model), name + ": file filter settles");
+        view.goToRow(5);
+    messages.clear();
+    legend.goToFileLine(small, true);
+    CHECK(testdocs::waitFor([&] { return !legend.isFileJumpRunning(); }, 20000)
+              && selected() == 5 && !messages.isEmpty(),
+          name + ": a hidden file has no line to go to");
+    model.setHiddenFiles({});
+    CHECK(testdocs::settleViews(model), name + ": file filter reset settles");
+    
+    if (!background)
+        return;
+    // Пользователь выбрал строку раньше итога — итог отброшен.
+    view.goToRow(20);
+    {
+        PoolHold hold;
+        legend.goToFileLine(small, true);
+        view.goToRow(30);
+    }
+    CHECK(testdocs::waitFor([&] { return !legend.isFileJumpRunning(); }, 20000) && selected() == 30,
+          name + ": a user action before the result wins");
+    // Пользователь успел действие, а потом модель перестроилась — молча.
+    view.goToRow(25);
+    const RecordKey picked = model.keyAt(35);
+    {
+        PoolHold hold;
+        legend.goToFileLine(small, true);
+        view.goToRow(35);
+        model.setLogLevelFilter({LogLevel::Info, LogLevel::Error, LogLevel::Warn, LogLevel::Fatal});
+    }
+    CHECK(testdocs::waitFor([&] { return !legend.isFileJumpRunning(); }, 20000)
+              && testdocs::settleViews(model),
+          name + ": jump after a user action finishes");
+    const RecordKey now = selected() >= 0 ? model.keyAt(selected()) : RecordKey();
+    CHECK(now.file == picked.file && now.line == picked.line, name + ": the user's own row stays");
+    model.setLogLevelFilter({});
+    CHECK(testdocs::settleViews(model), name + ": level filter reset settles");
+    // Модель перестроилась посреди поиска, пользователь ничего не делал —
+    // поиск идёт заново от того же выбора и доходит до строки файла.
+    view.goToRow(40);
+    const int expectedAfter = oracle(40, true);
+    {
+        PoolHold hold;
+        legend.goToFileLine(small, true);
+        model.setLogLevelFilter({LogLevel::Info, LogLevel::Error, LogLevel::Warn, LogLevel::Fatal});
+    }
+    CHECK(testdocs::waitFor([&] { return !legend.isFileJumpRunning() && !model.isFiltering(); }, 20000)
+              && testdocs::settleViews(model, [&] { return legend.isFileJumpRunning(); }),
+          name + ": jump across a filter change finishes");
+    CHECK(selected() >= 0 && model.keyAt(selected()).file.get() == smallFile
+              && selected() == expectedAfter,
+          name + ": a rebuilt model restarts the jump, which lands on the file");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -450,6 +612,99 @@ int main(int argc, char** argv)
         CHECK(found == -2, "invalidated level search reports no row");
     }
 
+    // --- Строка файла (S-14): ядро против эталона ------------------------------
+    // c.log — 30 строк в середине и в конце времени a/b.
+    QByteArray smallBytes;
+    for (int i = 0; i < 30; ++i)
+        smallBytes += line(i < 15 ? 100 + i : 400 + i, "INFO", "gamma " + QByteArray::number(i));
+    const QString c = testdocs::writeFile(dir, "c.log", smallBytes);
+    {
+        auto resident = testdocs::buildResident({a}, schema);
+        auto indexed = testdocs::buildIndexed({a}, schema);
+        auto residentMerged = testdocs::buildResident({a, b, c}, schema);
+        auto indexedMerged = testdocs::buildIndexed({a, b, c}, schema, testdocs::IndexedLoad::Concurrent);
+        auto stranger = testdocs::buildResident({t1}, schema);
+        struct { const char* name; testdocs::Document* doc; } docs[] = {
+            {"resident", &resident},
+            {"indexed", &indexed},
+            {"resident merged", &residentMerged},
+            {"indexed merged", &indexedMerged},
+        };
+        for (const auto& d : docs) {
+            LogModel& model = *d.doc->model;
+            const QString name = QString::fromLatin1(d.name);
+            QVector<const LogFile*> files;
+            for (const LogFilePtr& f : d.doc->files)
+                files << f.get();
+            CHECK(!files.isEmpty(), name + ": files known");
+            compareFileOracle(name, model, files);
+            // Файла во вкладке нет — ничего.
+            const LogFile* absent = stranger.files.value(0).get();
+            CHECK(model.findRowOfFile(absent, 10, true) == -1
+                      && model.findRowOfFile(nullptr, 10, true) == -1,
+                  name + ": a file not in the tab has no rows");
+            // Под фильтром — только видимые строки.
+            model.setLogLevelFilter({LogLevel::Error, LogLevel::Warn});
+            CHECK(testdocs::settle(model), name + ": level filter settles");
+            compareFileOracle(name + " filtered", model, files);
+            model.setLogLevelFilter({});
+            CHECK(testdocs::settle(model), name + ": level filter reset settles");
+            if (files.size() > 1) {
+                // Файл скрыт фильтром по файлу — у него строк нет.
+                model.setHiddenFiles({files.last()->filePath});
+                CHECK(testdocs::settle(model), name + ": file filter settles");
+                CHECK(model.findRowOfFile(files.last(), 0, true) == -1
+                          && model.findRowOfFile(files.last(), -1, false) == -1,
+                      name + ": a hidden file has no rows");
+                compareFileOracle(name + " file hidden", model, files);
+                model.setHiddenFiles({});
+                CHECK(testdocs::settle(model), name + ": file filter reset settles");
+            }
+        }
+    }
+
+    // --- Строка файла в фоне: сдвиг через вставки, перестройка -----------------
+    {
+        auto doc = testdocs::buildResident({a}, schema);
+        LogModel& model = *doc.model;
+        const LogFile* alpha = doc.files.value(0).get();
+        QuickSearch search;
+        int found = -2, invalidated = 0;
+        QObject::connect(&search, &QuickSearch::finished, [&](int row) { found = row; });
+        QObject::connect(&search, &QuickSearch::invalidated, [&] { ++invalidated; });
+        search.startFile(&model, alpha, true, 700);
+        CHECK(testdocs::waitFor([&] { return found != -2; }), "file search finishes");
+        CHECK(found == 701, "next row of the file from row 700");
+
+        auto earlier = testdocs::buildResident({b}, schema);
+        QVector<std::shared_ptr<LogEntry>> batch;
+        const QDateTime limit = model.visibleTimestampAt(1000);
+        for (const auto& entry : earlier.model->residentEntriesForFieldMutation()) {
+            if (entry->timestamp() < limit)
+                batch.append(entry);
+        }
+        std::sort(batch.begin(), batch.end(), logEntryPtrLess);
+        found = -2;
+        {
+            PoolHold hold;
+            search.startFile(&model, alpha, true, 700);
+            model.mergeEntries(batch);
+        }
+        CHECK(testdocs::waitFor([&] { return found != -2; }), "shifted file search finishes");
+        CHECK(found >= 0 && model.messageAt(found).endsWith("alpha 701"),
+              "found file row is mapped through insertions");
+        CHECK(invalidated == 0, "insertions do not invalidate the file search");
+        found = -2;
+        {
+            PoolHold hold;
+            search.startFile(&model, alpha, false, -1);
+            model.setLogLevelFilter({LogLevel::Error});
+        }
+        CHECK(testdocs::waitFor([&] { return invalidated == 1; }), "reset invalidates the file search");
+        testdocs::pump(50);
+        CHECK(found == -2, "invalidated file search reports no row");
+    }
+
     // --- Вкладка: резидентная и индексная, синхронный путь и фон --------------
     AppSettings& settings = AppSettings::instance();
     settings.setIndexedThresholdMB(512);
@@ -460,6 +715,12 @@ int main(int argc, char** argv)
     checkTab(QStringLiteral("indexed sync"), a, schema, 1000000);
     checkTab(QStringLiteral("indexed background"), a, schema, 0);
     checkTraces(QStringLiteral("indexed traces"), t1, schema, 0);
+    settings.setIndexedThresholdMB(512);
+    checkLegend(QStringLiteral("legend resident sync"), {a, b, c}, schema, false);
+    checkLegend(QStringLiteral("legend resident background"), {a, b, c}, schema, true);
+    settings.setIndexedThresholdMB(0);
+    checkLegend(QStringLiteral("legend indexed sync"), {a, b, c}, schema, false);
+    checkLegend(QStringLiteral("legend indexed background"), {a, b, c}, schema, true);
 
     std::fprintf(stdout, "Level jump: %d failure(s)\n", failures);
     return failures ? 1 : 0;

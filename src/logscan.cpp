@@ -210,6 +210,35 @@ qint64 LogScanSnapshot::findRowWithLevel(LogLevelMask levels, qint64 startRow, b
     return cancelled ? -1 : found;
 }
 
+qint64 LogScanSnapshot::findRowOfFile(const LogFile* file, qint64 startRow, bool forward,
+                                      bool wrapAround, const std::atomic_bool* cancel,
+                                      std::atomic<int>* progress) const
+{
+    if (!m_impl || !file)
+        return -1;
+    const Impl& impl = *m_impl;
+    const qint64 n = impl.rowCount();
+    qint64 scanned = 0;
+    bool cancelled = false;
+    const qint64 found = scanRowsFrom(n, startRow, forward, wrapAround, [&](qint64 row) {
+        if ((++scanned & 0xFFFF) == 0) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) {
+                cancelled = true;
+                return RowScanStep::Stop;
+            }
+            if (progress)
+                progress->store(int(qMin<qint64>(99, scanned * 100 / n)),
+                                std::memory_order_relaxed);
+        }
+        const LogFile* rowFile = nullptr;
+        impl.lineAt(row, &rowFile);
+        return rowFile == file ? RowScanStep::Found : RowScanStep::Continue;
+    });
+    if (progress)
+        progress->store(100, std::memory_order_relaxed);
+    return cancelled ? -1 : found;
+}
+
 qint64 LogScanSnapshot::findRowWithText(const TextQuery& query, qint64 startRow,
                                         bool forward, bool wrapAround,
                                         const std::atomic_bool* cancel,

@@ -4,6 +4,7 @@
 #include "appsettings.h"
 #include "apptheme.h"
 #include "logmodel.h"
+#include "quicksearch.h"
 #include "shortcount.h"
 
 #include <utility>
@@ -39,10 +40,33 @@ FileLegend::FileLegend(QWidget* parent)
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
         emit visibilityWanted(shouldShow());
     });
+    m_fileJump = new QuickSearch(this);
+    connect(m_fileJump, &QuickSearch::finished, this,
+            [this](int row) { finishFileJump(row, /*background=*/true); });
+    connect(m_fileJump, &QuickSearch::progress, this, [this](int percent) {
+        emit statusMessage(tr("Looking for a line of %1… %2%").arg(m_fileJumpName).arg(percent));
+    });
+    // Модель перестроилась посреди скана (фильтр, полная перезагрузка, порция
+    // загрузки слитой индексной вкладки — reset на батч): номер из снапшота
+    // ничего не значит. Пользователь ничего не делал — ищем заново от того же
+    // выбора, как F3 (на загружающейся вкладке «нажмите ещё раз» упиралось бы
+    // в следующий reset); сделал — он главнее, молча.
+    connect(m_fileJump, &QuickSearch::invalidated, this, [this]() {
+        if (!m_view || m_view->userActionCount() != m_fileJumpUserActions)
+            return;
+        for (const Chip& chip : std::as_const(m_chips)) {
+            if (chip.file == m_fileJumpFile) {
+                startFileJump(m_fileJumpFile, m_fileJumpForward);
+                return;
+            }
+        }
+        emit statusMessage(tr("%1 has no lines shown in this tab.").arg(m_fileJumpName));
+    });
 }
 
 void FileLegend::setModel(LogModel* model)
 {
+    m_fileJump->cancel();
     disconnect(m_setConnection);
     disconnect(m_linesConnection);
     disconnect(m_filterConnection);
@@ -334,15 +358,56 @@ bool FileLegend::goToFileLine(int chip, bool forward)
 {
     if (!m_model || !m_view || chip < 0 || chip >= m_chips.size())
         return false;
+    m_fileJumpName = m_chips[chip].name;
+    m_fileJumpUserActions = m_view->userActionCount();
+    return startFileJump(m_chips[chip].file, forward);
+}
+
+bool FileLegend::startFileJump(const LogFile* file, bool forward)
+{
+    m_fileJump->cancel();
+    m_fileJumpFile = file;
+    m_fileJumpForward = forward;
     int from = m_view->userSelectedRow();
     if (from < 0)
         from = m_view->viewAnchor().row;
-    const int row = m_model->findRowOfFile(m_chips[chip].file, from, forward);
-    if (row < 0)
-        return false;
+    const int rows = m_model->rowCount();
+    if (rows <= m_fileJumpSyncRows) {
+        const int row = m_model->findRowOfFile(file, from, forward);
+        finishFileJump(row, /*background=*/false);
+        return row >= 0;
+    }
+    // Большая вкладка — в пуле. Опорная строка вне диапазона — с края, как у
+    // LogModel::findRowOfFile.
+    if (from < 0 || from >= rows)
+        from = forward ? -1 : rows;
+    m_fileJump->startFile(m_model, file, forward, from);
+    return true;
+}
+
+bool FileLegend::isFileJumpRunning() const
+{
+    return m_fileJump->isRunning();
+}
+
+void FileLegend::cancelFileJump()
+{
+    m_fileJump->cancel();
+}
+
+void FileLegend::finishFileJump(int row, bool background)
+{
+    if (!m_view)
+        return;
+    // Фоновый поиск: пользователь успел сделать что-то во view — он главнее.
+    if (background && m_view->userActionCount() != m_fileJumpUserActions)
+        return;
+    if (row < 0) {
+        emit statusMessage(tr("%1 has no lines shown in this tab.").arg(m_fileJumpName));
+        return;
+    }
     m_view->goToRow(row, NavKind::Other);
     m_view->setFocus(Qt::OtherFocusReason);
-    return true;
 }
 
 void FileLegend::contextMenuEvent(QContextMenuEvent* event)

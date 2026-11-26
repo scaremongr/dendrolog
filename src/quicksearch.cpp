@@ -45,6 +45,18 @@ void QuickSearch::startLevel(LogModel* model, LogLevelMask levels, bool forward,
            });
 }
 
+void QuickSearch::startFile(LogModel* model, const LogFile* file, bool forward,
+                            int startRow, bool wrapAround)
+{
+    launch(model, startRow,
+           [file, forward, startRow, wrapAround](const LogScanSnapshot& snapshot,
+                                                 const std::atomic_bool* cancel,
+                                                 std::atomic<int>* progress) {
+               return snapshot.findRowOfFile(file, startRow, forward, wrapAround,
+                                             cancel, progress);
+           });
+}
+
 void QuickSearch::launch(LogModel* model, int startRow, Scan scan)
 {
     cancel();

@@ -129,6 +129,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_fileLegend->setView(m_view);
     m_fileLegend->hide();
     connect(m_fileLegend, &FileLegend::visibilityWanted, m_fileLegend, &QWidget::setVisible);
+    connect(m_fileLegend, &FileLegend::statusMessage, this, &LogViewWidget::statusMessage);
     m_fileLegend->setModel(m_model);
     layout->addWidget(m_fileLegend);
 

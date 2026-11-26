@@ -8,6 +8,7 @@
 #include "filterruleset.h"
 #include "textmatchhighlighter.h"
 #include <QAbstractListModel>
+#include <QPointer>
 #include <QColor>
 #include <QDateTime>
 #include <QHash>
@@ -285,17 +286,32 @@ public:
         qint64 lines = 0;
         qint64 maxLine = 0;   // наибольший номер строки файла во вкладке
     };
-    const QVector<LabeledFile>& labeledFiles() const { return m_labeledFiles; }
+    const QVector<LabeledFile>& labeledFiles() const
+    {
+        return m_labelSource ? m_labelSource->m_labeledFiles : m_labeledFiles;
+    }
+    // Метки и цвета файлов — у другой модели (S-14): выдача Search берёт их у
+    // вкладки-источника, иначе набор файлов её базы (только файлы с
+    // совпадениями) дал бы другие метки, другую ширину колонки и не показал
+    // бы колонку вовсе при совпадениях в одном файле. labeledFiles,
+    // labeledFile и fileColorOrdinal отвечают за источник, его fileSetChanged /
+    // fileLinesChanged пересылаются как свои. nullptr — свои.
+    void setFileLabelSource(LogModel* source);
     // Файл строки среди labeledFiles или nullptr. O(1).
     const LabeledFile* labeledFile(const LogFile* file) const;
     // Порядковый номер цвета файла (по пути); -1 — файла не было.
-    int fileColorOrdinal(const QString& filePath) const { return m_fileOrdinals.value(filePath, -1); }
+    int fileColorOrdinal(const QString& filePath) const
+    {
+        return m_labelSource ? m_labelSource->fileColorOrdinal(filePath)
+                             : m_fileOrdinals.value(filePath, -1);
+    }
     // Предел длины метки (FileLabels::kDefaultMaxChars).
     void setFileLabelMaxChars(int maxChars);
     // Ближайшая видимая строка файла после (forward) или до строки from, по
     // кругу; from вне диапазона — с начала (с конца). -1 — у файла нет
-    // видимых строк. Проход по видимым строкам (visibleMetaAt, O(1) на
-    // строку) — команда легенды, не горячий путь.
+    // видимых строк. Синхронный проход по снапшоту видимых строк
+    // (LogScanSnapshot::findRowOfFile) — на большой вкладке легенда ищет в
+    // фоне (QuickSearch::startFile, S-14).
     int findRowOfFile(const LogFile* file, int from, bool forward) const;
 
 signals:
@@ -369,6 +385,8 @@ private:
     QVector<LabeledFile> m_labeledFiles;
     QHash<const LogFile*, int> m_labeledIndex;
     int m_fileLabelMaxChars = 16;
+    QPointer<LogModel> m_labelSource;
+    QVector<QMetaObject::Connection> m_labelSourceConnections;
 
     QStringList m_availableFieldNames;
     QVector<int> m_visibleFieldIndexes;

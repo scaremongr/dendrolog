@@ -187,6 +187,15 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Go to Next / Previous Line of This File** (right-click a chip of the
+  file legend) no longer freezes the window on a huge merged tab when the
+  file is small or its next line is far away: above a million shown lines
+  the line is looked for in the background, like **F8** (progress in the
+  status bar). If the tab changes while it looks (a filter, a reload, the
+  next portion of a loading file), the search starts over by itself; a line
+  you pick yourself meanwhile wins. The search results of a merged tab
+  show the same file labels and colours as the tab, even when all matches
+  come from one file.
 - Standard input (`program | DendroLog -`): lines that arrived in one burst
   after which the program went quiet did not show up until it wrote more
   (or exited) — they waited in a write buffer of the spool file. They now

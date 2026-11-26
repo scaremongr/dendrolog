@@ -32,7 +32,7 @@ struct LogEntryMeta {
 };
 
 // Обход строк «ближайшая подходящая от startRow» — один на переход по уровню
-// (findRowWithLevel) и на поиск текста (findRowWithText: быстрый поиск в фоне
+// (findRowWithLevel), к строке файла (findRowOfFile) и на поиск текста (findRowWithText: быстрый поиск в фоне
 // и синхронный LogStore::findOccurrence):
 //   • вперёд — со startRow + 1 до конца; назад — со startRow - 1 до начала
 //     (startRow вне [0, n) — с последней строки);
@@ -167,6 +167,16 @@ public:
     qint64 findRowWithLevel(LogLevelMask levels, qint64 startRow, bool forward,
                             bool wrapAround, const std::atomic_bool* cancel = nullptr,
                             std::atomic<int>* progress = nullptr) const;
+
+    // Ближайшая от startRow строка файла file (команда легенды «следующая /
+    // предыдущая строка этого файла», S-14); -1 — у файла нет строк в
+    // снапшоте или отменено. Порядок обхода — scanRowsFrom. Читает только
+    // файл строки (Impl::lineAt), без текста и метки; указатель file не
+    // разыменовывается. На большом документе — из воркера (QuickSearch::
+    // startFile).
+    qint64 findRowOfFile(const LogFile* file, qint64 startRow, bool forward,
+                         bool wrapAround, const std::atomic_bool* cancel = nullptr,
+                         std::atomic<int>* progress = nullptr) const;
 
     // Ближайшая от startRow строка, подходящая под запрос (TextMatcher:
     // подстрока, слово целиком, регекс); -1 — нет, запрос пуст или невалиден,

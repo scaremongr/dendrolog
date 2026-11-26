@@ -19,8 +19,9 @@ class QTimer;
 // ============================================================================
 // QuickSearch — быстрый поиск (F3 / Shift+F3) ближайшего вхождения текста в
 // видимых строках модели, в фоне и с отменой. Тем же механизмом ищется
-// ближайшая строка с заданным уровнем (F8 / Shift+F8, startLevel): по
-// метаданным снапшота, без чтения текста.
+// ближайшая строка с заданным уровнем (F8 / Shift+F8, startLevel) и строка
+// файла (легенда слитой вкладки, startFile): по метаданным снапшота, без
+// чтения текста.
 //
 // Запрос — TextQuery (подстрока, слово целиком, регекс; см. textquery.h).
 // Синхронный LogModel::findOccurrence на индексном бэкенде —
@@ -57,6 +58,10 @@ public:
     // levels (LogScanSnapshot::findRowWithLevel).
     void startLevel(LogModel* model, LogLevelMask levels, bool forward, int startRow,
                     bool wrapAround = true);
+    // То же по файлу: ближайшая видимая строка файла file (команда легенды,
+    // LogScanSnapshot::findRowOfFile; S-14). file не разыменовывается.
+    void startFile(LogModel* model, const LogFile* file, bool forward, int startRow,
+                   bool wrapAround = true);
     // Строка, от которой стартует поиск (startRow для start/scan), по выбору
     // пользователя: selectedRow — выбранная строка view (LogListView::
     // userSelectedRow) или -1; anchorEntryId/anchorFile — запись, выбранная

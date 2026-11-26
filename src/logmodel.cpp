@@ -149,8 +149,33 @@ void LogModel::setFileLabelMaxChars(int maxChars)
 
 const LogModel::LabeledFile* LogModel::labeledFile(const LogFile* file) const
 {
+    if (m_labelSource)
+        return m_labelSource->labeledFile(file);
     const auto it = m_labeledIndex.constFind(file);
     return it == m_labeledIndex.constEnd() ? nullptr : &m_labeledFiles[it.value()];
+}
+
+void LogModel::setFileLabelSource(LogModel* source)
+{
+    if (source == this)
+        source = nullptr;
+    if (source == m_labelSource)
+        return;
+    for (const QMetaObject::Connection& c : std::as_const(m_labelSourceConnections))
+        disconnect(c);
+    m_labelSourceConnections.clear();
+    m_labelSource = source;
+    if (source) {
+        m_labelSourceConnections << connect(source, &LogModel::fileSetChanged, this,
+                                            &LogModel::fileSetChanged);
+        m_labelSourceConnections << connect(source, &LogModel::fileLinesChanged, this,
+                                            &LogModel::fileLinesChanged);
+        // Источник ушёл — свои метки (QPointer уже пуст).
+        m_labelSourceConnections << connect(source, &QObject::destroyed, this,
+                                            &LogModel::fileSetChanged);
+    }
+    emit fileSetChanged();
+    emit fileLinesChanged();
 }
 
 int LogModel::findRowOfFile(const LogFile* file, int from, bool forward) const
@@ -160,13 +185,8 @@ int LogModel::findRowOfFile(const LogFile* file, int from, bool forward) const
         return -1;
     if (from < 0 || from >= n)
         from = forward ? -1 : n;
-    for (int step = 1; step <= n; ++step) {
-        int row = forward ? from + step : from - step;
-        row = ((row % n) + n) % n;
-        if (m_store->visibleMetaAt(row).sourceFile == file)
-            return row;
-    }
-    return -1;
+    return int(scanSnapshot(/*filteredOnly=*/true).findRowOfFile(file, from, forward,
+                                                                 /*wrapAround=*/true));
 }
 
 void LogModel::refreshFileSet()
@@ -197,7 +217,7 @@ void LogModel::refreshFileSet()
                 linesChanged = true;
             }
         }
-        if (linesChanged)
+        if (linesChanged && !m_labelSource)
             emit fileLinesChanged();
         return;
     }
@@ -213,6 +233,10 @@ void LogModel::refreshFileSet()
                                files[i].maxLine});
         m_labeledIndex.insert(files[i].file.get(), i);
     }
+    // Метки у источника (выдача Search): view читает его набор, свой
+    // объявлять незачем — источник сообщает о своём сам.
+    if (m_labelSource)
+        return;
     emit fileSetChanged();
     emit fileLinesChanged();
 }

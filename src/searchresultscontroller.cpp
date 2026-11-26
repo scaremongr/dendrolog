@@ -35,6 +35,8 @@ void SearchResultsController::setSource(LogModel* source)
     disconnectSource();
     clear();
     m_source = source;
+    // Метки и цвета файлов выдачи — те же, что у вкладки-источника (S-14).
+    m_results->setFileLabelSource(source);
     if (!source)
         return;
 

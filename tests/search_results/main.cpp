@@ -368,6 +368,58 @@ static void testProvisionalLiveSearch(const QDir& dir, const QString& schema)
     }
 }
 
+// Метки и цвета файлов выдачи — у вкладки-источника (S-14): совпадения в
+// одном файле из трёх не делают выдачу «одно-файловой» с другими метками.
+static void testLabelsFromSource(const QDir& dir, const QString& schema)
+{
+    QStringList paths;
+    for (const char* name : {"svc-alpha-node.log", "svc-beta-node.log", "svc-gamma-node.log"}) {
+        QByteArray bytes;
+        for (int i = 0; i < 50; ++i)
+            bytes += logLine(i, "INFO", QByteArray(name).startsWith("svc-beta")
+                                            && i % 10 == 0 ? "NEEDLE " + QByteArray::number(i)
+                                                           : "ordinary " + QByteArray::number(i));
+        paths << testdocs::writeFile(dir, QString::fromLatin1(name), bytes);
+    }
+    for (const bool indexed : {false, true}) {
+        const QString tag = indexed ? QStringLiteral("labels indexed") : QStringLiteral("labels resident");
+        auto doc = indexed ? testdocs::buildIndexed(paths, schema, testdocs::IndexedLoad::Concurrent)
+                           : testdocs::buildResident(paths, schema);
+        LogModel& source = *doc.model;
+        CHECK(source.labeledFiles().size() == 3, tag + ": three files in the source");
+        SearchResultsController c;
+        int setChanges = 0;
+        QObject::connect(c.model(), &LogModel::fileSetChanged, [&] { ++setChanges; });
+        c.setSource(&source);
+        c.search(query("NEEDLE"));
+        CHECK(waitResults(c, 5), tag + ": matches in one file");
+        LogModel& results = *c.model();
+        CHECK(results.labeledFiles().size() == 3, tag + ": results carry the source's file set");
+        for (int row = 0; row < results.rowCount(); ++row) {
+            const LogFile* file = results.keyAt(row).file.get();
+            const LogModel::LabeledFile* mine = results.labeledFile(file);
+            const LogModel::LabeledFile* theirs = source.labeledFile(file);
+            CHECK(mine && theirs && mine->label == theirs->label
+                      && mine->colorOrdinal == theirs->colorOrdinal,
+                  tag + ": label and colour of a result row are the source's");
+            CHECK(file && results.fileColorOrdinal(file->filePath)
+                              == source.fileColorOrdinal(file->filePath),
+                  tag + ": colour ordinal by path is the source's");
+        }
+        CHECK(setChanges > 0, tag + ": the results model announces the borrowed file set");
+        // Набор файлов источника сменился — выдача объявляет это как своё.
+        const int before = setChanges;
+        source.setFileLabelMaxChars(6);
+        CHECK(setChanges > before, tag + ": source label changes are forwarded");
+        results.setFileLabelSource(nullptr);
+        CHECK(&results.labeledFiles() != &source.labeledFiles()
+                  && results.labeledFile(results.keyAt(0).file.get())
+                         != source.labeledFile(results.keyAt(0).file.get()),
+              tag + ": without a label source the results use their own labels");
+        c.setSource(nullptr);
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -383,6 +435,7 @@ int main(int argc, char** argv)
         bytes += late ? "LATE_NEEDLE " : "ordinary ";
         bytes += QByteArray::number(row) + '\n';
     }
+    testLabelsFromSource(dir, schema);
     const QString path = testdocs::writeFile(dir, "large.log", bytes);
     auto indexed = testdocs::buildIndexed({path}, schema);
     CHECK(indexed.errors.isEmpty(), "load indexed fixture");
