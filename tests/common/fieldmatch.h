@@ -9,14 +9,6 @@
 
 namespace testfields {
 
-inline FieldScanner scannerFor(const LogPattern& pattern)
-{
-    FieldLayout layout;
-    FileSchemaSet set;
-    set.fallback = layout.schemaFor(pattern);
-    return FieldScanner(set, nullptr);
-}
-
 // По определению схемы (в том числе LineFormat::fieldDefinition — колонки
 // формата строк JSON / logfmt, F-17, шаг 7).
 inline FieldScanner scannerFor(const QString& definition)

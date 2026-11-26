@@ -151,6 +151,11 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
     m_save->setObjectName(QStringLiteral("saveSchemaButton"));
     auto* close = new QPushButton(tr("Close"), this);
     close->setObjectName(QStringLiteral("closeSchemaWindowButton"));
+    m_close = close;
+    m_edit = new QPushButton(tr("Edit in Editor"), this);
+    m_edit->setObjectName(QStringLiteral("editSchemaVariantButton"));
+    m_edit->hide();
+    buttons->addWidget(m_edit);
     buttons->addWidget(m_use);
     buttons->addWidget(m_save);
     buttons->addWidget(close);
@@ -158,6 +163,17 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
 
     connect(close, &QPushButton::clicked, this, &QWidget::close);
     connect(m_use, &QPushButton::clicked, this, &SchemaCandidatesWindow::useForTab);
+    connect(m_edit, &QPushButton::clicked, this, [this]() {
+        const int v = currentVariant();
+        const auto& variants = m_candidates->variants();
+        if (v < 0 || v >= variants.size())
+            return;
+        QString text = variants[v].templateText;
+        if (text.isEmpty())
+            LineTemplateSchema::templateOf(variants[v].entry.schema, &text);
+        if (!text.isEmpty())
+            emit editRequested(text, variants[v].title);
+    });
     connect(m_save, &QPushButton::clicked, this, &SchemaCandidatesWindow::saveToSchemas);
     connect(m_askAi, &QPushButton::clicked, this, &SchemaCandidatesWindow::onAskAi);
     connect(m_list, &QListWidget::currentRowChanged, this, &SchemaCandidatesWindow::showVariant);
@@ -178,6 +194,13 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
 }
 
 SchemaCandidatesWindow::~SchemaCandidatesWindow() = default;
+
+void SchemaCandidatesWindow::setEmbedded(bool embedded)
+{
+    setWindowFlags(embedded ? Qt::Widget : Qt::Window);
+    m_close->setVisible(!embedded);
+    m_edit->setVisible(embedded);
+}
 
 void SchemaCandidatesWindow::setView(LogViewWidget* view)
 {

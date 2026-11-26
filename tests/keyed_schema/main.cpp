@@ -1,5 +1,5 @@
 // Ядро ключевой схемы (F-4, docs/design/F-4.md, PR 1): keyedline, вид схемы
-// в LogPattern, экранированные значения полей и их читатели, классификация
+// (до F-17 — в блочной модели), экранированные значения полей и их читатели, классификация
 // строки по ключам. Эталон — заданные руками поля и моменты; QJsonDocument —
 // только дополнительная проба на случайных объектах.
 //
@@ -12,7 +12,8 @@
 #include "lineformat.h"
 #include "fieldextractor.h"
 #include "logmodel.h"
-#include "logpattern.h"
+#include "linetemplate.h"
+#include "schemaconverter.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -42,7 +43,7 @@ constexpr const char* kAbsent = "<absent>";
 
 // Ключевая часть — формат строк файла (F-17, шаг 7): колонки — KeyedExtractor
 // по ключам формата, классификация — LineClassifier::classifyLine с
-// LineFormatReader. Прежде это была ключевая схема (LogPattern::keyed).
+// LineFormatReader. Прежде это была ключевая схема (ключ «keyed» блочной схемы).
 struct KeyedSchema {
     LineFormat format;
     LineFormatReader reader;
@@ -552,7 +553,7 @@ void testEarlyExit()
 // Формат строк (F-17, шаг 7) вместо ключевой схемы: выбор пользователя
 // сохраняется JSON-ом (TabSource, память файла, сессия) и читается обратно;
 // ключевая схема прежних версий читается своим запасным блоком «Message» и
-// узнаётся как снятая (LogPattern::isRetiredKeyedDefinition).
+// узнаётся как снятая (SchemaConverter::isRetiredKeyedDefinition).
 void testSerialization()
 {
     KeyedDefinition k;
@@ -587,13 +588,19 @@ void testSerialization()
                        {"blocks", QJsonArray{QJsonObject{{"name", "Message"}, {"kind", "remainder"}}}},
                        {"keyed", QJsonObject{{"format", "json"}}}};
     const QString text = QString::fromUtf8(QJsonDocument(legacy).toJson());
-    const LogPattern old(text);
-    CHECK(old.isValid() && old.fieldNames() == QStringList{"Message"},
-          "old keyed schema: a valid schema with one Message column");
-    CHECK(LogPattern::isRetiredKeyedDefinition(text) && !LogPattern::isRetiredKeyedDefinition(LogPattern::serializeDefinition(old.definition())),
-          "old keyed schema is recognised as retired; its re-serialization is not");
+    // С F-17, шаг 9 блочной модели нет: файл каталога переводится своим
+    // запасным блоком в шаблон «{Message}», сохранённое состояние — без схемы.
+    const SchemaConverter::Result old = SchemaConverter::fromBlocks(text);
+    CHECK(old.ok && LineTemplate(old.templateText).columns() == QStringList{"Message"},
+          "old keyed schema: its fallback is one Message column");
+    CHECK(SchemaConverter::isRetiredKeyedDefinition(text)
+              && !SchemaConverter::isRetiredKeyedDefinition(LineTemplateSchema::definition(old.templateText)),
+          "old keyed schema is recognised as retired; its translation is not");
+    CHECK(SchemaConverter::upgradeDefinition(text).isEmpty(), "a saved state with it has no schema");
     const QString line = QStringLiteral("level=info msg=x");
-    CHECK(old.extractFields(line).get(0, line) == line, "fallback Message is the whole line");
+    LogEntryFields fields;
+    TemplateExtractor(old.templateText).extract(line, &fields);
+    CHECK(fields.get(0, line) == line, "fallback Message is the whole line");
 }
 
 // Цена горячего пути: classifyKeyed + extractFields на JSON-строках против
@@ -630,18 +637,12 @@ Cost measureCost(int count, int rounds)
     k.extraColumns = {"thread", "logger"};
     const KeyedSchema keyed(k);
 
-    PatternDefinition rd;
-    rd.blocks = {
-        PatternBlock{QStringLiteral("Timestamp"), PatternBlock::MatchKind::Timestamp},
-        PatternBlock{QStringLiteral("Thread"), PatternBlock::MatchKind::TextUntilSeparator,
-                     QStringLiteral("["), QStringLiteral("]")},
-        PatternBlock{QStringLiteral("Level"), PatternBlock::MatchKind::Level},
-        PatternBlock{QStringLiteral("Logger"), PatternBlock::MatchKind::TextUntilSeparator,
-                     QString(), QString(), QStringLiteral("-")},
-        PatternBlock{QStringLiteral("Message"), PatternBlock::MatchKind::Remainder},
-    };
-    const LogPattern regex(LogPattern::serializeDefinition(rd));
-    CHECK(regex.isValid() && regex.extractFields(textLines[0]).has(4), "cost: regex schema matches its lines");
+    // Текстовая схема тех же колонок — шаблон строки (F-17, шаг 9: регексной
+    // блочной схемы больше нет).
+    const TemplateExtractor regex(QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}"));
+    LogEntryFields regexFields;
+    CHECK(regex.isValid() && regex.extract(textLines[0], &regexFields) == FieldExtractor::Outcome::Full
+              && regexFields.has(4), "cost: template schema matches its lines");
     CHECK(keyed.extractFields(jsonLines[0]).value(4, jsonLines[0]).startsWith(QLatin1String("com.example")),
           "cost: keyed schema matches its lines");
 
@@ -688,7 +689,8 @@ Cost measureCost(int count, int rounds)
             bool leading = false;
             classifier.detectTimestampMs(line, ms, ref, &leading);
             classifier.detectLogLevel(line, level);
-            sink += ms + int(level) + regex.extractFields(line).size();
+            regex.extract(line, &regexFields);
+            sink += ms + int(level) + regexFields.size();
         }
     });
     // Без схемы — только детекторы на тех же JSON-строках (цель шага 2 — ×1,2 к нему).
@@ -709,9 +711,9 @@ Cost measureCost(int count, int rounds)
 
 void report(const Cost& c, int count)
 {
-    std::printf("cost per line (%d lines): keyed classify + fields %.0f ns, regex schema (detectors + fields) %.0f ns,"
+    std::printf("cost per line (%d lines): keyed classify + fields %.0f ns, text schema — template (detectors + fields) %.0f ns,"
                 " keyed classify only %.0f ns (of it key scan %.0f ns), detectors only on the same JSON %.0f ns;"
-                " keyed / regex = %.2f\n",
+                " keyed / text = %.2f\n",
                 count, double(c.keyedNs) / count, double(c.regexNs) / count,
                 double(c.classifyNs) / count, double(c.scanNs) / count, double(c.heuristicNs) / count,
                 double(c.keyedNs) / double(c.regexNs));
@@ -741,7 +743,7 @@ void testCost()
     // проверяется.
     if (!kSanitized)
         CHECK(c.keyedNs <= c.regexNs * 12 / 10 + 20000000,
-              QStringLiteral("cost: keyed %1 ms vs regex schema %2 ms (target <= x1.2)")
+              QStringLiteral("cost: keyed %1 ms vs regex schema %2 ms (target <= x1.2; the text schema is a line template)")
                   .arg(c.keyedNs / 1000000).arg(c.regexNs / 1000000));
 }
 

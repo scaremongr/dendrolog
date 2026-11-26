@@ -3,7 +3,7 @@
 #include "documentstate.h"
 #include "filterruleset.h"
 #include "logmodel.h"
-#include "logpattern.h"
+#include "schemaconverter.h"
 #include "logviewwidget.h"
 #include "sessioncontroller.h"
 
@@ -52,7 +52,7 @@ void FieldSchemaController::load(QSettings& s)
     m_defaults.schema = s.value("conversionPattern").toString();
     // Ключевая схема прежних версий (JSON Lines, logfmt) — с F-17, шаг 7
     // формат строк файла: умолчание — без схемы.
-    if (LogPattern::isRetiredKeyedDefinition(m_defaults.schema))
+    if (SchemaConverter::isRetiredKeyedDefinition(m_defaults.schema))
         m_defaults.schema.clear();
     // Schemas are loaded from <configDir>/patterns/*.json; the INI keeps only
     // their display order, by name.
@@ -86,13 +86,21 @@ void FieldSchemaController::load(QSettings& s)
     // the user's files; a corrected built-in replaces only an untouched copy,
     // and the active schema follows it.
     const BuiltinSchemas::InstallReport builtins = SchemaStore::installBuiltins();
-    if (builtins.changed()) {
-        for (const auto& replaced : builtins.replaced) {
-            if (m_defaults.schema == replaced.first)
-                m_defaults.schema = replaced.second;
-        }
-        m_list = SchemaStore::loadAll(order);
+    for (const auto& replaced : builtins.replaced) {
+        if (m_defaults.schema == replaced.first)
+            m_defaults.schema = replaced.second;
     }
+    // Каталог версии 3 — шаблонами (F-17, шаг 9): после встроенных, чтобы
+    // нетронутая встроенная копия обновилась шаблоном по манифесту, а не
+    // переводом; оригиналы — в converted-from-v3/. Повторный запуск ничего
+    // не делает. Пресеты редактора из ini — один раз в каталог.
+    const SchemaStore::MigrationReport migration = SchemaStore::migrateToTemplates();
+    m_conversionFailures = migration.failed;
+    const bool presetsMoved = migratePresets(s);
+    if (builtins.changed() || !migration.converted.isEmpty() || presetsMoved)
+        m_list = SchemaStore::loadAll(order);
+    // Схема по умолчанию прежнего формата — тем же конвертером, что каталог.
+    m_defaults.schema = SchemaConverter::upgradeDefinition(m_defaults.schema);
     // Имя схемы по умолчанию — её пункт в каталоге (первый с тем же
     // определением); нет пункта (или схемы) — без имени.
     const int defaultIndex = indexOf(m_defaults);
@@ -110,6 +118,52 @@ void FieldSchemaController::load(QSettings& s)
 
     emit catalogueChanged();
     emit fieldsChanged();
+}
+
+bool FieldSchemaController::migratePresets(QSettings& s)
+{
+    // Пресеты прежнего редактора ([PatternPresets] names / values — блочные
+    // схемы) — схемами каталога (F-17, шаг 9: пресеты слились со схемами).
+    // Группа — рядом с [View], которую открыл вызывающий.
+    const QString group = s.group();
+    while (!s.group().isEmpty())
+        s.endGroup();
+    s.beginGroup(QStringLiteral("PatternPresets"));
+    const QStringList names = s.value(QStringLiteral("names")).toStringList();
+    const QStringList values = s.value(QStringLiteral("values")).toStringList();
+    s.endGroup();
+    bool moved = false;
+    if (!names.isEmpty() || !values.isEmpty()) {
+        SchemaStore::SchemaList list = SchemaStore::loadAll();
+        QSet<QString> taken;
+        for (const auto& e : std::as_const(list))
+            taken.insert(e.name);
+        const int count = int(qMin(names.size(), values.size()));
+        for (int i = 0; i < count; ++i) {
+            const QString definition = SchemaConverter::upgradeDefinition(values[i]);
+            if (definition.isEmpty() || !FieldLayout::isTemplateDefinition(definition))
+                continue;
+            bool same = false;
+            for (const auto& e : std::as_const(list))
+                same = same || e.schema == definition;
+            if (same)
+                continue;   // такая схема в каталоге уже есть
+            const QString base = names[i].trimmed().isEmpty() ? QStringLiteral("Preset") : names[i].trimmed();
+            QString name = base;
+            for (int n = 2; taken.contains(name); ++n)
+                name = QStringLiteral("%1 (%2)").arg(base).arg(n);
+            taken.insert(name);
+            list.append({name, definition, {}, {}});
+            moved = true;
+        }
+        if (moved && !SchemaStore::sync(list))
+            moved = false;   // ini не трогаем: попытка в следующий раз
+        else
+            s.remove(QStringLiteral("PatternPresets"));
+    }
+    for (const QString& part : group.split(QLatin1Char('/'), Qt::SkipEmptyParts))
+        s.beginGroup(part);
+    return moved;
 }
 
 void FieldSchemaController::save(QSettings& s) const
@@ -360,7 +414,7 @@ std::optional<FieldSettings> FieldSchemaController::resolveSaved(const FieldSett
     FieldSettings resolved = saved;
     // Ключевая схема прежних версий (F-4) — с F-17, шаг 7 формат строк файла:
     // сохранённая с ней вкладка — без схемы (JSON-файл читается своим форматом).
-    if (LogPattern::isRetiredKeyedDefinition(saved.schema))
+    if (SchemaConverter::isRetiredKeyedDefinition(saved.schema))
         resolved.schema.clear();
     if (!resolved.hasSchema()) {
         resolved.schemaName.clear();

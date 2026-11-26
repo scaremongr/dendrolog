@@ -41,10 +41,14 @@
   Rotated logs (`app.log.1`, `app.log-20260101`) are listed; drop a folder on
   the window to scan it.
 - **Field schemas** — split entries into structured fields (timestamp, level,
-  thread, message…); ready-made schemas for Logback / Log4j, Spring Boot,
-  nginx / Apache, syslog / journalctl, Serilog and Python logging, auto-detect
-  from a sample line or import a **Grok** expression. Each tab has its own
-  schema, and in a merged tab each file can have its own (**Applies to**) —
+  thread, message…) with a **line template** that looks like the log line
+  itself: `{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}`.
+  Ready-made schemas for Logback / Log4j, Spring Boot, nginx / Apache, syslog /
+  journalctl, Serilog and Python logging; the schema editor shows real lines of
+  the tab split into fields (with the number of distinct values per column),
+  the lines that did not match and why, and the share of the file parsed —
+  start from the lines, a template or a **Grok** expression. Each tab has its
+  own schema, and in a merged tab each file can have its own (**Applies to**) —
   an app log and an access log side by side.
 - **JSON Lines and logfmt without setup** — the line format of a file is
   detected like its encoding: JSON Lines and logfmt logs open with time, level

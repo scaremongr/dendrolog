@@ -1,0 +1,33 @@
+{
+    "name": "Python logging (basicConfig)",
+    "description": "Python logging.basicConfig default: LEVEL:logger:message.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Level",
+            "kind": "regex",
+            "leadingText": "",
+            "closingText": "",
+            "separator": ":",
+            "customRegex": "CRITICAL|ERROR|WARNING|INFO|DEBUG"
+        },
+        {
+            "name": "Logger",
+            "kind": "text",
+            "leadingText": "",
+            "closingText": "",
+            "separator": ":",
+            "customRegex": ""
+        },
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ]
+}

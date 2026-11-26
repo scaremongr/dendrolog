@@ -5,3 +5,5 @@ target_compile_definitions(builtin_schemas PRIVATE
     DENDROLOG_Q5_PATTERNS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/q5")
 target_compile_definitions(builtin_schemas PRIVATE
     DENDROLOG_F17_PATTERNS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/f17")
+target_compile_definitions(builtin_schemas PRIVATE
+    DENDROLOG_V3_PATTERNS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/v3")

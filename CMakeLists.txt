@@ -130,8 +130,6 @@ set(DENDROLOG_CORE_SOURCES
     src/filechangedetector.cpp
     src/keyedline.h
     src/keyedline.cpp
-    src/logpattern.h
-    src/logpattern.cpp
     src/patternheuristics.h
     src/patternheuristics.cpp
     src/schemafit.h
@@ -268,13 +266,6 @@ set(DENDROLOG_WIDGETS_SOURCES
     # (схема с описанием проходит через редактор и сохранение).
     src/schemastore.h
     src/schemastore.cpp
-    src/conversionpatterndialog.h
-    src/conversionpatterndialog.cpp
-    src/conversionpatterndialog.ui
-    src/patternblockcard.h
-    src/patternblockcard.cpp
-    src/separatornode.h
-    src/separatornode.cpp
 )
 
 # Оболочка окна: в статической библиотеке, а не в exe, чтобы окно целиком
@@ -313,6 +304,10 @@ set(DENDROLOG_APP_SOURCES
     src/schemacandidates.cpp
     src/schemacandidateswindow.h
     src/schemacandidateswindow.cpp
+    src/schemaeditorwindow.h
+    src/schemaeditorwindow.cpp
+    src/schemasamplemodel.h
+    src/schemasamplemodel.cpp
     src/aiconsentdialog.h
     src/aiconsentdialog.cpp
 )

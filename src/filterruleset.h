@@ -123,6 +123,17 @@ public:
     QJsonObject toJson() const;
     static FilterRuleSet fromJson(const QJsonObject& json);
 
+    // Правила, привязанные к колонке field (по имени, F-17, шаг 9: редактор
+    // схем предлагает переименовать поле и в правилах).
+    int countField(const QString& field) const;
+    // Переименовать привязку field → to; сколько правил изменено. Привязку
+    // заново — bindFields.
+    int renameField(const QString& field, const QString& to);
+    // То же в JSON правил и профилей (toJson, FilterPanelWidget::
+    // profilesToJson): ключ «field» правила на любой глубине.
+    static int countFieldInJson(const QJsonValue& json, const QString& field);
+    static int renameFieldInJson(QJsonValue& json, const QString& field, const QString& to);
+
     bool operator==(const FilterRuleSet& other) const;
 
 private:

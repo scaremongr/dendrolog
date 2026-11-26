@@ -1,7 +1,0 @@
-{
-    "name": "Python logging (basicConfig)",
-    "description": "Python logging.basicConfig default: LEVEL:logger:message.",
-    "version": 4,
-    "type": "line-template",
-    "template": "{Level:of(CRITICAL|ERROR|WARNING|INFO|DEBUG)}:{Logger}:{Message}"
-}

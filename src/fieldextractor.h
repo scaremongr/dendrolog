@@ -11,16 +11,13 @@
 
 #include <memory>
 
-class LogPattern;
-struct LineMatchResult;
-struct PatternDefinition;
 
 // ============================================================================
 // FieldExtractor — «поля строки = функция (текст строки, схема)» (F-17,
 // docs/design/F-17.md, раздел 2). Один интерфейс для всех, кто разбирает
 // строку на поля: шаблон строки (TemplateExtractor, linetemplate.h),
-// ключевая схема JSON / logfmt (KeyedExtractor), прежняя блочная схема
-// (LegacyPatternExtractor — живёт до шага 9). Будущий извлекатель «строку
+// ключевая схема JSON / logfmt (KeyedExtractor). Прежней блочной схемы
+// (LogPattern) с шага 9 нет: её файлы переведены в шаблоны. Будущий извлекатель «строку
 // разбирает модель» — ещё одна реализация с Cost::Background и своим
 // extractBatch; чтение и view для него менять не придётся.
 //
@@ -144,42 +141,6 @@ private:
     KeyedDefinition m_definition;
     KeyedLine::Lookup m_lookup;
     QStringList m_columns;
-};
-
-// ----------------------------------------------------------------------------
-// Прежняя блочная схема (LogPattern: каскад регексов) за тем
-// же интерфейсом — до шага 9 F-17, где блочная модель удаляется. Cost —
-// Inline (шаг 6: регексы блочных схем всегда шли на GUI-потоке, у встроенных
-// их много; Background — у шаблона с /регексом/). Full — полный регекс,
-// Partial — префиксный или re-sync вариант каскада.
-// ----------------------------------------------------------------------------
-class LegacyPatternExtractor : public FieldExtractor {
-public:
-    explicit LegacyPatternExtractor(std::shared_ptr<const LogPattern> pattern);
-    explicit LegacyPatternExtractor(const LogPattern& pattern);
-
-    const LogPattern& pattern() const { return *m_pattern; }
-
-    bool isValid() const override;
-
-    QStringList fields() const override { return m_fields; }
-    Cost cost() const override { return Cost::Inline; }
-    int tailField() const override;
-    Outcome extract(QStringView line, LogEntryFields* out, int upTo = -1,
-                    Stop* stop = nullptr) const override;
-    MatchReport explain(QStringView line) const override;
-
-    /// extract плюс результат регексного каскада строки (редактор схем красит
-    /// по нему предпросмотр).
-    Outcome extractWithMatch(QStringView line, LogEntryFields* out, LineMatchResult* match,
-                             Stop* stop = nullptr) const;
-    /// Причина остановки по готовому результату каскада (SchemaFit::explain).
-    static MatchReport explainMatch(const PatternDefinition& definition, const QString& line,
-                                    const LineMatchResult& match);
-
-private:
-    std::shared_ptr<const LogPattern> m_pattern;
-    QStringList m_fields;
 };
 
 #endif // FIELDEXTRACTOR_H

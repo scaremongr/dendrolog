@@ -155,8 +155,7 @@ double Result::specificity() const
 namespace {
 
 // Ядро меры: lineFn(i, text, out, stop) → итог разбора строки i набора.
-// Один проход на обе формы схемы (извлекатель и прежний LogPattern с
-// результатами каскада для редактора).
+
 template <typename LineFn>
 Result evaluateImpl(const FieldExtractor& schema, bool valid, const Corpus& lines,
                     const Budget& budget, LineFn&& lineFn)
@@ -283,35 +282,6 @@ Result evaluate(const FieldExtractor& schema, const QVector<Sample>& lines, cons
     return evaluate(schema, corpus(lines), budget);
 }
 
-Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& budget,
-                QVector<LineMatchResult>* matches)
-{
-    if (matches) {
-        matches->clear();
-        matches->resize(lines.samples.size());
-    }
-    const LegacyPatternExtractor extractor(schema);
-    return evaluateImpl(extractor, schema.isValid(), lines, budget,
-                        [&](int i, const QString& text, LogEntryFields* out, FieldExtractor::Stop* stop) {
-                            LineMatchResult match;
-                            const FieldExtractor::Outcome o =
-                                extractor.extractWithMatch(text, out, matches ? &match : nullptr, stop);
-                            if (matches)
-                                (*matches)[i] = std::move(match);
-                            return o;
-                        });
-}
-
-Result evaluate(const LogPattern& schema, const QStringList& lines, const Budget& budget)
-{
-    return evaluate(schema, corpus(lines), budget);
-}
-
-Result evaluate(const LogPattern& schema, const QVector<Sample>& lines, const Budget& budget)
-{
-    return evaluate(schema, corpus(lines), budget);
-}
-
 QString Result::distinctText(int column) const
 {
     const int count = distinct.value(column);
@@ -381,25 +351,6 @@ QVector<Ranked> rank(const QVector<FieldExtractorPtr>& schemas, const Corpus& li
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](const Ranked& a, const Ranked& b) { return better(a.result, b.result); });
     return ranked;
-}
-
-QVector<Ranked> rank(const QVector<LogPattern>& schemas, const Corpus& lines, const Budget& budget)
-{
-    QVector<Ranked> ranked;
-    ranked.reserve(schemas.size());
-    for (int i = 0; i < schemas.size(); ++i) {
-        if (budget.cancel && budget.cancel->load(std::memory_order_relaxed))
-            break;
-        ranked.append(Ranked{i, evaluate(schemas[i], lines, budget)});
-    }
-    std::stable_sort(ranked.begin(), ranked.end(),
-                     [](const Ranked& a, const Ranked& b) { return better(a.result, b.result); });
-    return ranked;
-}
-
-Reason explain(const PatternDefinition& definition, const QString& line, const LineMatchResult& match)
-{
-    return LegacyPatternExtractor::explainMatch(definition, line, match);
 }
 
 Reason explain(const FieldExtractor& extractor, const QString& line)
@@ -473,16 +424,6 @@ void SchemaFitJob::setModel(LogModel* model)
             emit invalidated();
         });
     }
-}
-
-int SchemaFitJob::start(const QVector<LogPattern>& schemas, const LogFile* file,
-                        const SchemaFit::Budget& budget)
-{
-    QVector<FieldExtractorPtr> extractors;
-    extractors.reserve(schemas.size());
-    for (const LogPattern& schema : schemas)
-        extractors.append(std::make_shared<const LegacyPatternExtractor>(schema));
-    return start(extractors, file, budget);
 }
 
 int SchemaFitJob::start(const QVector<FieldExtractorPtr>& schemas, const LogFile* file,

@@ -4,7 +4,6 @@
 #include "lineindex.h"
 #include "lineformat.h"
 #include "fieldlayout.h"
-#include "logpattern.h"
 #include "logstore.h"
 #include "textchunkcache.h"
 #include "textencoding.h"

@@ -23,7 +23,6 @@
 #include "keyedline.h"
 #include "logentry.h"
 #include "lineformat.h"
-#include "logpattern.h"
 
 #include <QByteArray>
 #include <QDate>

@@ -49,6 +49,10 @@ public:
     /// Шов теста: адрес сервера модели вместо api.anthropic.com.
     static void setAiEndpointForTesting(const QUrl& endpoint);
 
+    /// Панель редактора схем (F-17, шаг 9): без рамки окна и Close, с кнопкой
+    /// «Edit in Editor» — вариант открывается в редакторе новой схемой.
+    void setEmbedded(bool embedded);
+
 signals:
     /// «Set Up AI…» — открыть Settings → AI.
     void settingsRequested();
@@ -56,6 +60,8 @@ signals:
     void schemaSaved(const QString& name);
     /// Схема поставлена вкладке.
     void schemaUsed(LogViewWidget* view);
+    /// Встроенный вид: «Edit in Editor» — шаблон варианта и его название.
+    void editRequested(const QString& templateText, const QString& title);
 
 private:
     void refreshAiSettings();
@@ -85,6 +91,8 @@ private:
     QTableWidget* m_misses = nullptr;
     QPushButton* m_use = nullptr;
     QPushButton* m_save = nullptr;
+    QPushButton* m_edit = nullptr;
+    QPushButton* m_close = nullptr;
     bool m_consentOpen = false;
 };
 

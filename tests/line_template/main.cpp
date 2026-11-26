@@ -3,26 +3,34 @@
 //
 //   1. Таблица «шаблон × строка → поля» по каждому виду поля и правилам 1–6.
 //   2. Ошибки компиляции: код, позиция, имя поля.
-//   3. Встроенные шаблоны (resources/templates): имена колонок = именам
-//      блочных схем, поля на образцах tests/common/builtinsamples.h.
-//   4. Конвертер блочной схемы: каждая встроенная ≡ своему шаблону на корпусе.
-//   5. Ключевой и прежний извлекатели = LogPattern.
+//   3. Встроенные шаблоны (resources/patterns): имена колонок = именам
+//      блочных схем прежнего выпуска, поля на образцах
+//      tests/common/builtinsamples.h.
+//   4. Конвертер прежних схем (F-17, шаг 9 — единственный, кто знает формат
+//      версии 3): каждая встроенная блочная прежнего выпуска
+//      (tests/builtin_schemas/v3) ≡ ручному встроенному шаблону на корпусе;
+//      версии 1 и 2, строка-паттерн, прежние имена видов; Grok → шаблон.
+//   5. Ключевой извлекатель; формат строки JSON / logfmt и ключи формата
+//      строк по образцам (бывший pattern_smoke).
 //   6. SchemaFit на интерфейсе: шаблоны «подходят» своим образцам; число
 //      разных значений по колонке.
 //   7. Фаззинг: шаблон → порождённые строки → поля восстановлены.
 //   8. Случайные строки: без падений и за линейное число шагов (счётчик).
 //   9. Без аллокаций на строку (glibc, без санитайзера).
 //
-// Режим замера: line_template --bench [строк] — шаблон против регексной
-// схемы на корпусах встроенных форматов (бюджет F-17 — не дороже ×0,35).
+// Режим замера: line_template --bench [строк] — цена разбора строки
+// встроенным шаблоном на корпусах встроенных форматов (нс на строку; цифры
+// регексной схемы до шага 9 — в F-17.md, «Сделано → шаг 2 и 9»).
 //
-// Каталоги схем в исходниках — define DENDROLOG_PATTERNS_SOURCE_DIR и
-// DENDROLOG_TEMPLATES_SOURCE_DIR.
+// Каталоги схем в исходниках — define DENDROLOG_PATTERNS_SOURCE_DIR (блочные
+// встроенные прежнего выпуска, данные теста) и DENDROLOG_TEMPLATES_SOURCE_DIR
+// (поставляемые шаблоны).
 
 #include "builtinsamples.h"
 #include "fieldextractor.h"
 #include "linetemplate.h"
-#include "logpattern.h"
+#include "patternheuristics.h"
+#include "v3schema.h"
 #include "schemaconverter.h"
 #include "schemafit.h"
 #include "builtinschemas.h"
@@ -495,12 +503,10 @@ bool isKeyedFile(const QString& file)
     return file == QLatin1String("json-lines.json") || file == QLatin1String("logfmt.json");
 }
 
-LogPattern blockPattern(const QString& file)
+// Встроенная блочная схема прежнего выпуска, переведённая конвертером.
+SchemaConverter::Result convertedBuiltin(const QString& file)
 {
-    QString canonical;
-    BuiltinSchemas::parseSchemaFile(readAll(QDir(kPatternsDir).filePath(file)), QString(), nullptr,
-                                    &canonical, true);
-    return LogPattern(canonical);
+    return SchemaConverter::fromBlocks(QString::fromUtf8(readAll(QDir(kPatternsDir).filePath(file))));
 }
 
 std::shared_ptr<const LineTemplate> builtinTemplate(const QString& file, LineTemplateSchema* schema = nullptr)
@@ -541,10 +547,11 @@ void testBuiltinTemplates()
         const auto tpl = builtinTemplate(templateFileFor(sc.file));
         if (!tpl || !tpl->isValid())
             continue;
-        const LogPattern old = blockPattern(sc.file);
-        check(old.isValid() && tpl->columns() == old.fieldNames(),
+        const SchemaConverter::Result old = convertedBuiltin(sc.file);
+        const QStringList oldColumns = old.ok ? LineTemplate(old.templateText).columns() : QStringList();
+        check(old.ok && tpl->columns() == oldColumns,
               QStringLiteral("%1: колонки шаблона %2 = колонкам блочной схемы %3")
-                  .arg(sc.file, tpl->columns().join(','), old.fieldNames().join(',')));
+                  .arg(sc.file, tpl->columns().join(','), oldColumns.join(',')));
         for (const Sample& smp : sc.samples) {
             LogEntryFields f;
             const Outcome o = tpl->match(smp.line, &f);
@@ -598,22 +605,22 @@ void testConverter()
 {
     const QStringList all = corpusLines();
     for (const SchemaCase& sc : cases()) {
-        const LogPattern old = blockPattern(sc.file);
-        const SchemaConverter::Result r = SchemaConverter::fromBlocks(old.definition());
-        if (isKeyedFile(sc.file)) {
-            check(!r.ok && !r.error.isEmpty(), QStringLiteral("%1: ключевая схема — не шаблон").arg(sc.file));
+        if (isKeyedFile(sc.file))
             continue;
-        }
+        const SchemaConverter::Result r = convertedBuiltin(sc.file);
         check(r.ok, QStringLiteral("%1: переведена: %2 («%3»)").arg(sc.file, r.error, r.templateText));
         if (!r.ok)
             continue;
         const LineTemplate tpl(r.templateText);
-        check(tpl.isValid() && tpl.columns() == old.fieldNames(),
-              QStringLiteral("%1: «%2» компилируется, колонки те же").arg(sc.file, r.templateText));
-        if (!tpl.isValid())
+        const auto hand = builtinTemplate(templateFileFor(sc.file));
+        check(tpl.isValid() && hand && tpl.columns() == hand->columns(),
+              QStringLiteral("%1: «%2» компилируется, колонки — как у встроенного шаблона").arg(sc.file, r.templateText));
+        if (!tpl.isValid() || !hand)
             continue;
         std::printf("  %-28s %s\n", qPrintable(sc.file), qPrintable(r.templateText));
-        // Свой корпус и все продолжения: принята ли строка и поля — те же.
+        // Свой корпус и все продолжения: принята ли строка и поля — те же,
+        // что у ручного встроенного шаблона (а он — те же, что у блочной
+        // схемы прежнего выпуска: tests/builtin_schemas, шаг 2).
         QStringList lines;
         for (const Sample& s : sc.samples)
             lines << s.line;
@@ -623,156 +630,181 @@ void testConverter()
                     lines << s.line;
             }
         }
-        const auto hand = builtinTemplate(templateFileFor(sc.file));
         for (const QString& line : lines) {
-            LogEntryFields fo = old.extractFields(line);
-            LogEntryFields fn;
+            LogEntryFields fn, fh;
             const Outcome o = tpl.match(line, &fn);
-            const bool oldAccepted = !fo.isEmpty() || old.matchLine(line).ok;
-            const Fields a = fieldsOf(old.fieldNames(), line, fo, true);
+            const Outcome h = hand->match(line, &fh);
+            const Fields a = fieldsOf(hand->columns(), line, fh, true);
             const Fields b = fieldsOf(tpl.columns(), line, fn, true);
-            check(oldAccepted == FieldExtractor::accepted(o) && a == b,
-                  QStringLiteral("%1: конвертированный ≠ блочной на «%2»\n       блочная %3 {%4}\n       шаблон  %5 {%6}")
-                      .arg(sc.file, line).arg(oldAccepted).arg(describe(a), outcomeName(o), describe(b)));
-            // И ручной встроенный шаблон: те же поля, что у блочной.
-            if (hand && hand->isValid()) {
-                LogEntryFields fh;
-                const Outcome h = hand->match(line, &fh);
-                const Fields c = fieldsOf(hand->columns(), line, fh, true);
-                check(oldAccepted == FieldExtractor::accepted(h) && a == c,
-                      QStringLiteral("%1: встроенный шаблон ≠ блочной на «%2»\n       блочная {%3}\n       шаблон  {%4}")
-                          .arg(sc.file, line, describe(a), describe(c)));
-            }
+            check(FieldExtractor::accepted(h) == FieldExtractor::accepted(o) && a == b,
+                  QStringLiteral("%1: конвертированный ≠ встроенному на «%2»\n       встроенный %3 {%4}\n       конвертер  %5 {%6}")
+                      .arg(sc.file, line, outcomeName(h), describe(a), outcomeName(o), describe(b)));
         }
-        // Чужие записи (корпус других форматов): принятие не шире прежнего.
+        // Чужие записи (корпус других форматов): не шире встроенного, кроме
+        // закреплённого: регекс Client прежней access-схемы принимал «13:55:40.016»
+        // за IPv6 — перевод сохраняет прежнее поведение, встроенный шаблон
+        // (вид ip) строже.
+        static const QStringList kKnownWider = {
+            QStringLiteral("13:55:40.016 [main] TRACE my-app.startup -- Context initialized"),
+        };
         int wider = 0;
         for (const QString& line : all) {
-            LogEntryFields fn;
-            if (FieldExtractor::accepted(tpl.match(line, &fn)) && !old.matchLine(line).ok)
+            LogEntryFields fn, fh;
+            if (FieldExtractor::accepted(tpl.match(line, &fn)) && !FieldExtractor::accepted(hand->match(line, &fh))
+                && !(sc.file == QLatin1String("access-combined.json") && kKnownWider.contains(line))) {
                 ++wider;
+                std::printf("    шире встроенного: %s\n", qPrintable(line));
+            }
         }
-        check(wider == 0, QStringLiteral("%1: конвертированный не принимает того, что не принимала блочная (%2)")
+        check(wider == 0, QStringLiteral("%1: конвертированный не принимает того, что не принимает встроенный (%2)")
                               .arg(sc.file).arg(wider));
     }
 
-    // Простые случаи перевода.
-    struct C {
-        QString blocks;
-        QString tpl;
-    };
-    PatternDefinition def;
-    PatternBlock ts;
-    ts.name = QStringLiteral("Timestamp");
-    ts.matchKind = PatternBlock::MatchKind::Timestamp;
-    PatternBlock th;
-    th.name = QStringLiteral("Thread");
-    th.matchKind = PatternBlock::MatchKind::TextUntilSeparator;
-    th.leadingText = QStringLiteral("[");
-    th.closingText = QStringLiteral("]");
-    PatternBlock k;
-    k.name = QStringLiteral("Kind");
-    k.matchKind = PatternBlock::MatchKind::ConstantText;
-    k.customRegex = QStringLiteral("GET");
-    PatternBlock ig;
-    ig.name = QStringLiteral("Skip");
-    ig.matchKind = PatternBlock::MatchKind::Integer;
-    ig.ignored = true;
-    ig.separator = QStringLiteral("|");
-    PatternBlock msg;
-    msg.name = QStringLiteral("Message");
-    msg.matchKind = PatternBlock::MatchKind::Remainder;
-    def.blocks = { ts, th, k, ig, msg };
-    const SchemaConverter::Result r = SchemaConverter::fromBlocks(def);
-    check(r.ok && r.templateText
-                      == QLatin1String("{Timestamp:time}{? ?}[{? ?}{Thread:text}{? ?}]{? ?}{Kind:of(GET)}{? ?}"
-                                       "{_:int}{? ?}{?|?}{? ?}{Message:rest}"),
-          QStringLiteral("перевод: обёртки, константа полем, ignored, необязательный разделитель: %1")
-              .arg(r.templateText));
-    const LineTemplate t(r.templateText);
-    LogEntryFields f;
-    const QString line = QStringLiteral("2026-11-18 13:55:36 [ main ]GET 42| hello");
-    check(t.match(line, &f) == Outcome::Full
-              && fieldsOf(t.columns(), line, f)
-                  == Fields({ { "Timestamp", "2026-11-18 13:55:36" }, { "Thread", "main" }, { "Kind", "GET" },
-                              { "Message", "hello" } }),
-          QStringLiteral("перевод: шаблон разбирает строку"));
+    // Простые случаи перевода (определение версии 3 — данные, v3schema.h).
+    const v3schema::Block msg{ QStringLiteral("remainder"), QStringLiteral("Message") };
+    {
+        v3schema::Block ig{ QStringLiteral("integer"), QStringLiteral("Skip") };
+        ig.ignored = true;
+        ig.separator = QStringLiteral("|");
+        v3schema::Block k{ QStringLiteral("constant"), QStringLiteral("Kind") };
+        k.customRegex = QStringLiteral("GET");
+        const SchemaConverter::Result r = SchemaConverter::fromBlocks(v3schema::definition({
+            { QStringLiteral("timestamp"), QStringLiteral("Timestamp") },
+            { QStringLiteral("text"), QStringLiteral("Thread"), QStringLiteral("["), QStringLiteral("]") },
+            k, ig, msg }));
+        check(r.ok && r.templateText
+                          == QLatin1String("{Timestamp:time}{? ?}[{? ?}{Thread:text}{? ?}]{? ?}{Kind:of(GET)}{? ?}"
+                                           "{_:int}{? ?}{?|?}{? ?}{Message:rest}"),
+              QStringLiteral("перевод: обёртки, константа полем, ignored, необязательный разделитель: %1")
+                  .arg(r.templateText));
+        const LineTemplate t(r.templateText);
+        LogEntryFields f;
+        const QString line = QStringLiteral("2026-11-18 13:55:36 [ main ]GET 42| hello");
+        check(t.match(line, &f) == Outcome::Full
+                  && fieldsOf(t.columns(), line, f)
+                      == Fields({ { "Timestamp", "2026-11-18 13:55:36" }, { "Thread", "main" }, { "Kind", "GET" },
+                                  { "Message", "hello" } }),
+              QStringLiteral("перевод: шаблон разбирает строку"));
+    }
     // Text, за которым только пробел и поле без формы, — word.
-    PatternDefinition two;
-    PatternBlock a;
-    a.name = QStringLiteral("A");
-    a.matchKind = PatternBlock::MatchKind::TextUntilSeparator;
-    a.separator = QStringLiteral(" ");
-    PatternBlock b;
-    b.name = QStringLiteral("B");
-    b.matchKind = PatternBlock::MatchKind::TextUntilSeparator;
-    b.separator = QStringLiteral(" ");
-    two.blocks = { a, b, msg };
-    const SchemaConverter::Result w = SchemaConverter::fromBlocks(two);
-    check(w.ok && w.templateText == QLatin1String("{A:word} {B:word} {Message:rest}") && w.notes.size() == 2,
-          QStringLiteral("перевод: text без конца → word: %1 (%2)").arg(w.templateText, w.notes.join("; ")));
+    {
+        const v3schema::Block a{ QStringLiteral("text"), QStringLiteral("A"), QString(), QString(), QStringLiteral(" ") };
+        const v3schema::Block b{ QStringLiteral("text"), QStringLiteral("B"), QString(), QString(), QStringLiteral(" ") };
+        const SchemaConverter::Result w = SchemaConverter::fromBlocks(v3schema::definition({ a, b, msg }));
+        check(w.ok && w.templateText == QLatin1String("{A:word} {B:word} {Message:rest}") && w.notes.size() == 2,
+              QStringLiteral("перевод: text без конца → word: %1 (%2)").arg(w.templateText, w.notes.join("; ")));
+    }
     // Пробельный регекс-разделитель — пробел шаблона (после самоограниченного
     // блока — промежуток), а не пустой участок.
     {
-        PatternDefinition d;
-        PatternBlock lv;
-        lv.name = QStringLiteral("Level");
-        lv.matchKind = PatternBlock::MatchKind::Level;
-        lv.separator = QStringLiteral(" ");
+        v3schema::Block lv{ QStringLiteral("level"), QStringLiteral("Level"), QString(), QString(), QStringLiteral(" ") };
         lv.separatorIsRegex = true;
-        PatternBlock tx;
-        tx.name = QStringLiteral("Thread");
-        tx.matchKind = PatternBlock::MatchKind::TextUntilSeparator;
-        tx.separator = QStringLiteral(" ");
+        v3schema::Block tx{ QStringLiteral("text"), QStringLiteral("Thread"), QString(), QString(), QStringLiteral(" ") };
         tx.separatorIsRegex = true;
-        d.blocks = { lv, tx, msg };
-        const SchemaConverter::Result rs = SchemaConverter::fromBlocks(d);
+        const SchemaConverter::Result rs = SchemaConverter::fromBlocks(v3schema::definition({ lv, tx, msg }));
         const LineTemplate ts(rs.templateText);
         LogEntryFields fs;
         const QString l = QStringLiteral("INFO t1 hello world");
         check(rs.ok && ts.match(l, &fs) == Outcome::Full
                   && fieldsOf(ts.columns(), l, fs)
-                      == Fields({ { "Level", "INFO" }, { "Thread", "t1" }, { "Message", "hello world" } })
-                  && fieldsOf(ts.columns(), l, fs) == fieldsOf(LogPattern(LogPattern::serializeDefinition(d))
-                                                                   .fieldNames(), l,
-                                                               LogPattern(LogPattern::serializeDefinition(d))
-                                                                   .extractFields(l)),
+                      == Fields({ { "Level", "INFO" }, { "Thread", "t1" }, { "Message", "hello world" } }),
               QStringLiteral("перевод: пробельный регекс-разделитель: «%1» %2").arg(rs.templateText, rs.error));
     }
     // Имя колонки, которое шаблон не записал бы буква в букву, — отказ.
     {
-        PatternDefinition d;
-        PatternBlock u;
-        u.name = QStringLiteral("_");
-        u.matchKind = PatternBlock::MatchKind::Integer;
-        d.blocks = { u, msg };
-        check(!SchemaConverter::fromBlocks(d).ok, QStringLiteral("перевод: колонка «_» — отказ"));
-        u.name = QStringLiteral("?x");
-        d.blocks = { u, msg };
-        check(!SchemaConverter::fromBlocks(d).ok, QStringLiteral("перевод: колонка «?x» — отказ"));
+        check(!SchemaConverter::fromBlocks(v3schema::definition({ { QStringLiteral("integer"), QStringLiteral("_") }, msg })).ok,
+              QStringLiteral("перевод: колонка «_» — отказ"));
+        check(!SchemaConverter::fromBlocks(v3schema::definition({ { QStringLiteral("integer"), QStringLiteral("?x") }, msg })).ok,
+              QStringLiteral("перевод: колонка «?x» — отказ"));
+    }
+    // Прежние формы файла (бывший pattern_smoke): версия 1 без «ignored»,
+    // версия 2 (разделитель обёрнутого блока был его закрывающей скобкой),
+    // прежние имена видов, строка-паттерн log4j.
+    {
+        const QString v1 =
+            R"({"version":1,"type":"dynamic-block-schema","linePrefix":"",)"
+            R"("blocks":[{"name":"Timestamp","kind":"timestamp","leadingText":"","separator":"","customRegex":""},)"
+            R"({"name":"Message","kind":"remainder","leadingText":"","separator":"","customRegex":""}]})";
+        const SchemaConverter::Result r = SchemaConverter::fromBlocks(v1);
+        check(SchemaConverter::isBlockDefinition(v1) && r.ok
+                  && LineTemplate(r.templateText).columns() == QStringList({ "Timestamp", "Message" }),
+              QStringLiteral("версия 1 переводится, колонки те же: %1").arg(r.templateText));
+        const QString v2 =
+            R"({"version":2,"type":"dynamic-block-schema","linePrefix":"",)"
+            R"("blocks":[{"name":"Thread","kind":"text","leadingText":"[","separator":"]","customRegex":""},)"
+            R"({"name":"Message","kind":"remainder","leadingText":"","separator":"","customRegex":""}]})";
+        const SchemaConverter::Result r2 = SchemaConverter::fromBlocks(v2);
+        const LineTemplate t2(r2.templateText);
+        LogEntryFields f;
+        const QString line = QStringLiteral("[worker-9] all good");
+        t2.match(line, &f);
+        check(r2.ok && fieldsOf(t2.columns(), line, f) == Fields({ { "Thread", "worker-9" }, { "Message", "all good" } }),
+              QStringLiteral("версия 2: обёртка — закрывающей скобкой: %1").arg(r2.templateText));
+        const QString aliases =
+            R"({"version":2,"type":"dynamic-block-schema","linePrefix":"",)"
+            R"("blocks":[{"name":"A","kind":"optional-text","leadingText":"","separator":"|","customRegex":""},)"
+            R"({"name":"B","kind":"optional-path","leadingText":"","separator":"","customRegex":""}]})";
+        const SchemaConverter::Result r3 = SchemaConverter::fromBlocks(aliases);
+        check(r3.ok && r3.templateText.contains(QLatin1String("{B:path}")),
+              QStringLiteral("прежние имена видов (optional-text, optional-path): %1").arg(r3.templateText));
+        const SchemaConverter::Result r4 = SchemaConverter::fromBlocks(QStringLiteral("%d %p %m"));
+        check(SchemaConverter::isBlockDefinition(QStringLiteral("%d %p %m")) && r4.ok
+                  && LineTemplate(r4.templateText).columns() == QStringList({ "Timestamp", "Level", "Message" }),
+              QStringLiteral("строка-паттерн log4j: %1 %2").arg(r4.templateText, r4.error));
+        check(!SchemaConverter::isBlockDefinition(LineTemplateSchema::definition(QStringLiteral("{Message}")))
+                  && !SchemaConverter::isBlockDefinition(QStringLiteral("plain text"))
+                  && !SchemaConverter::isBlockDefinition(QString()),
+              QStringLiteral("шаблон и текст без «%» — не прежняя схема"));
+        const QString upgraded = SchemaConverter::upgradeDefinition(v1);
+        check(upgraded == LineTemplateSchema::definition(r.templateText),
+              QStringLiteral("upgradeDefinition — определение переведённого шаблона"));
+        const QString tplDef = LineTemplateSchema::definition(QStringLiteral("{Ts:time} {Message}"));
+        check(SchemaConverter::upgradeDefinition(tplDef) == tplDef
+                  && SchemaConverter::upgradeDefinition(QStringLiteral("{\"blocks\":[{\"type\":\"x\"}],\"version\":1}"))
+                      == QLatin1String("{\"blocks\":[{\"type\":\"x\"}],\"version\":1}"),
+              QStringLiteral("шаблон и непереводимое — как есть"));
+    }
+    // Встроенные прежнего выпуска — ровно поставляемым шаблоном (таблица
+    // отпечатков SchemaConverter совпадает с файлами resources/patterns).
+    for (const SchemaCase& sc : cases()) {
+        if (isKeyedFile(sc.file))
+            continue;
+        const auto hand = builtinTemplate(templateFileFor(sc.file));
+        const QString upgraded =
+            SchemaConverter::upgradeDefinition(QString::fromUtf8(readAll(QDir(kPatternsDir).filePath(sc.file))));
+        check(hand && upgraded == LineTemplateSchema::definition(hand->text()),
+              QStringLiteral("%1: состояние со встроенной схемой — поставляемый шаблон: %2").arg(sc.file, upgraded));
+    }
+    // Grok → шаблон (та же таблица соответствий, что у прежнего импорта).
+    {
+        const SchemaConverter::Result g = SchemaConverter::fromGrok(
+            QStringLiteral("%{TIMESTAMP_ISO8601:time} \\[%{WORD:thread}\\] %{LOGLEVEL:level} %{GREEDYDATA:msg}"));
+        const LineTemplate t(g.templateText);
+        LogEntryFields f;
+        const QString line = QStringLiteral("2025-06-11 12:00:01 [main] INFO started ok");
+        t.match(line, &f);
+        check(g.ok && fieldsOf(t.columns(), line, f)
+                          == Fields({ { "time", "2025-06-11 12:00:01" }, { "thread", "main" }, { "level", "INFO" },
+                                      { "msg", "started ok" } }),
+              QStringLiteral("Grok → шаблон: %1 → %2").arg(g.templateText, describe(fieldsOf(t.columns(), line, f))));
+        const SchemaConverter::Result hidden =
+            SchemaConverter::fromGrok(QStringLiteral("%{TIMESTAMP_ISO8601} %{GREEDYDATA:msg}"));
+        check(hidden.ok && LineTemplate(hidden.templateText).columns() == QStringList({ "msg" }),
+              QStringLiteral("Grok: безымянный токен — не колонка: %1").arg(hidden.templateText));
+        const SchemaConverter::Result unknown =
+            SchemaConverter::fromGrok(QStringLiteral("%{FOO:a} %{GREEDYDATA:msg}"));
+        check(unknown.ok && !unknown.notes.isEmpty() && unknown.notes.first().contains(QLatin1String("FOO")),
+              QStringLiteral("Grok: неизвестное имя названо в заметках"));
+        check(!SchemaConverter::fromGrok(QStringLiteral("no tokens")).ok, QStringLiteral("Grok без %{…} — отказ"));
     }
 }
 
 // ---------------------------------------------------------------------------
-// 5. Ключевой и прежний извлекатели
+// 5. Ключевой извлекатель
 // ---------------------------------------------------------------------------
 
 void testOtherExtractors()
 {
-    for (const SchemaCase& sc : cases()) {
-        const LogPattern old = blockPattern(sc.file);
-        const LegacyPatternExtractor legacy(old);
-        check(legacy.fields() == old.fieldNames() && legacy.tailField() == old.tailFieldIndex()
-                  && !legacy.isKeyed(),
-              QStringLiteral("%1: прежний извлекатель — колонки и хвост схемы").arg(sc.file));
-        for (const Sample& s : sc.samples) {
-            const LogEntryFields want = old.extractFields(s.line);
-            LogEntryFields got;
-            const Outcome o = legacy.extract(s.line, &got);
-            check(fieldsOf(old.fieldNames(), s.line, want) == fieldsOf(legacy.fields(), s.line, got)
-                      && FieldExtractor::accepted(o) == old.matchLine(s.line).ok,
-                  QStringLiteral("%1: прежний извлекатель = LogPattern на «%2»").arg(sc.file, s.line));
-        }
-    }
     // Ключевой извлекатель — колонки формата строк JSON Lines и logfmt
     // (F-17, шаг 7): на образцах форматов поля ролей — заданные значения,
     // продолжения не приняты.
@@ -798,6 +830,129 @@ void testOtherExtractors()
 }
 
 // ---------------------------------------------------------------------------
+// 5б. Формат строки и ключи формата строк по образцам (бывший pattern_smoke;
+// F-4, PR 4; с F-17, шаг 7 — LineFormatDetector, а не схема)
+// ---------------------------------------------------------------------------
+
+#define CHECK(cond, msg) check(bool(cond), QString(msg))
+
+void testLineShapeAndKeys()
+{
+    // 13. Формат строки и ключи формата строк по образцам (F-4, PR 4; с F-17,
+    // шаг 7 — LineFormatDetector, а не схема)
+    {
+        using PatternHeuristics::LineShape;
+        const struct { const char* line; LineShape format; } formats[] = {
+            { R"({"ts":"2026-11-18T10:00:00Z","level":"info","msg":"started"})", LineShape::Json },
+            { R"({"time":1700000000123,"level":30,"msg":"x"})", LineShape::Json },
+            { R"({"a":1})", LineShape::Json },
+            { R"({"msg":"cut in the mid)", LineShape::Blocks },   // ни одной полной пары
+            { R"({})", LineShape::Blocks },
+            { R"(  {"ts":1,"msg":"indented"})", LineShape::Blocks },
+            { R"({main} INFO started)", LineShape::Blocks },
+            { R"(ts=2026-11-18T10:00:00Z level=info msg="request done" status=200)", LineShape::Logfmt },
+            { R"(level=warn msg=x)", LineShape::Logfmt },
+            { R"(user=bob logged in)", LineShape::Blocks },        // одна пара — не logfmt
+            { R"(2026-11-18 10:00:00 INFO a=b c=d)", LineShape::Blocks },
+            { R"(Caused by: x=1 y=2)", LineShape::Blocks },
+            { "", LineShape::Blocks },
+            { "2025-06-11 12:00:01,123 [worker-1] ERROR Some.Logger - message here", LineShape::Blocks },
+        };
+        for (const auto& f : formats) {
+            const QString line = QString::fromUtf8(f.line);
+            CHECK(PatternHeuristics::detectLineFormat(line) == f.format,
+                  QString("detectLineFormat(%1) = %2").arg(line).arg(int(f.format)));
+        }
+
+        // JSON: формат, роли, колонки из ключей большинства образцов.
+        const QStringList json = {
+            R"({"ts":"2026-11-18T10:00:00Z","level":"info","msg":"a","service":"api","trace_id":"t1"})",
+            R"({"ts":"2026-11-18T10:00:01Z","level":"warn","msg":"b","service":"api","user":"bob"})",
+            "",
+            R"({"time":1763460002,"level":"error","message":"c","service":"db","user":"eve"})",
+        };
+        KeyedDefinition d;
+        CHECK(PatternHeuristics::suggestKeyedDefinition(json, &d) 
+                  && d.format == KeyedDefinition::Format::JsonObject,
+              "suggestKeyedDefinition: JSON lines → keyed JSON schema");
+        {
+            CHECK(d.extraColumns == QStringList({"service", "user"}),
+                  QString("suggested columns: keys of most samples, roles excluded: %1")
+                      .arg(d.extraColumns.join(",")));
+            CHECK(d.timeKeys == KeyedDefinition::defaultTimeKeys()
+                      && d.levelKeys == KeyedDefinition::defaultLevelKeys(),
+                  "suggested role keys: defaults");
+            const KeyedExtractor kp(d);
+            CHECK(kp.extract(json[0], nullptr) == FieldExtractor::Outcome::Full,
+                  "suggested keys recognise their sample");
+            LogEntryFields kf;
+            kp.extract(json[0], &kf);
+            CHECK(kf.value(int(kp.fields().indexOf("service")), json[0]) == "api", "suggested column extracted");
+            // Остальные ключи образцов — для кнопки «Add keys from sample».
+            CHECK(PatternHeuristics::keyedSampleKeys(json, d) == QStringList({"trace_id"}),
+                  QString("keys from sample beyond the columns: %1")
+                      .arg(PatternHeuristics::keyedSampleKeys(json, d).join(",")));
+        }
+
+        // Ключи ролей не в том регистре (.NET JSON console) становятся
+        // ключами ролей, а не колонками с именем роли.
+        const QStringList dotnet = {
+            R"({"Timestamp":"2026-11-18T10:00:00Z","EventId":0,"LogLevel":"Warning","Category":"App","Message":"hi"})",
+        };
+        KeyedDefinition dn;
+        CHECK(PatternHeuristics::suggestKeyedDefinition(dotnet, &dn) 
+                  && dn.timeKeys.contains("Timestamp") && dn.levelKeys.contains("LogLevel")
+                  && dn.messageKeys.contains("Message")
+                  && dn.extraColumns == QStringList({"EventId", "Category"}),
+              QString("role keys in another case join the roles: columns %1")
+                  .arg(dn.extraColumns.join(",")));
+        {
+            const KeyedExtractor dp(dn);
+            LogEntryFields df;
+            dp.extract(dotnet[0], &df);
+            CHECK(df.value(KeyedDefinition::kLevelColumn, dotnet[0]) == "Warning",
+                  ".NET sample: Level from LogLevel");
+        }
+
+        // logfmt в большинстве (одна строка — продолжение).
+        const QStringList logfmt = {
+            R"(ts=2026-11-18T10:00:00Z level=info msg="Starting" caller=main.go:12)",
+            R"(goroutine 1 [running]:)",
+            R"(ts=2026-11-18T10:00:01Z level=error msg="boom" caller=db.go:7 err="timeout")",
+        };
+        KeyedDefinition lf;
+        CHECK(PatternHeuristics::suggestKeyedDefinition(logfmt, &lf) 
+                  && lf.format == KeyedDefinition::Format::Logfmt
+                  && lf.extraColumns == QStringList({"caller"}),
+              "suggestKeyedDefinition: logfmt majority → keyed logfmt schema");
+
+        // Вложенный объект под путём ключа роли («log» у «log.level») —
+        // не колонка; ключ из одной буквы не становится ключом роли.
+        const QStringList ecs = {
+            R"({"@timestamp":"2026-11-18T10:00:00Z","log":{"level":"info","logger":"a"},"message":"m"})",
+            R"({"@timestamp":"2026-11-18T10:00:01Z","log":{"level":"warn","logger":"b"},"message":"n"})",
+        };
+        KeyedDefinition ed;
+        CHECK(PatternHeuristics::suggestKeyedDefinition(ecs, &ed) && ed.extraColumns.isEmpty(),
+              "ECS: the nested object of log.level is not a column");
+        KeyedDefinition td;
+        CHECK(PatternHeuristics::suggestKeyedDefinition({"ts=1 level=info msg=x T=42", "ts=2 level=info msg=y T=43"}, &td)
+                  && !td.timeKeys.contains("T")
+                  && td.extraColumns == QStringList({"T"}),
+              "a one-letter key is not promoted to a role key");
+
+        // Обычные строки — не ключевой формат.
+        KeyedDefinition none;
+        CHECK(!PatternHeuristics::suggestKeyedDefinition(
+                  {"2025-06-11 12:00:01,123 [worker-1] ERROR Some.Logger - message here",
+                   R"({"ts":1,"msg":"x"})", "plain text"}, &none),
+              "suggestKeyedDefinition: minority of JSON lines is not enough");
+    }
+}
+
+#undef CHECK
+
+// ---------------------------------------------------------------------------
 // 6. SchemaFit на интерфейсе
 // ---------------------------------------------------------------------------
 
@@ -807,13 +962,6 @@ void testSchemaFit()
         QStringList lines;
         for (const Sample& s : sc.samples)
             lines << s.line;
-        const LogPattern old = blockPattern(sc.file);
-        // Прежний путь (LogPattern) = тот же LogPattern через интерфейс.
-        const SchemaFit::Result a = SchemaFit::evaluate(old, lines);
-        const SchemaFit::Result b = SchemaFit::evaluate(LegacyPatternExtractor(old), lines);
-        check(a.full == b.full && a.partial == b.partial && a.missed == b.missed && a.loose == b.loose
-                  && a.filled == b.filled && a.distinct == b.distinct && a.valid && b.valid,
-              QStringLiteral("%1: SchemaFit по LogPattern = по LegacyPatternExtractor").arg(sc.file));
         const auto tpl = builtinTemplate(templateFileFor(sc.file));
         if (!tpl)
             continue;
@@ -1161,15 +1309,14 @@ void testNoAllocations()
 
 int runBench(int lineCount)
 {
-    std::printf("Разбор строки: шаблон против регексной схемы (нс на строку, %d строк на формат)\n", lineCount);
-    std::printf("%-30s %10s %10s %8s\n", "формат", "регекс", "шаблон", "доля");
-    double sumOld = 0, sumNew = 0;
+    std::printf("Разбор строки встроенным шаблоном (нс на строку, %d строк на формат)\n", lineCount);
+    std::printf("%-30s %10s\n", "формат", "шаблон");
+    double sum = 0;
     for (const SchemaCase& sc : cases()) {
         if (isKeyedFile(sc.file))
             continue;
         const auto tpl = builtinTemplate(templateFileFor(sc.file));
-        const LogPattern old = blockPattern(sc.file);
-        if (!tpl || !old.isValid())
+        if (!tpl)
             continue;
         QStringList lines;
         while (lines.size() < lineCount) {
@@ -1181,33 +1328,23 @@ int runBench(int lineCount)
         LogEntryFields f;
         qint64 sink = 0;
         // Прогрев и три прогона; медиана.
-        const auto timeIt = [&](auto&& fn) {
-            QVector<qint64> ns;
-            fn();
-            for (int r = 0; r < 3; ++r) {
-                QElapsedTimer t;
-                t.start();
-                fn();
-                ns << t.nsecsElapsed();
-            }
-            std::sort(ns.begin(), ns.end());
-            return double(ns[1]) / lineCount;
-        };
-        const double tOld = timeIt([&]() {
-            for (const QString& l : lines)
-                sink += old.extractFields(l).size();
-        });
-        const double tNew = timeIt([&]() {
+        QVector<qint64> ns;
+        for (int r = 0; r < 4; ++r) {
+            QElapsedTimer t;
+            t.start();
             for (const QString& l : lines)
                 sink += int(x.extract(l, &f));
-        });
-        sumOld += tOld;
-        sumNew += tNew;
-        std::printf("%-30s %10.0f %10.0f %8.3f\n", qPrintable(sc.file), tOld, tNew, tNew / tOld);
+            if (r > 0)
+                ns << t.nsecsElapsed();
+        }
+        std::sort(ns.begin(), ns.end());
+        const double tNew = double(ns[1]) / lineCount;
+        sum += tNew;
+        std::printf("%-30s %10.0f\n", qPrintable(sc.file), tNew);
         if (sink == 42)
             std::printf(" ");
     }
-    std::printf("%-30s %10.0f %10.0f %8.3f  (бюджет 0.35)\n", "сумма", sumOld, sumNew, sumNew / sumOld);
+    std::printf("%-30s %10.0f\n", "сумма", sum);
     return 0;
 }
 
@@ -1226,10 +1363,11 @@ int main(int argc, char** argv)
     testErrors();
     std::printf("3. встроенные шаблоны\n");
     testBuiltinTemplates();
-    std::printf("4. конвертер блочных схем\n");
+    std::printf("4. конвертер прежних схем\n");
     testConverter();
-    std::printf("5. ключевой и прежний извлекатели\n");
+    std::printf("5. ключевой извлекатель, формат строки и ключи по образцам\n");
     testOtherExtractors();
+    testLineShapeAndKeys();
     std::printf("6. SchemaFit на интерфейсе\n");
     testSchemaFit();
     std::printf("7. фаззинг шаблон → строки → поля\n");

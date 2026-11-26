@@ -45,7 +45,6 @@
 #include "logindexer.h"
 #include "logmodel.h"
 #include "logparser.h"
-#include "logpattern.h"
 #include "logscan.h"
 #include "recordid.h"
 #include "filterconfigs.h"
@@ -2520,16 +2519,8 @@ static void testKeyedSchemas(const QDir& dir)
 // ---------------------------------------------------------------------------
 static QString workerSchema()
 {
-    PatternDefinition def;
-    def.blocks = {
-        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Worker"),
-                     QStringLiteral("["), QStringLiteral("]")),
-        patternBlock(PatternBlock::MatchKind::Level, QStringLiteral("Level"), QString(),
-                     QString(), QStringLiteral("-")),
-        patternBlock(PatternBlock::MatchKind::Remainder, QStringLiteral("Message")),
-    };
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(
+        QStringLiteral("{Timestamp:time} [{Worker}] {Level:level} {?- ?}{Message}"));
 }
 
 // Конфигурации, которых нет среди общих: колонка одного файла, общая,
@@ -2930,12 +2921,11 @@ int main(int argc, char** argv)
     const QDir dir(tmp.path());
 
     const QString schema = buildSchema();
-    const LogPattern pattern(schema);
-    if (!pattern.isValid()) {
+    const QStringList fieldNames = schemaColumns(schema);
+    if (fieldNames.isEmpty()) {
         std::fprintf(stderr, "тестовая схема не компилируется\n");
         return 2;
     }
-    const QStringList fieldNames = pattern.fieldNames();
 
     const QDateTime baseA = fixtureBaseTime();
     const QDateTime baseB = baseA.addSecs(120); // перекрывается с первым файлом

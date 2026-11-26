@@ -1,7 +1,0 @@
-{
-    "name": "nginx error",
-    "description": "nginx error_log: yyyy/mm/dd hh:mm:ss [level] pid#tid: *connection message.",
-    "version": 4,
-    "type": "line-template",
-    "template": "{Timestamp:time} [{Level:of(debug|info|notice|warn|error|crit|alert|emerg)}] {PID:int}#{TID:int}: {?*{Connection:int} ?}{Message}"
-}

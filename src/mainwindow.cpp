@@ -8,7 +8,8 @@
 #include "encodingindicator.h"
 #include "lineformatindicator.h"
 #include "logtabwidget.h"
-#include "conversionpatterndialog.h"
+#include "schemaeditorwindow.h"
+#include "fulllogcontroller.h"
 #include "gotodialog.h"
 #include "directoryscanner.h"
 #include "directoryscannerpanel.h"
@@ -1664,6 +1665,14 @@ void MainWindow::setupFieldVisibilityDock()
     });
     connect(m_schemas, &FieldSchemaController::statusMessage, this,
             [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+    // Схемы прежнего формата, которые перевод при запуске не смог перевести
+    // (F-17, шаг 9): их файлы целы, но в списке их нет — сказать, почему.
+    if (!m_schemas->conversionFailures().isEmpty())
+        statusBar()->showMessage(
+            tr("%n schema file(s) of an earlier version could not be converted and are not in the list: %1",
+               nullptr, int(m_schemas->conversionFailures().size()))
+                .arg(m_schemas->conversionFailures().join(QStringLiteral("; "))),
+            60000);
     connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
         if (m_fieldFilterControlsWidget)
             m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
@@ -1823,20 +1832,83 @@ void MainWindow::onManagePatterns()
     // Refresh from the folder so schema files dropped in (or edited) since the
     // last load are picked up, preserving the current display order.
     m_schemas->reloadCatalogue();
+    // Одно немодальное окно на окно программы (F-17, шаг 9): образцы — строки
+    // активной вкладки с текущей, покрытие — по её файлу.
+    if (!m_schemaEditor) {
+        m_schemaEditor = new SchemaEditorWindow(m_schemas, this);
+        m_schemaEditor->setFieldUses(schemaFieldUses());
+        connect(m_schemaEditor, &SchemaEditorWindow::settingsRequested, this,
+                [this]() { openSettings(/*aiPage=*/true); });
+        connect(m_schemaEditor, &SchemaEditorWindow::schemaSaved, this, [this](const QString& name) {
+            statusBar()->showMessage(tr("Schema \"%1\" saved").arg(name), 10000);
+        });
+        connect(m_schemaEditor, &SchemaEditorWindow::appliedToTab, this, [this](LogViewWidget*) {
+            updateFilterStatusButtons();
+        });
+    }
+    m_schemaEditor->setView(qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()));
+    m_schemaEditor->show();
+    m_schemaEditor->raise();
+    m_schemaEditor->activateWindow();
+}
 
-    ConversionPatternDialog dlg(m_schemas->schemas(), this, QStringList(), m_schemas->shownSchema());
-    // The editor gets the tab, not a handful of lines: preview samples start
-    // at the row the user is looking at, and the schemas are checked on lines
-    // of the tab's file (SchemaFit, F-17).
-    if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()))
-        dlg.setSource(lv->model(), lv->view() ? lv->view()->currentIndex().row() : -1);
-    if (dlg.exec() != QDialog::Accepted) return;
-
-    const QString syncError = m_schemas->replaceCatalogue(dlg.resultPatterns(), dlg.chosenPattern(),
-                                                          dlg.chosenResultIndex());
-    if (!syncError.isEmpty())
-        QMessageBox::warning(this, tr("Schemas"),
-            tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
+SchemaEditorWindow::FieldUses MainWindow::schemaFieldUses()
+{
+    // Где живут имена колонок: правила вкладок со схемой, которую правят
+    // (применённые и приостановленные показом полного лога), правила панелей
+    // Text Filters и Search и их профили. Правила вкладки, равные текущим
+    // правилам панели (применённые оттуда), не считаются второй раз.
+    SchemaEditorWindow::FieldUses uses;
+    const auto panels = [this]() {
+        QList<FilterPanelWidget*> list;
+        for (FilterPanelWidget* p : {m_filterPanel, m_searchQuery})
+            if (p)
+                list << p;
+        return list;
+    };
+    const auto tabsWith = [this](const QString& schema) {
+        QList<LogViewWidget*> list;
+        for (int i = 0; i < ui->tabWidget->count(); ++i) {
+            auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i));
+            if (view && view->parserPattern() == schema)
+                list << view;
+        }
+        return list;
+    };
+    uses.count = [this, panels, tabsWith](const QString& field, const QString& schema) {
+        int n = 0;
+        const FilterRuleSet panelRules = m_filterPanel ? m_filterPanel->ruleSet() : FilterRuleSet();
+        for (LogViewWidget* view : tabsWith(schema)) {
+            const FilterRuleSet& rules = view->model()->filterRules();
+            if (!(rules == panelRules))
+                n += rules.countField(field);
+            if (const auto& suspended = view->fullLog().suspendedFilters();
+                suspended && !(suspended->rules == panelRules))
+                n += suspended->rules.countField(field);
+        }
+        for (FilterPanelWidget* p : panels())
+            n += FilterRuleSet::countFieldInJson(p->profilesToJson(), field);
+        return n;
+    };
+    uses.rename = [panels, tabsWith](const QString& field, const QString& to, const QString& schema) {
+        for (LogViewWidget* view : tabsWith(schema)) {
+            view->fullLog().renameSuspendedField(field, to);
+            FilterRuleSet rules = view->model()->filterRules();
+            if (rules.renameField(field, to) == 0)
+                continue;
+            FieldSchemaController::bindRules(view, rules);
+            view->model()->setFilterRules(rules);
+        }
+        for (FilterPanelWidget* p : panels()) {
+            FilterRuleSet current = p->ruleSet();
+            QJsonValue profiles = p->profilesToJson();
+            if (FilterRuleSet::renameFieldInJson(profiles, field, to) > 0)
+                p->profilesFromJson(profiles.toObject());
+            if (current.renameField(field, to) > 0)
+                p->setRuleSet(current);
+        }
+    };
+    return uses;
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
@@ -2757,6 +2829,11 @@ void MainWindow::onCurrentTabChanged(int index)
     }
 
     LogViewWidget *currentView = qobject_cast<LogViewWidget *>(ui->tabWidget->widget(index));
+    // Редактор схем (немодальный) описывает активную вкладку: Apply to Tab
+    // ставит схему ей (FieldSchemaController — вкладке дока), образцы и
+    // покрытие — её строки.
+    if (m_schemaEditor && m_schemaEditor->isVisible())
+        m_schemaEditor->setView(currentView);
     if (currentView)
     {
         connectToLogView(currentView);

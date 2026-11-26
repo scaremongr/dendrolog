@@ -72,7 +72,9 @@
 #include "documentstate.h"
 #include "fieldschemacontroller.h"
 #include "filememorystore.h"
-#include "logpattern.h"
+#include "linetemplate.h"
+#include "schemaconverter.h"
+#include "v3schema.h"
 #include "schemastore.h"
 #include "sessioncontroller.h"
 #include "sessionfile.h"
@@ -3000,21 +3002,136 @@ struct SchemaTabPool {
 
 static QString columnSchema(const QString& level, const QString& message)
 {
-    PatternDefinition def;
-    def.blocks = {
-        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Thread"),
-                     QStringLiteral("["), QStringLiteral("]")),
-        patternBlock(PatternBlock::MatchKind::Level, level, QString(), QString(), QStringLiteral("-")),
-        patternBlock(PatternBlock::MatchKind::Remainder, message),
-    };
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(
+        QStringLiteral("{Timestamp:time} [{Thread}] {%1:level} {?- ?}{%2}").arg(level, message));
 }
 
 static bool hasFields(LogViewWidget& tab, const QString& schema, const QVector<int>& visible)
 {
     return tab.parserPattern() == schema && tab.model()->fieldDisplayFilterEnabled()
         && tab.model()->visibleFieldIndexes() == visible;
+}
+
+// Эталон версии 1 со схемами прежнего формата (версия 3, блоки; F-17, шаг 9):
+// встроенная схема прежнего выпуска — ровно поставляемый шаблон (находится в
+// каталоге по определению), своя — шаблон того же конвертера, что каталог.
+static void checkBlockSchemaGolden()
+{
+    g_context = QStringLiteral("сессия: схемы версии 3");
+    QFile file(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/session-v3-blocks.json"));
+    CHECK(file.open(QIODevice::ReadOnly), QStringLiteral("эталон открывается"));
+    QByteArray bytes = file.readAll();
+    bytes.replace("@ROOT@", root().toUtf8());
+    QString error;
+    const auto parsed = SessionState::fromJson(bytesToObject(bytes), &error);
+    CHECK(parsed && parsed->tabs.size() == 2 && parsed->tabs[0].view.fields && parsed->tabs[1].view.fields,
+          QStringLiteral("эталон читается: ") + error);
+    if (!parsed || parsed->tabs.size() != 2 || !parsed->tabs[0].view.fields || !parsed->tabs[1].view.fields)
+        return;
+    const QString logback = LineTemplateSchema::definition(
+        QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {Logger:word} -{?-?} {Message}"));
+    CHECK(parsed->tabs[0].view.fields->schema == logback
+              && parsed->tabs[0].view.fields->schemaName == QStringLiteral("Logback / Log4j"),
+          QStringLiteral("встроенная схема прежнего выпуска — поставляемый шаблон: ")
+              + parsed->tabs[0].view.fields->schema);
+    const QString converted = SchemaConverter::upgradeDefinition(v3schema::fixtureDefinition());
+    CHECK(FieldLayout::isTemplateDefinition(converted)
+              && parsed->tabs[1].view.fields->schema == converted && parsed->schema == converted,
+          QStringLiteral("своя схема версии 3 — шаблон конвертера (вкладка и верхний уровень)"));
+    CHECK(testdocs::schemaColumns(converted)
+              == (QStringList{ QStringLiteral("Timestamp"), QStringLiteral("Thread"), QStringLiteral("Level"),
+                               QStringLiteral("Message") }),
+          QStringLiteral("те же колонки"));
+}
+
+// Сессия со схемой версии 3 на живой вкладке (F-17, шаг 9): каталог версии 3
+// переведён при запуске, сохранённая схема находит свой пункт по определению
+// («(from session)» не добавляется), вкладка получает те же поля, что давала
+// блочная схема, — по разбору строк фикстуры независимым регексом.
+static void checkBlockSchemaSession(const QDir& dir, const QString& name)
+{
+    g_context = name + QStringLiteral(" / сессия со схемой версии 3");
+    const QString v3 = v3schema::fixtureDefinition();
+    const QString converted = SchemaConverter::upgradeDefinition(v3);
+    {
+        QJsonObject file = v3schema::object({
+            { QStringLiteral("timestamp"), QStringLiteral("Timestamp") },
+            { QStringLiteral("text"), QStringLiteral("Thread"), QStringLiteral("["), QStringLiteral("]") },
+            { QStringLiteral("level"), QStringLiteral("Level"), QString(), QString(), QStringLiteral("-") },
+            { QStringLiteral("remainder"), QStringLiteral("Message") },
+        });
+        file.insert(QStringLiteral("name"), QStringLiteral("Old blocks ") + name);
+        CHECK(writeBytes(QDir(SchemaStore::patternsDir()).filePath(QStringLiteral("old-blocks-%1.json").arg(name)),
+                         QJsonDocument(file).toJson()),
+              QStringLiteral("файл каталога версии 3"));
+    }
+    FieldSchemaController c;
+    {
+        QSettings ini(QDir(AppSettings::configDir()).filePath(QStringLiteral("schemas-v3-%1.ini").arg(name)),
+                      QSettings::IniFormat);
+        ini.beginGroup(QStringLiteral("View"));
+        c.load(ini);
+    }
+    int catalogue = -1;
+    for (int i = 0; i < c.schemas().size(); ++i)
+        if (c.schemas()[i].name == QStringLiteral("Old blocks ") + name)
+            catalogue = i;
+    CHECK(catalogue >= 0 && c.schemas()[catalogue].schema == converted,
+          QStringLiteral("каталог версии 3 переведён при запуске"));
+    const int catalogueSize = int(c.schemas().size());
+
+    const QString log = writeFile(dir, name + QStringLiteral("-v3-blocks.log"), logBytes(200));
+    const QString sessionPath = dir.filePath(name + QStringLiteral("-v3-blocks.dlsession"));
+    SessionController sessions;
+    QString error;
+    {
+        SchemaTabPool pool{ &c, {} };
+        LogViewWidget* t = pool.make();
+        t->addLogFile(log);
+        CHECK(settled(*t), QStringLiteral("вкладка"));
+        SessionState session = sessions.capture({ t }, t);
+        // Сессия прежнего выпуска — схема версии 3 вкладки и верхнего уровня.
+        if (!session.tabs.isEmpty())
+            session.tabs[0].view.fields = FieldSettings{ QStringLiteral("Old blocks ") + name, v3, true, {} };
+        session.schemaName = QStringLiteral("Old blocks ") + name;
+        session.schema = v3;
+        CHECK(SessionFile::save(sessionPath, session, &error), QStringLiteral("запись: ") + error);
+    }
+    const SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+    CHECK(loaded.state && loaded.state->tabs.size() == 1 && loaded.state->tabs[0].view.fields
+              && loaded.state->tabs[0].view.fields->schema == converted && loaded.state->schema == converted,
+          QStringLiteral("схема версии 3 читается шаблоном: ") + loaded.error);
+    if (!loaded.state)
+        return;
+    SchemaTabPool pool{ &c, {} };
+    const auto result = sessions.open(*loaded.state, sessionPath, [&pool]() { return pool.make(); });
+    CHECK(result.tabs.size() == 1, QStringLiteral("вкладка открыта"));
+    if (result.tabs.size() != 1)
+        return;
+    LogViewWidget& tab = *result.tabs[0];
+    CHECK(settled(tab) && tab.parserPattern() == converted, QStringLiteral("схема вкладки — шаблон"));
+    CHECK(c.schemas().size() == catalogueSize, QStringLiteral("пункт «(from session)» не добавлен"));
+    CHECK(tab.model()->isIndexedBackend() == (name == QLatin1String("indexed")), QStringLiteral("бэкенд"));
+    const QRegularExpression re(QStringLiteral("^(\\S+ \\S+) \\[([^\\]]*)\\] (\\w+) - (.*)$"));
+    LogModel& m = *tab.model();
+    int checked = 0;
+    bool same = true;
+    for (int r = 0; r < m.rowCount() && same; ++r) {
+        const auto entry = m.entryAt(r);
+        const QString text = entry->message();
+        const QRegularExpressionMatch match = re.match(text);
+        if (!match.hasMatch())
+            continue;
+        const LogEntryFields f = m.fieldsOf(*entry);
+        for (int col = 0; col < 4 && same; ++col) {
+            same = f.value(col, text) == match.captured(col + 1);
+            if (!same)
+                std::fprintf(stderr, "строка %d, колонка %d: «%s» вместо «%s»\n", r, col,
+                             qPrintable(f.value(col, text)), qPrintable(match.captured(col + 1)));
+        }
+        ++checked;
+    }
+    CHECK(same && checked >= 200, QStringLiteral("вкладка получает те же поля (%1 строк)").arg(checked));
 }
 
 static void checkSessionSchemas(const QDir& dir, const QString& name)
@@ -3342,6 +3459,7 @@ int main(int argc, char** argv)
     checkFileMemoryFormat();
     checkSessionFormat();
     checkSchemasFormat();
+    checkBlockSchemaGolden();
     checkFileSchemasFormat();
     checkSessionSchema();
 
@@ -3384,6 +3502,7 @@ int main(int argc, char** argv)
     for (const bool indexed : { false, true }) {
         settings.setIndexedThresholdMB(indexed ? 0 : 512);
         checkSessionSchemas(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
+        checkBlockSchemaSession(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
         checkSessionFileSchemas(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
     }
     settings.setIndexedThresholdMB(512);

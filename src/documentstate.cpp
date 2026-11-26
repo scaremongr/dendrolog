@@ -1,4 +1,5 @@
 #include "documentstate.h"
+#include "schemaconverter.h"
 
 #include <QDir>
 #include <algorithm>
@@ -93,6 +94,11 @@ bool schemaFromJson(const QJsonValue& schema, QString* name, QString* definition
         fail(error, QStringLiteral("bad schema definition"));
         return false;
     }
+    // Схема прежнего формата (версия 3, блоки) — шаблоном, тем же
+    // конвертером, что каталог (F-17, шаг 9): вкладка получает те же поля, а
+    // схема находится в переведённом каталоге по определению. Ключевая схема
+    // прежних версий — без схемы (JSON и logfmt — формат строк файла).
+    *definition = SchemaConverter::upgradeDefinition(*definition);
     *name = n.toString();
     return true;
 }

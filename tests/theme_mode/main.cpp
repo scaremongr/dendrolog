@@ -24,6 +24,8 @@
 #include "LogListView.h"
 #include "appsettings.h"
 #include "schemacandidateswindow.h"
+#include "schemaeditorwindow.h"
+#include "fieldschemacontroller.h"
 #include "apptheme.h"
 #include "cardframe.h"
 #include "colorschemecontroller.h"
@@ -793,6 +795,24 @@ static void checkOpenPanels(const QDir& dir)
             window->setSourceModel(doc->model.get(), nullptr);
             SchemaCandidates* candidates = window->candidates();
             testdocs::waitFor([candidates]() { return !candidates->isComputing(); }, 30000);
+            return window;
+        });
+        // Редактор схем (F-17, шаг 9): вкладка-источник, таблица образцов,
+        // не подошедшие строки и покрытие файла посчитаны.
+        auto schemas = std::make_shared<FieldSchemaController>();
+        auto tab = std::make_shared<LogViewWidget>();
+        tab->addLogFile(pa);
+        testdocs::waitFor([tab]() { return !tab->isLoading() && tab->model()->rowCount() > 0; }, 30000);
+        checkRepaintsOnThemeChange("Schema editor", [schemas, tab]() -> std::unique_ptr<QWidget> {
+            auto window = std::make_unique<SchemaEditorWindow>(schemas.get());
+            SchemaFit::Budget noLimit;
+            noLimit.maxMs = 0;
+            window->setFitBudget(noLimit);
+            window->setView(tab.get());
+            window->newFromTemplate(QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {?- ?}{Message}"),
+                                    QStringLiteral("Fixture"));
+            SchemaEditorWindow* w = window.get();
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady(); }, 30000);
             return window;
         });
     }

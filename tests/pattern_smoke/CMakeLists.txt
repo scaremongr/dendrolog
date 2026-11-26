@@ -1,1 +1,0 @@
-dendrolog_add_test(pattern_smoke LIBRARIES dendrolog_core)

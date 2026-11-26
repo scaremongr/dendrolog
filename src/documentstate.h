@@ -174,7 +174,7 @@ struct TabState {
 //
 // Формат (версия 1; эталон — tests/document_state/session-v1.json):
 //   {"format":"dendrolog-session","version":1,
-//    "schema":{"name":"Spring Boot","definition":{…схема LogPattern…}},
+//    "schema":{"name":"Spring Boot","definition":{…шаблон строки, версия 4…}},
 //    "fieldExtraction":true,"visibleFields":["Level","Message"],
 //    "activeTab":1,
 //    "files":[{"path":"/logs/app.log","relative":"../logs/app.log"}],

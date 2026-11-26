@@ -1,7 +1,7 @@
 #include "builtinschemas.h"
 #include "linetemplate.h"
 
-#include "logpattern.h"
+#include "schemaconverter.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -20,16 +20,22 @@ const QLatin1String kStateInstalled("installed");
 const QLatin1String kStateDeclined("declined");
 const QLatin1String kStateRetired("retired");
 
-// Снятые с поставки встроенные схемы (F-17, шаг 7): файл, имя и ключевая
-// часть в том виде, в каком они поставлялись (F-4, PR 4).
+// Снятые с поставки встроенные схемы: файл, имя и ключевая часть в том виде,
+// в каком они поставлялись (F-4, PR 4; сняты в F-17, шаг 7 — JSON и logfmt
+// теперь формат строк файла), либо (format == nullptr) нетронутость — по
+// отпечатку манифеста, и схема, которая её заменила (F-17, шаг 9: две
+// syslog-схемы версии 3 — один шаблон syslog.json).
 struct RetiredSchema {
     const char* file;
     const char* name;
     const char* format;
+    const char* replacedBy;
 };
 constexpr RetiredSchema kRetired[] = {
-    {"json-lines.json", "JSON Lines", "json"},
-    {"logfmt.json", "logfmt", "logfmt"},
+    {"json-lines.json", "JSON Lines", "json", nullptr},
+    {"logfmt.json", "logfmt", "logfmt", nullptr},
+    {"syslog-iso.json", "Syslog / journalctl (ISO timestamp)", nullptr, "syslog.json"},
+    {"syslog-rfc3164.json", "Syslog (RFC 3164)", nullptr, "syslog.json"},
 };
 
 QJsonObject retiredKeyed(const char* format)
@@ -60,14 +66,19 @@ bool isUntouchedRetired(const QByteArray& bytes, const RetiredSchema& retired)
     if (root.value(QStringLiteral("name")).toString() != QLatin1String(retired.name)
         || root.value(QStringLiteral("keyed")).toObject() != retiredKeyed(retired.format))
         return false;
-    PatternDefinition def;
-    if (!LogPattern::deserializeDefinition(QString::fromUtf8(bytes), &def, true, false)
-        || def.blocks.size() != 1 || !def.linePrefix.isEmpty())
-        return false;
-    const PatternBlock& b = def.blocks.first();
-    return b.name == QLatin1String("Message") && b.matchKind == PatternBlock::MatchKind::Remainder
-        && b.leadingText.isEmpty() && b.closingText.isEmpty() && b.separator.isEmpty()
-        && b.customRegex.isEmpty() && !b.ignored;
+    // Блоки — один «Message» на всю строку (каноническая форма прежнего
+    // формата, SchemaConverter::canonicalBlocks).
+    static const QString expected = [] {
+        QString c;
+        SchemaConverter::canonicalBlocks(QStringLiteral(
+            R"({"version":3,"type":"dynamic-block-schema","linePrefix":"","blocks":[)"
+            R"({"name":"Message","kind":"remainder","leadingText":"","closingText":"",)"
+            R"("separator":"","customRegex":""}]})"), &c);
+        return c;
+    }();
+    QString canonical;
+    return SchemaConverter::canonicalBlocks(QString::fromUtf8(bytes), &canonical)
+        && canonical == expected;
 }
 
 struct ParsedSchema {
@@ -149,8 +160,10 @@ bool parseSchemaFile(const QByteArray& bytes, const QString& fallbackName,
         }
     }
 
-    PatternDefinition def;
-    if (!LogPattern::deserializeDefinition(text, &def, /*allowLegacy=*/true, strict))
+    // Прежний формат (версия 3): каноническая сериализация — для отпечатков
+    // манифеста; строгая проверка нужна только встроенной схеме.
+    QString blocksCanonical;
+    if (!SchemaConverter::canonicalBlocks(text, &blocksCanonical, strict))
         return false;
 
     QString embeddedName;
@@ -161,7 +174,7 @@ bool parseSchemaFile(const QByteArray& bytes, const QString& fallbackName,
     if (name)
         *name = embeddedName.isEmpty() ? fallbackName.trimmed() : embeddedName;
     if (canonical)
-        *canonical = LogPattern::serializeDefinition(def);
+        *canonical = blocksCanonical;
     return true;
 }
 
@@ -301,13 +314,28 @@ InstallReport install(const QString& sourceDir, const QString& targetDir)
         const QString path = target.filePath(file);
         QByteArray bytes;
         if (QFileInfo::exists(path)) {
-            if (!readFile(path, &bytes) || !isUntouchedRetired(bytes, retired))
+            if (!readFile(path, &bytes))
+                continue;
+            ParsedSchema onDisk;
+            const bool untouched = retired.format
+                ? isUntouchedRetired(bytes, retired)
+                : parseFileAt(path, &onDisk, false)
+                    && onDisk.fingerprint == record.value(QStringLiteral("fingerprint")).toString();
+            if (!untouched)
                 continue;   // изменена пользователем — его схема
             if (!QFile::remove(path)) {
                 report.errors << QStringLiteral("%1: cannot remove").arg(QDir::toNativeSeparators(path));
                 continue;
             }
             report.retired << file;
+            // Выбранная схема следует за заменой (как за обновлённой).
+            if (retired.replacedBy) {
+                QByteArray replacement;
+                ParsedSchema next;
+                if (readFile(source.filePath(QString::fromLatin1(retired.replacedBy)), &replacement)
+                    && parseSchemaFile(replacement, QString(), &next.name, &next.canonical, false))
+                    report.replaced.append({onDisk.canonical, next.canonical});
+            }
         }
         QJsonObject r;
         r.insert(QStringLiteral("state"), kStateRetired);

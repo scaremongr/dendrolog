@@ -3,7 +3,6 @@
 #include "fieldlayout.h"
 #include "linetemplate.h"
 #include "logmodel.h"
-#include "logpattern.h"
 #include "logscan.h"
 #include "logmodel.h"
 
@@ -48,7 +47,7 @@ void SchemaCandidates::setCatalogue(const SchemaStore::SchemaList& catalogue)
     m_catalogueExtractors.clear();
     m_catalogueExtractors.reserve(catalogue.size());
     for (const SchemaStore::SchemaEntry& entry : catalogue)
-        m_catalogueExtractors.append(FieldLayout::extractorFor(LogPattern(entry.schema)));
+        m_catalogueExtractors.append(FieldLayout::extractorFor(entry.schema));
 }
 
 void SchemaCandidates::setSource(LogModel* model, const LogFile* file)

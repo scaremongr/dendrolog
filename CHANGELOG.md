@@ -7,6 +7,34 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Field schemas are line templates, edited in a new schema editor.** A
+  schema is one line that looks like the log line:
+  `{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}` — text
+  stands as in the line, a field says where it ends by its kind (`time`,
+  `level`, `int`, `ip`, `quoted`, `word`, `of(a|b)`, `padded`, `width(N)`,
+  `words(N)`, `rest`, `/regex/`…); a template whose field end is not defined is
+  refused with an explanation. `Tools → Field Schemas…` opens a non-modal
+  editor: the template line with its error underlined in place, real lines of
+  the tab split into fields (each column header shows how many different
+  values it has, the tooltip the most frequent ones), the lines of the file
+  that did not match with the reason in words, the share of the file parsed,
+  *Find a Schema* as a panel, **Apply to Tab**, **Save**, **Save As…**, undo
+  and redo (`Ctrl+Z`), a question before closing with unsaved edits, and an
+  offer to rename a field in the filter rules and profiles that use it.
+  **New ▾** starts an empty schema, one from the sample lines, from a pasted
+  template or from a **Grok** expression. The built-in schemas are templates
+  (the two Syslog schemas are one now) and parse a line several times faster.
+- **Your schemas are converted on the first start.** Each schema file of the
+  earlier (block) format becomes a template under the same file name, with its
+  description and unknown keys; the original is kept in
+  `patterns/converted-from-v3/`. Untouched built-in schemas are replaced by the
+  new templates, ones you changed are converted like your own. Schemas saved in
+  sessions, file memory and `last-session.json` are read through the same
+  conversion, so a tab gets the same fields; the presets of the old editor
+  become schemas of the list. Column names stay the same, so filter rules on
+  them keep working. On lines a schema does not describe the result may differ
+  from before: a template stops at the first mismatch and gives the rest of the
+  line to the last field.
 - **JSON Lines and logfmt are a line format, not a schema.** The format of a
   file's lines is detected when it is opened, like its encoding: a JSON Lines
   or logfmt log opens with time, level and message taken from its keys and its
@@ -29,6 +57,9 @@ All notable changes to DendroLog are documented here. The format follows
   timestamp or level word could find (a rare custom format) no longer does.
 
 ### Removed
+- The block schema editor (block cards and separators), schema presets in the
+  INI file and the draft schema from a single line (**Suggest schema**): use
+  **New ▾ → From Sample Lines** or *Find a Schema*.
 - The built-in **JSON Lines** and **logfmt** schemas and the **Format** mode
   of the schema editor. An untouched built-in copy is removed on upgrade; one
   you edited stays and reads the whole line as `Message`; a tab, session or

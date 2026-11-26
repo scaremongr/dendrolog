@@ -800,7 +800,7 @@ private:
     // стор, — у модели (LogModel::fileSchemas), отсюда их ставит
     // applySchemaToModel; парсеры получают схему файла на старте прохода
     // (passSchema).
-    LogPattern m_pattern;
+    QString m_schemaDefinition; // определение схемы вкладки (шаблон, колонки формата строк)
     FieldLayout m_fieldLayout;
     FileSchemaPtr m_tabSchema;
     // Свои схемы файлов (F-5, PR 3): filePath → схема (только отличающиеся от

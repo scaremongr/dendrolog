@@ -1,7 +1,7 @@
 #ifndef PATTERNHEURISTICS_H
 #define PATTERNHEURISTICS_H
 
-#include "logpattern.h"
+#include "keyedline.h"
 
 #include <QString>
 #include <QStringList>
@@ -14,14 +14,14 @@
 // heuristic in the application:
 //
 //   • Canonical token sub-regexes (timestamp, level, hex, ip, path…)
-//     shared by LogPattern's regex generator and by LogParser's
-//     line classification, so the two never drift apart.
-//   • suggestSchema()  — "Auto-detect" magic: builds a draft
-//     PatternDefinition from one real log line.
-//   • definitionFromGrok() — translates a Logstash Grok expression
-//     (%{TIMESTAMP_ISO8601:time} %{LOGLEVEL:level} …) into blocks.
-//   • builtInPresets() — ready-made schema presets offered by the
-//     editor dialog next to user presets stored in the INI file.
+//     and detect patterns — the reference the hand-written scanners of
+//     LineClassifier and the line-template kinds are pinned against
+//     (tests/lineindex_smoke), so the two never drift apart.
+//   • detectLineFormat() / suggestKeyedDefinition() — "is this line JSON /
+//     logfmt" and the keys of a file's line format.
+// The draft schema from one line (suggestSchema), Grok import and the
+// presets went with the block model (F-17, step 9): drafts come from
+// SchemaInference, Grok — SchemaConverter::fromGrok.
 // ============================================================
 
 namespace PatternHeuristics {
@@ -77,14 +77,6 @@ QString monthNameRegex();
 // (1) = level word.
 QString levelDetectPattern();
 
-// ---- Auto-detect ---------------------------------------------- //
-
-// Builds a draft schema from a single real log line.
-// Never fails: worst case is a single Remainder("Message") block.
-// JSON и logfmt — формат строк файла (lineformat.h, F-17, шаг 7), а не
-// схема: строка такого вида получает обычный черновик блоков.
-PatternDefinition suggestSchema(const QString& sampleLine);
-
 // ---- Ключевая схема по образцам (F-4, PR 4) --------------------- //
 
 // Единственное место правила «как выглядит строка JSON / logfmt»:
@@ -112,25 +104,6 @@ bool suggestKeyedDefinition(const QStringList& sampleLines, KeyedDefinition* def
 // берёт > 0,5). Кнопка редактора «Add keys from sample».
 QStringList keyedSampleKeys(const QStringList& sampleLines, const KeyedDefinition& definition,
                             double minShare = 0.0);
-
-// ---- Grok ------------------------------------------------------ //
-
-// Translates a Grok expression into a PatternDefinition.
-// Returns false only when the input contains no %{...} tokens at all.
-// Unknown pattern names degrade to TextUntilSeparator and are listed
-// in *warnings (one line per unknown name) when the pointer is given.
-bool definitionFromGrok(const QString& grokExpression,
-                        PatternDefinition* definition,
-                        QString* warnings = nullptr);
-
-// ---- Presets ---------------------------------------------------- //
-
-struct Preset {
-    QString           name;
-    PatternDefinition definition;
-};
-
-QVector<Preset> builtInPresets();
 
 } // namespace PatternHeuristics
 

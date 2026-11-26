@@ -25,7 +25,9 @@
 #include "fieldschemacontroller.h"
 #include "filterruleset.h"
 #include "logmodel.h"
-#include "logpattern.h"
+#include "linetemplate.h"
+#include "schemaconverter.h"
+#include "v3schema.h"
 #include "logviewwidget.h"
 #include "LogListView.h"
 #include "schemastore.h"
@@ -54,27 +56,14 @@ static int failures = 0;
 // Схема фикстур (Timestamp, Thread, Level, Message) с другими именами колонок.
 static QString schemaNamed(const QString& level, const QString& message)
 {
-    PatternDefinition def;
-    def.blocks = {
-        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
-        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Thread"),
-                     QStringLiteral("["), QStringLiteral("]")),
-        patternBlock(PatternBlock::MatchKind::Level, level, QString(), QString(),
-                     QStringLiteral("-")),
-        patternBlock(PatternBlock::MatchKind::Remainder, message),
-    };
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(QStringLiteral("{Timestamp:time} [{Thread}] {%1:level} {?- ?}{%2}")
+                                              .arg(level, message));
 }
 
 // Метка и остаток строки — ни одной колонки фикстурной схемы.
 static QString schemaRest()
 {
-    PatternDefinition def;
-    def.blocks = {
-        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("When")),
-        patternBlock(PatternBlock::MatchKind::Remainder, QStringLiteral("Rest")),
-    };
-    return LogPattern::serializeDefinition(def);
+    return LineTemplateSchema::definition(QStringLiteral("{When:time} {Rest}"));
 }
 
 static const char* levelOf(int i)
@@ -170,7 +159,10 @@ struct ConfigDir {
 static void checkMigrationAndBuiltins()
 {
     ConfigDir config;
-    const QString legacy = schemaNamed(QStringLiteral("Level"), QStringLiteral("Message"));
+    // Список прежних версий — схемы версии 3 (блоки): перевод в шаблоны
+    // (F-17, шаг 9) тем же конвертером, что каталог.
+    const QString legacy = v3schema::fixtureDefinition();
+    const QString converted = SchemaConverter::upgradeDefinition(legacy);
     {
         QSettings s(config.ini(), QSettings::IniFormat);
         s.beginGroup(QStringLiteral("View"));
@@ -180,6 +172,11 @@ static void checkMigrationAndBuiltins()
         s.setValue(QStringLiteral("fieldFilterEnabled"), true);
         // Маска версий до имён: колонки 2 и 3 (Level, Message).
         s.setValue(QStringLiteral("fieldVisibilityMask"), (1 << 2) | (1 << 3));
+        s.endGroup();
+        // Пресеты прежнего редактора — один раз схемами каталога (F-17, шаг 9).
+        s.beginGroup(QStringLiteral("PatternPresets"));
+        s.setValue(QStringLiteral("names"), QStringList{QStringLiteral("My preset"), QStringLiteral("Same as Old")});
+        s.setValue(QStringLiteral("values"), QStringList{v3schema::fixtureDefinition(QStringLiteral("Severity")), legacy});
         s.endGroup();
     }
     FieldSchemaController c;
@@ -194,6 +191,19 @@ static void checkMigrationAndBuiltins()
         s.endGroup();
     }
     CHECK(catalogueSignals >= 1, "load announces the catalogue");
+    {
+        QSettings s(config.ini(), QSettings::IniFormat);
+        CHECK(!s.childGroups().contains(QStringLiteral("PatternPresets")), "the presets group is gone from the INI");
+    }
+    {
+        const int preset = indexOf(c.schemas(), QStringLiteral("My preset"));
+        CHECK(preset >= 0 && FieldLayout::isTemplateDefinition(c.schemas()[preset].schema)
+                  && c.schemas()[preset].schema
+                         == SchemaConverter::upgradeDefinition(v3schema::fixtureDefinition(QStringLiteral("Severity"))),
+              "a user preset becomes a schema of the catalogue (a line template)");
+        CHECK(indexOf(c.schemas(), QStringLiteral("Same as Old")) < 0,
+              "a preset equal to a schema of the catalogue is not added twice");
+    }
     const int old = indexOf(c.schemas(), QStringLiteral("Old"));
     CHECK(old >= 0, "migrated schema is in the catalogue");
     CHECK(QFileInfo::exists(QDir(SchemaStore::patternsDir()).filePath(QStringLiteral("Old.json"))),
@@ -202,7 +212,11 @@ static void checkMigrationAndBuiltins()
               && indexOf(c.schemas(), QStringLiteral("JSON Lines")) < 0
               && indexOf(c.schemas(), QStringLiteral("logfmt")) < 0,
           "built-in schemas are installed; JSON Lines and logfmt are line formats, not schemas");
-    CHECK(c.activeIndex() == old && c.activeSchema() == legacy, "active schema found by its text");
+    CHECK(FieldLayout::isTemplateDefinition(converted) && old >= 0 && c.schemas()[old].schema == converted,
+          "the migrated schema is a line template");
+    CHECK(QFileInfo::exists(QDir(SchemaStore::patternsDir()).filePath(QStringLiteral("converted-from-v3/Old.json"))),
+          "the original of the migrated schema is kept in converted-from-v3/");
+    CHECK(c.activeIndex() == old && c.activeSchema() == converted, "active schema found by its text");
     CHECK(c.activeSchemaName() == QLatin1String("Old"), "active schema name for sessions");
     CHECK(c.showFields() && c.fieldDisplayEnabled(), "Filter blocks restored");
     CHECK(c.visibleFieldNames() == (QStringList{QStringLiteral("Level"), QStringLiteral("Message")}),
@@ -229,7 +243,7 @@ static void checkMigrationAndBuiltins()
     for (const auto& e : again.schemas())
         namesAgain << e.name;
     CHECK(names == namesAgain, "catalogue order survives a restart");
-    CHECK(again.activeIndex() == c.activeIndex() && again.activeSchema() == legacy,
+    CHECK(again.activeIndex() == c.activeIndex() && again.activeSchema() == converted,
           "active schema survives a restart");
     CHECK(again.visibleFieldNames() == c.visibleFieldNames() && again.showFields(),
           "column choice and Filter blocks survive a restart");
