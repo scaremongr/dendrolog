@@ -1,4 +1,5 @@
 #include "searchresultscontroller.h"
+#include "bookmarkstore.h"
 #include "logmodel.h"
 
 #include <QTimer>
@@ -37,6 +38,8 @@ void SearchResultsController::setSource(LogModel* source)
     m_source = source;
     // Метки и цвета файлов выдачи — те же, что у вкладки-источника (S-14).
     m_results->setFileLabelSource(source);
+    // Отметки закладок — закладки источника (U-19).
+    m_results->setBookmarkSource(source);
     if (!source)
         return;
 
@@ -173,4 +176,33 @@ void SearchResultsController::onSourceDataChanged(int first, int last, const QLi
     if (roles.contains(Qt::DisplayRole))
         mirrorFieldDisplay();
     // Остальные роли (IsNewRole, маркеры, плашки файлов) выдачу не меняют.
+}
+
+int SearchResultsController::sourceRowOf(int resultRow) const
+{
+    if (!m_source || resultRow < 0 || resultRow >= m_results->rowCount())
+        return -1;
+    const RecordKey key = m_results->keyAt(resultRow);
+    return key.isValid() ? m_source->rowForKey(key) : -1;
+}
+
+std::optional<bool> SearchResultsController::toggleBookmark(int resultRow)
+{
+    const int row = sourceRowOf(resultRow);
+    if (row < 0)
+        return std::nullopt;
+    return m_source->bookmarks().toggle(row);
+}
+
+int SearchResultsController::addBookmark(int resultRow, bool* created)
+{
+    const int row = sourceRowOf(resultRow);
+    if (row < 0)
+        return -1;
+    BookmarkStore& store = m_source->bookmarks();
+    const int before = store.count();
+    const int id = store.add(row);
+    if (created)
+        *created = id >= 0 && store.count() > before;
+    return id;
 }

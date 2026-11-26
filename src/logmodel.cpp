@@ -278,6 +278,10 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
         return color.isValid() ? QVariant(color) : QVariant();
     }
     case BookmarkRole:
+        if (m_bookmarkSource) {
+            const BookmarkStore& marks = m_bookmarkSource->bookmarks();
+            return !marks.isEmpty() && marks.idForKey(keyAt(index.row())) >= 0;
+        }
         return m_bookmarks->isBookmarkedRow(index.row());
     case AnsiStyleRole: {
         AnsiStyles styles = m_store->ansiStylesAt(index.row());
@@ -294,6 +298,23 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     default:
         return QVariant();
     }
+}
+
+void LogModel::setBookmarkSource(LogModel* source)
+{
+    if (source == this)
+        source = nullptr;
+    if (source == m_bookmarkSource)
+        return;
+    disconnect(m_bookmarkSourceConnection);
+    m_bookmarkSource = source;
+    if (source)
+        m_bookmarkSourceConnection = connect(&source->bookmarks(), &BookmarkStore::markChanged, this,
+                                             [this](const RecordKey& key) {
+            notifyBookmarkRow(rowForKey(key));
+        });
+    if (rowCount() > 0)
+        emit dataChanged(index(0, 0), index(rowCount() - 1, 0), { int(BookmarkRole) });    emit bookmarkSourceChanged();
 }
 
 void LogModel::notifyBookmarkRow(int row)

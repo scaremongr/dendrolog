@@ -110,6 +110,9 @@ public:
     // Живая закладка на видимой строке; -1 — нет. O(1).
     int idAtRow(int row) const;
     bool isBookmarkedRow(int row) const { return idAtRow(row) >= 0; }
+    // Живая закладка на строке с ключом key; -1 — нет. O(1). Им выдача
+    // Search (U-19) спрашивает закладку строки источника.
+    int idForKey(const RecordKey& key) const;
 
     // ---- Правка ---------------------------------------------------------------------
     // Поставить закладку на видимую строку; id новой либо уже стоящей. Закладка,
@@ -178,6 +181,10 @@ signals:
     // Набор закладок, заметка или проверка изменились (не на каждый фильтр:
     // статус Visible/Hidden панель пересчитывает по сигналам модели сама).
     void changed();
+    // Отметка закладки строки key могла смениться (поставлена, снята,
+    // найдена после перезагрузки). Ключ, а не номер ряда: выдача Search
+    // (U-19) находит свой ряд rowForKey — O(log N) на правку, без прохода.
+    void markChanged(const RecordKey& key);
 
 protected:
     LocatedPlace* placeById(int id) override;
@@ -190,7 +197,8 @@ private:
     using LineKey = std::pair<const LogFile*, qint64>;
 
     static LineKey lineKey(const Bookmark& b) { return { b.key.file.get(), b.line }; }
-    void notifyRow(int row);
+    // Перерисовать отметку строки key: ряд модели и markChanged.
+    void notifyKey(const RecordKey& key);
     void scheduleChanged();
     // Привязать закладку к строке row (постановка, повторная постановка):
     // ключ, идентификатор, слежение за недописанной строкой, источник.

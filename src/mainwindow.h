@@ -166,6 +166,8 @@ private slots:
     void onLevelJumpProgress(LogLevelMask levels, bool forward, int percent);
     void onLevelJumpFinished(LogLevelMask levels, LogViewWidget::LevelJumpOutcome outcome);
     void onBookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOutcome outcome);
+    // Ctrl+F2 и меню строки выдачи Search (U-19): закладка строки источника.
+    void toggleSearchResultBookmark(int resultRow);
     void editBookmarkNote(int bookmarkId, bool created);
     // Пункт контекстного меню лога над выделенным текстом: найти его,
     // добавить правило фильтра или маркер и применить к активной вкладке.

@@ -54,6 +54,12 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **Bookmarks in the Search panel.** A result line shows the ribbon of its
+  bookmark in the tab, its context menu has **Add Bookmark / Remove Bookmark**
+  and **Add Bookmark with Note… / Edit Bookmark Note…**, and `Ctrl+F2` with
+  the results focused bookmarks the tab line of the selected result. The
+  bookmark is the tab's: the log and the Bookmarks panel show it at once, and
+  a bookmark set or removed there shows in the results at once.
 - **Find a Schema.** `Tools → Find a Schema…` (and **Find…** in the *Log
   Fields* panel) offers ways to split the lines of the active tab into fields,
   each with the share of record lines it parses: the best schemas from your
