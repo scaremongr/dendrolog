@@ -116,16 +116,79 @@ QKeySequence ShortcutManager::sequence(const QString& id) const
 // ---------------------------------------------------------------------------
 void ShortcutManager::setSequence(const QString& id, const QKeySequence& seq)
 {
-    const QKeySequence current = sequence(id);
-    if (current == seq)
-        return;
-
-    if (seq == defaultSequence(id))
-        m_overrides.remove(id);   // back to default → no stored override
-    else
+    // Сравнение — с сохранённым переопределением, а не с sequence(): у
+    // команды, уступившей умолчание (U-20), sequence() пусто, но явный
+    // выбор «без сочетания» обязан сохраниться, иначе команда получит
+    // умолчание обратно, как только держатель его отпустит.
+    if (seq == defaultSequence(id)) {
+        if (!m_overrides.remove(id))
+            return;   // back to default → no stored override
+    } else {
+        const auto it = m_overrides.constFind(id);
+        if (it != m_overrides.constEnd() && it.value() == seq)
+            return;
         m_overrides.insert(id, seq);
+    }
 
     emit shortcutsChanged();
+}
+
+// ---------------------------------------------------------------------------
+ShortcutManager::Assignment ShortcutManager::assignment() const
+{
+    Assignment a;
+    for (const Command& c : m_commands)
+        a.insert(c.id, sequence(c.id));
+    return a;
+}
+
+// ---------------------------------------------------------------------------
+bool ShortcutManager::isYielded(const QString& id) const
+{
+    return !m_overrides.contains(id) && !defaultSequence(id).isEmpty() && sequence(id).isEmpty();
+}
+
+// ---------------------------------------------------------------------------
+QString ShortcutManager::defaultHolder(const QString& id, const Assignment& a) const
+{
+    const QKeySequence def = defaultSequence(id);
+    if (def.isEmpty() || !a.value(id).isEmpty())
+        return QString();
+    // Порядок команд, а не хэша: ответ один и тот же при любом наполнении.
+    for (const Command& c : m_commands)
+        if (c.id != id && a.value(c.id) == def)
+            return c.id;
+    return QString();
+}
+
+// ---------------------------------------------------------------------------
+ShortcutManager::Restore ShortcutManager::restoreDefault(const QString& id,
+                                                         const Assignment& a) const
+{
+    Restore r;
+    r.result = a;
+    const QKeySequence def = defaultSequence(id);
+    r.result.insert(id, def);
+    if (def.isEmpty())
+        return r;
+    // Держатель обычно один; два — неразрешённый конфликт полей Settings:
+    // сочетание снимается со всех, в ответе — первый по порядку команд.
+    for (const Command& c : m_commands) {
+        if (c.id == id || a.value(c.id) != def)
+            continue;
+        QKeySequence own = c.defaultSeq;
+        if (own == def)
+            own = QKeySequence();
+        for (auto it = r.result.constBegin(); !own.isEmpty() && it != r.result.constEnd(); ++it)
+            if (it.key() != c.id && it.value() == own)
+                own = QKeySequence();
+        r.result.insert(c.id, own);
+        if (r.holder.isEmpty()) {
+            r.holder = c.id;
+            r.holderKeys = own;
+        }
+    }
+    return r;
 }
 
 // ---------------------------------------------------------------------------

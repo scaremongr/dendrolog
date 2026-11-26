@@ -341,7 +341,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
   - **Appearance** — window theme, monospaced font family and size (live preview), default word wrap.
   - **Colors** — log-level, syntax, selection and UI colours.
   - **AI** — AI suggestions of field schemas: on or off (off by default), the model, the API key (see *Find a schema*).
-  - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved.
+  - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved. When a newer version gives a command a default shortcut you had already assigned to another command, the key stays with your command and the new one is left empty; its field says so ("Default Alt+Left is assigned to “Go to line or time…”"). The ↺ button next to a field that differs from its default restores that one default; its tooltip tells what happens to the command holding the key — it gets its own default back, or is left without a shortcut if that one is taken too.
 - **Theme** (**Settings → Appearance → Theme**): **Same as system** follows the light or dark theme of the operating system and switches with it (the default); **Light** and **Dark** keep the window that way whatever the system uses. The choice applies at once, without a restart, and is remembered. The colours of the **Colors** tab are one set shared by both themes.
 
 ---

@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 // ---------------------------------------------------------------------------
@@ -202,7 +203,16 @@ void SettingsDialog::buildShortcutsTab()
     form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
     for (const auto& cmd : mgr.commands()) {
-        auto* edit = new QKeySequenceEdit(content);
+        auto* cell = new QWidget(content);
+        auto* cellBox = new QVBoxLayout(cell);
+        cellBox->setContentsMargins(0, 0, 0, 0);
+        cellBox->setSpacing(1);
+        auto* line = new QHBoxLayout;
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(3);
+        cellBox->addLayout(line);
+
+        auto* edit = new QKeySequenceEdit(cell);
         edit->setObjectName(QStringLiteral("shortcut_") + cmd.id);
         edit->setKeySequence(mgr.sequence(cmd.id));
         // A single combination is enough for application shortcuts.
@@ -211,11 +221,29 @@ void SettingsDialog::buildShortcutsTab()
         // Backspace/Delete are recorded as the new combination.
         edit->setClearButtonEnabled(true);
         connect(edit, &QKeySequenceEdit::keySequenceChanged,
-                this, [this]() { updateShortcutConflicts(); });
+                this, [this]() { updateShortcutConflicts(); updateShortcutNotes(); });
+        line->addWidget(edit, 1);
 
-        m_shortcutRows.append({ cmd.id, edit, edit->keySequence() });
+        // U-20: вернуть умолчание этой одной команде (и сказать, что станет
+        // с командой, которая его держит).
+        auto* restore = new QToolButton(cell);
+        restore->setObjectName(QStringLiteral("restoreShortcut_") + cmd.id);
+        restore->setText(QStringLiteral("\u21BA"));
+        restore->setAutoRaise(true);
+        const QString id = cmd.id;
+        connect(restore, &QToolButton::clicked, this, [this, id]() { restoreShortcutDefault(id); });
+        line->addWidget(restore);
+
+        auto* note = new MutedLabel(QString(), cell);
+        note->setObjectName(QStringLiteral("shortcutNote_") + cmd.id);
+        note->setWordWrap(true);
+        note->hide();
+        cellBox->addWidget(note);
+
+        m_shortcutRows.append({ cmd.id, edit, edit->keySequence(), restore, note,
+                                mgr.isYielded(cmd.id) });
         m_shortcutLabels.insert(cmd.id, cmd.label);
-        form->addRow(new QLabel(cmd.label, content), edit);
+        form->addRow(new QLabel(cmd.label, content), cell);
     }
 
     ui->shortcutsScrollArea->setWidget(content);
@@ -231,7 +259,106 @@ void SettingsDialog::buildShortcutsTab()
 
     connect(ui->resetShortcutsButton, &QPushButton::clicked,
             this, &SettingsDialog::resetShortcutsToDefaults);
+    ui->resetShortcutsButton->setToolTip(
+        tr("Give every command its default shortcut. Shortcuts you assigned yourself are removed."));
     updateShortcutConflicts();
+    updateShortcutNotes();
+}
+
+// ---------------------------------------------------------------------------
+QHash<QString, QKeySequence> SettingsDialog::shortcutWorkingCopy() const
+{
+    QHash<QString, QKeySequence> a;
+    for (const ShortcutRow& row : m_shortcutRows)
+        a.insert(row.id, row.edit->keySequence());
+    return a;
+}
+
+// ---------------------------------------------------------------------------
+// U-20. Сочетание по умолчанию, которое пользователь отдал другой команде,
+// у своей команды пустое (ShortcutManager::sequence). Под таким полем —
+// подпись «Default Alt+← is assigned to “Go to line or time…”», у «↺» —
+// что будет при возврате с обеими командами. Считается по полям диалога,
+// а не по действующим сочетаниям: правка видна сразу, до OK.
+// ---------------------------------------------------------------------------
+void SettingsDialog::updateShortcutNotes()
+{
+    const ShortcutManager& mgr = ShortcutManager::instance();
+    const QHash<QString, QKeySequence> a = shortcutWorkingCopy();
+    // Уступившая команда, чьё умолчание в полях освободилось (держатель
+    // получил другое сочетание или «↺» на своей строке), получает его в поле:
+    // после OK ShortcutManager отдал бы его ей сам, а поле осталось бы пустым.
+    const auto freed = [&](const ShortcutRow& row) {
+        if (!row.yielded || row.edit->keySequence() != row.initial)
+            return false;
+        const QKeySequence def = mgr.defaultSequence(row.id);
+        for (auto it = a.constBegin(); it != a.constEnd(); ++it)
+            if (it.key() != row.id && it.value() == def)
+                return false;
+        return true;
+    };
+    QVector<QKeySequenceEdit*> fill;
+    QVector<QKeySequence> fillKeys;
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows))
+        if (freed(row)) {
+            fill << row.edit;
+            fillKeys << mgr.defaultSequence(row.id);
+        }
+    if (!fill.isEmpty()) {
+        for (int i = 0; i < fill.size(); ++i)
+            fill[i]->setKeySequence(fillKeys[i]);   // keySequenceChanged обновит всё заново
+        return;
+    }
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
+        const QKeySequence def = mgr.defaultSequence(row.id);
+        const QString defText = def.toString(QKeySequence::NativeText);
+        const QString holder = mgr.defaultHolder(row.id, a);
+        const QString noteText = holder.isEmpty() ? QString()
+            : tr("Default %1 is assigned to “%2”.")
+                  .arg(defText, m_shortcutLabels.value(holder));
+        row.note->setText(noteText);
+        row.note->setVisible(!noteText.isEmpty());
+        if (!noteText.isEmpty() && row.edit->toolTip().isEmpty())
+            row.edit->setToolTip(noteText);
+
+        const bool atDefault = row.edit->keySequence() == def;
+        row.restore->setVisible(!atDefault);
+        if (atDefault)
+            continue;
+        const ShortcutManager::Restore r = mgr.restoreDefault(row.id, a);
+        QString tip = def.isEmpty() ? tr("Restore the default: no shortcut.")
+                                    : tr("Restore the default %1.").arg(defText);
+        if (!r.holder.isEmpty()) {
+            const QString holderLabel = m_shortcutLabels.value(r.holder);
+            tip += QLatin1Char(' ') + (r.holderKeys.isEmpty()
+                ? tr("“%1” loses it and is left without a shortcut.").arg(holderLabel)
+                : tr("“%1” loses it and gets its own default %2 back.")
+                      .arg(holderLabel, r.holderKeys.toString(QKeySequence::NativeText)));
+        }
+        // Держатель уступленного умолчания возвращается к своему: клавишу
+        // получит уступившая команда.
+        for (const ShortcutRow& other : std::as_const(m_shortcutRows)) {
+            if (&other == &row || !other.yielded || other.edit->keySequence() != other.initial)
+                continue;
+            const QKeySequence otherDef = mgr.defaultSequence(other.id);
+            if (otherDef == row.edit->keySequence() && r.result.value(row.id) != otherDef)
+                tip += QLatin1Char(' ') + tr("“%1” gets its default %2 back.")
+                           .arg(m_shortcutLabels.value(other.id), otherDef.toString(QKeySequence::NativeText));
+        }
+        row.restore->setToolTip(tip);
+    }
+}
+
+// ---------------------------------------------------------------------------
+void SettingsDialog::restoreShortcutDefault(const QString& id)
+{
+    const ShortcutManager::Restore r =
+        ShortcutManager::instance().restoreDefault(id, shortcutWorkingCopy());
+    for (const ShortcutRow& row : std::as_const(m_shortcutRows)) {
+        const QKeySequence seq = r.result.value(row.id);
+        if (row.edit->keySequence() != seq)
+            row.edit->setKeySequence(seq);   // keySequenceChanged обновит подписи
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +791,9 @@ void SettingsDialog::applyToSettings()
 // ---------------------------------------------------------------------------
 void SettingsDialog::accept()
 {
-    if (!updateShortcutConflicts().isEmpty()) {
+    const bool clash = !updateShortcutConflicts().isEmpty();
+    updateShortcutNotes();   // updateShortcutConflicts сбросил подсказки полей
+    if (clash) {
         ui->tabWidget->setCurrentWidget(ui->shortcutsTab);
         QMessageBox::warning(this, tr("Settings"),
             tr("Some shortcuts are assigned to more than one command. "

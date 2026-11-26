@@ -10,6 +10,7 @@
 // Forward declarations
 class QLabel;
 class QPushButton;
+class QToolButton;
 class QKeySequenceEdit;
 class QSpinBox;
 class QComboBox;
@@ -71,6 +72,14 @@ private:
         // другой команде (ShortcutManager::sequence), стало бы пустым
         // переопределением навсегда, едва та команда освободит клавишу.
         QKeySequence initial;
+        // U-20: «↺» — вернуть сочетание по умолчанию (виден, пока поле от
+        // него отличается) и подпись «сочетание по умолчанию у команды Y».
+        QToolButton*      restore = nullptr;
+        QLabel*           note = nullptr;
+        // Пусто при открытии потому, что умолчание держит другая команда
+        // (ShortcutManager::isYielded): отпустит его в полях — поле само
+        // получит умолчание, как получило бы после OK.
+        bool              yielded = false;
     };
 
     // ---- Helpers -----------------------------------------------------------
@@ -80,6 +89,11 @@ private:
     // Highlights shortcuts bound to more than one command; returns the
     // clashes ("keys — command, command"), empty when there are none.
     QStringList updateShortcutConflicts();
+    // Рабочая копия сочетаний (поля диалога) для ShortcutManager.
+    QHash<QString, QKeySequence> shortcutWorkingCopy() const;
+    // U-20: подписи уступленных сочетаний и подсказки кнопок «↺».
+    void updateShortcutNotes();
+    void restoreShortcutDefault(const QString& id);
     void buildPerformanceControls();
     // Память файлов (R-4): «помнить состояние файлов» и «Clear Memory».
     void buildFileMemoryControls();

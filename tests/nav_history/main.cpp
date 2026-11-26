@@ -913,6 +913,57 @@ static void checkShortcuts()
     CHECK(sm.sequence(QStringLiteral("navigateBack")).isEmpty()
               && sm.sequence(QStringLiteral("goTo")) == QKeySequence(Qt::ALT | Qt::Key_Left),
           QStringLiteral("переназначенное пользователем сочетание остаётся у его команды"));
+    // U-20: кто держит уступленное сочетание и что даёт «вернуть по умолчанию».
+    {
+        using A = ShortcutManager::Assignment;
+        const QString back = QStringLiteral("navigateBack");
+        const QString goTo = QStringLiteral("goTo");
+        A a = sm.assignment();
+        CHECK(sm.defaultHolder(back, a) == goTo,
+              QStringLiteral("Alt+← у «Go to»: %1").arg(sm.defaultHolder(back, a)));
+        CHECK(sm.defaultHolder(goTo, a).isEmpty() && sm.defaultHolder(QStringLiteral("open"), a).isEmpty(),
+              QStringLiteral("у остальных команд ничего не уступлено"));
+        ShortcutManager::Restore r = sm.restoreDefault(back, a);
+        CHECK(r.holder == goTo && r.holderKeys == sm.defaultSequence(goTo)
+                  && r.result.value(back) == QKeySequence(Qt::ALT | Qt::Key_Left)
+                  && r.result.value(goTo) == QKeySequence(Qt::CTRL | Qt::Key_G),
+              QStringLiteral("возврат: «назад» — Alt+←, «Go to» — снова Ctrl+G"));
+        CHECK(sm.defaultHolder(back, r.result).isEmpty() && sm.defaultHolder(goTo, r.result).isEmpty(),
+              QStringLiteral("после возврата ничего не уступлено"));
+        for (auto it = r.result.constBegin(); it != r.result.constEnd(); ++it)
+            if (it.key() != back && it.key() != goTo)
+                CHECK(it.value() == a.value(it.key()), QStringLiteral("остальные не тронуты: %1").arg(it.key()));
+        // Своё умолчание держателя тоже занято — он остаётся без сочетания.
+        A b = a;
+        b.insert(QStringLiteral("open"), QKeySequence(Qt::CTRL | Qt::Key_G));
+        r = sm.restoreDefault(back, b);
+        CHECK(r.holder == goTo && r.holderKeys.isEmpty() && r.result.value(goTo).isEmpty()
+                  && r.result.value(QStringLiteral("open")) == QKeySequence(Qt::CTRL | Qt::Key_G),
+              QStringLiteral("умолчание держателя занято — держатель без сочетания, без каскада"));
+        // Сочетание по умолчанию свободно: возврат никого не задевает.
+        A c = a;
+        c.insert(goTo, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_G));
+        c.insert(back, QKeySequence());
+        CHECK(sm.defaultHolder(back, c).isEmpty(), QStringLiteral("пустое поле без держателя — не уступлено"));
+        r = sm.restoreDefault(back, c);
+        CHECK(r.holder.isEmpty() && r.result.value(back) == QKeySequence(Qt::ALT | Qt::Key_Left),
+              QStringLiteral("свободное умолчание возвращается без держателя"));
+        // Применённый возврат — как в Settings: изменённые команды через setSequence.
+        r = sm.restoreDefault(back, a);
+        sm.setSequence(back, r.result.value(back));
+        sm.setSequence(goTo, r.result.value(goTo));
+        CHECK(sm.assignment() == r.result, QStringLiteral("возврат, применённый к менеджеру, = расчёт"));
+        sm.setSequence(goTo, QKeySequence(Qt::ALT | Qt::Key_Left));
+        CHECK(sm.isYielded(back) && !sm.isYielded(goTo), QStringLiteral("«назад» уступила умолчание"));
+        // Явное «без сочетания» у уступившей команды сохраняется: держатель
+        // отпустил клавишу — она не возвращается.
+        sm.setSequence(back, QKeySequence());
+        CHECK(!sm.isYielded(back), QStringLiteral("явный выбор «без сочетания» — не уступка"));
+        sm.setSequence(goTo, sm.defaultSequence(goTo));
+        CHECK(sm.sequence(back).isEmpty(), QStringLiteral("явно снятое сочетание не возвращается"));
+        sm.setSequence(back, sm.defaultSequence(back));
+        sm.setSequence(goTo, QKeySequence(Qt::ALT | Qt::Key_Left));
+    }
     sm.setSequence(QStringLiteral("goTo"), sm.defaultSequence(QStringLiteral("goTo")));
     CHECK(sm.sequence(QStringLiteral("navigateBack")) == QKeySequence(Qt::ALT | Qt::Key_Left),
           QStringLiteral("переназначение снято — сочетание вернулось"));
