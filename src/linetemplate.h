@@ -152,6 +152,13 @@ struct LineTemplateSchema {
     /// false — не файл шаблона (другая версия или тип, битый JSON, нет имени
     /// или шаблона); шаблон при этом НЕ проверяется — это LineTemplate.
     static bool read(const QByteArray& json, LineTemplateSchema* out, QString* error = nullptr);
+    /// Определение схемы-шаблона (F-17, шаг 3: каталог SchemaStore, состояния
+    /// вкладок): JSON версии 4 с типом line-template и непустым шаблоном,
+    /// имя не обязательно. false — не определение шаблона.
+    static bool templateOf(const QString& definition, QString* templateText);
+    /// Каноническое определение: {"type":"line-template","version":4,
+    /// "template":…} компактно — как SchemaEntry::schema блочной схемы.
+    static QString definition(const QString& templateText);
 };
 
 class LineTemplate {

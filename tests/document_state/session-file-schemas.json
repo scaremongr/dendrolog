@@ -134,7 +134,7 @@
                     }
                 },
                 "fields": {
-                    "extraction": true,
+                    "showFields": true,
                     "schema": {
                         "definition": {
                             "blocks": [

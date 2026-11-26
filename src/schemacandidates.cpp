@@ -1,5 +1,6 @@
 #include "schemacandidates.h"
 
+#include "fieldlayout.h"
 #include "linetemplate.h"
 #include "logmodel.h"
 #include "logpattern.h"
@@ -47,8 +48,7 @@ void SchemaCandidates::setCatalogue(const SchemaStore::SchemaList& catalogue)
     m_catalogueExtractors.clear();
     m_catalogueExtractors.reserve(catalogue.size());
     for (const SchemaStore::SchemaEntry& entry : catalogue)
-        m_catalogueExtractors.append(std::make_shared<LegacyPatternExtractor>(
-            std::make_shared<const LogPattern>(entry.schema)));
+        m_catalogueExtractors.append(FieldLayout::extractorFor(LogPattern(entry.schema)));
 }
 
 void SchemaCandidates::setSource(LogModel* model, const LogFile* file)
@@ -483,8 +483,7 @@ QString SchemaCandidates::saveTemplate(int variant, const QString& name, QString
     if (dir.isEmpty())
         return fail(tr("The schemas folder could not be created."));
 
-    // Имена каталога и уже лежащих файлов версии 4 (каталог их пока не
-    // читает — шаг 3 F-17 — но занятые имена учитываются).
+    // Имена каталога и уже лежащих файлов (и тех, что каталог не прочёл).
     QSet<QString> taken;
     for (const SchemaStore::SchemaEntry& entry : m_catalogue)
         taken.insert(entry.name.toCaseFolded());

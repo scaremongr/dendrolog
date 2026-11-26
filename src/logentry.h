@@ -3,7 +3,6 @@
 
 #include <QString>
 #include <QDateTime>
-#include <atomic>
 #include <limits>
 #include "logfile.h"
 #include "logfield.h"
@@ -62,24 +61,17 @@ public:
     // Источник (файл)
     const LogFilePtr& sourceFile() const { return m_sourceFile; }
 
-    // Structured fields extracted from message by LogPattern::extractFields().
-    // Offsets are into `message()`; isEmpty() == true for continuation lines.
-    const LogEntryFields& fields() const { return m_fields; }
-    // Единственные мутаторы — поля по схеме. У опубликованной записи (она уже
-    // в модели) только на GUI-потоке и при остановленных фоновых фильтрах:
-    // воркеры фильтра, статистики и таймлайна читают поля без синхронизации.
-    // Фоновое переизвлечение (FieldReextraction) пишет не сюда, а в свой
-    // буфер и ставит поля swapFields'ом на GUI-потоке.
-    void setFields(LogEntryFields fields)
-    {
-        m_fields = std::move(fields);
-        m_hasFields.store(!m_fields.isEmpty(), std::memory_order_relaxed);
-    }
-    void swapFields(LogEntryFields& fields)
-    {
-        std::swap(m_fields, fields);
-        m_hasFields.store(!m_fields.isEmpty(), std::memory_order_relaxed);
-    }
+    // Первая строка логической записи этой строки (F-17, шаг 3); nullptr —
+    // строка сама первая. Правило фильтра по полю решается по полям первой
+    // строки записи (FieldRecordCursor), и строке-продолжению нужен её текст,
+    // даже если первая строка не попала в проход (дозапись посреди записи,
+    // поисковая база из видимых строк). Ставит парсер до публикации записи.
+    // Полей в записи нет: поля — функция текста и схемы (FieldSource).
+    const std::shared_ptr<const LogEntry>& recordHead() const { return m_head; }
+    void setRecordHead(std::shared_ptr<const LogEntry> head) { m_head = std::move(head); }
+    // Схема при загрузке узнала строку (граница записи по схеме, до шага 7
+    // F-17). Только для isPlainText; ставит парсер до публикации.
+    void setSchemaMatched(bool matched) { m_schemaMatched = matched; }
 
     // Стиль ANSI строки (F-3): спаны SGR в координатах message(); nullptr —
     // в строке не было кодов с видимым стилем (у большинства строк). Ставит
@@ -96,11 +88,11 @@ public:
     // уровень унаследованы от её первой строки, поэтому true возможен только
     // там, где группировка в логические записи номинальна (не-лог файл целиком
     // слипается в запись #0; преамбула до первой настоящей записи — туда же).
-    // Сами поля не читаются: это зовут воркеры статистики и таймлайна, а поля
-    // может в это время менять GUI-поток (смена схемы).
+    // «Структурные поля» — схема при загрузке узнала строку (паритет с
+    // индексом: LineIndex::isPlainTextLine). Запись неизменяема после
+    // публикации: воркеры статистики и таймлайна читают это без синхронизации.
     bool isPlainText() const {
-        return !m_timestamp.isValid() && m_level == LogLevel::Unknown
-            && !m_hasFields.load(std::memory_order_relaxed);
+        return !m_timestamp.isValid() && m_level == LogLevel::Unknown && !m_schemaMatched;
     }
 
     bool operator<(const LogEntry& other) const {
@@ -147,12 +139,10 @@ private:
     int m_originalLineNumber;
     QDateTime m_timestamp;
     LogLevel m_level;
-    // !m_fields.isEmpty() — для isPlainText() без чтения самих полей.
-    // Встаёт в выравнивание после m_level: запись не растёт.
-    std::atomic<bool> m_hasFields{false};
+    bool m_schemaMatched = false;   // встаёт в выравнивание после m_level
     QString m_message;
     LogFilePtr m_sourceFile;
-    LogEntryFields m_fields;
+    std::shared_ptr<const LogEntry> m_head;
     std::unique_ptr<const AnsiStyles> m_ansi;
 };
 

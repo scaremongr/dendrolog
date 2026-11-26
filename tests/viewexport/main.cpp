@@ -360,7 +360,7 @@ static ExpectedTable expectedTable(const LogModel& model, const QStringList& fie
         values << QString();   // _time проверяется моментом
         if (fileColumn)
             values << QDir::toNativeSeparators(entry->sourceFile()->displayPath());
-        const LogEntryFields& fields = entry->fields();
+        const LogEntryFields fields = model.fieldsOf(*entry);
         for (int k = 0; k < fieldColumns.size(); ++k) {
             const int fi = fieldColumns.at(k);
             if (k == messageColumn && (fields.isEmpty() || (fi >= 0 && !fields.has(fi))))

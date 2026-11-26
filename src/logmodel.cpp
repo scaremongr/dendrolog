@@ -24,6 +24,7 @@ LogModel::LogModel(QObject* parent)
     // Локатор — раньше закладок: они подписываются на его ответы.
     m_locator = new RecordLocator(*this);
     m_bookmarks = new BookmarkStore(*this);
+    m_fieldSource = new FieldSource(this);
     // Метки и число строк файлов (U-23) — на события модели, O(числа файлов).
     // Подписка раньше любого view: на rowsInserted view уже видит набор.
     connect(this, &QAbstractItemModel::rowsInserted, this, &LogModel::refreshFileSet);
@@ -61,6 +62,7 @@ ResidentLogStore* LogModel::residentOrNull() const
 void LogModel::setEntries(const QVector<std::shared_ptr<LogEntry>>& entries)
 {
     m_locator->allReset();
+    m_fieldSource->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();
@@ -96,6 +98,7 @@ NavHistory& LogModel::navHistory() const
 void LogModel::invalidateFileRows(const QString& filePath)
 {
     m_locator->fileReset(filePath);
+    m_fieldSource->fileReset(filePath);
     m_bookmarks->invalidateFile(filePath);
     if (m_navHistory)
         m_navHistory->invalidateFile(filePath);
@@ -425,12 +428,13 @@ void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
         return;
     }
 
-    // Resident workers share field spans with the source. Finish cancellation
-    // before dropping the old request so later schema changes cannot race it.
+    // Resident workers share entries with the source. Finish cancellation
+    // before dropping the old request.
     cancelPendingFilter(!isIndexedBackend());
     beginResetModel();
-    // Схемы файлов — до стора: индексный берёт схему файла у модели.
+    // Схемы файлов — как у источника (поля — тем же путём, FieldSource).
     m_fileSchemas = source.m_fileSchemas;
+    m_fieldSource->setSchemas(m_fileSchemas);
     if (auto* indexed = source.indexedOrNull())
         m_store = std::make_unique<IndexedLogStore>(*this, *indexed);
     else
@@ -453,6 +457,7 @@ void LogModel::clear()
 {
     cancelPendingFilter(!isIndexedBackend());
     m_locator->allReset();
+    m_fieldSource->allReset();
     m_bookmarks->invalidateAll();
     if (m_navHistory)
         m_navHistory->invalidateAll();
@@ -476,13 +481,13 @@ bool LogModel::appendSearchRows(const LogModel& source, int first, int last)
         return false;
     IndexedLogStore* indexed = indexedOrNull();
     IndexedLogStore* sourceIndexed = source.indexedOrNull();
-    // Схемы файлов — как у источника (новые файлы стор копирует вместе с их
-    // схемами, у прежних обновляет указатели).
-    m_fileSchemas = source.m_fileSchemas;
-    if (indexed && sourceIndexed) {
-        indexed->refreshFileSchemas();
-        return indexed->appendSearchRows(*sourceIndexed, first, last);
+    // Схемы файлов — как у источника.
+    if (!(m_fileSchemas == source.m_fileSchemas)) {
+        m_fileSchemas = source.m_fileSchemas;
+        m_fieldSource->setSchemas(m_fileSchemas);
     }
+    if (indexed && sourceIndexed)
+        return indexed->appendSearchRows(*sourceIndexed, first, last);
     if (!indexed && !sourceIndexed)
         return resident()->appendSearchRows(*source.resident(), first, last);
     return false; // источник сменил бэкенд
@@ -503,7 +508,7 @@ LogScanSnapshot LogModel::scanSnapshot(bool filteredOnly) const
     return m_store->scanSnapshot(filteredOnly);
 }
 
-QVector<std::shared_ptr<LogEntry>> LogModel::residentEntriesForFieldMutation() const
+QVector<std::shared_ptr<LogEntry>> LogModel::residentEntries() const
 {
     return resident()->allEntries();
 }
@@ -776,18 +781,29 @@ void LogModel::setFileSchemas(const FileSchemaSet& schemas)
     if (m_fileSchemas == schemas)
         return;
     m_fileSchemas = schemas;
-    if (auto* indexed = indexedOrNull())
-        indexed->refreshFileSchemas();
+    // O(1): записи не трогаются, кэш полей пуст (F-17, шаг 3); показ полей
+    // — перерисовать видимое.
+    m_fieldSource->setSchemas(m_fileSchemas);
+    if (m_fieldFilterEnabled)
+        notifyDisplayChanged();
 }
 
 void LogModel::setFileSchema(const QString& filePath, FileSchemaPtr schema)
 {
+    FileSchemaSet schemas = m_fileSchemas;
     if (schema)
-        m_fileSchemas.byPath.insert(filePath, std::move(schema));
+        schemas.byPath.insert(filePath, std::move(schema));
     else
-        m_fileSchemas.byPath.remove(filePath);
-    if (auto* indexed = indexedOrNull())
-        indexed->refreshFileSchemas();
+        schemas.byPath.remove(filePath);
+    setFileSchemas(schemas);
+}
+
+LogEntryFields LogModel::fieldsOf(const LogEntry& entry) const
+{
+    const FieldLookup lookup = m_fieldSource->fieldsFor(entry.sourceFile().get(),
+                                                         entry.originalLineNumber(),
+                                                         entry.message());
+    return lookup.isReady() ? lookup.fields : LogEntryFields();
 }
 
 // ---------------------------------------------------------------------------
@@ -801,9 +817,12 @@ void LogModel::setFileSchema(const QString& filePath, FileSchemaPtr schema)
 
 QString LogModel::formatDisplayMessage(const LogEntry& entry) const
 {
-    if (!m_fieldFilterEnabled || entry.fields().isEmpty())
+    if (!m_fieldFilterEnabled)
         return entry.message();
-    return formatDisplayText(entry.message(), entry.fields(), m_fieldFilterEnabled,
+    const LogEntryFields fields = fieldsOf(entry);
+    if (fields.isEmpty())
+        return entry.message();
+    return formatDisplayText(entry.message(), fields, m_fieldFilterEnabled,
                              m_visibleFieldIndexes, m_fileSchemas.forFile(entry.sourceFile().get()));
 }
 
@@ -845,40 +864,14 @@ QString LogModel::formatDisplayText(const QString& message, const LogEntryFields
     return result;
 }
 
-// Длина результата formatDisplayMessage() без конкатенации строк.
-// Для резидентного бэкенда даёт ровно ту же длину, что построенный
-// display-текст; для индексного — ОЦЕНКУ (байтовая длина сырой строки):
-// точная длина потребовала бы чтения с диска и извлечения полей на каждую
-// строку в горячих путях view, а оценки достаточно — высоты уточняются
-// лениво при отрисовке.
+// Длина текста строки для оценки высот view. Без показа полей — точная
+// (сырой текст). С показом полей — ОЦЕНКА по сырому тексту на обоих
+// бэкендах (F-17, шаг 3): поля не хранятся, а считать их здесь значило бы
+// разбирать каждую вставленную строку (инвариант 3: на вставку поля не
+// считаются); view уточняет высоты лениво при отрисовке.
 int LogModel::displayTextLength(int row) const
 {
     if (row < 0 || row >= m_store->visibleCount())
         return 0;
-
-    if (!m_fieldFilterEnabled || m_store->backend() == LogStore::Backend::Indexed)
-        return m_store->rawTextLengthAt(row);
-
-    const auto entryPtr = m_store->entryAt(row);
-    if (!entryPtr)
-        return 0;
-    const LogEntry& entry = *entryPtr;
-
-    if (entry.fields().isEmpty())
-        return int(entry.message().length());
-    if (const FileSchema* schema = m_fileSchemas.forFile(entry.sourceFile().get());
-        schema && !m_visibleFieldIndexes.isEmpty() && !schema->hasAnyOf(m_visibleFieldIndexes))
-        return int(entry.message().length());
-
-    int length = 0;
-    bool first = true;
-    for (const int fieldIndex : m_visibleFieldIndexes) {
-        const int valueLength =
-            int(entry.fields().valueSize(fieldIndex, entry.message(), /*displayLine=*/true));
-        if (valueLength == 0)
-            continue;
-        length += (first ? 0 : 1) + valueLength;
-        first = false;
-    }
-    return length;
+    return m_store->rawTextLengthAt(row);
 }

@@ -305,7 +305,7 @@ SessionState SessionController::captureWindow() const
             session.schema = w.schema;
             session.schemaName = w.schemaName;
         }
-        session.fieldExtraction = w.fieldExtraction;
+        session.showFields = w.showFields;
         session.visibleFields = w.visibleFields;
     }
     return session;

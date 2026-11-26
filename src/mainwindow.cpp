@@ -184,9 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupBookmarksDock();
     setupDirectoryScanner();
     m_schemas = new FieldSchemaController(this);
-    m_schemas->setWindow({
-        [this]() { return logViews(); },
-        [this](LogViewWidget* view, bool starting) { stopFieldReaders(view, starting); } });
+    m_schemas->setWindow({ [this]() { return logViews(); } });
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
     // ДО loadSettings — restoreState() должен знать тулбар по objectName.
@@ -366,7 +364,7 @@ MainWindow::MainWindow(QWidget *parent)
             SessionController::WindowSettings w;
             w.schema = m_schemas->activeSchema();
             w.schemaName = m_schemas->activeSchemaName();
-            w.fieldExtraction = m_schemas->extractionEnabled();
+            w.showFields = m_schemas->showFields();
             w.visibleFields = m_schemas->visibleFieldNames();
             return w;
         } });
@@ -1101,11 +1099,8 @@ QString MainWindow::logFileDialogFilter(bool forOpen) const
 
 MainWindow::~MainWindow()
 {
-    // Make sure no re-extraction worker still reads entries we are about to
-    // release (closeEvent usually handles this, but not every teardown path
-    // goes through it). Its signals no longer reach the window being torn down.
+    // Сигналы контроллера схем окну, которое уже разбирают, не доходят.
     disconnect(m_schemas, nullptr, this, nullptr);
-    m_schemas->cancelReextraction();
     // Вкладки разрушаются позже, в ~QWidget, когда полей окна уже нет: их
     // сигналы (destroyed вкладки → SessionController::reportChanged, смена
     // текущей вкладки) не должны дойти до лямбд и слотов окна (UBSan,
@@ -1123,9 +1118,6 @@ MainWindow::~MainWindow()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    // Stop any background field re-extraction before our members (which its
-    // workers reference) are torn down.
-    m_schemas->cancelReextraction();
     saveSettings();
     // Последняя сессия (R-5) — только при штатном выходе и только первичным
     // окном; пустое окно прошлую не затирает (SessionController).
@@ -1360,7 +1352,7 @@ void MainWindow::saveSettings()
     s.endGroup();
 
     s.beginGroup("View");
-    // Схема, «Filter blocks», колонки и порядок каталога — FieldSchemaController.
+    // Схема, показ полей, колонки и порядок каталога — FieldSchemaController.
     m_schemas->save(s);
     s.endGroup();
 
@@ -1438,7 +1430,7 @@ void MainWindow::loadSettings()
 
     s.beginGroup("View");
     // Каталог схем (с миграцией и встроенными схемами), активная схема,
-    // «Filter blocks» и колонки; док следует за контроллером по сигналам.
+    // Показ полей и колонки; док следует за контроллером по сигналам.
     m_schemas->load(s);
     s.endGroup();
 
@@ -1554,7 +1546,7 @@ void MainWindow::setupFieldVisibilityDock()
     // действием. Оно же — в меню View и в меню кнопки дока.
     m_applySchemaToAllAction = new QAction(tr("Apply Schema to All Tabs"), this);
     m_applySchemaToAllAction->setObjectName(QStringLiteral("applySchemaToAllTabs"));
-    m_applySchemaToAllAction->setToolTip(tr("Use this tab's schema, \"Filter blocks\" and visible "
+    m_applySchemaToAllAction->setToolTip(tr("Use this tab's schema, \"Show selected fields only\" and visible "
                                             "blocks in every open tab"));
     connect(m_applySchemaToAllAction, &QAction::triggered, this, [this]() {
         m_schemas->applyToAllViews();
@@ -1592,7 +1584,7 @@ void MainWindow::setupFieldVisibilityDock()
     rootLayout->addSpacing(CompactStyle::kSpacing);
 
     // ---- Master enable/disable toggle ----
-    m_fieldFilterEnabledCheckBox = new QCheckBox(tr("Filter blocks"), contents);
+    m_fieldFilterEnabledCheckBox = new QCheckBox(tr("Show selected fields only"), contents);
     m_fieldFilterEnabledCheckBox->setChecked(false); // default: no filtering
     m_fieldFilterEnabledCheckBox->setToolTip(tr(
         "When checked, only the selected blocks below are shown.\n"
@@ -1664,28 +1656,12 @@ void MainWindow::setupFieldVisibilityDock()
     });
     connect(m_schemas, &FieldSchemaController::statusMessage, this,
             [this](const QString& text) { statusBar()->showMessage(text, 10000); });
-    connect(m_schemas, &FieldSchemaController::reextractionStarted, this, [this](int entries) {
-        // Тот же прогресс в строке состояния, что у загрузки файла.
-        m_statusLabel->setText(tr("Applying field schema…"));
-        m_progressBar->setRange(0, entries);
-        m_progressBar->setValue(0);
-        m_progressBar->show();
-    });
-    connect(m_schemas, &FieldSchemaController::reextractionProgress,
-            m_progressBar, &QProgressBar::setValue);
-    connect(m_schemas, &FieldSchemaController::reextractionFinished, this, [this]() {
-        if (m_schemas->isReextracting())
-            return; // идёт расчёт другой вкладки («Apply Schema to All Tabs»)
-        m_progressBar->hide();
-        updateStatusBarDefaultText();
-    });
     connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
         if (m_fieldFilterControlsWidget)
             m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
-        // Контроллер включает/выключает извлечение полей, переизвлекает поля
-        // загруженных записей и перепривязывает колоночные правила (галочка
-        // «Filter blocks» управляет строгой фильтрацией по колонкам).
-        m_schemas->setExtractionEnabled(enabled);
+        // Только показ выбранных колонок (F-17, шаг 3): правила по полю и
+        // Entry Details от галочки не зависят.
+        m_schemas->setShowFields(enabled);
     });
     if (m_fieldFilterControlsWidget)
         m_fieldFilterControlsWidget->setEnabled(false);
@@ -1801,13 +1777,13 @@ void MainWindow::syncFieldControls()
         m_allFieldsCheckBox->blockSignals(false);
     }
     if (m_fieldFilterEnabledCheckBox
-        && m_fieldFilterEnabledCheckBox->isChecked() != m_schemas->extractionEnabled()) {
+        && m_fieldFilterEnabledCheckBox->isChecked() != m_schemas->showFields()) {
         m_fieldFilterEnabledCheckBox->blockSignals(true);
-        m_fieldFilterEnabledCheckBox->setChecked(m_schemas->extractionEnabled());
+        m_fieldFilterEnabledCheckBox->setChecked(m_schemas->showFields());
         m_fieldFilterEnabledCheckBox->blockSignals(false);
     }
     if (m_fieldFilterControlsWidget)
-        m_fieldFilterControlsWidget->setEnabled(m_schemas->extractionEnabled()
+        m_fieldFilterControlsWidget->setEnabled(m_schemas->showFields()
                                                 && !m_fieldCheckBoxes.isEmpty());
     // Кнопка-индикатор Fields тулбара Filters.
     updateFilterStatusButtons();
@@ -1855,34 +1831,10 @@ void MainWindow::onManagePatterns()
             tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
 }
 
-void MainWindow::stopFieldReaders(LogViewWidget* view, bool starting)
-{
-    // Выдача Search делит записи с источником: clear() ждёт её фильтр.
-    // Повторит поиск schemaApplied; посреди фонового расчёта поиск не
-    // запускается (runSearchIntoResults). Выдача другой вкладки записей этой
-    // не читает.
-    if (starting && m_searchController && view
-        && (m_searchController->source() == view->model() || view == m_activeLogView))
-        clearSearchResults();
-    // A background Save View As reads the fields of resident entries too
-    // (of whichever tab it exports — it is stopped regardless, cheaply):
-    // CSV / JSON Lines always, text only with the blocks shown — and during a
-    // background re-extraction they are not (FieldSchemaController), so a
-    // text export started then is left to finish.
-    const bool readsFields = m_exportJob
-        && (starting || m_exportJob->format() != ViewExport::Format::Text);
-    if (readsFields && m_exportJob->isRunning()) {
-        m_exportCancelReason = tr("Save View As cancelled: the field schema changed. "
-                                  "%1 was not changed.")
-                                   .arg(QFileInfo(m_exportJob->destination()).fileName());
-        m_exportJob->cancel(/*wait=*/true);
-    }
-}
-
 LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
-    // Схема, «Filter blocks» и колонки окна.
+    // Схема, показ полей и колонки окна.
     m_schemas->configureView(view);
     attachLineWrapAction(view->view());
     // Память файла (R-4): вкладка читает и пишет её сама; окну — сообщения
@@ -2547,13 +2499,13 @@ void MainWindow::updateFilterStatusButtons()
 
     // Fields (пер-вкладочный с F-5 — у активной вкладки)
     {
-        const bool active = m_schemas->extractionEnabled();
+        const bool active = m_schemas->showFields();
         m_fieldFilterStatusAction->setChecked(active);
         m_fieldFilterStatusAction->setToolTip(active
-            ? tr("Field filtering: %1 of %2 blocks shown (this tab)\nClick to show full lines")
+            ? tr("Showing %1 of %2 fields (this tab)\nClick to show full lines")
                   .arg(m_schemas->visibleFieldIndexes().size())
                   .arg(m_schemas->fieldNames().size())
-            : tr("Field filtering is off\nClick to show only the blocks selected in the Log Fields panel"));
+            : tr("Full lines are shown\nClick to show only the fields selected in the Log Fields panel"));
     }
 
     // Row highlighters (пер-вкладочные; строки не скрывают, но индикатор полезен)
@@ -3150,11 +3102,8 @@ void MainWindow::onViewExportFinished(const ViewExport::Result& result)
     m_cancelExportButton->hide();
     const QString fileName = m_exportJob->destination();
     if (result.error == ViewExport::Error::Cancelled) {
-        m_statusLabel->setText(m_exportCancelReason.isEmpty()
-                                   ? tr("Save View As cancelled; %1 was not changed.")
-                                         .arg(QFileInfo(fileName).fileName())
-                                   : m_exportCancelReason);
-        m_exportCancelReason.clear();
+        m_statusLabel->setText(tr("Save View As cancelled; %1 was not changed.")
+                                   .arg(QFileInfo(fileName).fileName()));
         return;
     }
     if (!result.ok()) {
@@ -3318,7 +3267,7 @@ void MainWindow::maybeStartBaselineDump()
             inc2.text = QStringLiteral("Ошибка");
             inc2.connector = FilterRule::Connector::Or;
             rules.rules = {inc1, inc2};
-            rules.bindFields({}, false);
+            rules.bindFields({});
             model->setFilterRules(rules);
             break;
         }
@@ -3438,13 +3387,17 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
     // пока док скрыт, панель лишь запоминает её и строит HTML при показе.
     if (m_detailsPanel)
     {
-        if (currentEntry)
-            m_detailsPanel->showEntry(currentEntry,
-                                      model->logicalRecordLines(currentEntry),
-                                      model->availableFields(),
+        if (currentEntry) {
+            const QVector<std::shared_ptr<LogEntry>> lines = model->logicalRecordLines(currentEntry);
+            // Поля записи — первой её строки (F-17, шаг 3), через FieldSource.
+            const LogEntryFields recordFields = (!lines.isEmpty() && lines.first())
+                ? model->fieldsOf(*lines.first()) : LogEntryFields();
+            m_detailsPanel->showEntry(currentEntry, lines, model->availableFields(),
                                       currentEntry->sourceFile()
                                           ? model->fileSchemaFor(currentEntry->sourceFile()->filePath)
-                                          : FileSchemaPtr());
+                                          : FileSchemaPtr(),
+                                      recordFields);
+        }
         else
             m_detailsPanel->clearEntry();
         if (currentEntry)
@@ -3887,11 +3840,6 @@ void MainWindow::refreshMainViewHighlights(LogViewWidget* view)
 
 void MainWindow::runSearchIntoResults()
 {
-    // Fields are being recomputed for the new schema: rules bound to it would
-    // not match the entries' old spans. FieldSchemaController::schemaApplied
-    // searches.
-    if (m_schemas->isReextracting(m_activeLogView))
-        return;
     if (!m_searchRequested || !m_searchQuery || !m_searchController || !m_activeLogView
         || !m_activeLogView->model())
         return;
@@ -3946,12 +3894,13 @@ void MainWindow::applyRowMarkersToActiveView()
 
 void MainWindow::updateFilterPanelFieldNames()
 {
-    const bool fieldScope = m_schemas->extractionEnabled();
+    // Правило по полю ищет в поле при любом показе полей (F-17, шаг 3):
+    // список колонок карточки доступен всегда.
     const QStringList fieldNames = m_schemas->fieldNames();
     if (m_filterPanel)
-        m_filterPanel->setFieldNames(fieldNames, fieldScope);
+        m_filterPanel->setFieldNames(fieldNames);
     if (m_searchQuery)
-        m_searchQuery->setFieldNames(fieldNames, fieldScope);
+        m_searchQuery->setFieldNames(fieldNames);
 }
 
 void MainWindow::updateFilterInputsFromModel()

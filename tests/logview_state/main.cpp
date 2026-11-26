@@ -289,7 +289,7 @@ static FilterRuleSet singleRule(FilterRule::Action action, const QString& text)
     rule.text = text;
     FilterRuleSet set;
     set.rules << rule;
-    set.bindFields({}, false);
+    set.bindFields({});
     return set;
 }
 

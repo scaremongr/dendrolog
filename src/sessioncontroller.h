@@ -119,7 +119,7 @@ public:
     // верхний уровень сессии (F-5: у каждой вкладки своя в ViewState.fields).
     struct WindowSettings {
         QString schemaName, schema;
-        bool fieldExtraction = false;
+        bool showFields = false;
         QStringList visibleFields;
     };
     struct Window {

@@ -1216,7 +1216,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Filter blocks"))
+                if (cb->text() == QLatin1String("Show selected fields only"))
                     filterBlocks = cb;
                 else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
@@ -1307,7 +1307,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const int ig = tabIndexForFile(win, fresh);
         LogViewWidget* g = ig >= 0 ? tabAt(win, ig) : nullptr;
         check(g && g->parserPattern() == b->parserPattern()
-                  && g->fieldSettings().extraction == b->fieldSettings().extraction,
+                  && g->fieldSettings().showFields == b->fieldSettings().showFields,
               QStringLiteral("the new tab takes the default schema (the last choice)"));
         if (g) {
             tabs(win)->setCurrentIndex(ig);
@@ -1365,7 +1365,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Filter blocks"))
+                if (cb->text() == QLatin1String("Show selected fields only"))
                     filterBlocks = cb;
                 else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
@@ -2876,7 +2876,7 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
         return;
     const auto setFilterBlocks = [&](bool on) {
         for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != on)
+            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
                 cb->click();
     };
 
@@ -2910,9 +2910,14 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
         const QDateTime ts = row >= 0 ? m->visibleTimestampAt(row) : QDateTime();
         return ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
     };
+    // Схема по умолчанию могла остаться ключевой от прошлых сценариев, а
+    // ключевая действует при чтении при любом показе полей (F-17, шаг 3):
+    // сначала регексная.
+    combo->setCurrentIndex(smoke);
+    check(waitAllLoaded(win), QStringLiteral("the tab settles under the regex schema"));
     // Эвристика: строка с эпохой — продолжение записи над ней (её момент).
     check(rowOfEpoch() >= 0 && momentOfEpoch() != keyMoment,
-          QStringLiteral("without the schema the epoch is no moment"));
+          QStringLiteral("without a keyed schema the epoch is no moment"));
 
     combo->setCurrentIndex(jsonLines);
     setFilterBlocks(true);
@@ -2998,7 +3003,7 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
         return;
     const auto setFilterBlocks = [&](bool on) {
         for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != on)
+            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
                 cb->click();
     };
 
@@ -3610,42 +3615,67 @@ void scenarioFindSchema(MainWindow& win, const Fixtures& fx)
     if (!list || !table || !use || !save || !askAi)
         return;
 
-    // Каталог: таблица образцов, Use for This Tab — без перечитывания.
-    if (catalogueVariant >= 0) {
-        const QString name = variants[catalogueVariant].entry.name;
-        window->selectVariant(catalogueVariant);
-        check(window->currentVariant() == catalogueVariant && table->rowCount() > 0
-                  && table->columnCount() == candidates->columns(catalogueVariant).size() + 1,
-              QStringLiteral("the sample table shows the fields of %1").arg(name));
-        check(use->isEnabled() && !save->isEnabled(), QStringLiteral("a catalogue schema: Use yes, Save no"));
-        const QString before = tab->fieldSettings().schemaName;
-        const bool extractionBefore = tab->fieldSettings().extraction;
+    auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
+    const FieldSettings original = tab->fieldSettings();
+    // Use for This Tab: схема на вкладке, ни одного прохода загрузчика.
+    const auto useVariant = [&](int variant, const QString& expectedSchema, const QString& what) {
+        window->selectVariant(variant);
+        check(use->isEnabled(), QStringLiteral("%1: Use for This Tab is enabled").arg(what));
         int passes = 0;
         QObject spy;
         QObject::connect(tab, &LogViewWidget::fileParsingStarted, &spy, [&passes]() { ++passes; });
         use->click();
-        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == name,
-              QStringLiteral("Use for This Tab sets %1 on the tab (%2)").arg(name, tab->fieldSettings().schemaName));
+        check(waitAllLoaded(win) && tab->fieldSettings().schema == expectedSchema && tab->fieldSettings().showFields,
+              QStringLiteral("%1: Use for This Tab sets the schema and shows the fields (%2)")
+                  .arg(what, tab->fieldSettings().schemaName));
         check(passes == 0 && model->rowCount() == allRows,
-              QStringLiteral("the tab is not read again (%1 passes)").arg(passes));
-        auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
-        check(combo && combo->currentText() == name, QStringLiteral("Log Fields shows the schema used"));
-        check(tab->fieldSettings().extraction, QStringLiteral("Use for This Tab shows the fields"));
-        if (combo && combo->findText(before) >= 0)
-            combo->setCurrentIndex(combo->findText(before));
-        // Как было: и «Filter blocks» (схема по умолчанию следующих вкладок).
+              QStringLiteral("%1: the tab is not read again (%2 passes)").arg(what).arg(passes));
+    };
+    // Как было: схема комбобоксом и «Show selected fields only».
+    const auto restore = [&]() {
+        if (combo && combo->findText(original.schemaName) >= 0)
+            combo->setCurrentIndex(combo->findText(original.schemaName));
         for (QCheckBox* cb : dock(win, "fieldVisibilityDockWidget")->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != extractionBefore)
+            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != original.showFields)
                 cb->click();
-        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == before
-                  && tab->fieldSettings().extraction == extractionBefore,
-              QStringLiteral("the tab returns to %1").arg(before));
+        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == original.schemaName
+                  && tab->fieldSettings().showFields == original.showFields,
+              QStringLiteral("the tab returns to %1").arg(original.schemaName));
+    };
+
+    // Замер «без перечитывания» — от схемы, которая в чтении не участвует:
+    // ключевая (JSON Lines) до шага 7 задаёт моменты и границы записей, и её
+    // смена перечитывает файл по правилу F-4, PR 3.
+    const auto toBlockSchema = [&]() {
+        if (combo && combo->findText(QStringLiteral("Smoke Fields")) >= 0)
+            combo->setCurrentIndex(combo->findText(QStringLiteral("Smoke Fields")));
+        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == QLatin1String("Smoke Fields"),
+              QStringLiteral("a block schema before Use for This Tab"));
+    };
+
+    // Каталог: таблица образцов, Use for This Tab.
+    if (catalogueVariant >= 0) {
+        const SchemaStore::SchemaEntry entry = variants[catalogueVariant].entry;
+        window->selectVariant(catalogueVariant);
+        check(window->currentVariant() == catalogueVariant && table->rowCount() > 0
+                  && table->columnCount() == candidates->columns(catalogueVariant).size() + 1,
+              QStringLiteral("the sample table shows the fields of %1").arg(entry.name));
+        check(!save->isEnabled(), QStringLiteral("a catalogue schema: Save no"));
+        toBlockSchema();
+        useVariant(catalogueVariant, entry.schema, entry.name);
+        check(combo && combo->currentText() == entry.name, QStringLiteral("Log Fields shows the schema used"));
+        restore();
     }
 
-    // Вывод структуры: Save to My Schemas… — файл версии 4.
+    // Вывод структуры: шаблон — вкладке без перечитывания (ленивые поля,
+    // шаг 3), Save to My Schemas… — файл версии 4 и пункт каталога.
     if (inferredVariant >= 0) {
+        const QString templateText = variants[inferredVariant].templateText;
+        toBlockSchema();
+        useVariant(inferredVariant, LineTemplateSchema::definition(templateText), QStringLiteral("inferred template"));
+        restore();
         window->selectVariant(inferredVariant);
-        check(!use->isEnabled() && save->isEnabled(), QStringLiteral("an inferred template: Save yes"));
+        check(save->isEnabled(), QStringLiteral("an inferred template: Save yes"));
         const QString name = QStringLiteral("Smoke Inferred");
         g_driver->expect([&](QWidget* w) {
             auto* dialog = qobject_cast<QInputDialog*>(w);
@@ -3665,9 +3695,10 @@ void scenarioFindSchema(MainWindow& win, const Fixtures& fx)
                 continue;
             LineTemplateSchema schema;
             if (LineTemplateSchema::read(file.readAll(), &schema) && schema.name == name)
-                saved = schema.templateText == variants[inferredVariant].templateText;
+                saved = schema.templateText == templateText;
         }
         check(saved, QStringLiteral("Save to My Schemas writes a version 4 file"));
+        check(combo && combo->findText(name) >= 0, QStringLiteral("the saved template is in the schema list"));
     }
 
     // AI выключен: «Set Up AI…» — Settings на вкладке AI.

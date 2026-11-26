@@ -48,10 +48,8 @@ FilterRule FilterRule::fromJson(const QJsonObject& json)
 // FilterRuleSet
 // ---------------------------------------------------------------------------
 
-void FilterRuleSet::bindFields(const QStringList& fieldNames, bool fieldScopeActive)
+void FilterRuleSet::bindFields(const QStringList& fieldNames)
 {
-    m_fieldScopeActive = fieldScopeActive;
-
     m_boundFieldIndexes.resize(rules.size());
     m_compiledRegexes.clear();
     m_compiledRegexes.resize(rules.size());
@@ -108,62 +106,91 @@ bool FilterRuleSet::ruleUsable(int ruleIndex) const
 
 bool FilterRuleSet::fieldMissing(int ruleIndex) const
 {
-    return m_fieldScopeActive && !rules[ruleIndex].fieldName.isEmpty()
+    return !rules[ruleIndex].fieldName.isEmpty()
         && m_boundFieldIndexes.value(ruleIndex, -1) < 0;
 }
 
+bool FilterRuleSet::needsFields() const
+{
+    for (int i = 0; i < rules.size(); ++i)
+        if (!rules[i].fieldName.isEmpty() && ruleUsable(i))
+            return true;
+    return false;
+}
+
+bool FilterRuleSet::textContains(int ruleIndex, QStringView scope) const
+{
+    const FilterRule& rule = rules[ruleIndex];
+    if (scope.isEmpty())
+        return false;
+    if (rule.isRegex) {
+        const QRegularExpression& re = m_compiledRegexes.value(ruleIndex);
+        return re.isValid() && re.matchView(scope).hasMatch();
+    }
+    return scope.contains(rule.text, rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+}
+
 bool FilterRuleSet::ruleContains(int ruleIndex, QStringView message,
-                                 const LogEntryFields& fields) const
+                                 FieldRecordCursor* record) const
 {
     const FilterRule& rule = rules[ruleIndex];
     const int fieldIndex = (ruleIndex < m_boundFieldIndexes.size())
         ? m_boundFieldIndexes[ruleIndex] : -1;
+    if (rule.fieldName.isEmpty() || fieldIndex < 0)
+        return textContains(ruleIndex, message);
 
-    // Область поиска: значение поля (zero-copy view) или вся строка.
-    // Строка без запрошенного поля (continuation line) = «не содержит».
-    // Экранированное значение ключевой схемы (F-4: JSON \", \uXXXX) правило
-    // видит раскодированным — аллокация только у таких значений.
-    QStringView scope;
-    QString decoded;
-    bool scopeAvailable = true;
-    if (m_fieldScopeActive && fieldIndex >= 0) {
-        if (fields.isEscaped(fieldIndex)) {
-            decoded = fields.value(fieldIndex, message);
-            scope = decoded;
-        } else {
-            scope = fields.get(fieldIndex, message);
-        }
-        scopeAvailable = !scope.isEmpty();
-    } else {
-        scope = message;
-    }
+    // Правило по полю — на записи: ответ по первой строке записи, один раз.
+    if (!record)
+        return false;
+    const int known = record->ruleState(ruleIndex);
+    if (known >= 0)
+        return known == 1;
 
     bool contains = false;
-    if (scopeAvailable) {
-        if (rule.isRegex) {
-            const QRegularExpression& re = m_compiledRegexes.value(ruleIndex);
-            contains = re.isValid() && re.matchView(scope).hasMatch();
-        } else {
-            contains = scope.contains(rule.text,
-                rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+    const FileSchema* schema = record->schema();
+    if (schema && schema->has(fieldIndex)) {
+        const QString& head = record->headText();
+        // Предфильтр: образца нет во всей строке — нет и в поле. Только для
+        // подстроки и только если значение — дословный кусок строки (нет
+        // обратной косой черты: JSON \uXXXX, \" и quoted раскодируются).
+        const bool prefilter = !rule.isRegex && !head.contains(QLatin1Char('\\'));
+        if (!prefilter
+            || head.contains(rule.text, rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive)) {
+            const LogEntryFields* fields = record->fieldsUpTo(fieldIndex);
+            if (fields && fields->has(fieldIndex)) {
+                // Экранированное значение (JSON, quoted) — раскодированным;
+                // аллокация только у таких значений.
+                if (fields->isEscaped(fieldIndex)) {
+                    const QString decoded = fields->value(fieldIndex, head);
+                    contains = textContains(ruleIndex, decoded);
+                } else {
+                    contains = textContains(ruleIndex, fields->get(fieldIndex, head));
+                }
+            }
         }
     }
+    record->setRuleState(ruleIndex, contains);
     return contains;
 }
 
 bool FilterRuleSet::ruleMatches(int ruleIndex, QStringView message,
-                                const LogEntryFields& fields) const
+                                FieldRecordCursor* record) const
 {
-    const bool contains = ruleContains(ruleIndex, message, fields);
+    const bool contains = ruleContains(ruleIndex, message, record);
     return (rules[ruleIndex].action == FilterRule::Action::Exclude) ? !contains : contains;
 }
 
-bool FilterRuleSet::matches(const LogEntry& entry) const
+bool FilterRuleSet::matches(const LogEntry& entry, FieldRecordCursor* record) const
 {
-    return matchesLine(QStringView(entry.message()), entry.fields());
+    if (record) {
+        const LogEntry* head = entry.recordHead() ? entry.recordHead().get() : &entry;
+        record->setLine(quint64(quintptr(head)), entry.sourceFile().get(),
+                        head->originalLineNumber(), &head->message());
+    }
+    return matchesLine(QStringView(entry.message()), record);
 }
 
-bool FilterRuleSet::matchesLine(QStringView message, const LogEntryFields& fields) const
+bool FilterRuleSet::matchesLine(QStringView message, FieldRecordCursor* record) const
 {
     // AND связывает сильнее OR: правила разбиваются OR-коннекторами на
     // AND-группы; запись проходит, если истинна хотя бы одна группа.
@@ -184,7 +211,7 @@ bool FilterRuleSet::matchesLine(QStringView message, const LogEntryFields& field
         }
 
         if (groupResult)
-            groupResult = ruleMatches(i, message, fields);
+            groupResult = ruleMatches(i, message, record);
         // groupResult == false: группа уже провалена — правила до следующего
         // OR можно не вычислять (short-circuit), но пропускать их всё равно
         // нужно через цикл, чтобы найти OR-границу.

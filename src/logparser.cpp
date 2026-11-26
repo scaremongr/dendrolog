@@ -218,6 +218,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // номера строк идут дальше, а не с 1.
     int logicalEntryIdCounter = context.nextLogicalEntryId;
     int currentLogicalEntryId = context.currentLogicalEntryId;
+    std::shared_ptr<const LogEntry> currentHead = context.currentHead;
     QDateTime currentLogicalEntryTimestamp = context.currentTimestamp;
     LogLevel currentLogicalEntryLevel = context.currentLevel;
     int fileLineNumber = context.nextLineNumber - 1;
@@ -231,12 +232,13 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // дозапись после Нового года получает новый год (LineClassifier).
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Схема прохода (F-5): nullptr — извлечение полей выключено. Ключевая
-    // (F-4) решает метку, уровень и границу записи; поля любой схемы — сразу
-    // в колонках вкладки (FileSchema::toLayout).
-    const bool extraction = schema && schema->isValid();
+    // Схема прохода (F-5): nullptr — без схемы. Ключевая (F-4) решает метку,
+    // уровень и границу записи, регексная — только границу. Полей записи не
+    // хранят (F-17, шаг 3): поля — функция текста и схемы (FieldSource).
+    const LogPattern* const passPattern =
+        (schema && schema->pattern.isValid()) ? &schema->pattern : nullptr;
     const LogPattern* const keyedSchema =
-        (extraction && schema->pattern.isKeyed()) ? &schema->pattern : nullptr;
+        (passPattern && passPattern->isKeyed()) ? passPattern : nullptr;
     // Дата времени без даты (F-11): дозапись продолжает состояние прошлого
     // прохода (LogFile::clockState), проход с начала файла — с нуля; первая
     // такая строка при пустом состоянии зовёт предпросмотр от начала прохода.
@@ -340,16 +342,17 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         // и сразу отдаёт поля, без неё — эвристика по строке. Регексная схема
         // решает только «первичная ли» (и даёт поля).
         clockBeforeLine = clock.state;
-        LogEntryFields extractedFields;
         const KeyedClassification cls =
-            m_classifier.classifyLine(keyedSchema, line, yearRef, &clock, &extractedFields);
+            m_classifier.classifyLine(keyedSchema, line, yearRef, &clock);
         const QDateTime lineTs = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
         const LogLevel lineLevel = cls.hasLevel ? cls.level : LogLevel::Unknown;
+        // Регексная схема решает только «первичная ли» — и только там, где
+        // без неё строка первичной не была бы (как у индексатора): строке с
+        // ведущей меткой разбор схемой не нужен.
         bool schemaMatched = cls.matched;
-        if (!keyedSchema && extraction)
-            schemaMatched = !(extractedFields = schema->pattern.extractFields(line)).isEmpty();
-        if (extraction)
-            schema->toLayout(extractedFields);
+        if (!keyedSchema && passPattern
+            && !LineClassifier::isPrimaryLine(false, cls.hasTs, cls.leading, cls.hasLevel))
+            schemaMatched = !passPattern->extractFields(line).isEmpty();
 
         std::shared_ptr<LogEntry> currentEntry;
         if (LineClassifier::isPrimaryLine(schemaMatched, cls.hasTs, cls.leading, cls.hasLevel)) {
@@ -358,16 +361,24 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
                 currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            currentEntry->setFields(extractedFields);
-        } else {
+            currentEntry->setSchemaMatched(schemaMatched);
+            currentHead = currentEntry;
+        } else if (currentLogicalEntryId < 0 || !currentHead) {
+            // Ни одной записи ещё нет — строка становится собственной записью
+            // (и её первой строкой). Запись без первой строки (дозапись без
+            // контекста) — так же.
             if (currentLogicalEntryId < 0) {
-                // Ни одной записи ещё нет — строка становится собственной записью.
                 currentLogicalEntryId = logicalEntryIdCounter++;
                 currentLogicalEntryTimestamp = QDateTime();
                 currentLogicalEntryLevel = LogLevel::Unknown;
             }
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
                 currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            currentHead = currentEntry;
+        } else {
+            currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
+                currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
+            currentEntry->setRecordHead(currentHead);
         }
         if (!lineAnsi.isEmpty())
             currentEntry->setAnsiStyles(std::move(lineAnsi));

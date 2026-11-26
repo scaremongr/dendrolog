@@ -1,0 +1,1 @@
+dendrolog_add_test(field_source LIBRARIES dendrolog_core TIMEOUT 300)

@@ -366,7 +366,7 @@ static void checkTab(const QDir& dir, const QString& name, const QString& schema
     const QString path = writeFile(dir, name + "-tab.log", bytes);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.view()->resize(800, 300);
     tab.addLogFile(path);
     CHECK(settled(tab), QStringLiteral("загрузка"));
@@ -666,7 +666,7 @@ static void checkConversion(const QDir& dir, const QString& schema)
     const QString path = writeFile(dir, "grows.log", start);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), QStringLiteral("загрузка"));
     LogModel& model = *tab.model();

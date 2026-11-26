@@ -1334,3 +1334,31 @@ bool LineTemplateSchema::read(const QByteArray& json, LineTemplateSchema* out, Q
         *out = s;
     return true;
 }
+
+bool LineTemplateSchema::templateOf(const QString& definition, QString* templateText)
+{
+    if (!definition.trimmed().startsWith(QLatin1Char('{')))
+        return false;
+    const QJsonDocument doc = QJsonDocument::fromJson(definition.toUtf8());
+    if (!doc.isObject())
+        return false;
+    const QJsonObject obj = doc.object();
+    if (obj.value(QStringLiteral("version")).toInt() != kVersion
+        || obj.value(QStringLiteral("type")).toString() != QLatin1String("line-template"))
+        return false;
+    const QString text = obj.value(QStringLiteral("template")).toString();
+    if (text.isEmpty())
+        return false;
+    if (templateText)
+        *templateText = text;
+    return true;
+}
+
+QString LineTemplateSchema::definition(const QString& templateText)
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("type"), QStringLiteral("line-template"));
+    obj.insert(QStringLiteral("version"), kVersion);
+    obj.insert(QStringLiteral("template"), templateText);
+    return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+}

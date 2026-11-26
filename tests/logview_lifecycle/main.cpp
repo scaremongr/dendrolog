@@ -102,7 +102,7 @@ static void checkAppendInParts(const QDir& dir, const QString& name, const QStri
         record(0, "INFO", "first") + record(1, "INFO", "second"));
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), name + ": initial load");
     LogModel& model = *tab.model();
@@ -169,7 +169,7 @@ static void checkLineNumbers(const QDir& dir, const QString& name, const QString
     const QString path = testdocs::writeFile(dir, name + "-lines.log", bytes);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), name + " line numbers: initial load");
     const LogModel& model = *tab.model();
@@ -248,7 +248,7 @@ static void checkJumps(const QDir& dir, const QString& name, const QString& sche
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": jumps: initial load");
@@ -390,7 +390,7 @@ static void checkNewLinesIndicator(const QDir& dir, const QString& name, const Q
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": new lines: initial load");
@@ -551,7 +551,7 @@ static void checkWideTail(const QDir& dir, const QString& name, const QString& s
                   + recordText(1, "INFO", QStringLiteral("вторая"))));
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), name + ": initial load");
     LogModel& model = *tab.model();
@@ -646,7 +646,7 @@ static void checkWideAboveThreshold(const QDir& dir, const QString& schema)
     int fullReads = 0; // каждая полная загрузка (индексатор или парсер) сигналит о старте
     QObject::connect(&tab, &LogViewWidget::fileParsingStarted, [&] { ++fullReads; });
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), "utf16 threshold: initial load");
     CHECK(testdocs::idleViews(), "views settle");
@@ -728,7 +728,7 @@ static void checkEncodingSwitch(const QDir& dir, const QString& schema)
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.setFallbackEncoding(TextEncoding::Windows1251);
     tab.addLogFile(path);
     tab.show();
@@ -799,7 +799,7 @@ static void checkEncodingSwitch(const QDir& dir, const QString& schema)
     FilterRule rule;
     rule.text = QStringLiteral("ОШИБКА");
     rules.rules.append(rule);
-    rules.bindFields({}, false);
+    rules.bindFields({});
     model.setFilterRules(rules);
     CHECK(settled(tab), "encoding filter: settles");
     const int filteredRows = model.rowCount();
@@ -847,7 +847,7 @@ static void checkGrowingSingleByte(const QDir& dir, const QString& name, const Q
         record(0, "INFO", "ascii head") + record(1, "INFO", "still ascii"));
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.setFallbackEncoding(TextEncoding::Windows1251);
     tab.addLogFile(path);
     CHECK(settled(tab), name + " cp1251: initial load");
@@ -911,7 +911,7 @@ static void checkThresholdKeepsEncoding(const QDir& dir, const QString& schema)
             testdocs::encodeText(head, TextEncoding::Windows1251));
         LogViewWidget tab;
         tab.setParserPattern(schema);
-        tab.setExtractionEnabled(true);
+        tab.setShowFields(true);
         tab.setFallbackEncoding(TextEncoding::Windows1251);
         tab.addLogFile(path);
         CHECK(settled(tab), "threshold auto: initial load");
@@ -947,7 +947,7 @@ static void checkThresholdKeepsEncoding(const QDir& dir, const QString& schema)
             testdocs::encodeText(head, TextEncoding::Windows1251));
         LogViewWidget tab;
         tab.setParserPattern(schema);
-        tab.setExtractionEnabled(true);
+        tab.setShowFields(true);
         tab.setFallbackEncoding(TextEncoding::Windows1251);
         tab.addLogFile(path);
         CHECK(settled(tab), "threshold user: initial load");
@@ -1028,7 +1028,7 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.setFallbackEncoding(TextEncoding::Windows1251);
     tab.addLogFile(path);
     tab.show();
@@ -1084,7 +1084,7 @@ static void checkResidentEncodingSwitch(const QDir& dir, const QString& schema)
     {
         LogViewWidget early;
         early.setParserPattern(schema);
-        early.setExtractionEnabled(true);
+        early.setShowFields(true);
         early.setFallbackEncoding(TextEncoding::Windows1251);
         early.addLogFile(path);
         const LogFilePtr earlyFile = early.loadedFiles().value(0);
@@ -1131,7 +1131,7 @@ static void checkProvisionalRevision(const QDir& dir, const QString& name, const
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.setFallbackEncoding(TextEncoding::Windows1251);
     tab.addLogFile(path);
     tab.show();
@@ -1249,7 +1249,7 @@ static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, co
                                                  testdocs::encodeText(text, TextEncoding::Windows1251));
         LogViewWidget tab;
         tab.setParserPattern(schema);
-        tab.setExtractionEnabled(true);
+        tab.setShowFields(true);
         tab.setFallbackEncoding(TextEncoding::Windows1251);
         QObject spies;
         QObject::connect(tab.model(), &QAbstractItemModel::modelReset, &spies, [&] { ++out.resets; });
@@ -1283,7 +1283,7 @@ static void checkProvisionalNoExtraWork(const QDir& dir, const QString& name, co
                                                  testdocs::encodeText(withWord, TextEncoding::Windows1251));
         LogViewWidget tab;
         tab.setParserPattern(schema);
-        tab.setExtractionEnabled(true);
+        tab.setShowFields(true);
         tab.setFallbackEncoding(TextEncoding::Windows1251);
         tab.addLogFile(path);
         CHECK(settled(tab), name + " user: load");
@@ -1323,7 +1323,7 @@ static void checkProvisionalThreshold(const QDir& dir, const QString& schema)
     const QString path = testdocs::writeFile(dir, "provisional-threshold.log", head);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.setFallbackEncoding(TextEncoding::Windows1251);
     tab.addLogFile(path);
     CHECK(settled(tab), "provisional threshold: initial load");
@@ -1880,7 +1880,7 @@ static void checkReopenClosedTab(const QDir& dir, const QString& name, const QSt
     rule.text = QStringLiteral("alpha 13");
     FilterRuleSet rules;
     rules.rules = { rule };
-    rules.bindFields(ta->parserFieldNames(), false);
+    rules.bindFields(ta->parserFieldNames());
     ma.setFilters({ LogLevel::Info }, QDateTime(), QDateTime(), rules);
     ta->setFileEncoding(ta->loadedFiles().first(), TextEncoding::Windows1251);
     CHECK(tabSettled(*ta), prefix + "A: filters");
@@ -2137,7 +2137,7 @@ static void checkHeadRewrite(const QDir& dir, const QString& name, const QString
 
             LogViewWidget tab;
             tab.setParserPattern(schema);
-            tab.setExtractionEnabled(true);
+            tab.setShowFields(true);
             tab.setAutoReload(true);
             tab.addLogFile(path);
             if (!other.isEmpty())
@@ -2246,6 +2246,61 @@ static QVector<KeyedRow> keyedRows(const LogModel& model)
     return out;
 }
 
+// F-17, шаг 3: правило по полю решается на записи и на живой вкладке —
+// продолжения, дописанные хвостом (в том числе после строки без '\n',
+// перечитанной с начала), следуют за первой строкой своей записи. Путь —
+// настоящий: LogViewWidget::reloadChangedFiles (ResumeContext::currentHead у
+// резидентного, первая строка записи по индексу у индексного).
+static void checkFieldRuleOnTail(const QDir& dir, const QString& name, const QString& schema)
+{
+    const QString path = testdocs::writeFile(dir, name + "-field-tail.log",
+        "2026-03-05 10:00:00.000 [main] ERROR - first\n"
+        "2026-03-05 10:00:01.000 [io-pool] INFO - second\n"
+        "2026-03-05 10:00:02.000 [main] WARN - third\n");
+    LogViewWidget tab;
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    CHECK(settled(tab), name + " field tail: loads");
+    LogModel& model = *tab.model();
+    for (const bool include : { true, false }) {
+        FilterRuleSet rules;
+        FilterRule r;
+        r.fieldName = QStringLiteral("Thread");
+        r.text = QStringLiteral("main");
+        r.action = include ? FilterRule::Action::Include : FilterRule::Action::Exclude;
+        rules.rules = { r };
+        rules.bindFields(tab.parserFieldNames());
+        model.setFilterRules(rules);
+        CHECK(settled(tab), name + " field tail: filter settles");
+        const int before = model.rowCount();
+        // Трейс записи «third» (main) — частями; последняя порция без '\n'.
+        for (const QByteArray& part : { QByteArray("    at A.call [io-pool]\n"),
+                                        QByteArray("    at B.call\n    at C.ca"),
+                                        QByteArray("ll\n") }) {
+            CHECK(testdocs::appendToFile(path, part), name + " field tail: append");
+            tab.reloadChangedFiles(/*force=*/true);
+            CHECK(settled(tab), name + " field tail: reload settles");
+        }
+        int traces = 0;
+        for (int row = 0; row < model.rowCount(); ++row)
+            traces += model.messageAt(row).startsWith(u' ') ? 1 : 0;
+        if (include) {
+            CHECK(traces == 3 && model.rowCount() == before + 3,
+                  name + QStringLiteral(" field tail: Include keeps the appended trace of its record (%1 rows, %2 traces)")
+                             .arg(model.rowCount()).arg(traces));
+        } else {
+            CHECK(traces == 0 && model.rowCount() == before,
+                  name + QStringLiteral(" field tail: Exclude hides the appended trace with its record (%1 rows, %2 traces)")
+                             .arg(model.rowCount()).arg(traces));
+        }
+        // Следующий проход цикла дописывает новую запись main с трейсом.
+        CHECK(testdocs::appendToFile(path, "2026-03-05 10:00:03.000 [main] INFO - fourth\n"),
+              name + " field tail: next record");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + " field tail: settles");
+    }
+}
+
 static void checkKeyedTail(const QDir& dir, const QString& name)
 {
     const QString schema = keyedfx::schema(KeyedDefinition::Format::JsonObject);
@@ -2257,7 +2312,7 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
     const QString path = testdocs::writeFile(dir, name + "-keyed.jsonl", fx.bytes);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), name + " keyed: initial load");
     int done = 0;
@@ -2272,7 +2327,7 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
         const QString wholePath = testdocs::writeFile(dir, name + QString("-keyed-whole-%1.jsonl").arg(to), bytes);
         LogViewWidget whole;
         whole.setParserPattern(schema);
-        whole.setExtractionEnabled(true);
+        whole.setShowFields(true);
         whole.addLogFile(wholePath);
         CHECK(settled(whole), name + " keyed: whole file loads");
         CHECK(tab.model()->isIndexedBackend() == whole.model()->isIndexedBackend(),
@@ -2289,7 +2344,7 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
 }
 
 // F-4, PR 3: смена схемы на открытой вкладке, при которой меняется ключевая
-// часть (было или стало keyed, флаг извлечения у ключевой схемы), перечитывает
+// часть (было или стало keyed; показ полей — нет, F-17, шаг 3), перечитывает
 // файлы вкладки: моменты, уровни и границы записей — из ключей (обратно —
 // эвристика), и вкладка равна открытой сразу с этой схемой. Текущая строка,
 // выделение и её место на экране, закладка и история переходов переживают
@@ -2324,7 +2379,7 @@ static FieldSettings schemaSettings(const QString& schema, bool extraction = tru
 {
     FieldSettings settings;
     settings.schema = schema;
-    settings.extraction = extraction;
+    settings.showFields = extraction;
     return settings;
 }
 
@@ -2420,9 +2475,10 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
                   && model.visibleTimestampAt(row).toMSecsSinceEpoch() == fx.records[2].ms,
               name + " keyed: the epoch record has its key moment and level");
     }
-    // Извлечение выключено — ключевая схема не действует: эвристика.
-    switchTo(schemaSettings(keyed, false), name + " keyed, extraction off", true);
-    switchTo(schemaSettings(keyed), name + " keyed, extraction on", true);
+    // Показ полей выключен — только показ (F-17, шаг 3): ключевая схема
+    // действует при чтении как прежде, файл не перечитывается.
+    switchTo(schemaSettings(keyed, false), name + " keyed, fields not shown", false);
+    switchTo(schemaSettings(keyed), name + " keyed, fields shown", false);
     switchTo(schemaSettings(regexSchema), name + " keyed → regex", true);
     regexToRegex = true;
     switchTo(schemaSettings(plain), name + " regex → regex", false);
@@ -2721,6 +2777,7 @@ int main(int argc, char** argv)
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
     checkKeyedTail(dir, QStringLiteral("resident"));
+    checkFieldRuleOnTail(dir, QStringLiteral("resident"), schema);
     checkKeyedSchemaSwitch(dir, QStringLiteral("resident"), schema);
     checkFileSchemas(dir, QStringLiteral("resident"), schema);
     checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
@@ -2750,6 +2807,7 @@ int main(int argc, char** argv)
     checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkKeyedTail(dir, QStringLiteral("indexed"));
+    checkFieldRuleOnTail(dir, QStringLiteral("indexed"), schema);
     checkKeyedSchemaSwitch(dir, QStringLiteral("indexed"), schema);
     checkFileSchemas(dir, QStringLiteral("indexed"), schema);
     checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
@@ -2777,7 +2835,7 @@ int main(int argc, char** argv)
         const QString path = testdocs::writeFile(dir, "grows.log", start);
         LogViewWidget tab;
         tab.setParserPattern(schema);
-        tab.setExtractionEnabled(true);
+        tab.setShowFields(true);
         tab.addLogFile(path);
         CHECK(settled(tab), "threshold: initial load");
         CHECK(!tab.model()->isIndexedBackend(), "threshold: small file starts resident");

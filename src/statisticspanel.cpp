@@ -198,8 +198,8 @@ QVector<BinRun> runsAboveThreshold(const QVector<quint32>& bins, double threshol
 
 // ---------------------------------------------------------------------------
 // collectDocumentStats — воркер: одна проходка по снапшоту + постобработка.
-// Читает только message/timestamp/level/logicalEntryId/sourceFile — поле
-// fields может конкурентно переписываться переизвлечением схемы полей.
+// Читает только message/timestamp/level/logicalEntryId/sourceFile; полей в
+// записях нет (F-17, шаг 3), записи неизменяемы после публикации.
 // ---------------------------------------------------------------------------
 struct TemplateAgg {
     int      count = 0;

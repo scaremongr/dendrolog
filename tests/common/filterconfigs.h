@@ -27,6 +27,9 @@ struct FilterConfig {
     QDateTime                 start;
     QDateTime                 end;
     FilterRuleSet             rules;
+    // До F-17, шаг 3 — галочка «Filter blocks» (правило по полю искало по
+    // всей строке без неё). Теперь привязка от показа не зависит; флаг
+    // остался именем конфигурации и признаком «правило по одной колонке».
     bool                      fieldScopeActive = false;
     bool                      fieldFilterEnabled = false;
     QVector<int>              visibleFields;
@@ -337,7 +340,7 @@ inline bool applyConfig(LogModel& model, const FilterConfig& cfg, const QStringL
     model.setFieldDisplaySelection(cfg.fieldFilterEnabled, cfg.visibleFields);
 
     FilterRuleSet rules = cfg.rules;
-    rules.bindFields(fieldNames, cfg.fieldScopeActive);
+    rules.bindFields(fieldNames);
 
     model.setLogLevelFilter(cfg.levels);
     model.setTimeRangeFilter(cfg.start, cfg.end);

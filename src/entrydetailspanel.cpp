@@ -329,12 +329,14 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
 void EntryDetailsPanel::showEntry(const std::shared_ptr<LogEntry>& line,
                                   const QVector<std::shared_ptr<LogEntry>>& logicalLines,
                                   const QStringList& fieldNames,
-                                  const FileSchemaPtr& schema)
+                                  const FileSchemaPtr& schema,
+                                  const LogEntryFields& recordFields)
 {
     m_line = line;
     m_logicalLines = logicalLines;
     m_fieldNames = fieldNames;
     m_schema = schema;
+    m_recordFields = recordFields;
     scheduleRebuild();
 }
 
@@ -370,6 +372,7 @@ void EntryDetailsPanel::clearEntry()
     m_logicalLines.clear();
     m_fieldNames.clear();
     m_schema.reset();
+    m_recordFields = LogEntryFields();
     scheduleRebuild();
 }
 
@@ -545,12 +548,11 @@ QVector<EntryDetailsPanel::SectionAnchor> EntryDetailsPanel::collectSectionAncho
 
 const LogEntry* EntryDetailsPanel::fieldsSource() const
 {
-    // У continuation-строк fields пуст — берём их с первой строки логической
-    // записи, у которой они извлеклись (обычно это первая строка).
-    for (const auto& e : m_logicalLines)
-        if (e && !e->fields().isEmpty())
-            return e.get();
-    return nullptr;
+    // Поля записи — поля её первой строки (F-17, шаг 3); их передал
+    // showEntry (recordFields). Строка не принята схемой — полей нет.
+    if (m_recordFields.isEmpty() || m_logicalLines.isEmpty() || !m_logicalLines.first())
+        return nullptr;
+    return m_logicalLines.first().get();
 }
 
 QVector<std::pair<QString, QString>> EntryDetailsPanel::keyPairs() const
@@ -601,11 +603,11 @@ void EntryDetailsPanel::onAnchorClicked(const QUrl& url)
         if (const LogEntry* src = fieldsSource()) {
             QStringList rows;
             const int count = int(qMin(m_fieldNames.size(),
-                                       qsizetype(src->fields().size())));
+                                       qsizetype(m_recordFields.size())));
             for (int i = 0; i < count; ++i)
-                if (src->fields().has(i))
+                if (m_recordFields.has(i))
                     rows << m_fieldNames.at(i) + QLatin1Char('\t')
-                            + src->fields().value(i, src->message());
+                            + m_recordFields.value(i, src->message());
             text = rows.join(QLatin1Char('\n'));
         }
     } else if (what == QLatin1String("keys")) {
@@ -715,18 +717,18 @@ QString EntryDetailsPanel::buildHtml()
         if (src) {
             html += QLatin1String("<table cellspacing=\"0\" cellpadding=\"2\">");
             const int count = int(qMin(m_fieldNames.size(),
-                                       qsizetype(src->fields().size())));
+                                       qsizetype(m_recordFields.size())));
             for (int i = 0; i < count; ++i) {
                 // Имя поля со стрелкой ▾/▸ — ссылка сворачивания (как узел
                 // tree view); у свёрнутого поля вместо значения «…».
                 const bool collapsed = m_collapsedFields.contains(m_fieldNames.at(i));
                 QString value;
-                if (!src->fields().has(i)) {
+                if (!m_recordFields.has(i)) {
                     value = colorSpan(muted, QStringLiteral("—"));
                 } else if (collapsed) {
                     value = colorSpan(muted, QStringLiteral("…"));
                 } else {
-                    value = src->fields().value(i, src->message());
+                    value = m_recordFields.value(i, src->message());
                     if (value.size() > kMaxFieldValueChars)
                         value = value.left(kMaxFieldValueChars) + QStringLiteral("…");
                     value = value.toHtmlEscaped();

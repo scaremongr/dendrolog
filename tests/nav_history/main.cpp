@@ -306,7 +306,7 @@ static void checkTab(const QDir& dir, const QString& name, const QString& schema
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), QStringLiteral("загрузка"));
@@ -538,7 +538,7 @@ static void checkConversion(const QDir& dir, const QString& schema)
     const QString path = writeFile(dir, "grows.log", start);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), QStringLiteral("загрузка"));
     LogModel& model = *tab.model();
@@ -849,7 +849,7 @@ static void checkSearchResultsQuiet(const QDir& dir, const QString& schema)
     FilterRule rule;
     rule.text = QStringLiteral("needle");
     rules.rules.append(rule);
-    rules.bindFields({}, false);
+    rules.bindFields({});
     search.search(rules);
     CHECK(waitFor([&] { return search.model()->rowCount() >= 10 && !search.model()->isFiltering(); }, 10000),
           QStringLiteral("выдача готова"));

@@ -250,9 +250,10 @@ QMap<int, RowInfo> rowsByLine(testdocs::Document& doc, const LogPattern& pattern
         RowInfo info;
         info.recordId = e->logicalEntryId();
         info.ms = e->timestamp().isValid() ? e->timestamp().toMSecsSinceEpoch() : kNoTimestampMs;
-        info.fieldsText = e->fields().isEmpty()
+        const LogEntryFields fields = doc.model->fieldsOf(*e);
+        info.fieldsText = fields.isEmpty()
             ? QString()
-            : describeFields(pattern, e->message(), e->fields());
+            : describeFields(pattern, e->message(), fields);
         rows.insert(e->originalLineNumber(), info);
     }
     return rows;

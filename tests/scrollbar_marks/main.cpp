@@ -129,7 +129,6 @@ public:
     QString textAt(qint64) const override { return QString(); }
     std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor(qint64) const override { return nullptr; }
     LogFilePtr sourceFilePtrAt(qint64) const override { return m_data->file; }
-    LogEntryFields fieldsAt(qint64, const QString&) const override { return LogEntryFields(); }
 
 private:
     std::shared_ptr<const SyntheticRows> m_data;
@@ -465,7 +464,7 @@ static void checkTabUpdates(const QDir& dir, const QString& schema, bool indexed
     const QStringList paths = makeFiles(dir, QStringLiteral("tab-%1").arg(indexed), 2, 1500);
     LogViewWidget tab;
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.resize(900, 600);
     tab.show();
     tab.addLogFile(paths[0]);
@@ -764,7 +763,7 @@ static void checkLifecycle(const QDir& dir, const QString& schema)
 
     // Поток батчей: каждый — только флаг и таймер.
     testdocs::Document second = testdocs::buildResident({ paths[1] }, schema);
-    QVector<std::shared_ptr<LogEntry>> entries = second.model->residentEntriesForFieldMutation();
+    QVector<std::shared_ptr<LogEntry>> entries = second.model->residentEntries();
     std::sort(entries.begin(), entries.end(),
               [](const auto& a, const auto& b) { return *a < *b; });
     const int start = marks.launchCount();

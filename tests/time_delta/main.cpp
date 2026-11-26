@@ -249,7 +249,7 @@ static void checkTab(const QDir& dir, bool indexed)
     needle.action = FilterRule::Action::Include;
     needle.text = QStringLiteral("needle");
     rules.rules << needle;
-    rules.bindFields(model.availableFields(), false);
+    rules.bindFields(model.availableFields());
     model.setLogLevelFilter({});
     model.setFilterRules(rules);
     CHECK(settled(tab), label + ": text filter");

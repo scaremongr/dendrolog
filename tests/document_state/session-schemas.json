@@ -117,7 +117,7 @@
                     }
                 },
                 "fields": {
-                    "extraction": true,
+                    "showFields": true,
                     "schema": {
                         "definition": {
                             "blocks": [
@@ -202,7 +202,7 @@
             "view": {
                 "autoReload": false,
                 "fields": {
-                    "extraction": false,
+                    "showFields": false,
                     "schema": {
                         "definition": {
                             "blocks": [

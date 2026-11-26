@@ -422,8 +422,10 @@ bool ViewExportJob::start(const LogModel& model, const QString& destination,
     const bool fieldsShown = model.fieldDisplayFilterEnabled();
     const QVector<int> visibleIndexes = model.visibleFieldIndexes();
     // Схемы файлов (F-5): строка, в схеме файла которой нет ни одной
-    // выбранной колонки, — сырым текстом, как во view.
+    // выбранной колонки, — сырым текстом, как во view. Поля строк — снимком
+    // схем в воркере (FieldScanner, F-17, шаг 3): в записях их нет.
     const FileSchemaSet schemas = model.fileSchemas();
+    const FieldScanner scanner = model.fieldSource().scanner();
     const qint64 rows = snapshot.rowCount();
     // Таблица (F-9): колонки и имена файлов — здесь, на GUI-потоке.
     const bool table = format != ViewExport::Format::Text;
@@ -453,13 +455,13 @@ bool ViewExportJob::start(const LogModel& model, const QString& destination,
         };
         const ViewExport::RowSource text = [&](const ViewExport::RowSink& sink) {
             qint64 done = 0;
-            snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta& meta, QStringView text) {
+            snapshot.forEachLine(0, [&](qint64, const LogEntryMeta& meta, QStringView text) {
                 tick(done);
                 if (!fieldsShown)
                     return sink(text);
                 // Текст строки валиден только внутри колбэка — без копии.
                 const QString raw = QString::fromRawData(text.data(), text.size());
-                return sink(LogModel::formatDisplayText(raw, snapshot.fieldsAt(row, raw),
+                return sink(LogModel::formatDisplayText(raw, scanner.fields(meta.sourceFile, raw),
                                                         true, visibleIndexes,
                                                         schemas.forFile(meta.sourceFile)));
             });
@@ -472,10 +474,10 @@ bool ViewExportJob::start(const LogModel& model, const QString& destination,
             QVector<bool> nulls(columns.headers.size(), false);
             qint64 done = 0;
             IsoTime isoTime;
-            snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta& meta, QStringView text) {
+            snapshot.forEachLine(0, [&](qint64, const LogEntryMeta& meta, QStringView text) {
                 tick(done);
                 const QString raw = QString::fromRawData(text.data(), text.size());
-                const LogEntryFields fields = snapshot.fieldsAt(row, raw);
+                const LogEntryFields fields = scanner.fields(meta.sourceFile, raw);
                 values.clear();
                 values << isoTime(meta.timestampMs);
                 nulls[0] = !hasTimestampMs(meta.timestampMs);

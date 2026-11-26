@@ -165,9 +165,10 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // как у LogParser: дозапись после Нового года получает новый год.
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Схема прохода (F-5) — как у LogParser: nullptr — без извлечения полей.
-    const bool extraction = schema && schema->isValid();
-    const LogPattern* const pattern = extraction ? &schema->pattern : nullptr;
+    // Схема прохода (F-5) — как у LogParser: nullptr — без схемы; решает
+    // только чтение (граница записи, у ключевой — метка и уровень).
+    const LogPattern* const pattern =
+        (schema && schema->pattern.isValid()) ? &schema->pattern : nullptr;
     const LogPattern* const keyedSchema = (pattern && pattern->isKeyed()) ? pattern : nullptr;
     // Дата времени без даты (F-11) — как у LogParser: дозапись продолжает
     // состояние прошлого прохода, предпросмотр — от начала этого прохода.

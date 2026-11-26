@@ -231,7 +231,7 @@ static void checkTab(const QString& name, const QString& path, const QString& sc
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": load settles");
@@ -358,7 +358,7 @@ static void checkTraces(const QString& name, const QString& path, const QString&
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     tab.addLogFile(path);
     tab.show();
     CHECK(settled(tab), name + ": load settles");
@@ -398,7 +398,7 @@ static void checkLegend(const QString& name, const QStringList& paths, const QSt
     LogViewWidget tab;
     tab.resize(900, 400);
     tab.setParserPattern(schema);
-    tab.setExtractionEnabled(true);
+    tab.setShowFields(true);
     for (const QString& path : paths)
         tab.addLogFile(path);
     tab.show();
@@ -579,7 +579,7 @@ int main(int argc, char** argv)
         auto earlier = testdocs::buildResident({b}, schema);
         QVector<std::shared_ptr<LogEntry>> batch;
         const QDateTime limit = model.visibleTimestampAt(1000); // b.log начинается позже a.log
-        for (const auto& entry : earlier.model->residentEntriesForFieldMutation()) {
+        for (const auto& entry : earlier.model->residentEntries()) {
             if (entry->timestamp() < limit)
                 batch.append(entry);
         }
@@ -679,7 +679,7 @@ int main(int argc, char** argv)
         auto earlier = testdocs::buildResident({b}, schema);
         QVector<std::shared_ptr<LogEntry>> batch;
         const QDateTime limit = model.visibleTimestampAt(1000);
-        for (const auto& entry : earlier.model->residentEntriesForFieldMutation()) {
+        for (const auto& entry : earlier.model->residentEntries()) {
             if (entry->timestamp() < limit)
                 batch.append(entry);
         }

@@ -99,6 +99,9 @@ public:
         QDateTime currentTimestamp;         // of the current record
         LogLevel currentLevel = LogLevel::Unknown;
         int nextLineNumber = 1;             // 1-based line number in the file
+        // First line of the current record (F-17, step 3): a continuation
+        // line read by this pass links to it (LogEntry::recordHead).
+        std::shared_ptr<const LogEntry> currentHead;
     };
 
     // Кодировка файлов не в UTF-8, на которую автоопределение отступает
@@ -111,11 +114,11 @@ public slots:
     // Полный разбор файла. encoding — состояние кодировки файла на старте
     // (F-1): по умолчанию «не решено»; выбор пользователя (Source::User)
     // переживает перечитывание и автоматикой не меняется.
-    // schema (F-5) — схема, которой читается файл в этом проходе, с таблицей
-    // «поле схемы → колонка вкладки»: поля записей — сразу в колонках
-    // вкладки. nullptr — без схемы (извлечение полей выключено). Схема
-    // берётся на старте прохода и живёт с ним: смена схемы вкладки не
-    // трогает проход в полёте.
+    // schema (F-5) — схема, которой читается файл в этом проходе (до шага 7
+    // F-17): ключевая решает метку, уровень и границу записи, регексная —
+    // только границу (строка, не первичная без схемы, первична, если схема
+    // её узнала). Полей записи не хранят (F-17, шаг 3). nullptr — без схемы.
+    // Схема берётся на старте прохода и живёт с ним.
     void startParsing(const LogFilePtr& logFile, FileEncoding encoding = {},
                       FileSchemaPtr schema = {});
     // Incremental parse: read only bytes starting at startOffset (a line

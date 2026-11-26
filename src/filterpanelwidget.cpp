@@ -61,7 +61,7 @@ FilterRuleCard::FilterRuleCard(const FilterRule& rule, QWidget* parent)
 
     m_fieldCombo = new QComboBox(this);
     m_fieldCombo->setToolTip(tr("Bind the rule to a Log Fields column.\n"
-                                "Active only while 'Filter blocks' is checked in the Log Fields panel."));
+                                "The rule searches the field of the record's first line and applies to the whole record."));
     m_fieldCombo->setMinimumWidth(80);
     m_fieldCombo->setFocusPolicy(Qt::StrongFocus);
     headerRow->addWidget(m_fieldCombo, /*stretch=*/1);
@@ -178,7 +178,7 @@ FilterRule FilterRuleCard::rule() const
     return rule;
 }
 
-void FilterRuleCard::setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled)
+void FilterRuleCard::setFieldNames(const QStringList& fieldNames)
 {
     const QString previousField = m_fieldCombo->currentData().toString();
 
@@ -201,10 +201,8 @@ void FilterRuleCard::setFieldNames(const QStringList& fieldNames, bool fieldScop
     }
     m_fieldCombo->blockSignals(false);
 
-    m_fieldCombo->setEnabled(fieldScopeEnabled);
     m_schemaFields = fieldNames;
     m_schemaKnown = true;
-    m_fieldScopeEnabled = fieldScopeEnabled;
     updateRegexValidity();
 }
 
@@ -242,9 +240,7 @@ void FilterRuleCard::updateRegexValidity()
 
     const QString field = m_fieldCombo->currentData().toString();
     if (error.isEmpty() && !field.isEmpty() && m_schemaKnown) {
-        if (!m_fieldScopeEnabled)
-            note = tr("Log Fields are off: this rule searches the entire row.");
-        else if (!m_schemaFields.contains(field))
+        if (!m_schemaFields.contains(field))
             error = tr("Column \"%1\" is not in the current schema: the rule is ignored "
                        "until the column is back.").arg(field);
     }
@@ -463,12 +459,11 @@ void FilterPanelWidget::setRuleSet(const FilterRuleSet& set)
         addRule(FilterRule{});
 }
 
-void FilterPanelWidget::setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled)
+void FilterPanelWidget::setFieldNames(const QStringList& fieldNames)
 {
     m_fieldNames = fieldNames;
-    m_fieldScopeEnabled = fieldScopeEnabled;
     for (auto* card : m_cards)
-        card->setFieldNames(fieldNames, fieldScopeEnabled);
+        card->setFieldNames(fieldNames);
 }
 
 // ===========================================================================
@@ -696,7 +691,7 @@ void FilterPanelWidget::addRule(const FilterRule& rule)
         prepared.highlightColor = nextFreeColor();
 
     auto* card = new FilterRuleCard(prepared, this);
-    card->setFieldNames(m_fieldNames, m_fieldScopeEnabled);
+    card->setFieldNames(m_fieldNames);
     card->setTextPlaceholder(m_mode == Mode::Search ? tr("Text to find...")
                                                     : tr("Text to filter by..."));
 

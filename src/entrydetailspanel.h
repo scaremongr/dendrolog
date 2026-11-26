@@ -56,10 +56,14 @@ public:
     // в порядке файла (содержат саму line); fieldNames — схема полей модели;
     // schema — схема файла строки (LogModel::fileSchemaFor): у ключевой
     // (F-4) под колонками — все ключи верхнего уровня строки.
+    // recordFields — поля ПЕРВОЙ строки записи (logicalLines.first()) в
+    // колонках вкладки (LogModel::fieldsOf, F-17, шаг 3: в записях полей
+    // нет); пусто — строка не принята схемой.
     void showEntry(const std::shared_ptr<LogEntry>& line,
                    const QVector<std::shared_ptr<LogEntry>>& logicalLines,
                    const QStringList& fieldNames,
-                   const FileSchemaPtr& schema = FileSchemaPtr());
+                   const FileSchemaPtr& schema = FileSchemaPtr(),
+                   const LogEntryFields& recordFields = LogEntryFields());
     void clearEntry();
     // Дельта времени строки (F-8): от предыдущей строки и от «нулевой» —
     // строкой под заголовком. Окно ставит её после showEntry и при смене
@@ -109,6 +113,7 @@ private:
     QVector<std::shared_ptr<LogEntry>> m_logicalLines;
     QStringList m_fieldNames;
     FileSchemaPtr m_schema;
+    LogEntryFields m_recordFields;   // поля первой строки записи
     TimeDelta::RowDelta m_delta;
     // Ключи строки ключевой схемы (LogPattern::keyValuePairs) — для одной
     // записи; пусто — схема не ключевая или строка не распознана.

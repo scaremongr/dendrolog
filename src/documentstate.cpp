@@ -127,7 +127,7 @@ QJsonObject FieldSettings::toJson() const
     QJsonObject json;
     if (hasSchema())
         json.insert(QStringLiteral("schema"), schemaToJson(schemaName, schema));
-    json.insert(QStringLiteral("extraction"), extraction);
+    json.insert(QStringLiteral("showFields"), showFields);
     if (!visibleFields.isEmpty())
         json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
     return json;
@@ -139,7 +139,9 @@ std::optional<FieldSettings> FieldSettings::fromJson(const QJsonObject& json, QS
     const QJsonValue schema = json.value(QLatin1String("schema"));
     if (!schema.isUndefined() && !schemaFromJson(schema, &s.schemaName, &s.schema, error))
         return std::nullopt;
-    if (!boolField(json, "extraction", &s.extraction, error)
+    // До F-17, шаг 3 — «extraction» («Filter blocks»): тот же смысл для показа.
+    if (!boolField(json, "extraction", &s.showFields, error)
+        || !boolField(json, "showFields", &s.showFields, error)
         || !stringListField(json, "visibleFields", &s.visibleFields, error))
         return std::nullopt;
     return s;
@@ -453,7 +455,7 @@ QJsonObject SessionState::toJson(const QString& sessionFilePath) const
     json.insert(QStringLiteral("version"), kFormatVersion);
     if (hasSchema())
         json.insert(QStringLiteral("schema"), schemaToJson(schemaName, schema));
-    json.insert(QStringLiteral("fieldExtraction"), fieldExtraction);
+    json.insert(QStringLiteral("fieldExtraction"), showFields);
     if (!visibleFields.isEmpty())
         json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
     json.insert(QStringLiteral("activeTab"), activeTab);
@@ -514,7 +516,7 @@ std::optional<SessionState> SessionState::fromJson(const QJsonObject& json, QStr
     if (!schema.isUndefined() && !schemaFromJson(schema, &s.schemaName, &s.schema, error))
         return std::nullopt;
 
-    if (!boolField(json, "fieldExtraction", &s.fieldExtraction, error))
+    if (!boolField(json, "fieldExtraction", &s.showFields, error))
         return std::nullopt;
 
     if (!stringListField(json, "visibleFields", &s.visibleFields, error))

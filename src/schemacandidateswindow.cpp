@@ -7,6 +7,7 @@
 #include "logmodel.h"
 #include "logviewwidget.h"
 #include "secretstore.h"
+#include "linetemplate.h"
 
 #include <QCoreApplication>
 #include <QHBoxLayout>
@@ -361,10 +362,8 @@ void SchemaCandidatesWindow::showVariant()
     m_misses->setColumnWidth(1, qMin(m_misses->columnWidth(1), 360));
 
     const bool catalogue = variant.source == SchemaCandidates::Variant::Source::Catalogue;
-    m_use->setEnabled(catalogue && m_view && m_schemas);
-    m_use->setToolTip(catalogue ? tr("Use this schema in the tab the window was opened for")
-                                : tr("A line template cannot be used for a tab in this version yet: "
-                                     "save it to your schemas."));
+    m_use->setEnabled(m_view && m_schemas && (catalogue || !variant.templateText.isEmpty()));
+    m_use->setToolTip(tr("Use this schema in the tab the window was opened for (the file is not read again)"));
     m_save->setEnabled(!catalogue && !variant.templateText.isEmpty());
 }
 
@@ -448,12 +447,19 @@ void SchemaCandidatesWindow::useForTab()
     if (v < 0 || v >= variants.size() || !m_view || !m_schemas)
         return;
     const SchemaCandidates::Variant& variant = variants[v];
-    if (variant.source != SchemaCandidates::Variant::Source::Catalogue)
-        return;
+    // Поля ленивые (F-17, шаг 3): схема — вкладке за O(1), файл не
+    // перечитывается; шаблон (вывод структуры, AI) — определением версии 4.
     FieldSettings settings = m_view->fieldSettings();
-    settings.schemaName = variant.entry.name;
-    settings.schema = variant.entry.schema;
-    settings.extraction = true;
+    if (variant.source == SchemaCandidates::Variant::Source::Catalogue) {
+        settings.schemaName = variant.entry.name;
+        settings.schema = variant.entry.schema;
+    } else {
+        if (variant.templateText.isEmpty())
+            return;
+        settings.schemaName = variant.title;
+        settings.schema = LineTemplateSchema::definition(variant.templateText);
+    }
+    settings.showFields = true;
     settings.visibleFields.clear();
     m_schemas->applyToView(m_view, settings);
     emit schemaUsed(m_view);

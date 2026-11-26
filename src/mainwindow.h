@@ -253,7 +253,6 @@ private:
     QToolButton* m_cancelUnpackButton = nullptr; // F-2: распаковка активной вкладки
     bool m_unpackStatusShown = false;            // строка состояния показывает распаковку
     class EncodingIndicator* m_encodingIndicator = nullptr; // кодировка файла текущей строки
-    QString m_exportCancelReason; // почему экспорт отменён не пользователем
 
     // Time filter widgets (added to ui->timeFilterToolBar)
     QDateTimeEdit* m_timeFilterFrom;
@@ -395,7 +394,7 @@ private:
     QStringList m_shownFieldNames;
     bool m_fieldControlsBuilt = false;
 
-    // Каталог схем, активная схема, «Filter blocks», колонки и их применение
+    // Каталог схем, активная схема, показ полей, колонки и их применение
     // ко вкладкам (M-2); окно — только вид дока Log Fields.
     FieldSchemaController* m_schemas = nullptr;
 
@@ -525,9 +524,6 @@ private:
     void updateTabLabel(LogViewWidget* view);
     // Построить и показать контекстное меню заголовка вкладки index.
     void onTabContextMenu(int index, const QPoint& globalPos);
-    // Читатели полей вне вкладок — выдача Search и Save View As — перед
-    // сменой полей записей (инвариант 4; FieldSchemaController::Window).
-    void stopFieldReaders(LogViewWidget* view, bool starting);
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.
@@ -551,7 +547,7 @@ private:
     // Применить row-маркеры к активной вкладке.
     void applyRowMarkersToActiveView();
     // Синхронизировать список колонок конструктора фильтров с активной
-    // схемой Log Fields и состоянием галочки "Filter blocks".
+    // схемой Log Fields и состоянием галочки "Show selected fields only".
     void updateFilterPanelFieldNames();
     // Док Log Fields по состоянию FieldSchemaController.
     void syncSchemaCombo();

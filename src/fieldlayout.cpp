@@ -1,5 +1,7 @@
 #include "fieldlayout.h"
+#include "linetemplate.h"
 #include "logfile.h"
+
 
 bool FileSchema::hasAnyOf(const QVector<int>& columns) const noexcept
 {
@@ -23,11 +25,52 @@ void FileSchema::toLayout(LogEntryFields& fields) const
     fields.spans = std::move(spans);
 }
 
+FieldExtractor::Outcome FileSchema::extract(QStringView line, LogEntryFields* out,
+                                            int upToColumn) const
+{
+    if (!extractor) {
+        out->spans.clear();
+        return FieldExtractor::Outcome::Rejected;
+    }
+    int upTo = -1;
+    if (upToColumn >= 0) {
+        // Колонки вкладки нет у схемы — разбирать её не нужно, но принята ли
+        // строка, решает весь разбор; такой вызов не делают (правило по
+        // отсутствующей колонке нейтрально).
+        upTo = (upToColumn < fieldOf.size()) ? fieldOf[upToColumn] : -1;
+    }
+    const FieldExtractor::Outcome outcome = extractor->extract(line, out, upTo);
+    if (outcome == FieldExtractor::Outcome::Rejected) {
+        out->spans.clear();
+        return outcome;
+    }
+    toLayout(*out);
+    return outcome;
+}
+
+bool FieldLayout::isTemplateDefinition(const QString& definition)
+{
+    return LineTemplateSchema::templateOf(definition, nullptr);
+}
+
+FieldExtractorPtr FieldLayout::extractorFor(const LogPattern& pattern)
+{
+    QString templateText;
+    if (LineTemplateSchema::templateOf(pattern.patternString(), &templateText))
+        return std::make_shared<const TemplateExtractor>(templateText);
+    if (!pattern.isValid())
+        return nullptr;
+    return std::make_shared<const LegacyPatternExtractor>(pattern);
+}
+
 FileSchemaPtr FieldLayout::schemaFor(const LogPattern& pattern)
 {
     auto schema = std::make_shared<FileSchema>();
-    schema->pattern = pattern;
-    const QStringList names = pattern.isValid() ? pattern.fieldNames() : QStringList();
+    schema->extractor = extractorFor(pattern);
+    // Шаблон строки загрузке не виден: pattern пустой.
+    if (!dynamic_cast<const TemplateExtractor*>(schema->extractor.get()))
+        schema->pattern = pattern;
+    const QStringList names = schema->isValid() ? schema->extractor->fields() : QStringList();
     schema->columnOf.reserve(names.size());
     for (int i = 0; i < names.size(); ++i) {
         // k-е поле с этим именем в схеме ↔ k-я колонка с ним в раскладке.
@@ -53,8 +96,11 @@ FileSchemaPtr FieldLayout::schemaFor(const LogPattern& pattern)
             schema->identity = false;
     }
     schema->hasColumn.resize(int(columns.size()));
-    for (const int column : std::as_const(schema->columnOf))
-        schema->hasColumn.setBit(column);
+    schema->fieldOf.fill(-1, int(columns.size()));
+    for (int i = 0; i < schema->columnOf.size(); ++i) {
+        schema->hasColumn.setBit(schema->columnOf[i]);
+        schema->fieldOf[schema->columnOf[i]] = i;
+    }
     return schema;
 }
 

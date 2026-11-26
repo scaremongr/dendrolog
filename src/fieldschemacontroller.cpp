@@ -1,7 +1,6 @@
 #include "fieldschemacontroller.h"
 
 #include "documentstate.h"
-#include "fieldreextraction.h"
 #include "filterruleset.h"
 #include "logmodel.h"
 #include "logpattern.h"
@@ -13,21 +12,22 @@
 #include <algorithm>
 #include <memory>
 
+// Колонки схемы по определению — блочной, ключевой или шаблона (F-17).
+static QStringList schemaColumns(const QString& definition)
+{
+    if (definition.isEmpty())
+        return {};
+    FieldLayout layout;
+    layout.schemaFor(definition);
+    return layout.columns;
+}
+
 FieldSchemaController::FieldSchemaController(QObject* parent)
     : QObject(parent)
 {
 }
 
-FieldSchemaController::~FieldSchemaController()
-{
-    // Воркеры не должны пережить записи, которые читают; сигналов владельцу,
-    // которого уже разбирают, — нет.
-    for (FieldReextraction* job : std::as_const(m_jobs)) {
-        job->cancel();
-        delete job;
-    }
-    m_jobs.clear();
-}
+FieldSchemaController::~FieldSchemaController() = default;
 
 QStringList FieldSchemaController::listOrder() const
 {
@@ -45,7 +45,7 @@ QStringList FieldSchemaController::listOrder() const
 void FieldSchemaController::load(QSettings& s)
 {
     m_defaults = FieldSettings();
-    m_defaults.extraction = s.value("fieldFilterEnabled", false).toBool();
+    m_defaults.showFields = s.value("fieldFilterEnabled", false).toBool();
     m_defaults.visibleFields = s.value("fieldVisibleNames").toStringList();
     const int legacyMask = s.value("fieldVisibilityMask", -1).toInt();
 
@@ -95,7 +95,7 @@ void FieldSchemaController::load(QSettings& s)
     m_defaults.schemaName = defaultIndex >= 0 ? m_list[defaultIndex].name : QString();
 
     // Выбор колонок версий до имён — битовая маска по индексам схемы.
-    const QStringList defaultFieldNames = LogPattern(m_defaults.schema).fieldNames();
+    const QStringList defaultFieldNames = schemaColumns(m_defaults.schema);
     if (m_defaults.visibleFields.isEmpty() && legacyMask >= 0) {
         for (int i = 0; i < defaultFieldNames.size() && i < 31; ++i) {
             if (legacyMask & (1 << i))
@@ -111,7 +111,7 @@ void FieldSchemaController::load(QSettings& s)
 void FieldSchemaController::save(QSettings& s) const
 {
     // Схема по умолчанию — последняя выбранная в доке (F-5).
-    s.setValue("fieldFilterEnabled", m_defaults.extraction);
+    s.setValue("fieldFilterEnabled", m_defaults.showFields);
     s.setValue("fieldVisibleNames", m_defaults.visibleFields);
     s.setValue("conversionPattern", m_defaults.schema);
     // Schemas themselves live as files in <configDir>/patterns/ (see
@@ -246,7 +246,7 @@ QString FieldSchemaController::activeSchemaName() const
 
 QStringList FieldSchemaController::fieldNames() const
 {
-    return m_current ? m_current->parserFieldNames() : LogPattern(m_defaults.schema).fieldNames();
+    return m_current ? m_current->parserFieldNames() : schemaColumns(m_defaults.schema);
 }
 
 QVector<int> FieldSchemaController::visibleFieldIndexes() const
@@ -285,7 +285,7 @@ void FieldSchemaController::chooseShown(const FieldSettings& settings, bool clea
     }
     // Вкладок нет — только схема по умолчанию.
     if (chosen.schema != m_defaults.schema)
-        chosen.visibleFields = keptColumns(chosen.visibleFields, LogPattern(chosen.schema).fieldNames());
+        chosen.visibleFields = keptColumns(chosen.visibleFields, schemaColumns(chosen.schema));
     m_defaults = chosen;
     emit catalogueChanged();
     emit fieldsChanged();
@@ -323,15 +323,14 @@ void FieldSchemaController::applyToFile(LogViewWidget* view, const LogFilePtr& f
     applyToView(view, view->fieldSettings(), &files);
 }
 
-void FieldSchemaController::setExtractionEnabled(bool enabled)
+void FieldSchemaController::setShowFields(bool enabled)
 {
     FieldSettings settings = tabSettings();
-    if (settings.extraction == enabled)
+    if (settings.showFields == enabled)
         return;
-    // Включает/выключает извлечение полей, переизвлекает поля уже загруженных
-    // записей и перепривязывает колоночные правила (галочка «Filter blocks»
-    // управляет строгой фильтрацией по колонкам).
-    settings.extraction = enabled;
+    // Только показ выбранных колонок (F-17, шаг 3): поля и правила по полю
+    // от галочки не зависят.
+    settings.showFields = enabled;
     chooseShown(settings);
 }
 
@@ -348,7 +347,7 @@ void FieldSchemaController::setVisibleFieldNames(const QStringList& names)
 void FieldSchemaController::bindRules(const LogViewWidget* view, FilterRuleSet& rules)
 {
     if (view)
-        rules.bindFields(view->parserFieldNames(), view->fieldSettings().extraction);
+        rules.bindFields(view->parserFieldNames());
 }
 
 std::optional<FieldSettings> FieldSchemaController::resolveSaved(const FieldSettings& saved,
@@ -418,7 +417,7 @@ void FieldSchemaController::onSavedFileSchema(LogViewWidget* view, const QString
     }
     if (!error.isEmpty())
         emit statusMessage(tr("Could not save the session schema: %1").arg(error));
-    // Файл уже читается — смена схемы (переизвлечение, инвариант 4); ещё без
+    // Файл уже читается — смена схемы (applyToFile); ещё без
     // строк (не открыт, сжатый ждёт распаковки) — схема ждёт его и только
     // растит раскладку.
     const LogFilePtr file = view->fileForSourceKey(sourceKey);
@@ -470,7 +469,7 @@ void FieldSchemaController::onSavedFieldSettings(LogViewWidget* view, const Fiel
     // Пустой выбор колонок в снимке — «все колонки» (как у сессии 0.6 и ini),
     // какой бы ни была схема вкладки до применения.
     FieldSettings settings = *resolved;
-    settings.visibleFields = keptColumns(settings.visibleFields, LogPattern(settings.schema).fieldNames());
+    settings.visibleFields = keptColumns(settings.visibleFields, schemaColumns(settings.schema));
     applyToView(view, settings);
 }
 
@@ -504,45 +503,15 @@ void FieldSchemaController::configureView(LogViewWidget* view)
             if (view == m_current)
                 emit catalogueChanged();
         });
-    // Вкладка закрыта посреди расчёта: воркеры держат записи сами
-    // (shared_ptr), расчёт просто отменяется.
-    connect(view, &QObject::destroyed, this, [this, view]() { cancelReextraction(view); });
 }
 
 void FieldSchemaController::applyFieldVisibility(LogViewWidget* view)
 {
     if (!view || !view->model())
         return;
-    // Посреди фонового расчёта колонки новой схемы легли бы на поля старой
-    // (и Save View As читал бы их во время замены) — показ включит конец
-    // расчёта.
-    const bool enabled = view->fieldDisplayEnabled() && !isReextracting(view);
+    const bool enabled = view->fieldDisplayEnabled();
     view->model()->setFieldDisplaySelection(enabled, enabled ? view->visibleFieldIndexes()
                                                              : QVector<int>());
-}
-
-bool FieldSchemaController::isReextracting(const LogViewWidget* view) const
-{
-    return view ? m_jobs.contains(view) : !m_jobs.isEmpty();
-}
-
-void FieldSchemaController::cancelReextraction(const LogViewWidget* view)
-{
-    FieldReextraction* job = m_jobs.take(view);
-    if (!job)
-        return;
-    m_progress.remove(job);
-    // Workers stop and are waited for; entries keep their old fields intact.
-    job->cancel();
-    job->deleteLater();
-    emit reextractionFinished();
-}
-
-void FieldSchemaController::cancelReextraction()
-{
-    const QList<const LogViewWidget*> keys = m_jobs.keys();
-    for (const LogViewWidget* view : keys)
-        cancelReextraction(view);
 }
 
 void FieldSchemaController::applyToAllViews()
@@ -621,142 +590,34 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
         settings.visibleFields = kept;
     }
 
-    const bool reextract = schemasChanged
-        || (settings.extraction && !newNames.isEmpty()) != view->fieldDisplayEnabled();
-    if (!reextract) {
-        // Те же схема и флаг: поля записей не меняются — только выбор колонок
-        // (и имена пунктов каталога).
-        view->setFieldSettings(settings, newFiles);
-        applyFieldVisibility(view);
-        if (view == m_current) {
-            emit catalogueChanged();
-            emit fieldsChanged();
-        }
-        return;
-    }
-
-    // Новая схема вкладки отменяет её расчёт в полёте.
-    cancelReextraction(view);
-    // Индексный бэкенд: спаны полей не хранятся — извлечение идёт по
-    // требованию новым паттерном (его передаст setFieldSettings).
-    QVector<std::shared_ptr<LogEntry>> entries;
-    if (view->model() && !view->model()->isIndexedBackend()) {
-        for (const auto& entry : view->model()->residentEntriesForFieldMutation())
-            if (entry)
-                entries.append(entry);
-    }
-    // Читатели полей вне вкладки (выдача Search, Save View As) и её фильтр —
-    // до синхронной мутации ниже (инвариант 4). Мутировать нечего (индексная
-    // вкладка, вкладка из снимка до загрузки) — чужие читатели не трогаются:
-    // их полей смена не касается. finishApplication() перефильтрует
-    // отменённое, окно повторит поиск по вкладке.
-    if (!entries.isEmpty() && m_window.stopFieldReaders)
-        m_window.stopFieldReaders(view, true);
-    if (view->model())
-        view->model()->cancelPendingFilter(true);
-
-    // Point the tab's parsers at the new schema up-front so newly loaded
-    // lines are parsed correctly even while the back-fill runs.
+    // Поля — функция текста и схемы (F-17, шаг 3): смена схемы — O(1) на
+    // вкладке (FieldSource модели: поколение, кэш пуст), записи не
+    // трогаются, читателей останавливать не нужно. Схема в модели — до
+    // перепривязки правил (их перефильтрация берёт её снимок).
     view->setFieldSettings(settings, newFiles);
     applyFieldVisibility(view);
     if (view == m_current) {
         emit catalogueChanged();
         emit fieldsChanged();
     }
-
-    // Схема записи — схема её файла у модели вкладки (F-5): setFieldSettings
-    // уже поставил их; nullptr — извлечение выключено, поля снимаются.
-    const FileSchemaSet schemas = view->model() ? view->model()->fileSchemas() : FileSchemaSet();
-    const bool doExtract = view->fieldDisplayEnabled()
-        && (schemas.fallback || !schemas.byPath.isEmpty());
-    if (!doExtract) {
-        for (const auto& entry : entries)
-            entry->setFields(LogEntryFields());
-        entries.clear();
-    }
-
-    // Small batches (or "no extraction") complete instantly on the GUI
-    // thread — no worker, no progress bar, no display flicker.
-    constexpr int kAsyncThreshold = 4000;
-    if (!doExtract || entries.size() < kAsyncThreshold) {
-        for (const auto& entry : entries) {
-            const FileSchema* schema = schemas.forFile(entry->sourceFile().get());
-            entry->setFields((schema && schema->isValid()) ? schema->extractFields(entry->message())
-                                                           : LogEntryFields());
-        }
+    if (schemasChanged)
         finishApplication(view);
-        return;
-    }
-
-    // Large batch: re-extract in the background. Workers do not touch the
-    // entries, so filters started meanwhile read the old fields safely. Field
-    // display of the tab is OFF for the duration (applyFieldVisibility): the
-    // column list already describes the new schema, while the entries still
-    // carry spans of the old one.
-    auto* job = new FieldReextraction(std::move(entries), schemas, this);
-    m_jobs.insert(view, job);
-    applyFieldVisibility(view);
-    // Прогресс окна — сумма расчётов («Apply Schema to All Tabs» запускает
-    // по одному на вкладку).
-    connect(job, &FieldReextraction::progressValueChanged, this, [this, job](int value) {
-        m_progress.insert(job, value);
-        int sum = 0;
-        for (int v : std::as_const(m_progress))
-            sum += v;
-        emit reextractionProgress(sum);
-    });
-    QPointer<LogViewWidget> guard(view);
-    connect(job, &FieldReextraction::finished, this, [this, guard, job]() {
-        if (guard && m_jobs.value(guard) == job)
-            onReextractionFinished(guard);
-    });
-    int total = 0;
-    for (const FieldReextraction* running : std::as_const(m_jobs))
-        total += running->entryCount();
-    emit reextractionStarted(total);
-    job->start();
-}
-
-void FieldSchemaController::onReextractionFinished(LogViewWidget* view)
-{
-    FieldReextraction* job = m_jobs.value(view);
-    if (!job)
-        return;
-    // Readers started while the fields were being computed (the tab's filter:
-    // Apply, level buttons, appended lines; Save View As to CSV / JSON Lines)
-    // read entry->fields(): stop them before the new fields go in;
-    // finishApplication() re-applies the filter. Search is not started then.
-    if (view->model())
-        view->model()->cancelPendingFilter(true);
-    if (m_window.stopFieldReaders)
-        m_window.stopFieldReaders(view, false);
-    job->apply();
-    m_jobs.remove(view);
-    m_progress.remove(job);
-    job->deleteLater();
-    emit reextractionFinished();
-    finishApplication(view);
 }
 
 void FieldSchemaController::finishApplication(LogViewWidget* view)
 {
-    if (view->model()) {
+    if (view->model())
         view->model()->refreshDisplay();
-        // Фильтр-джоб, отменённый на время переизвлечения полей, мог
-        // оставить список строк со старыми настройками — доводим.
-        view->model()->reapplyFilterIfStale();
-    }
-
-    // Re-enables field display with the tab's selection (it was turned off
-    // during a background re-extraction).
-    applyFieldVisibility(view);
 
     // Вкладка сохраняет СВОЙ применённый набор правил, но колоночные привязки
-    // пересчитываются под новую схему (вкладке без фильтров правила не
-    // навязываются).
+    // пересчитываются под новую схему, и правила по полю — перефильтрация
+    // (правила только по всей строке от схемы не зависят: вкладке без
+    // правил по полю ничего не перефильтровывается).
     if (view->model()) {
         FilterRuleSet rules = view->model()->filterRules();
-        if (rules.isActive()) {
+        const bool byField = std::any_of(rules.rules.cbegin(), rules.rules.cend(),
+            [](const FilterRule& r) { return r.isActive() && !r.fieldName.isEmpty(); });
+        if (rules.isActive() && byField) {
             bindRules(view, rules);
             view->model()->setFilterRules(rules);
             emit filtersRebound(view);
