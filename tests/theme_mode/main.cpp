@@ -412,7 +412,7 @@ static QImage grabOf(QWidget& w)
 }
 
 // Число отличающихся пикселей и описание первого из них.
-static int differingPixels(const QImage& a, const QImage& b, QString* where)
+static int differingPixels(const QImage& a, const QImage& b, QString* where, QPoint* first = nullptr)
 {
     if (a.size() != b.size()) {
         *where = QStringLiteral("sizes differ: %1x%2 vs %3x%4")
@@ -425,9 +425,12 @@ static int differingPixels(const QImage& a, const QImage& b, QString* where)
         for (int x = 0; x < a.width(); ++x) {
             if (a.pixel(x, y) == b.pixel(x, y))
                 continue;
-            if (n == 0)
+            if (n == 0) {
                 *where = QStringLiteral("first at (%1,%2): %3, a fresh widget has %4")
                              .arg(x).arg(y).arg(a.pixelColor(x, y).name(), b.pixelColor(x, y).name());
+                if (first)
+                    *first = QPoint(x, y);
+            }
             box |= QRect(x, y, 1, 1);
             ++n;
         }
@@ -472,7 +475,21 @@ static void checkRepaintsOnThemeChange(const char* name, const WidgetFactory& ma
         QString where;
         CHECK(differingPixels(before, reference, &where) != 0,
               QStringLiteral("%1, %2: the themes look different at all").arg(QLatin1String(name), QLatin1String(d.name)));
-        const int n = differingPixels(switched, reference, &where);
+        QPoint firstAt;
+        const int n = differingPixels(switched, reference, &where, &firstAt);
+        // Отказ сам называет виджет под первым разным пикселем (снимок —
+        // в координатах виджета; у HiDPI — с учётом масштаба).
+        if (n > 0) {
+            const qreal dpr = switched.devicePixelRatio() > 0 ? switched.devicePixelRatio() : 1.0;
+            const QPoint at(int(firstAt.x() / dpr), int(firstAt.y() / dpr));
+            const auto describe = [](const QWidget* w) {
+                return w ? QStringLiteral("%1 '%2'").arg(QLatin1String(w->metaObject()->className()),
+                                                         w->objectName())
+                         : QStringLiteral("the widget itself");
+            };
+            where += QStringLiteral("; under it: %1, in the fresh widget: %2")
+                         .arg(describe(survivor->childAt(at)), describe(fresh->childAt(at)));
+        }
         CHECK(n == 0, QStringLiteral("%1, %2: %3 px keep the previous theme (%4)")
                           .arg(QLatin1String(name), QLatin1String(d.name)).arg(n).arg(where));
     }
@@ -544,7 +561,21 @@ static void checkScrollbarMarks(const QDir& dir)
         QString where;
         CHECK(differingPixels(before, reference, &where) != 0,
               QStringLiteral("scrollbar marks, %1: the themes look different at all").arg(QLatin1String(d.name)));
-        const int n = differingPixels(switched, reference, &where);
+        QPoint firstAt;
+        const int n = differingPixels(switched, reference, &where, &firstAt);
+        // Отказ сам называет виджет под первым разным пикселем (снимок —
+        // в координатах виджета; у HiDPI — с учётом масштаба).
+        if (n > 0) {
+            const qreal dpr = switched.devicePixelRatio() > 0 ? switched.devicePixelRatio() : 1.0;
+            const QPoint at(int(firstAt.x() / dpr), int(firstAt.y() / dpr));
+            const auto describe = [](const QWidget* w) {
+                return w ? QStringLiteral("%1 '%2'").arg(QLatin1String(w->metaObject()->className()),
+                                                         w->objectName())
+                         : QStringLiteral("the widget itself");
+            };
+            where += QStringLiteral("; under it: %1, in the fresh widget: %2")
+                         .arg(describe(survivor->childAt(at)), describe(fresh->childAt(at)));
+        }
         CHECK(n == 0, QStringLiteral("scrollbar marks, %1: %2 px keep the previous theme (%3)")
                           .arg(QLatin1String(d.name)).arg(n).arg(where));
         CHECK(countColour(switched, theme.forLevel(LogLevel::Error)) > 0,
