@@ -1,6 +1,7 @@
 #ifndef NAVHISTORY_H
 #define NAVHISTORY_H
 
+#include "locatedplaces.h"
 #include "recordid.h"
 
 #include <QObject>
@@ -80,24 +81,19 @@ enum class NavKind : quint8 {
     FullLog,      // возврат из полного лога к строке, с которой ушли (R-3)
 };
 
-struct NavEntry {
-    RecordKey key;
-    QString filePath;
-    qint64 line = 0;
-    QString preview;           // первые kPreviewLength символов строки
-    RecordId record;           // номер строки + отпечаток текста (R-1)
-    int token = 0;             // запрос к RecordLocator (поиск, слежение)
+// Запись истории — место в логе (LocatedPlace: ключ, идентификатор, путь,
+// номер, фрагмент, состояние поиска строки — общая обвязка M-8) плюс вид
+// перехода.
+struct NavEntry : LocatedPlace {
+    int id = 0;                // id места в LocatedPlaces (токены локатора)
     NavKind kind = NavKind::Other;
     bool origin = false;       // место, ОТКУДА ушли (не цель перехода)
-    bool verified = true;      // ключ сверен после последнего сброса строк
-    bool lost = false;         // строка пропала (переписана, файл убран)
 };
 
-class NavHistory : public QObject {
+class NavHistory : public LocatedPlaces {
     Q_OBJECT
 public:
     static constexpr int kMaxEntries = 100;
-    static constexpr int kPreviewLength = 200;
 
     explicit NavHistory(LogModel& model);
 
@@ -139,21 +135,24 @@ signals:
     // Набор записей или позиция изменились (состояние пунктов Back / Forward).
     void changed();
 
+protected:
+    LocatedPlace* placeById(int id) override;
+    void forEachPlace(const std::function<void(int, LocatedPlace&)>& fn) override;
+    void placeResolved(int id, const RecordKey& previousKey) override;
+    void placeRefused(int id) override;
+    void placeCompleted(int id, bool keyChanged) override;
+
 private:
     static bool isStepKind(NavKind kind);
-    NavEntry makeEntry(int row, NavKind kind, bool origin) const;
+    NavEntry makeEntry(int row, NavKind kind, bool origin);
     int resolve(NavEntry& entry);
     int step(int direction, int currentRow);
-    RecordLocator& locator() const;
     // Отпустить запросы к локатору у записей [from, end) перед удалением.
     void releaseTokens(qsizetype from, qsizetype end);
-    void release(NavEntry& e);
-    void reacquire(NavEntry& e);
-    NavEntry* entryByToken(int token);
 
-    LogModel& m_model;
     QVector<NavEntry> m_entries;
     int m_pos = -1;            // текущая запись; -1 — история пуста
+    int m_nextId = 1;          // id следующего места
     bool m_lastWasJump = false; // текущая запись — цель последнего перехода,
                                 // а не место, куда вернулись по истории
 };
