@@ -160,6 +160,8 @@ set(DENDROLOG_CORE_SOURCES
     src/textquery.cpp
     src/gotolocation.h
     src/gotolocation.cpp
+    src/timedelta.h
+    src/timedelta.cpp
     src/builtinschemas.h
     src/builtinschemas.cpp
     src/openrouting.h

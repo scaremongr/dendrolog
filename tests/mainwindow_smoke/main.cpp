@@ -27,6 +27,7 @@
 #include "compactstyle.h"
 #include "directoryscanner.h"
 #include "encodingindicator.h"
+#include "entrydetailspanel.h"
 #include "filelegend.h"
 #include "filememorystore.h"
 #include "filterpanelwidget.h"
@@ -2440,6 +2441,8 @@ void checkHelpShortcutTable()
         {QStringLiteral("File labels: Name / Color Only / Hidden"),
          {QStringLiteral("fileLabelsName"), QStringLiteral("fileLabelsColorOnly"), QStringLiteral("fileLabelsHidden")}},
         {QStringLiteral("Show / hide line numbers"), {QStringLiteral("lineNumbers")}},
+        {QStringLiteral("Show / hide the time delta column"), {QStringLiteral("timeDelta")}},
+        {QStringLiteral("Set / clear time zero"), {QStringLiteral("timeZero")}},
         {QStringLiteral("Extend selection by character"), {}},
         {QStringLiteral("Extend selection by token"), {}},
     };
@@ -3757,6 +3760,73 @@ void scenarioBookmarkNote(MainWindow& win, const Fixtures& fx)
 
 // Растущий файл в окне: авто-обновление кнопкой тулбара (таймер), follow-tail
 // на дозаписи, F5, правый щелчок по Reload.
+// Дельта времени (F-8): View → Time Delta, «нулевая» сочетанием и из
+// контекстного меню строки, обе дельты в Entry Details.
+void scenarioTimeDelta(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("time delta"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, fx.b));
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    LogListView* view = tab->view();
+    QAction* column = command(win, QStringLiteral("timeDelta"));
+    check(column && !column->isChecked() && !AppSettings::instance().timeDelta() && view->timeDeltaWidth() == 0,
+          QStringLiteral("View → Time Delta exists and is off by default"));
+    if (column)
+        column->trigger();
+    check(waitFor([&]() { return view->timeDeltaWidth() > 0 && !view->hasPendingLayout(); }, 5000)
+              && AppSettings::instance().timeDelta(),
+          QStringLiteral("View → Time Delta shows the column"));
+
+    const auto timedRow = [&](int from) {
+        for (int r = from; r < model->rowCount(); ++r)
+            if (hasTimestampMs(model->visibleMetaAt(r).timestampMs))
+                return r;
+        return -1;
+    };
+    auto* details = win.findChild<EntryDetailsPanel*>();
+    const int zeroRow = timedRow(12);
+    view->goToRow(zeroRow);
+    pressCommand(win, QStringLiteral("timeZero"));
+    check(waitFor([&]() { return model->isTimeZeroRow(zeroRow); }, 5000)
+              && view->timeDeltaText(zeroRow) == QStringLiteral("= 0"),
+          QStringLiteral("Ctrl+Shift+D makes the selected line the time zero"));
+    check(details && details->timeDeltaSummary().contains(QStringLiteral("time zero")),
+          QStringLiteral("Entry Details names the zero: %1").arg(details ? details->timeDeltaSummary() : QString()));
+    const int later = timedRow(zeroRow + 5);
+    view->goToRow(later);
+    check(details && waitFor([&]() {
+              return details->timeDeltaSummary().contains(QStringLiteral("Δ previous: "))
+                  && details->timeDeltaSummary().contains(QStringLiteral("Δ time zero: +"));
+          }, 5000),
+          QStringLiteral("Entry Details shows both deltas: %1").arg(details ? details->timeDeltaSummary() : QString()));
+    view->goToRow(zeroRow);
+    pressCommand(win, QStringLiteral("timeZero"));
+    check(waitFor([&]() { return !model->hasTimeZero(); }, 5000),
+          QStringLiteral("Ctrl+Shift+D on the zero line clears it"));
+
+    // Контекстное меню строки.
+    const int menuRow = timedRow(5);
+    bool picked = false;
+    pickMenuItem(QStringLiteral("Set as Time Zero"), &picked);
+    rowContextMenu(tab, menuRow);
+    g_driver->dropExpectations();
+    check(picked && waitFor([&]() { return model->isTimeZeroRow(menuRow); }, 5000),
+          QStringLiteral("row menu → Set as Time Zero"));
+    picked = false;
+    pickMenuItem(QStringLiteral("Clear Time Zero"), &picked);
+    rowContextMenu(tab, timedRow(30));
+    g_driver->dropExpectations();
+    check(picked && waitFor([&]() { return !model->hasTimeZero(); }, 5000),
+          QStringLiteral("row menu → Clear Time Zero"));
+
+    if (column)
+        column->trigger();
+    check(waitFor([&]() { return view->timeDeltaWidth() == 0 && !view->hasPendingLayout(); }, 5000)
+              && !AppSettings::instance().timeDelta(),
+          QStringLiteral("and View → Time Delta hides it again"));
+}
+
 void scenarioAutoReload(MainWindow& win, const QDir& dir)
 {
     section(QStringLiteral("auto-reload a growing file"));
@@ -4075,6 +4145,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioScannerPanel(win, fx);
         scenarioFieldSchemasDialog(win, fx);
         scenarioBookmarkNote(win, fx);
+        scenarioTimeDelta(win, fx);
         scenarioSearchFollowsTab(win, fx);
         scenarioEncoding(win, fx);
         scenarioFileMemory(win, fx);

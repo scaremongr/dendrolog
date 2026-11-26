@@ -22,6 +22,19 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **Time delta.** `View → Time Delta` (off by default, `[View] timeDelta`)
+  adds a column after the line numbers with the time from the previous shown
+  line with a timestamp: `+250 ms`, `+1.234 s`, `+2 m 03 s`, `+5 h 07 m`,
+  `+3 d 04 h`. Under a filter it is measured between the shown lines; the
+  lines of a multi-line entry share its time, so only its first shown line
+  has a delta; a line earlier than the one above it gets `−`. **Set as Time
+  Zero** in a line's context menu (or `Ctrl+Shift+D`,
+  `View → Set / Clear Time Zero`) makes the column count from that line
+  instead — the same command on it clears it. The zero survives filters (a
+  hidden zero still counts), tail updates, reloads and the switch to the
+  large-file mode. **Entry Details** shows both deltas of the selected line.
+  Only the lines on screen are computed, from line metadata, so the column
+  costs nothing on a huge log.
 - **ANSI escape codes are hidden, their colors shown.** Logs written by
   programs with a colored console — `docker logs`, `kubectl logs`, the output
   of a command tab, Spring Boot, Serilog console, pino-pretty, npm — no longer

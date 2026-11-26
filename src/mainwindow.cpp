@@ -71,6 +71,7 @@
 #include "sessioncontroller.h"
 #include "sessionfile.h"
 #include "sessionreportdialog.h"
+#include "timedelta.h"
 #include <QComboBox>
 #include <QToolButton>
 #include <QMouseEvent>
@@ -621,6 +622,33 @@ MainWindow::MainWindow(QWidget *parent)
         m_shortcutActions.insert(QStringLiteral("lineNumbers"), numbers);
     }
 
+    // Колонка дельты времени (F-8): View → Time Delta, общая настройка, за
+    // номерами строк.
+    {
+        QAction* delta = new QAction(tr("Time Delta"), this);
+        delta->setObjectName(QStringLiteral("timeDeltaAction"));
+        delta->setCheckable(true);
+        delta->setChecked(AppSettings::instance().timeDelta());
+        connect(delta, &QAction::toggled, this, [](bool on) {
+            if (AppSettings::instance().timeDelta() == on)
+                return;
+            AppSettings::instance().setTimeDelta(on);
+            AppSettings::instance().save();
+        });
+        connect(&AppSettings::instance(), &AppSettings::settingsChanged, delta, [delta]() {
+            delta->setChecked(AppSettings::instance().timeDelta());
+        });
+        const QList<QAction*> viewActions = ui->menuView->actions();
+        const int numbersAt = viewActions.indexOf(m_shortcutActions.value(QStringLiteral("lineNumbers")));
+        QAction* after = numbersAt >= 0 && numbersAt + 1 < viewActions.size()
+            ? viewActions[numbersAt + 1] : nullptr;
+        if (after)
+            ui->menuView->insertAction(after, delta);
+        else
+            ui->menuView->addAction(delta);
+        m_shortcutActions.insert(QStringLiteral("timeDelta"), delta);
+    }
+
     // Цвета ANSI (F-3): View → ANSI Colors, общая настройка рядом с номерами
     // строк; коды сняты в любом случае.
     {
@@ -722,6 +750,24 @@ MainWindow::MainWindow(QWidget *parent)
         addBookmarkJump(tr("Next Bookmark"), QStringLiteral("nextBookmark"), true);
         addBookmarkJump(tr("Previous Bookmark"), QStringLiteral("prevBookmark"), false);
         ui->menuView->insertSeparator(ui->actionWordWrap);
+    }
+
+    // Дельта времени (F-8): «нулевая» на выбранной строке (повтор снимает).
+    {
+        QAction* zero = new QAction(tr("Set / Clear Time Zero"), this);
+        zero->setObjectName(QStringLiteral("timeZeroAction"));
+        connect(zero, &QAction::triggered, this, [this]() {
+            if (!m_activeLogView)
+                return;
+            const int row = m_activeLogView->view()->userSelectedRow();
+            if (row < 0)
+                m_statusLabel->setText(tr("Select a line to make it the time zero"));
+            else if (!m_activeLogView->model()->toggleTimeZero(row))
+                m_statusLabel->setText(tr("The line has no timestamp"));
+        });
+        ui->menuView->insertAction(ui->actionWordWrap, zero);
+        ui->menuView->insertSeparator(ui->actionWordWrap);
+        m_shortcutActions.insert(QStringLiteral("timeZero"), zero);
     }
 
     // Переход к строкам, дописанным ниже экрана («↓ N new lines» — та же
@@ -2558,6 +2604,12 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
 
     connect(logView, &LogViewWidget::totalRowCountChanged, this, &MainWindow::handleTotalRowCountChanged);
     connect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
+    // «Нулевая» сменилась — дельты выбранной строки в Entry Details (F-8).
+    disconnect(m_timeZeroConnection);
+    m_timeZeroConnection = connect(logView->model(), &LogModel::timeZeroChanged, this, [this, logView]() {
+        if (logView == m_activeLogView)
+            updateEntryDetailsTimeDelta(/*force=*/true);
+    });
     connect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
     connect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
     connect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
@@ -2651,6 +2703,7 @@ void MainWindow::disconnectFromLogView(LogViewWidget *logView)
 
     disconnect(logView, &LogViewWidget::totalRowCountChanged, this, &MainWindow::handleTotalRowCountChanged);
     disconnect(logView, &LogViewWidget::currentRowChanged, this, &MainWindow::updateLineInfoLabel);
+    disconnect(m_timeZeroConnection);
     disconnect(logView, &LogViewWidget::modelFiltered, this, &MainWindow::handleModelFiltered);
     disconnect(logView, &LogViewWidget::quickSearchProgress, this, &MainWindow::onQuickSearchProgress);
     disconnect(logView, &LogViewWidget::quickSearchFinished, this, &MainWindow::onQuickSearchFinished);
@@ -3380,7 +3433,40 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
                                           : FileSchemaPtr());
         else
             m_detailsPanel->clearEntry();
+        if (currentEntry)
+            updateEntryDetailsTimeDelta(/*force=*/false);
     }
+}
+
+void MainWindow::updateEntryDetailsTimeDelta(bool force)
+{
+    if (!m_detailsPanel || !m_activeLogView)
+        return;
+    LogModel& model = *m_activeLogView->model();
+    const int row = m_activeLogView->view()->currentIndex().row();
+    if (row < 0)
+        return;
+    // updateLineInfoLabel зовут и на каждую порцию дозаписи: полный проход
+    // назад (до kMaxBackScan строк) — только для новой строки или по смене
+    // «нулевой»; та же строка — короткий проход, а упёрся — дельта прежняя
+    // (инвариант 3).
+    const RecordKey key = model.keyAt(row);
+    DetailsDeltaLine line;
+    line.model = &model;
+    line.file = key.file.get();
+    line.line = key.line;
+    line.timestampMs = key.timestampMs;
+    line.entryId = key.logicalEntryId;
+    const bool sameLine = !force && key.isValid() && line == m_detailsDeltaLine;
+    int previous = -2;
+    if (sameLine) {
+        bool exhausted = false;
+        previous = TimeDelta::previousTimedRow(model, row, 64, &exhausted);
+        if (exhausted)
+            return;
+    }
+    m_detailsDeltaLine = line;
+    m_detailsPanel->setTimeDelta(TimeDelta::forRow(model, row, previous));
 }
 
 void MainWindow::on_actionInfo_toggled(bool checked)

@@ -31,6 +31,7 @@
 #include <cmath>
 #include <limits>
 #include "texttoken.h"
+#include "timedelta.h"
 
 // Знак развёрнутой строки на переключателе переноса (U-23).
 static constexpr QChar kCollapseGlyph(0x2212);
@@ -62,6 +63,7 @@ LogListView::LogListView(QWidget *parent)
     m_fileLabelMode = AppSettings::instance().fileLabelMode();
     m_fileColumnChars = AppSettings::instance().fileColumnChars();
     m_lineNumbersVisible = AppSettings::instance().lineNumbers();
+    m_timeDeltaVisible = AppSettings::instance().timeDelta();
     m_ansiColors = AppSettings::instance().ansiColors();
     // Движение мыши без кнопок — только курсор над границей колонки файла.
     viewport()->setMouseTracking(true);
@@ -70,6 +72,7 @@ LogListView::LogListView(QWidget *parent)
         if (!m_columnDrag)
             setFileColumnChars(AppSettings::instance().fileColumnChars());
         setLineNumbersVisible(AppSettings::instance().lineNumbers());
+        setTimeDeltaVisible(AppSettings::instance().timeDelta());
         setAnsiColorsEnabled(AppSettings::instance().ansiColors());
     });
     
@@ -241,7 +244,22 @@ void LogListView::setModel(QAbstractItemModel *model) {
         m_fileColumnWidth = computeFileColumnWidth();
         rebuildFileLabels();
         m_lineNumberWidth = computeLineNumberWidth();
+        m_timeDeltaWidth = computeTimeDeltaWidth();
+        m_deltaPrevMemo.clear();
         if (logModel) {
+            // «Нулевая» сменилась — тексты колонки Δ, геометрия та же.
+            m_modelConnections << connect(logModel, &LogModel::timeZeroChanged, this, [this]() {
+                if (m_timeDeltaWidth > 0)
+                    viewport()->update();
+            });
+            // Любое изменение строк — найденные долгим проходом предыдущие
+            // устарели (O(1) на событие: очистка небольшого хэша).
+            const auto dropMemo = [this]() { m_deltaPrevMemo.clear(); };
+            m_modelConnections << connect(logModel, &QAbstractItemModel::modelReset, this, dropMemo);
+            m_modelConnections << connect(logModel, &QAbstractItemModel::rowsInserted, this, dropMemo);
+            m_modelConnections << connect(logModel, &QAbstractItemModel::rowsRemoved, this, dropMemo);
+            m_modelConnections << connect(logModel, &QAbstractItemModel::layoutChanged, this, dropMemo);
+            m_modelConnections << connect(logModel, &QAbstractItemModel::dataChanged, this, dropMemo);
             m_modelConnections << connect(logModel, &LogModel::fileSetChanged, this, [this]() {
                 m_lineNumberHighWater = 0;   // другой набор файлов — ширина заново
                 scheduleLeftColumns();
@@ -969,8 +987,9 @@ void LogListView::applyLeftColumns()
 {
     const int width = computeFileColumnWidth();
     const int numbers = computeLineNumberWidth();
+    const int deltas = computeTimeDeltaWidth();
     rebuildFileLabels();   // O(числа файлов): метки — по ширине колонки
-    if (width == m_fileColumnWidth && numbers == m_lineNumberWidth) {
+    if (width == m_fileColumnWidth && numbers == m_lineNumberWidth && deltas == m_timeDeltaWidth) {
         viewport()->update();   // метки могли смениться при той же ширине
         return;
     }
@@ -998,6 +1017,7 @@ void LogListView::applyLeftColumns()
     m_anchorOffsetInViewport = 0;
     m_fileColumnWidth = width;
     m_lineNumberWidth = numbers;
+    m_timeDeltaWidth = deltas;
     ++m_leftColumnRelayouts;
     invalidateRowState(-1, /*preserveTextLengths=*/true);
     rebuildHeightCache();
@@ -1101,6 +1121,91 @@ void LogListView::paintLineNumber(QPainter& painter, int row, int rowTop, int ro
     painter.setPen(selected ? palette().color(QPalette::Text) : AppTheme::lineNumberFg(palette()));
     painter.setClipRect(QRect(kLeftMarginWidth, r.top(), m_lineNumberWidth, r.height()));
     painter.drawText(r, Qt::AlignVCenter | Qt::AlignRight, text);
+    painter.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Колонка дельты времени (F-8): за номерами строк, левее метки файла. Текст —
+// TimeDelta::columnText, ширина постоянная (kMaxChars символов).
+// ---------------------------------------------------------------------------
+void LogListView::setTimeDeltaVisible(bool visible)
+{
+    if (m_timeDeltaVisible == visible)
+        return;
+    m_timeDeltaVisible = visible;
+    updateFileColumn();
+}
+
+int LogListView::computeTimeDeltaWidth() const
+{
+    if (!m_timeDeltaVisible || !model())
+        return 0;
+    return int(std::ceil(TimeDelta::kMaxChars * m_charWidth)) + 2 * kLineNumberPadX;
+}
+
+int LogListView::deltaPreviousRow(int row) const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel)
+        return -1;
+    const auto it = m_deltaPrevMemo.constFind(row);
+    if (it != m_deltaPrevMemo.constEnd())
+        return it.value();
+    // Подряд идущие строки с метками находят предыдущую за шаг-два; долгий
+    // проход (серия строк без меток) запоминается.
+    constexpr int kQuick = 64;
+    bool exhausted = false;
+    int prev = TimeDelta::previousTimedRow(*logModel, row, kQuick, &exhausted);
+    if (prev < 0 && exhausted) {
+        prev = TimeDelta::previousTimedRow(*logModel, row);
+        if (m_deltaPrevMemo.size() >= 4096)
+            m_deltaPrevMemo.clear();
+        m_deltaPrevMemo.insert(row, prev);
+    }
+    return prev;
+}
+
+QString LogListView::timeDeltaText(int row) const
+{
+    auto* logModel = qobject_cast<LogModel*>(model());
+    if (!logModel || row < 0 || row >= logModel->rowCount())
+        return QString();
+    // Предыдущая нужна только первой показанной строке записи с меткой и
+    // без «нулевой»: строка продолжения (её запись бывает в десятки тысяч
+    // строк) прохода назад не делает — в колонке у неё пусто.
+    const int prev = TimeDelta::needsPrevious(*logModel, row) ? deltaPreviousRow(row) : -1;
+    return TimeDelta::columnText(TimeDelta::forRow(*logModel, row, prev));
+}
+
+QRect LogListView::timeDeltaRect(int row) const
+{
+    if (m_timeDeltaWidth <= 0 || !model() || row < 0 || row >= model()->rowCount())
+        return QRect();
+    const int top = stickyTop(rowYOffset(row) - scrollContentY(), getRowHeight(row), singleRowHeight());
+    return QRect(timeDeltaLeft(), top, m_timeDeltaWidth, singleRowHeight());
+}
+
+void LogListView::paintTimeDelta(QPainter& painter, int row, int rowTop, int rowHeight, bool selected)
+{
+    if (m_timeDeltaWidth <= 0)
+        return;
+    const QString text = timeDeltaText(row);
+    if (text.isEmpty())
+        return;
+    const int top = stickyTop(rowTop, rowHeight, singleRowHeight());
+    const QRect cell(timeDeltaLeft(), top, m_timeDeltaWidth, singleRowHeight());
+    const bool zero = qobject_cast<LogModel*>(model())->isTimeZeroRow(row);
+    painter.save();
+    QColor color = selected ? palette().color(QPalette::Text) : AppTheme::lineNumberFg(palette());
+    if (zero) {
+        color = palette().color(QPalette::Highlight);
+        QFont bold = painter.font();
+        bold.setBold(true);
+        painter.setFont(bold);
+    }
+    painter.setPen(color);
+    painter.setClipRect(cell);
+    painter.drawText(cell.adjusted(0, 0, -kLineNumberPadX, 0), Qt::AlignVCenter | Qt::AlignRight, text);
     painter.restore();
 }
 
@@ -2619,6 +2724,8 @@ void LogListView::paintEvent(QPaintEvent *event) {
             paintGutter(painter, row, QRect(0, currentY, kLeftMarginWidth, rowHeight));
             paintLineNumber(painter, row, currentY, rowHeight,
                             selectionModel() && selectionModel()->isSelected(idx));
+            paintTimeDelta(painter, row, currentY, rowHeight,
+                           selectionModel() && selectionModel()->isSelected(idx));
             paintFileColumn(painter, row, currentY, rowHeight);
 
             // Кэшированный растр ИЛИ прямая отрисовка — клипаем к textRect, чтобы текст не залезал на плашки
@@ -2878,7 +2985,8 @@ void LogListView::mousePressEvent(QMouseEvent *event) {
     // отпусканию без протяжки (mouseReleaseEvent); метка файла — без
     // действия. Выделение текста здесь не начинается.
     const RowChromeHit chrome = rowChromeAt(event->pos());
-    if ((chrome.kind == RowChrome::LineNumber || chrome.kind == RowChrome::FileLabel)
+    if ((chrome.kind == RowChrome::LineNumber || chrome.kind == RowChrome::FileLabel
+         || chrome.kind == RowChrome::TimeDelta)
         && event->pos().x() < textAreaLeft()) {
         // Номер и метка файла не выделяются: щелчок выбирает строку.
         m_selection.clear();
@@ -3172,10 +3280,31 @@ LogListView::RowChromeHit LogListView::rowChromeAt(const QPoint& pos) const
     const qint64 rowTop = rowTopContent - scrollY;
     // Колонка номеров строк: номер на первой линии, без действия по щелчку
     // (кроме выбора строки).
-    if (m_lineNumberWidth > 0 && pos.x() >= kLeftMarginWidth && pos.x() < fileColumnLeft()) {
+    if (m_lineNumberWidth > 0 && pos.x() >= kLeftMarginWidth && pos.x() < timeDeltaLeft()) {
         hit.kind = RowChrome::LineNumber;
         hit.row = row;
         hit.rect = lineNumberScreenRect(rowTop, state.height);
+        return hit;
+    }
+    // Колонка дельты времени: что от чего — в подсказке; щелчок выбирает строку.
+    if (m_timeDeltaWidth > 0 && pos.x() >= timeDeltaLeft() && pos.x() < fileColumnLeft()) {
+        hit.kind = RowChrome::TimeDelta;
+        hit.row = row;
+        hit.rect = QRect(timeDeltaLeft(), stickyTop(rowTop, state.height, singleRowHeight()),
+                         m_timeDeltaWidth, singleRowHeight());
+        if (auto* logModel = qobject_cast<LogModel*>(model())) {
+            const int prev = TimeDelta::needsPrevious(*logModel, row, /*ignoreZero=*/true)
+                ? deltaPreviousRow(row) : -1;
+            const TimeDelta::RowDelta d = TimeDelta::forRow(*logModel, row, prev);
+            QStringList lines;
+            if (d.isZero)
+                lines << tr("Time zero");
+            if (d.hasPrevious)
+                lines << tr("From previous line: %1").arg(TimeDelta::formatDetailed(d.fromPrevious));
+            if (d.hasZero && !d.isZero)
+                lines << tr("From time zero: %1").arg(TimeDelta::formatDetailed(d.fromZero));
+            hit.toolTip = lines.join(QLatin1Char('\n'));
+        }
         return hit;
     }
     // Колонка метки файла: полоса и метка — путь в подсказке; щелчка нет.
@@ -3719,6 +3848,46 @@ void LogListView::contextMenuEvent(QContextMenuEvent *event) {
                 if (now >= 0)
                     emit fullLogToggleRequested(now);
             });
+        }
+    }
+
+    // «Нулевая» дельты времени (F-8): поставить на строку под курсором,
+    // снять повтором; строка без метки «нулевой» не становится.
+    if (haveRow && m_timeZeroActions) {
+        if (auto* logModel = qobject_cast<LogModel*>(model())) {
+            const bool zero = logModel->isTimeZeroRow(row);
+            const bool timed = hasTimestampMs(logModel->visibleMetaAt(row).timestampMs);
+            if (zero || timed || logModel->hasTimeZero())
+                menu.addSeparator();
+            const RecordKey key = logModel->keyAt(row);
+            if (zero) {
+                QAction* clear = menu.addAction(tr("Clear Time Zero"));
+                clear->setObjectName(QStringLiteral("clearTimeZeroAction"));
+                connect(clear, &QAction::triggered, this, [this]() {
+                    if (auto* m = qobject_cast<LogModel*>(model()))
+                        m->clearTimeZero();
+                });
+            } else {
+                if (timed) {
+                    QAction* set = menu.addAction(tr("Set as Time Zero"));
+                    set->setObjectName(QStringLiteral("setTimeZeroAction"));
+                    // Пока меню открыто, строки могли сдвинуться — по ключу.
+                    connect(set, &QAction::triggered, this, [this, key]() {
+                        auto* m = qobject_cast<LogModel*>(model());
+                        const int now = m && key.isValid() ? m->rowForKey(key) : -1;
+                        if (now >= 0)
+                            m->setTimeZero(now);
+                    });
+                }
+                if (logModel->hasTimeZero()) {
+                    QAction* clear = menu.addAction(tr("Clear Time Zero"));
+                    clear->setObjectName(QStringLiteral("clearTimeZeroAction"));
+                    connect(clear, &QAction::triggered, this, [this]() {
+                        if (auto* m = qobject_cast<LogModel*>(model()))
+                            m->clearTimeZero();
+                    });
+                }
+            }
         }
     }
 

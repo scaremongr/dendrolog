@@ -320,6 +320,60 @@ LogModel::EntryKey LogModel::keyForRow(int visibleRow) const
     return key;
 }
 
+LogEntryMeta LogModel::visibleMetaAt(int row) const
+{
+    return m_store->visibleMetaAt(row);
+}
+
+bool LogModel::setTimeZero(int row)
+{
+    if (row < 0 || row >= rowCount())
+        return false;
+    const RecordKey key = m_store->keyAt(row);
+    const LogEntryMeta meta = m_store->visibleMetaAt(row);
+    if (!key.isValid() || !hasTimestampMs(meta.timestampMs))
+        return false;
+    TimeZero zero;
+    zero.ms = meta.timestampMs;
+    zero.filePath = key.file->orderKey();
+    zero.line = key.line;
+    if (zero.ms == m_timeZero.ms && zero.line == m_timeZero.line
+        && zero.filePath == m_timeZero.filePath)
+        return true;
+    m_timeZero = zero;
+    emit timeZeroChanged();
+    return true;
+}
+
+void LogModel::clearTimeZero()
+{
+    if (!m_timeZero.isSet())
+        return;
+    m_timeZero = TimeZero{};
+    emit timeZeroChanged();
+}
+
+bool LogModel::toggleTimeZero(int row)
+{
+    if (isTimeZeroRow(row)) {
+        clearTimeZero();
+        return true;
+    }
+    return setTimeZero(row);
+}
+
+bool LogModel::isTimeZeroRow(int row) const
+{
+    if (!m_timeZero.isSet() || row < 0 || row >= rowCount())
+        return false;
+    // Момент тоже: в переписанном файле под тем же номером — другая строка,
+    // и «= 0» на ней сбивал бы с толку (дельты считаются от прежнего момента).
+    const RecordKey key = m_store->keyAt(row);
+    return key.isValid() && key.line == m_timeZero.line
+        && key.timestampMs == m_timeZero.ms
+        && key.file->orderKey() == m_timeZero.filePath;
+}
+
 QDateTime LogModel::visibleTimestampAt(int row) const
 {
     return m_store->visibleTimestampAt(row);

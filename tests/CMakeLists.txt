@@ -128,6 +128,7 @@ add_subdirectory(unpack)
 add_subdirectory(row_chrome)
 add_subdirectory(compressed_tabs)
 add_subdirectory(command_output)
+add_subdirectory(time_delta)
 add_subdirectory(mainwindow_smoke)
 
 # Проверка самой проверки: слой tests/sanitizers/tsan_qt_sync.cpp не должен ни

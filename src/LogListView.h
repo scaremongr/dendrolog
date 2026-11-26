@@ -204,6 +204,7 @@ public:
         WrapRail,     // рейка развёрнутой строки: столбец «−» на всю её высоту
         FileLabel,    // метка файла строки
         LineNumber,   // номер строки (U-23, часть 3)
+        TimeDelta,    // дельта времени (F-8)
     };
     struct RowChromeHit {
         RowChrome kind = RowChrome::None;
@@ -265,6 +266,20 @@ public:
     // выключена ([View] lineNumbers). Номера не выделяются и не копируются.
     void setLineNumbersVisible(bool visible);
     bool lineNumbersVisible() const { return m_lineNumbersVisible; }
+
+    // ---- Дельта времени (F-8, docs/design/F-8.md) ------------------------------
+    // Колонка за номерами строк: время от предыдущей показанной строки с
+    // меткой, а при заданной «нулевой» (LogModel::timeZero) — от неё
+    // (TimeDelta::columnText). Ширина постоянная (TimeDelta::kMaxChars);
+    // по умолчанию выключена ([View] timeDelta). Считается только для
+    // видимых строк при отрисовке, по метаданным.
+    void setTimeDeltaVisible(bool visible);
+    bool timeDeltaVisible() const { return m_timeDeltaVisible; }
+    int timeDeltaWidth() const { return m_timeDeltaWidth; }
+    QString timeDeltaText(int row) const;
+    QRect timeDeltaRect(int row) const;   // экранный, с прилипанием; пусто — колонки нет
+    // Пункты «нулевой» в контекстном меню строки (только view вкладки).
+    void setTimeZeroActionsEnabled(bool enabled) { m_timeZeroActions = enabled; }
 
     // ---- Цвета ANSI (F-3) ---------------------------------------------------
     // Раскраска по стилю ANSI строки (LogModel::AnsiStyleRole) поверх
@@ -566,7 +581,18 @@ private:
     bool m_ansiColors = true;
     int m_lineNumberWidth = 0;
     int m_leftColumnRelayouts = 0;
-    int fileColumnLeft() const { return kLeftMarginWidth + m_lineNumberWidth; }
+    int fileColumnLeft() const { return timeDeltaLeft() + m_timeDeltaWidth; }
+    int timeDeltaLeft() const { return kLeftMarginWidth + m_lineNumberWidth; }
+    bool m_timeDeltaVisible = false;
+    bool m_timeZeroActions = false;
+    int m_timeDeltaWidth = 0;
+    int computeTimeDeltaWidth() const;
+    // Предыдущая строка с меткой, найденная долгим проходом (TimeDelta::
+    // previousTimedRow), — до любого изменения модели: прокрутка его не
+    // повторяет.
+    mutable QHash<int, int> m_deltaPrevMemo;
+    int deltaPreviousRow(int row) const;
+    void paintTimeDelta(QPainter& painter, int row, int rowTop, int rowHeight, bool selected);
     int lineNumberDigits() const;
     int computeLineNumberWidth() const;
     void onFileLinesChanged();

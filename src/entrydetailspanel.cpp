@@ -338,8 +338,34 @@ void EntryDetailsPanel::showEntry(const std::shared_ptr<LogEntry>& line,
     scheduleRebuild();
 }
 
+void EntryDetailsPanel::setTimeDelta(const TimeDelta::RowDelta& delta)
+{
+    m_delta = delta;
+    scheduleRebuild();
+}
+
+QString EntryDetailsPanel::timeDeltaSummary() const
+{
+    if (!m_line || !m_delta.valid)
+        return QString();
+    if (!m_delta.hasTimestamp)
+        return tr("Δ: the line has no timestamp");
+    QStringList parts;
+    parts << (m_delta.hasPrevious
+                  ? tr("Δ previous: %1").arg(TimeDelta::formatDetailed(m_delta.fromPrevious))
+                  : tr("Δ previous: —"));
+    if (m_delta.isZero)
+        parts << tr("this line is the time zero");
+    else if (m_delta.hasZero)
+        parts << tr("Δ time zero: %1").arg(TimeDelta::formatDetailed(m_delta.fromZero));
+    else
+        parts << tr("no time zero (Set as Time Zero in the line's context menu)");
+    return parts.join(QStringLiteral(" · "));
+}
+
 void EntryDetailsPanel::clearEntry()
 {
+    m_delta = TimeDelta::RowDelta{};
     m_line.reset();
     m_logicalLines.clear();
     m_fieldNames.clear();
@@ -673,6 +699,9 @@ QString EntryDetailsPanel::buildHtml()
         if (!m_line->isPlainText())
             location << tr("entry #%1").arg(m_line->logicalEntryId());
         html += mutedDiv(location.join(QStringLiteral(" · ")).toHtmlEscaped());
+        const QString delta = timeDeltaSummary();
+        if (!delta.isEmpty())
+            html += mutedDiv(delta.toHtmlEscaped());
     }
 
     // ---- Извлечённые поля ---------------------------------------------------
