@@ -1256,14 +1256,14 @@ public:
                              f.index.lineByteLength(line));
     }
 
-    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor() const override
+    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor(qint64 windowBytes) const override
     {
         // Свои ридеры на курсор: SequentialLineReader ставит окно по
         // направлению скана, обход назад не перечитывает окно на строку.
         class Cursor final : public LogScanSnapshot::LineCursor {
         public:
-            explicit Cursor(const IndexedScanSnapshotImpl& snapshot)
-                : m_snapshot(snapshot), m_readers(snapshot.paths(), snapshot.decoders()) {}
+            Cursor(const IndexedScanSnapshotImpl& snapshot, qint64 windowBytes)
+                : m_snapshot(snapshot), m_readers(snapshot.paths(), snapshot.decoders(), windowBytes) {}
             QStringView lineAt(qint64 row) override
             {
                 if (row < 0 || row >= m_snapshot.rowCount())
@@ -1278,7 +1278,7 @@ public:
             const IndexedScanSnapshotImpl& m_snapshot;
             SequentialLineReaders m_readers;
         };
-        return std::make_unique<Cursor>(*this);
+        return std::make_unique<Cursor>(*this, windowBytes);
     }
 
     LogFilePtr sourceFilePtrAt(qint64 row) const override

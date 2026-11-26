@@ -99,11 +99,14 @@ private:
 // смешивать кодировки); короче списка путей — недостающим UTF-8.
 class SequentialLineReaders {
 public:
+    // windowBytes — окно каждого ридера; 0 — по умолчанию (8 МБ).
     explicit SequentialLineReaders(QStringList filePaths,
-                                   QVector<TextDecoder> decoders = {})
+                                   QVector<TextDecoder> decoders = {},
+                                   qint64 windowBytes = 0)
         : m_paths(std::move(filePaths))
         , m_decoders(std::move(decoders))
         , m_readers(size_t(m_paths.size()))
+        , m_windowBytes(windowBytes)
     {
     }
 
@@ -111,8 +114,10 @@ public:
     {
         std::unique_ptr<SequentialLineReader>& reader = m_readers[size_t(fileId)];
         if (!reader) {
-            reader = std::make_unique<SequentialLineReader>(
-                m_paths.at(fileId), m_decoders.value(fileId));
+            reader = m_windowBytes > 0
+                ? std::make_unique<SequentialLineReader>(m_paths.at(fileId), m_decoders.value(fileId),
+                                                         m_windowBytes)
+                : std::make_unique<SequentialLineReader>(m_paths.at(fileId), m_decoders.value(fileId));
             reader->open();
         }
         return reader->lineAt(offset, byteLength);
@@ -122,6 +127,7 @@ private:
     QStringList m_paths;
     QVector<TextDecoder> m_decoders;
     std::vector<std::unique_ptr<SequentialLineReader>> m_readers;
+    qint64 m_windowBytes = 0;
 };
 
 #endif // SEQUENTIALLINEREADER_H

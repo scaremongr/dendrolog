@@ -137,7 +137,7 @@ public:
         return m_entries.at(row)->message();
     }
 
-    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor() const override
+    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor(qint64) const override
     {
         // Текст уже в памяти — курсор только смотрит в записи.
         class Cursor final : public LogScanSnapshot::LineCursor {
@@ -259,7 +259,7 @@ qint64 LogScanSnapshot::findRowWithText(const TextQuery& query, qint64 startRow,
     const TextMatcher matcher(query);
     if (!m_impl || n == 0 || !matcher.isUsable())
         return -1;
-    const std::unique_ptr<LineCursor> cursor = m_impl->lineCursor();
+    const std::unique_ptr<LineCursor> cursor = m_impl->lineCursor(0);
     qint64 scanned = 0;
     bool cancelled = false;
     // Прогресс — доля просмотренных строк от всех: второй проход при

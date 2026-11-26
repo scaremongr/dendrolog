@@ -3,6 +3,7 @@
 
 #include "appsettings.h"
 #include "cardframe.h"
+#include "logmodel.h"
 #include "patternblockcard.h"
 #include "patternheuristics.h"
 #include "schemastore.h"
@@ -48,6 +49,8 @@ constexpr int kMaxPreviewLineLength = 4000;
 constexpr int kPreviewDebounceMs = 250;
 constexpr int kPreviewWatchdogMs = 2500;
 constexpr int kApplyProbeTimeoutMs = 1500;
+constexpr int kFileFitDebounceMs = 400;   // F-17: file coverage after an edit
+constexpr int kSuggestionCount = 3;       // catalogue schemas in the "▾" menu
 
 const char* kPresetsGroup = "PatternPresets";
 const char* kEditorGroup  = "PatternEditor";
@@ -179,6 +182,8 @@ field column — useful for session IDs and other noise you never analyse.</p>
 <h3>Power tools</h3>
 <ul>
   <li><b>Suggest schema</b> builds a draft schema from the first preview line.</li>
+  <li><b>▾</b> next to it offers the schemas of the list that parse the open log (or the preview lines) best, with the share of parsed lines.</li>
+  <li>The status line under the preview — and, with a log open, the line below it for the log's own lines — tells how many <i>record lines</i> the schema parses: lines that start a record; stack traces and other continuation lines are not misses. &ldquo;Partly&rdquo; lines matched only at the start, the rest went into the message field.</li>
   <li><b>Presets</b> replace the blocks with a ready-made layout; your own schemas can be
       saved as presets too (stored in <code>DendroLog.ini</code>).</li>
   <li><b>Grok…</b> imports Logstash patterns such as
@@ -357,6 +362,8 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     // position — the sample text otherwise persists between sessions and
     // only auto-fills the very first time it is empty.
     auto* reloadSampleBtn = new QToolButton(this);
+    m_reloadSampleBtn = reloadSampleBtn;
+    reloadSampleBtn->setObjectName(QStringLiteral("reloadSampleBtn"));
     reloadSampleBtn->setIcon(QIcon(QStringLiteral(":/icons/reload.svg")));
     reloadSampleBtn->setAutoRaise(true);
     reloadSampleBtn->setToolTip(
@@ -393,6 +400,33 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     statusRow->addWidget(reloadSampleBtn);
     ui->previewLayout->insertLayout(statusIndex, statusRow);
 
+    // Coverage on the source tab's file (F-17): hidden until setSource().
+    m_fileFitLabel = new QLabel(this);
+    m_fileFitLabel->setObjectName(QStringLiteral("fileCoverageLabel"));
+    m_fileFitLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_fileFitLabel->setToolTip(
+        tr("Record lines of the open log (the start of the file and lines spread over it)\n"
+           "that the edited schema parses: fully, or partly with the rest in the free-text field."));
+    m_fileFitLabel->hide();
+    ui->previewLayout->insertWidget(statusIndex + 1, m_fileFitLabel);
+
+    // "Suggest schema" keeps its click (a draft from the sample lines); the
+    // arrow next to it offers the catalogue schemas that fit best first.
+    m_suggestMenuBtn = new QToolButton(this);
+    m_suggestMenuBtn->setObjectName(QStringLiteral("suggestMenuBtn"));
+    m_suggestMenuBtn->setText(QStringLiteral("\u25BE"));
+    m_suggestMenuBtn->setPopupMode(QToolButton::InstantPopup);
+    m_suggestMenuBtn->setToolTip(
+        tr("Suggestions: schemas from the list that parse these log lines best,\n"
+           "then a draft built from the sample lines."));
+    {
+        auto* menu = new QMenu(m_suggestMenuBtn);
+        menu->setObjectName(QStringLiteral("suggestMenu"));
+        connect(menu, &QMenu::aboutToShow, this, &ConversionPatternDialog::rebuildSuggestMenu);
+        m_suggestMenuBtn->setMenu(menu);
+    }
+    ui->nameRow->insertWidget(ui->nameRow->indexOf(ui->autoDetectBtn) + 1, m_suggestMenuBtn);
+
     // Help (colours are blended from the palette so the text stays
     // readable on dark themes).
     {
@@ -420,6 +454,22 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     m_previewWatcher = new QFutureWatcher<PreviewJob>(this);
     connect(m_previewWatcher, &QFutureWatcherBase::finished,
             this, &ConversionPatternDialog::onPreviewReady);
+
+    m_catalogueWatcher = new QFutureWatcher<CatalogueFit>(this);
+    connect(m_catalogueWatcher, &QFutureWatcherBase::finished, this, [this]() {
+        const QFuture<CatalogueFit> future = m_catalogueWatcher->future();
+        if (future.resultCount() == 0)
+            return;
+        const CatalogueFit fit = future.result();
+        if (fit.cancelled || fit.catalogue != m_catalogueFitKey.first || fit.lines != m_catalogueFitKey.second)
+            return;
+        m_previewCatalogueFits = fit.results;
+    });
+
+    m_fitTimer = new QTimer(this);
+    m_fitTimer->setSingleShot(true);
+    m_fitTimer->setInterval(kFileFitDebounceMs);
+    connect(m_fitTimer, &QTimer::timeout, this, &ConversionPatternDialog::startFileFit);
 
     m_previewWatchdog = new QTimer(this);
     m_previewWatchdog->setSingleShot(true);
@@ -500,6 +550,9 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
 
 ConversionPatternDialog::~ConversionPatternDialog()
 {
+    if (m_catalogueCancel)
+        m_catalogueCancel->store(true);
+    m_catalogueWatcher->waitForFinished();
     // Persist the sample text so the next session starts with it.
     // The destructor covers every close path (Close, X, Use Selected, Esc).
     QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
@@ -1080,6 +1133,8 @@ void ConversionPatternDialog::schedulePreviewUpdate()
     // edit must never apply its highlight spans to the changed text.
     ++m_previewGeneration;
     m_previewTimer->start();
+    if (m_fitJob && m_fitJob->model())
+        m_fitTimer->start();
 }
 
 void ConversionPatternDialog::startPreviewJob()
@@ -1095,6 +1150,7 @@ void ConversionPatternDialog::startPreviewJob()
 
     const LogPattern pattern(serialized);
     const QStringList lines = previewLines();
+    startCatalogueFit(lines);
 
     if (!pattern.isValid() || lines.isEmpty()
             || ui->sampleEdit->toPlainText().trimmed().isEmpty()) {
@@ -1102,6 +1158,7 @@ void ConversionPatternDialog::startPreviewJob()
         // false "too slow" warning while nothing is being matched.
         m_previewWatchdog->stop();
         m_previewSlow = false;
+        m_sampleFit = SchemaFit::Result();
         ui->sampleEdit->setExtraSelections({});
         ui->previewStatusLabel->setStyleSheet(QString());
         ui->previewStatusLabel->setText(!pattern.isValid()
@@ -1117,9 +1174,11 @@ void ConversionPatternDialog::startPreviewJob()
     m_previewWatcher->setFuture(QtConcurrent::run([pattern, lines, generation]() {
         PreviewJob job;
         job.generation = generation;
-        job.lines.reserve(lines.size());
-        for (const QString& line : lines)
-            job.lines.append(pattern.matchLine(line));
+        // One pass: the status line reports the one measure (SchemaFit,
+        // continuation lines are not misses there) and the highlights come
+        // from the same matches.
+        job.fit = SchemaFit::evaluate(pattern, SchemaFit::corpus(lines), SchemaFit::Budget(),
+                                      &job.lines);
         return job;
     }));
 }
@@ -1204,17 +1263,236 @@ void ConversionPatternDialog::onPreviewReady()
 
     ui->sampleEdit->setExtraSelections(selections);
 
-    QStringList statusParts;
-    statusParts << tr("%1 matched").arg(fullCount);
-    if (partialCount > 0)
-        statusParts << tr("%1 partial (red text is unparsed, routed into free-text fields)").arg(partialCount);
-    if (failedCount > 0)
-        statusParts << tr("%1 not recognized").arg(failedCount);
+    Q_UNUSED(fullCount);
+    Q_UNUSED(failedCount);
+    m_sampleFit = job.fit;
+    QString status = job.fit.timedOut ? tr("The schema is too slow on these lines — simplify custom regexes.")
+                                      : SchemaFit::summary(job.fit);
+    if (job.fit.valid && job.fit.partial > 0)
+        status += tr(" (red text is unparsed, routed into free-text fields)");
     ui->previewStatusLabel->setStyleSheet(
-        failedCount > 0 ? QStringLiteral("color:#C0392B;")
-        : partialCount > 0 ? QStringLiteral("color:#B9770E;")
+        (job.fit.timedOut || job.fit.missed > 0) ? QStringLiteral("color:#C0392B;")
+        : (job.fit.partial > 0 || partialCount > 0) ? QStringLiteral("color:#B9770E;")
         : QStringLiteral("color:#1E8449;"));
-    ui->previewStatusLabel->setText(statusParts.join(QStringLiteral(", ")));
+    ui->previewStatusLabel->setText(status);
+}
+
+// ---------------------------------------------------------------- //
+// Coverage on the file and catalogue suggestions (F-17, step 1)
+// ---------------------------------------------------------------- //
+
+void ConversionPatternDialog::setSource(LogModel* model, int currentRow)
+{
+    // Preview samples start at the row the user is looking at (the top of
+    // the log when nothing is selected) — schema problems usually live there.
+    QStringList sampleLines;
+    if (model) {
+        const int total = model->rowCount();
+        for (int row = qMax(0, currentRow); row < total && sampleLines.size() < 8; ++row) {
+            const QString text = model->messageAt(row);
+            if (!text.trimmed().isEmpty())
+                sampleLines.append(text);
+        }
+        if (sampleLines.isEmpty())
+            sampleLines = model->sampleMessages(8);
+    }
+    m_fileSampleLines = sampleLines;
+    if (m_reloadSampleBtn)
+        m_reloadSampleBtn->setEnabled(!m_fileSampleLines.isEmpty());
+    if (ui->sampleEdit->toPlainText().isEmpty() && !sampleLines.isEmpty())
+        ui->sampleEdit->setPlainText(sampleLines.mid(0, 8).join(QLatin1Char('\n')));
+
+    if (!m_fitJob) {
+        m_fitJob = new SchemaFitJob(this);
+        connect(m_fitJob, &SchemaFitJob::finished, this, &ConversionPatternDialog::onFileFitReady);
+        // Reset of the tab (reload, encoding change): check again.
+        connect(m_fitJob, &SchemaFitJob::invalidated, this, [this]() {
+            m_fileFitReady = false;
+            updateFileFitLabel();
+            m_fitTimer->start();
+        });
+    }
+    m_fitJob->setModel(model);
+    m_fileFitReady = false;
+    m_catalogueFileFits.clear();
+    m_fileFit = SchemaFit::Result();
+    m_fileFitLabel->setVisible(model != nullptr);
+    startFileFit();
+}
+
+QVector<LogPattern> ConversionPatternDialog::cataloguePatterns() const
+{
+    QVector<LogPattern> patterns;
+    patterns.reserve(ui->schemaTable->rowCount());
+    for (int row = 0; row < ui->schemaTable->rowCount(); ++row)
+        patterns.append(LogPattern(schemaRow(row).schema));
+    return patterns;
+}
+
+void ConversionPatternDialog::startFileFit()
+{
+    m_fitTimer->stop();
+    if (!m_fitJob || !m_fitJob->model())
+        return;
+    // One job: the edited schema (unapplied edits included) first, then
+    // every catalogue row — the "▾" suggestions use the same lines.
+    const int row = ui->schemaTable->currentRow();
+    QVector<LogPattern> patterns;
+    patterns.append(row >= 0 ? LogPattern(LogPattern::serializeDefinition(currentDefinitionFromEditor()))
+                             : LogPattern());
+    m_fitCatalogue.clear();
+    for (int r = 0; r < ui->schemaTable->rowCount(); ++r)
+        m_fitCatalogue.append(schemaRow(r).schema);
+    patterns += cataloguePatterns();
+    m_fileFitReady = false;
+    m_catalogueFileFits.clear();
+    m_fitJob->start(patterns, nullptr, m_fitBudget);
+    updateFileFitLabel();
+}
+
+void ConversionPatternDialog::onFileFitReady()
+{
+    const SchemaFitJob::Outcome& outcome = m_fitJob->outcome();
+    if (outcome.results.isEmpty())
+        return;
+    m_fileFit = outcome.results.first();
+    m_catalogueFileFits = outcome.results.mid(1);
+    m_fileFitReady = true;
+    updateFileFitLabel();
+}
+
+void ConversionPatternDialog::updateFileFitLabel()
+{
+    if (!m_fileFitLabel || !m_fitJob || !m_fitJob->model())
+        return;
+    QString text;
+    QString style;
+    if (!m_fileFitReady) {
+        text = tr("In the file: checking…");
+    } else if (m_fileFit.timedOut) {
+        text = tr("In the file: the schema is too slow — simplify custom regexes.");
+        style = QStringLiteral("color:#C0392B;");
+    } else if (!m_fileFit.valid) {
+        text = tr("In the file: the schema is incomplete.");
+    } else {
+        text = tr("In the file: %1").arg(SchemaFit::summary(m_fileFit));
+        const SchemaFit::Verdict verdict = SchemaFit::verdict(m_fileFit);
+        style = verdict == SchemaFit::Verdict::Fits ? QStringLiteral("color:#1E8449;")
+              : verdict == SchemaFit::Verdict::Doubtful ? QStringLiteral("color:#B9770E;")
+              : QStringLiteral("color:#C0392B;");
+    }
+    m_fileFitLabel->setStyleSheet(style);
+    m_fileFitLabel->setText(text);
+}
+
+QStringList ConversionPatternDialog::catalogueSchemas() const
+{
+    QStringList catalogue;
+    for (int r = 0; r < ui->schemaTable->rowCount(); ++r)
+        catalogue.append(schemaRow(r).schema);
+    return catalogue;
+}
+
+void ConversionPatternDialog::startCatalogueFit(const QStringList& lines)
+{
+    const QStringList catalogue = catalogueSchemas();
+    if (m_catalogueFitKey.first == catalogue && m_catalogueFitKey.second == lines)
+        return;   // ready or running for exactly these
+    m_catalogueFitKey = {catalogue, lines};
+    m_previewCatalogueFits.clear();
+    if (m_catalogueCancel)
+        m_catalogueCancel->store(true);
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_catalogueCancel = cancel;
+    const QVector<LogPattern> patterns = cataloguePatterns();
+    // Every schema of the list under the time budget — in a worker: a
+    // catastrophic regex in the list must not freeze the menu.
+    m_catalogueWatcher->setFuture(QtConcurrent::run([patterns, lines, catalogue, cancel]() {
+        CatalogueFit fit;
+        fit.catalogue = catalogue;
+        fit.lines = lines;
+        SchemaFit::Budget budget;
+        budget.cancel = cancel.get();
+        const SchemaFit::Corpus corpus = SchemaFit::corpus(lines);
+        for (const LogPattern& pattern : patterns)
+            fit.results.append(SchemaFit::evaluate(pattern, corpus, budget));
+        fit.cancelled = cancel->load();
+        return fit;
+    }));
+}
+
+QVector<SchemaFit::Ranked> ConversionPatternDialog::catalogueSuggestions(bool* pending) const
+{
+    const QStringList catalogue = catalogueSchemas();
+    if (pending)
+        *pending = false;
+
+    QVector<SchemaFit::Ranked> ranked;
+    const bool onFile = m_fitJob && m_fitJob->model();
+    const QVector<SchemaFit::Result>* fits = nullptr;
+    if (onFile) {
+        if (m_fileFitReady && m_fitCatalogue == catalogue && m_catalogueFileFits.size() == catalogue.size())
+            fits = &m_catalogueFileFits;
+    } else if (m_catalogueFitKey.first == catalogue && m_catalogueFitKey.second == previewLines()
+               && m_previewCatalogueFits.size() == catalogue.size()) {
+        fits = &m_previewCatalogueFits;
+    }
+    if (!fits) {
+        if (pending)
+            *pending = true;
+        return ranked;
+    }
+    for (int i = 0; i < fits->size(); ++i)
+        ranked.append(SchemaFit::Ranked{i, fits->at(i)});
+    std::stable_sort(ranked.begin(), ranked.end(), [](const SchemaFit::Ranked& a, const SchemaFit::Ranked& b) {
+        return SchemaFit::better(a.result, b.result);
+    });
+    QVector<SchemaFit::Ranked> fitting;
+    for (const SchemaFit::Ranked& r : ranked) {
+        if (SchemaFit::verdict(r.result) != SchemaFit::Verdict::NoFit)
+            fitting.append(r);
+    }
+    return fitting;
+}
+
+void ConversionPatternDialog::rebuildSuggestMenu()
+{
+    QMenu* menu = m_suggestMenuBtn->menu();
+    menu->clear();
+    const bool onFile = m_fitJob && m_fitJob->model();
+    QAction* header = menu->addAction(onFile ? tr("From the list — checked on the open log")
+                                             : tr("From the list — checked on the sample lines"));
+    header->setEnabled(false);
+    bool pending = false;
+    const QVector<SchemaFit::Ranked> suggestions = catalogueSuggestions(&pending);
+    if (pending) {
+        QAction* wait = menu->addAction(tr("Checking the lines…"));
+        wait->setEnabled(false);
+    } else if (suggestions.isEmpty()) {
+        QAction* none = menu->addAction(tr("No schema in the list fits these lines"));
+        none->setEnabled(false);
+    }
+    for (int i = 0; i < suggestions.size() && i < kSuggestionCount; ++i) {
+        const int row = suggestions[i].index;
+        const SchemaFit::Result& fit = suggestions[i].result;
+        QAction* action = menu->addAction(tr("%1 — parsed %2%")
+                                              .arg(schemaRow(row).name, SchemaFit::percent(fit.coverage())));
+        action->setObjectName(QStringLiteral("suggestCatalogue%1").arg(i));
+        action->setData(row);
+        if (row == ui->schemaTable->currentRow()) {
+            action->setCheckable(true);
+            action->setChecked(true);
+        }
+        connect(action, &QAction::triggered, this, [this, row]() {
+            if (row < ui->schemaTable->rowCount())
+                ui->schemaTable->setCurrentCell(row, SchemaColName);
+        });
+    }
+    menu->addSeparator();
+    QAction* draft = menu->addAction(tr("Build a Draft from the Sample Lines"));
+    draft->setObjectName(QStringLiteral("suggestDraft"));
+    draft->setEnabled(ui->schemaTable->currentRow() >= 0);
+    connect(draft, &QAction::triggered, this, &ConversionPatternDialog::onAutoDetect);
 }
 
 // ---------------------------------------------------------------- //

@@ -9,9 +9,11 @@
 #include <QVector>
 
 #include "logpattern.h"
+#include "schemafit.h"
 #include "schemastore.h"
 
 class CardFrame;
+class LogModel;
 class PatternBlockCard;
 class SeparatorNode;
 class QAction;
@@ -20,6 +22,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTimer;
+class QToolButton;
 class QVBoxLayout;
 
 QT_BEGIN_NAMESPACE
@@ -47,6 +50,13 @@ QT_END_NAMESPACE
 /// loses nothing until Apply (a keyed schema saves only the fallback
 /// "Message" block). The preview runs the same LogPattern::matchLine and
 /// colours the found values by column.
+///
+/// Coverage (F-17, step 1): the preview status line and, with a source tab
+/// (setSource), a line under the editor report SchemaFit — the one measure of
+/// "how many record lines the schema parses" — on the samples and on lines of
+/// the tab's file (SchemaFitJob in the pool, restarted after edits). The
+/// "▾" menu next to "Suggest schema" offers the catalogue schemas that fit
+/// these lines best first, then the draft built from the sample lines.
 class ConversionPatternDialog : public QDialog
 {
     Q_OBJECT
@@ -62,6 +72,25 @@ public:
                                      const QStringList& sampleLines = QStringList(),
                                      const QString& activeSchema = QString());
     ~ConversionPatternDialog() override;
+
+    /// Source tab of the lines: \a model's rows from \a currentRow (the top
+    /// when negative) refill the preview, and the schemas are checked on the
+    /// lines of its file. The model must outlive the dialog.
+    void setSource(LogModel* model, int currentRow);
+
+    /// Last SchemaFit of the edited schema on the preview lines (valid=false
+    /// until the first preview) and on the source file (fileFitReady()).
+    const SchemaFit::Result& sampleFit() const { return m_sampleFit; }
+    const SchemaFit::Result& fileFit() const { return m_fileFit; }
+    bool fileFitReady() const { return m_fileFitReady; }
+    /// Catalogue rows ranked by SchemaFit, best first — on the file lines
+    /// when a source is set and checked, else on the preview lines. Rows
+    /// whose schema does not fit are left out.
+    /// \a pending (may be nullptr) — the lines are still being checked
+    /// (the result is then empty).
+    QVector<SchemaFit::Ranked> catalogueSuggestions(bool* pending = nullptr) const;
+    /// Time budget of the file check per schema (test seam: 0 — none).
+    void setFitBudget(const SchemaFit::Budget& budget) { m_fitBudget = budget; }
 
     /// Returns the (possibly edited) list on dialog close.
     PatternList resultPatterns() const;
@@ -100,11 +129,13 @@ private slots:
     void onSavePreset();
     void onUseSelected();
     void onPreviewReady();
+    void onFileFitReady();
 
 private:
     struct PreviewJob {
         int generation = 0;
         QVector<LineMatchResult> lines;
+        SchemaFit::Result fit;   ///< the same lines through SchemaFit (one measure)
     };
 
     void populateSchemas(const PatternList& list, const QString& activeSchema = QString());
@@ -142,6 +173,15 @@ private:
     void saveUserPresets(const PresetList& presets);
 
     void schedulePreviewUpdate();
+    void startFileFit();
+    void updateFileFitLabel();
+    void rebuildSuggestMenu();
+    /// Catalogue rows as patterns, in table order (invalid rows — invalid patterns).
+    QVector<LogPattern> cataloguePatterns() const;
+    QStringList catalogueSchemas() const;
+    /// Ranks the list on the preview lines in a worker (the "▾" menu
+    /// without a source tab); no-op when done or running for the same.
+    void startCatalogueFit(const QStringList& lines);
     void startPreviewJob();
     void updateValidationLabel();
     void updateButtonStates();
@@ -149,6 +189,29 @@ private:
     QStringList previewLines() const;
 
     QStringList   m_fileSampleLines; ///< Log lines at the current view position, for the "reload sample" button.
+    QToolButton*  m_reloadSampleBtn = nullptr;
+
+    // ---- Coverage (F-17, step 1) ----
+    SchemaFit::Result m_sampleFit;
+    SchemaFit::Result m_fileFit;
+    bool          m_fileFitReady = false;
+    SchemaFitJob* m_fitJob = nullptr;      ///< lines of the source tab's file
+    QTimer*       m_fitTimer = nullptr;    ///< restart 400 ms after an edit
+    QStringList   m_fitCatalogue;          ///< catalogue (serialized) the last file fit ranked
+    QVector<SchemaFit::Result> m_catalogueFileFits; ///< by catalogue row, from the file fit
+    SchemaFit::Budget m_fitBudget;
+    struct CatalogueFit {
+        QStringList catalogue;
+        QStringList lines;
+        QVector<SchemaFit::Result> results;
+        bool cancelled = false;
+    };
+    QFutureWatcher<CatalogueFit>* m_catalogueWatcher = nullptr;
+    QPair<QStringList, QStringList> m_catalogueFitKey;   ///< catalogue, preview lines
+    QVector<SchemaFit::Result> m_previewCatalogueFits;  ///< by row, on the preview lines
+    std::shared_ptr<std::atomic_bool> m_catalogueCancel;
+    QLabel*       m_fileFitLabel = nullptr;
+    QToolButton*  m_suggestMenuBtn = nullptr;
 
     QVector<PatternBlockCard*> m_cards;
     QVector<SeparatorNode*>    m_separators; ///< Links between cards: m_separators[i] sits after m_cards[i].

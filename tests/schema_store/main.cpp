@@ -749,9 +749,13 @@ void testKeyedEditor()
         sample->setPlainText(QStringLiteral(
             "{\"when\":1763474136456,\"level\":40,\"msg\":\"a\",\"service\":\"api\"}\n"
             "{\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"info\",\"msg\":\"b\",\"trace_id\":\"t1\",\"user\":\"bob\"}\n"
-            "not json at all"));
-        check(waitPreview(status, QStringLiteral("2 matched")), "editor: live preview recognises the JSON lines: " + status->text());
-        check(status->text().contains(QStringLiteral("1 not recognized")), "editor: preview counts the plain line");
+            "2026-11-18 10:00:01 WARN not json at all"));
+        // Подпись — мера SchemaFit (F-17): записи — строки с меткой и
+        // уровнем; строка JSON с эпохой числом — не начало записи по правилу
+        // без схемы, но разобрана (loose).
+        check(waitPreview(status, QStringLiteral("Parsed 50% of 2 record lines")),
+              "editor: live preview recognises the JSON lines: " + status->text());
+        check(status->text().contains(QStringLiteral("1 did not match")), "editor: preview counts the plain line");
         apply->click();
 
         // Revert возвращает применённое.

@@ -1697,27 +1697,12 @@ void MainWindow::onManagePatterns()
     // last load are picked up, preserving the current display order.
     m_schemas->reloadCatalogue();
 
-    // Offer log lines as live-preview samples, starting from the row the
-    // user is currently looking at (top of the log when nothing is
-    // selected) — schema problems usually live at the current position.
-    QStringList sampleLines;
-    if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget())) {
-        if (LogModel* model = lv->model()) {
-            const int total = model->rowCount();
-            int row = lv->view() ? lv->view()->currentIndex().row() : -1;
-            if (row < 0)
-                row = 0;
-            for (; row < total && sampleLines.size() < 8; ++row) {
-                const QString text = model->messageAt(row);
-                if (!text.trimmed().isEmpty())
-                    sampleLines.append(text);
-            }
-            if (sampleLines.isEmpty())
-                sampleLines = model->sampleMessages(8);
-        }
-    }
-
-    ConversionPatternDialog dlg(m_schemas->schemas(), this, sampleLines, m_schemas->activeSchema());
+    ConversionPatternDialog dlg(m_schemas->schemas(), this, QStringList(), m_schemas->activeSchema());
+    // The editor gets the tab, not a handful of lines: preview samples start
+    // at the row the user is looking at, and the schemas are checked on lines
+    // of the tab's file (SchemaFit, F-17).
+    if (auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()))
+        dlg.setSource(lv->model(), lv->view() ? lv->view()->currentIndex().row() : -1);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const QString syncError = m_schemas->replaceCatalogue(dlg.resultPatterns(), dlg.chosenPattern(),

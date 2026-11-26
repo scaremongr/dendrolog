@@ -22,6 +22,18 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **How many lines a field schema parses.** The schema editor (`Tools →
+  Field Schemas…`) shows under the preview the share of the sample lines the
+  edited schema parses — "Parsed 92% of 12 record lines · 1 did not match"
+  — and, when a log is open, the same on lines of the tab's file (its start
+  and lines spread over the whole file), recounted after each edit. Only
+  lines that start a record count: stack traces and other continuation lines
+  are not misses. A schema with a too heavy regular expression is reported as
+  too slow instead of freezing the window.
+- **A fitting schema from the list.** The **▾** arrow next to **Suggest
+  schema** offers first the schemas of the list that parse the open log (or
+  the preview lines) best, with their share of parsed lines; then the draft
+  built from the sample lines, as before.
 - **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
   as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name
   the file `.csv` / `.jsonl`). Columns are the field columns the view shows
