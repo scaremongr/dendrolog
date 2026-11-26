@@ -104,12 +104,6 @@ public:
     // только что подключённого — без reset.
     void setFileEncodingState(const LogFilePtr& logFile, const FileEncoding& encoding);
 
-    // Схемы файлов (F-5, PR 2) — у модели (LogModel::fileSchemas): стор
-    // держит копию указателя в записи файла рядом с декодером и раздаёт её
-    // читателям полей (точечный доступ, снапшоты, фильтр-воркер, поисковая
-    // база). Поля извлекаются по требованию схемой файла и кладутся сразу в
-    // колонки вкладки. Модель зовёт это при смене схем.
-    void refreshFileSchemas();
     void setTextCacheBudget(qint64 bytes);
 
     // ---- Виртуальный интерфейс LogStore ---------------------------------------
@@ -150,7 +144,6 @@ private:
         std::shared_ptr<LineIndex> index;
         int cacheFileId = -1;
         FileEncoding encoding; // decoder — копией во все читатели текста
-        FileSchemaPtr schema;  // схема файла (F-5), nullptr — без полей
         qint64 shownLines = 0; // строк файла, показанных модели (U-23, fileLineCounts)
     };
 

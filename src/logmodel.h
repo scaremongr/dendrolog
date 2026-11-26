@@ -3,6 +3,7 @@
 
 #include "logentry.h"
 #include "fieldlayout.h"
+#include "fieldsource.h"
 #include "logscan.h"
 #include "recordid.h"
 #include "filterruleset.h"
@@ -117,10 +118,9 @@ public:
     // Снапшот для последовательного скана в воркере (статистика, таймлайн).
     LogScanSnapshot scanSnapshot(bool filteredOnly) const;
 
-    // ЕДИНСТВЕННЫЙ легальный доступ к записям как к мутируемому набору —
-    // для переизвлечения полей схемы (FieldSchemaController::applyToView).
-    // Осмыслен только для резидентного бэкенда.
-    QVector<std::shared_ptr<LogEntry>> residentEntriesForFieldMutation() const;
+    // Все записи резидентного бэкенда (тесты, редкие проходы). Записи
+    // неизменяемы после публикации. Только для резидентного бэкенда.
+    QVector<std::shared_ptr<LogEntry>> residentEntries() const;
 
     // ---- Бэкенды ---------------------------------------------------------------
     // Резидентный (по умолчанию) или индексный (очень большие файлы).
@@ -192,12 +192,12 @@ public:
     void refreshDisplay();
 
     // Схемы файлов вкладки (F-5, PR 2): своя у файла или общая; nullptr —
-    // без схемы (извлечение выключено). Модель — единственный владелец во
-    // вкладке: индексный стор берёт схему файла отсюда (извлечение по
-    // требованию, снапшоты, фильтр-воркер, поисковая база — копией), показ —
-    // hasColumn файла (formatDisplayText). Поля резидентных записей уже
-    // разобраны: смена схемы их не трогает (переизвлечение — у контроллера,
-    // инвариант 4), дисплей обновляет refreshDisplay вызывающего.
+    // у файла нет схемы. Модель — единственный владелец во вкладке: её
+    // FieldSource (F-17, шаг 3) отдаёт поля строк показу (fieldsFor, кэш) и
+    // воркерам (scanner — снимок схем: фильтр, Save View As, поиск). Записи
+    // полей не хранят, поэтому смена схем — O(1): поколение источника, кэш
+    // пуст, перерисовка видимого (dataChanged); правила по полю, если
+    // применены, — перефильтрация (у того, кто их применил).
     void setFileSchemas(const FileSchemaSet& schemas);
     void setFileSchema(const QString& filePath, FileSchemaPtr schema);
     const FileSchemaSet& fileSchemas() const noexcept { return m_fileSchemas; }
@@ -205,6 +205,11 @@ public:
     {
         return m_fileSchemas.forPath(filePath);
     }
+    // Источник полей вкладки (F-17, шаг 3).
+    FieldSource& fieldSource() const { return *m_fieldSource; }
+    // Поля строки для показа (GUI-поток, через кэш FieldSource); пусто —
+    // у файла нет схемы или строка не принята.
+    LogEntryFields fieldsOf(const LogEntry& entry) const;
     // -------------------------------------------------------------------------
 
     void setLogLevelFilter(const QSet<LogLevel>& levels);
@@ -291,8 +296,8 @@ public:
     QModelIndex findPreviousOccurrence(const QString& text, int startRow, Qt::CaseSensitivity cs, bool wrapAround = true) const;
 
     // Отменяет фоновую перефильтрацию, если она идёт. wait=true — дождаться
-    // фактической остановки воркера; обязательно перед конкурентной мутацией
-    // LogEntry::fields (переизвлечение полей в MainWindow).
+    // фактической остановки воркера (резидентный воркер делит записи с
+    // поисковой базой).
     void cancelPendingFilter(bool wait = false);
     // Перефильтровать, если отмена фонового джоба оставила видимый список
     // не соответствующим текущим настройкам фильтров.
@@ -420,6 +425,8 @@ private:
     QVector<int> m_visibleFieldIndexes;
     FileSchemaSet m_fileSchemas;
     bool m_fieldFilterEnabled = false;
+
+    FieldSource* m_fieldSource = nullptr; // child QObject (F-17, шаг 3)
 
     TimeZero m_timeZero;                  // F-8
     RecordLocator* m_locator = nullptr;   // child QObject

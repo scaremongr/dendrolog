@@ -1389,7 +1389,7 @@ static void testLocatorBatchCost(const QDir& dir, const QString& schema)
         // Все строки резидентного документа в порядке файла — для порций.
         QVector<std::shared_ptr<LogEntry>> fileOrder;
         if (resident) {
-            fileOrder = model.residentEntriesForFieldMutation();
+            fileOrder = model.residentEntries();
             std::sort(fileOrder.begin(), fileOrder.end(), [](const auto& x, const auto& y) {
                 return x->originalLineNumber() < y->originalLineNumber();
             });

@@ -35,7 +35,7 @@ public:
     explicit FilterRuleCard(const FilterRule& rule, QWidget* parent = nullptr);
 
     FilterRule rule() const;
-    void setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled);
+    void setFieldNames(const QStringList& fieldNames);
     // Первая карточка не имеет связи с предыдущей — коннектор скрыт.
     void setIsFirstRow(bool first);
     // Фокус в поле текста правила (новая карточка по «+ Add rule»).
@@ -73,7 +73,6 @@ private:
     QLabel*      m_regexErrorLabel;   // пояснение под текстом (обычно скрыто)
     QStringList  m_schemaFields;      // колонки текущей схемы (setFieldNames)
     bool         m_schemaKnown = false;
-    bool         m_fieldScopeEnabled = true;
     QString      m_textPlaceholder;   // подсказка поля текста без регекса
 
     QColor       m_color;
@@ -111,9 +110,9 @@ public:
     // Перестроить UI из набора (загрузка настроек).
     void setRuleSet(const FilterRuleSet& set);
 
-    // Обновить список колонок в комбобоксах правил. fieldScopeEnabled = false
-    // (галочка "Filter blocks" снята) блокирует выбор колонки.
-    void setFieldNames(const QStringList& fieldNames, bool fieldScopeEnabled);
+    // Обновить список колонок в комбобоксах правил (от показа полей не
+    // зависит: правило по полю ищет в поле всегда, F-17, шаг 3).
+    void setFieldNames(const QStringList& fieldNames);
 
     // ---- Роль и подсветка ---------------------------------------------------
     Mode mode() const { return m_mode; }
@@ -194,7 +193,6 @@ private:
     int m_activeProfileIndex = 0;
 
     QStringList m_fieldNames;
-    bool m_fieldScopeEnabled = false;
 };
 
 #endif // FILTERPANELWIDGET_H

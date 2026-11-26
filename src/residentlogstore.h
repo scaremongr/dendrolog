@@ -12,6 +12,8 @@
 // (все записи + видимые), синхронный фильтр до порога и фоновый джоб выше,
 // слияние отсортированных батчей без reset модели.
 // ============================================================================
+class FieldRecordCursor;
+
 class ResidentLogStore final : public LogStore {
 public:
     explicit ResidentLogStore(LogModel& model) : LogStore(model) {}
@@ -72,8 +74,8 @@ public:
     // перечитыванием) без reset: видимая строка удаляется rowsRemoved.
     void removeEntry(const std::shared_ptr<LogEntry>& entry);
 
-    // Прямой доступ для переизвлечения полей и посева результатов поиска —
-    // только внутри слоя хранения/фасада.
+    // Прямой доступ для посева результатов поиска — только внутри слоя
+    // хранения/фасада.
     const QVector<std::shared_ptr<LogEntry>>& allEntries() const { return m_allEntries; }
     // Записи файла с номерами строк из sortedLines (по возрастанию), видимые и
     // скрытые. Один линейный проход по всем записям — O(N log K): строки
@@ -88,7 +90,7 @@ private:
     // lower_bound по ключу сортировки; *exact — на ней стоит строка ключа.
     static int lowerBoundForKey(const QVector<std::shared_ptr<LogEntry>>& list,
                                 const RecordKey& key, bool* exact);
-    bool passesFilters(const std::shared_ptr<LogEntry>& entry) const;
+    bool passesFilters(const std::shared_ptr<LogEntry>& entry, FieldRecordCursor* record) const;
     void rebuildFilteredEntries();
     void mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
     void insertFilteredSorted(const QVector<std::shared_ptr<LogEntry>>& passing);

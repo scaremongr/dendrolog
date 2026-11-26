@@ -319,7 +319,7 @@ static void checkFlags(const QString& name, LogModel& model)
         rule.isRegex = q.needsRegex();
         rule.caseSensitive = q.caseSensitive;
         rules.rules.append(rule);
-        rules.bindFields({}, false);
+        rules.bindFields({});
         QVector<bool> hit(n);
         int hits = 0;
         for (int row = 0; row < n; ++row) {
@@ -329,7 +329,7 @@ static void checkFlags(const QString& name, LogModel& model)
             if (matcher.matches(text) != hit[row] && ++mismatches <= 5)
                 std::fprintf(stderr, "  %s matcher '%s' cs=%d word=%d re=%d on '%s'\n", qPrintable(name),
                              qPrintable(q.text), q.caseSensitive, q.wholeWord, q.regex, qPrintable(text));
-            if (rules.matchesLine(text, LogEntryFields()) != hit[row] && ++mismatches <= 5)
+            if (rules.matchesLine(text, nullptr) != hit[row] && ++mismatches <= 5)
                 std::fprintf(stderr, "  %s Find All rule '%s' word=%d re=%d on '%s'\n", qPrintable(name),
                              qPrintable(q.text), q.wholeWord, q.regex, qPrintable(text));
             // Подсветка: что-то залито ровно на найденных строках, и залитое —
@@ -741,10 +741,10 @@ int main(int argc, char** argv)
                 rule.text = q.patternText();
                 rule.isRegex = q.needsRegex();
                 rules.rules.append(rule);
-                rules.bindFields({}, false);
+                rules.bindFields({});
                 int ruleHits = 0;
                 for (int r = 0; r < model->rowCount(); ++r)
-                    ruleHits += rules.matchesLine(model->messageAt(r), LogEntryFields());
+                    ruleHits += rules.matchesLine(model->messageAt(r), nullptr);
                 CHECK(ruleHits == want.size(), name + ": Find All rule for " + q.text);
             }
             for (const char* code : {"[31m", "\x1b", "8;;http", "38;5"}) {
@@ -786,7 +786,7 @@ int main(int argc, char** argv)
         // прийти (он доставляется циклом событий).
         auto earlier = testdocs::buildResident({b}, schema);
         QVector<std::shared_ptr<LogEntry>> batch;
-        for (const auto& entry : earlier.model->residentEntriesForFieldMutation()) {
+        for (const auto& entry : earlier.model->residentEntries()) {
             if (entry->timestamp().toString("mm") == "00") // 10:00:xx — раньше, чем 10:01 у row 1400
                 batch.append(entry);
         }

@@ -1,6 +1,7 @@
 #ifndef FIELDLAYOUT_H
 #define FIELDLAYOUT_H
 
+#include "fieldextractor.h"
 #include "logfield.h"
 #include "logpattern.h"
 
@@ -18,15 +19,16 @@ struct LogFile;
 //
 // У вкладки одна раскладка колонок — FieldLayout: объединение колонок схем
 // её файлов по имени, в порядке схем; колонки только добавляются (новая
-// схема дописывает недостающие имена в конец), поэтому индексы уже
-// разобранных записей не устаревают. Пересборка раскладки — только при
-// смене схемы пользователем (тогда поля вкладки переизвлекаются).
+// схема дописывает недостающие имена в конец), поэтому индексы привязанных
+// правил не устаревают. Пересборка раскладки — только при смене схемы
+// пользователем.
 //
-// FileSchema — схема, которой читается файл, и таблица «поле схемы →
-// колонка вкладки». Все, кто кладёт поля (резидентный парсер, индексный стор
-// по требованию, переизвлечение), кладут их СРАЗУ в пространстве колонок
+// FileSchema — схема файла: извлекатель (F-17, шаг 3: поля — функция текста
+// строки и схемы, в записях не хранятся) и таблица «поле схемы → колонка
+// вкладки». FileSchema::extract отдаёт поля СРАЗУ в пространстве колонок
 // вкладки (toLayout); дальше фильтр, показ, Save View As, Search Results и
-// Entry Details работают индексами колонок вкладки. У вкладки с одной схемой
+// Entry Details работают индексами колонок вкладки. Получают поля через
+// FieldSource / FieldScanner (fieldsource.h). У вкладки с одной схемой
 // columnOf тождественен (identity) — поля те же, байт в байт.
 //
 // Значение неизменяемое и делится между потоками через FileSchemaPtr (как
@@ -36,16 +38,24 @@ struct LogFile;
 // ============================================================================
 
 struct FileSchema {
+    // Схема для ЗАГРУЗКИ (до шага 7 F-17: граница записи по схеме, момент и
+    // уровень из ключей ключевой схемы) и для раздела Keys Entry Details.
+    // У схемы-шаблона (версия 4) — пустая и негодная: загрузка её не видит.
     LogPattern pattern;
+    // Поля строки (F-17, шаг 3): extractor->extract(текст) — единственный
+    // способ их получить; в записях поля не хранятся.
+    FieldExtractorPtr extractor;
     // Индекс поля схемы → индекс колонки вкладки.
     QVector<int> columnOf;
+    // Колонка вкладки → поле схемы (-1 — колонки у схемы нет).
+    QVector<int> fieldOf;
     // Какие колонки вкладки есть у этой схемы (длина — число колонок
     // раскладки на момент построения; колонки, добавленные позже, — чужие).
     QBitArray hasColumn;
     // columnOf[i] == i для всех полей: перенос спанов не нужен.
     bool identity = true;
 
-    bool isValid() const noexcept { return pattern.isValid(); }
+    bool isValid() const noexcept { return extractor && extractor->isValid(); }
     bool has(int column) const noexcept
     {
         return column >= 0 && column < hasColumn.size() && hasColumn.testBit(column);
@@ -56,11 +66,16 @@ struct FileSchema {
 
     // Поля, извлечённые схемой (индексы её полей), — в колонки вкладки.
     void toLayout(LogEntryFields& fields) const;
-    // pattern.extractFields + toLayout.
-    LogEntryFields extractFields(const QString& line) const
+    // Поля строки в колонках вкладки. upToColumn >= 0 — нужна только эта
+    // колонка вкладки (и левее по схеме): разбор кончается раньше
+    // (FieldExtractor::extract, upTo). Строка не принята — out пуст
+    // (isEmpty), Rejected.
+    FieldExtractor::Outcome extract(QStringView line, LogEntryFields* out,
+                                    int upToColumn = -1) const;
+    LogEntryFields extractFields(QStringView line) const
     {
-        LogEntryFields fields = pattern.extractFields(line);
-        toLayout(fields);
+        LogEntryFields fields;
+        extract(line, &fields);
         return fields;
     }
 };
@@ -74,17 +89,24 @@ struct FieldLayout {
     // Схема файла в этой раскладке; недостающие колонки дописываются в
     // конец. k-е поле схемы с именем N — k-я колонка с именем N (схема с
     // повторяющимся именем не склеивает свои поля в одну колонку).
+    // Определение — блочная или ключевая схема (LogPattern) либо шаблон
+    // строки версии 4 (LineTemplateSchema, F-17): шаблону — TemplateExtractor
+    // и пустой pattern.
     FileSchemaPtr schemaFor(const LogPattern& pattern);
     FileSchemaPtr schemaFor(const QString& patternString)
     {
         return schemaFor(LogPattern(patternString));
     }
+    // Извлекатель по определению схемы (шаблон версии 4 или LogPattern).
+    static FieldExtractorPtr extractorFor(const LogPattern& pattern);
+    // Определение — файл шаблона строки версии 4.
+    static bool isTemplateDefinition(const QString& definition);
     void clear() { columns.clear(); }
 };
 
 // Схемы файлов вкладки: своя у файла (по пути) либо общая (fallback).
-// nullptr — файл читается без схемы (извлечение полей выключено). Значение —
-// копируемое: модель отдаёт его воркерам (Save View As, переизвлечение).
+// nullptr — у файла нет схемы (полей нет). Значение — копируемое: модель
+// отдаёт его воркерам (FieldScanner — фильтр, Save View As, поиск).
 struct FileSchemaSet {
     QHash<QString, FileSchemaPtr> byPath;
     FileSchemaPtr fallback;

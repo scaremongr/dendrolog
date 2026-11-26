@@ -203,7 +203,7 @@ static void checkMigrationAndBuiltins()
           "built-in schemas are installed, keyed ones included");
     CHECK(c.activeIndex() == old && c.activeSchema() == legacy, "active schema found by its text");
     CHECK(c.activeSchemaName() == QLatin1String("Old"), "active schema name for sessions");
-    CHECK(c.extractionEnabled() && c.fieldDisplayEnabled(), "Filter blocks restored");
+    CHECK(c.showFields() && c.fieldDisplayEnabled(), "Filter blocks restored");
     CHECK(c.visibleFieldNames() == (QStringList{QStringLiteral("Level"), QStringLiteral("Message")}),
           QStringLiteral("legacy mask becomes names: %1").arg(c.visibleFieldNames().join(',')));
     CHECK(c.visibleFieldIndexes() == (QVector<int>{2, 3}), "visible indexes follow the names");
@@ -230,7 +230,7 @@ static void checkMigrationAndBuiltins()
     CHECK(names == namesAgain, "catalogue order survives a restart");
     CHECK(again.activeIndex() == c.activeIndex() && again.activeSchema() == legacy,
           "active schema survives a restart");
-    CHECK(again.visibleFieldNames() == c.visibleFieldNames() && again.extractionEnabled(),
+    CHECK(again.visibleFieldNames() == c.visibleFieldNames() && again.showFields(),
           "column choice and Filter blocks survive a restart");
 }
 
@@ -252,7 +252,7 @@ static void checkColumnChoice()
     }
     CHECK(c.activeIndex() == -1 && c.activeSchema().isEmpty() && c.fieldNames().isEmpty(),
           "no active schema by default");
-    CHECK(!c.extractionEnabled() && !c.fieldDisplayEnabled(), "Filter blocks off by default");
+    CHECK(!c.showFields() && !c.fieldDisplayEnabled(), "Filter blocks off by default");
     int fieldSignals = 0;
     QObject::connect(&c, &FieldSchemaController::fieldsChanged, [&] { ++fieldSignals; });
 
@@ -276,7 +276,7 @@ static void checkColumnChoice()
           "schema cleared");
 
     // Перезапуск: ini → новый контроллер (без вкладок выбор — схема по умолчанию).
-    c.setExtractionEnabled(true);
+    c.setShowFields(true);
     c.selectSchema(indexOf(c.schemas(), QStringLiteral("A")));
     c.setVisibleFieldNames({QStringLiteral("Thread")});
     {
@@ -292,7 +292,7 @@ static void checkColumnChoice()
         restarted.load(s);
         s.endGroup();
     }
-    CHECK(restarted.activeSchema() == a && restarted.extractionEnabled()
+    CHECK(restarted.activeSchema() == a && restarted.showFields()
               && restarted.visibleFieldNames() == QStringList{QStringLiteral("Thread")},
           "column choice survives a restart");
 
@@ -326,21 +326,21 @@ static void checkSavedSchema()
         s.endGroup();
     }
     FieldSettings none;
-    none.extraction = true;
+    none.showFields = true;
     auto resolved = c.resolveSaved(none, true);
-    CHECK(resolved && !resolved->hasSchema() && resolved->extraction, "saved tab without a schema");
+    CHECK(resolved && !resolved->hasSchema() && resolved->showFields, "saved tab without a schema");
 
     FieldSettings known;
     known.schemaName = QStringLiteral("Other name");
     known.schema = a;
-    known.extraction = true;
+    known.showFields = true;
     known.visibleFields = {QStringLiteral("Message")};
     QString error;
     resolved = c.resolveSaved(known, true, &error);
     CHECK(resolved && error.isEmpty() && resolved->schemaName == QLatin1String("A")
               && resolved->schema == a,
           "same definition — the catalogue entry, whatever its name");
-    CHECK(resolved && resolved->extraction && resolved->visibleFields == QStringList{QStringLiteral("Message")},
+    CHECK(resolved && resolved->showFields && resolved->visibleFields == QStringList{QStringLiteral("Message")},
           "saved Filter blocks and columns");
     resolved = c.resolveSaved(known, false);
     CHECK(resolved && resolved->schemaName == QLatin1String("A"), "file memory finds it as well");
@@ -382,18 +382,13 @@ static void checkViews(const QDir& dir, bool indexed)
 
     std::vector<std::unique_ptr<LogViewWidget>> tabs;
     FieldSchemaController c;
-    int starts = 0, rebound = 0, applied = 0;
-    QList<LogViewWidget*> stoppedFor;
+    int rebound = 0, applied = 0;
     c.setWindow({
         [&]() {
             QList<LogViewWidget*> list;
             for (const auto& t : tabs)
                 list << t.get();
             return list;
-        },
-        [&](LogViewWidget* view, bool starting) {
-            starts += starting ? 1 : 0;
-            stoppedFor << view;
         } });
     QObject::connect(&c, &FieldSchemaController::filtersRebound, [&](LogViewWidget*) { ++rebound; });
     QObject::connect(&c, &FieldSchemaController::schemaApplied, [&](LogViewWidget*) { ++applied; });
@@ -416,9 +411,8 @@ static void checkViews(const QDir& dir, bool indexed)
 
     // Док — у первой вкладки: выбор меняет только её.
     c.setCurrentView(first);
-    c.setExtractionEnabled(true); // без схемы колонок нет — показ выключен
+    c.setShowFields(true); // без схемы колонок нет — показ выключен
     CHECK(!first->model()->fieldDisplayFilterEnabled(), label + ": no schema, no column display");
-    stoppedFor.clear();
     c.selectSchema(indexOf(c.schemas(), QStringLiteral("A")));
     c.setVisibleFieldNames({QStringLiteral("Level")});
     CHECK(settled(*first), label + ": settles after the switch");
@@ -429,15 +423,9 @@ static void checkViews(const QDir& dir, bool indexed)
           label + ": column choice reaches the dock's tab");
     CHECK(showsOnlyLevels(*first->model()), label + ": rows show the chosen column");
     CHECK(second->parserPattern().isEmpty() && !second->model()->fieldDisplayFilterEnabled()
-              && !second->fieldSettings().extraction,
+              && !second->fieldSettings().showFields,
           label + ": the other tab keeps its schema");
-    // Индексной вкладке мутировать нечего — чужих читателей (Save View As
-    // другой вкладки) смена её схемы не останавливает.
-    CHECK(applied >= 1
-              && (indexed ? stoppedFor.isEmpty()
-                          : starts >= 1 && std::all_of(stoppedFor.cbegin(), stoppedFor.cend(),
-                                                       [&](LogViewWidget* v) { return v == first; })),
-          label + ": readers stopped for this tab only (none without resident fields), application announced");
+    CHECK(applied >= 1, label + ": application announced");
 
     // Правило по колонке на первой вкладке переживает смену схемы второй.
     FilterRuleSet rules = levelRule(QStringLiteral("Level"), QStringLiteral("ERROR"));
@@ -447,10 +435,10 @@ static void checkViews(const QDir& dir, bool indexed)
     CHECK(settled(*first) && first->model()->rowCount() == errorCount(records),
           QStringLiteral("%1: rule on Level filters (%2)").arg(label).arg(first->model()->rowCount()));
     c.setCurrentView(second);
-    CHECK(c.activeSchema().isEmpty() && c.activeIndex() == -1 && !c.extractionEnabled(),
+    CHECK(c.activeSchema().isEmpty() && c.activeIndex() == -1 && !c.showFields(),
           label + ": the dock follows the tab");
     rebound = 0;
-    c.setExtractionEnabled(true);
+    c.setShowFields(true);
     c.selectSchema(indexOf(c.schemas(), QStringLiteral("B")));
     CHECK(settled(*second) && second->parserPattern() == b, label + ": schema B on the second tab");
     CHECK(rebound == 0, label + ": the tab without rules is not rebound");
@@ -509,25 +497,26 @@ static void checkViews(const QDir& dir, bool indexed)
           QStringLiteral("%1: rule on a keyed column (%2)").arg(label).arg(keyed->model()->rowCount()));
     CHECK(showsOnlyLevels(*keyed->model()), label + ": keyed column shown decoded");
 
-    // «Filter blocks» выключен — поля сняты на этой вкладке.
-    c.setExtractionEnabled(false);
-    CHECK(settled(*keyed), label + ": settles after Filter blocks off");
+    // «Show selected fields only» выключена — только показ: правило по полю
+    // ищет в поле как прежде (F-17, шаг 3).
+    c.setShowFields(false);
+    CHECK(settled(*keyed), label + ": settles after Show selected fields off");
     CHECK(!keyed->model()->fieldDisplayFilterEnabled(), label + ": column display off on the tab");
+    CHECK(keyed->model()->rowCount() == errorCount(records),
+          label + ": the rule on a column still filters with the display off");
     CHECK(first->model()->fieldDisplayFilterEnabled(), label + ": the neighbour keeps its columns");
-    CHECK(!c.isReextracting(), label + ": small tabs re-extract synchronously");
 
     // Редактор схем без «Use Selected»: схема вкладки уже применена — заново
     // не применяется (вкладка не переизвлекается, поиск не сбрасывается).
     c.setCurrentView(first);
     applied = 0;
-    starts = 0;
     c.replaceCatalogue(c.schemas(), QString(), -1);
-    CHECK(applied == 0 && starts == 0 && c.activeSchema() == a, label + ": editor without a choice keeps the schema");
+    CHECK(applied == 0 && c.activeSchema() == a, label + ": editor without a choice keeps the schema");
 
     // Сохранённая схема вкладки (applyState → savedFieldSettingsFound).
     LogViewWidget* restored = newTab(plain);
     TabState state = first->captureState();
-    CHECK(state.view.fields && state.view.fields->schema == a && state.view.fields->extraction
+    CHECK(state.view.fields && state.view.fields->schema == a && state.view.fields->showFields
               && state.view.fields->visibleFields == QStringList{QStringLiteral("Level")},
           label + ": captureState takes the tab's schema");
     state.sources.clear();
@@ -539,7 +528,11 @@ static void checkViews(const QDir& dir, bool indexed)
           label + ": applyState sets the saved schema of the tab");
 }
 
-static void checkBackgroundReextraction(const QDir& dir)
+// Смена схемы на большой резидентной вкладке (F-17, шаг 3): поля — функция
+// текста и схемы, поэтому смена — O(1): ни reset, ни прохода по записям,
+// вызовов извлекателя — только у фильтра по полю (не больше строк, где есть
+// образец) и у показа видимых строк. Соседняя вкладка не тронута.
+static void checkLazySchemaSwitch(const QDir& dir)
 {
     ConfigDir config;
     AppSettings::instance().setIndexedThresholdMB(512);
@@ -547,36 +540,13 @@ static void checkBackgroundReextraction(const QDir& dir)
     const QString b = schemaNamed(QStringLiteral("Level"), QStringLiteral("Text"));
     SchemaStore::sync({ {QStringLiteral("A"), a, {}, {}}, {QStringLiteral("B"), b, {}, {}} });
 
-    // Больше 100 000 записей — резидентный фильтр уходит в пул; больше
-    // 4000 — переизвлечение тоже.
+    // Больше 100 000 записей — резидентный фильтр уходит в пул.
     const int records = 120000;
     const QString path = writeFile(dir, QStringLiteral("big.log"), logBytes(records));
     auto tab = std::make_unique<LogViewWidget>();
     auto neighbour = std::make_unique<LogViewWidget>();
     FieldSchemaController c;
-    int starts = 0, beforeApply = 0;
-    bool filteringAtApply = false;
-    bool otherTabStopped = false;
-    c.setWindow({
-        [&]() { return QList<LogViewWidget*>{tab.get(), neighbour.get()}; },
-        [&](LogViewWidget* view, bool starting) {
-            otherTabStopped = otherTabStopped || view != tab.get();
-            if (starting) {
-                ++starts;
-                return;
-            }
-            ++beforeApply;
-            // Перед установкой полей фильтры вкладок уже остановлены.
-            filteringAtApply = filteringAtApply || tab->model()->isFiltering();
-        } });
-    int startedEntries = 0, finished = 0;
-    QObject::connect(&c, &FieldSchemaController::reextractionStarted, [&](int n) { startedEntries = n; });
-    QObject::connect(&c, &FieldSchemaController::reextractionFinished, [&] {
-        ++finished;
-        // Поля уже стоят, перефильтрации ещё не было: фильтр, запущенный за
-        // время расчёта, остановлен до установки полей (инвариант 4).
-        filteringAtApply = filteringAtApply || tab->model()->isFiltering();
-    });
+    c.setWindow({ [&]() { return QList<LogViewWidget*>{tab.get(), neighbour.get()}; } });
     {
         QSettings s(config.ini(), QSettings::IniFormat);
         s.beginGroup(QStringLiteral("View"));
@@ -592,66 +562,46 @@ static void checkBackgroundReextraction(const QDir& dir)
     CHECK(!tab->model()->isIndexedBackend(), "big tab is resident");
     c.setCurrentView(tab.get());
 
-    c.setExtractionEnabled(true);
+    LogModel& model = *tab->model();
+    int resets = 0;
+    QObject::connect(&model, &QAbstractItemModel::modelReset, [&] { ++resets; });
+    model.fieldSource().resetStats();
+    c.setShowFields(true);
     c.selectSchema(indexOf(c.schemas(), QStringLiteral("A")));
-    CHECK(c.isReextracting() && startedEntries == records, "large re-extraction runs in the background");
-    CHECK(!tab->model()->fieldDisplayFilterEnabled(), "column display off while re-extracting");
-    CHECK(waitFor([&] { return !c.isReextracting(); }, 120000) && finished == 1,
-          "background re-extraction finishes");
-    CHECK(starts >= 1 && beforeApply == 1, "readers outside the tabs are stopped first and before apply");
+    CHECK(settled(*tab), "settles after the switch");
+    CHECK(resets == 0, QStringLiteral("schema switch: no model reset (%1)").arg(resets));
+    CHECK(model.fieldSource().stats().scanExtracts == 0,
+          "schema switch: no pass over the entries");
+    CHECK(model.fieldDisplayFilterEnabled(), "column display on at once");
 
-    finished = 0;
-    c.selectSchema(indexOf(c.schemas(), QStringLiteral("B")));
-    CHECK(c.isReextracting(), "second schema re-extracts in the background");
-    // Выбор колонок посреди расчёта: колонки новой схемы не ложатся на поля
-    // старой — показ остаётся выключенным до конца расчёта.
-    c.setVisibleFieldNames({QStringLiteral("Level")});
-    CHECK(!tab->model()->fieldDisplayFilterEnabled(), "column choice keeps display off while re-extracting");
-    // Фильтр по колонке, запущенный посреди расчёта: читает старые поля,
-    // и его надо остановить до установки новых.
+    // Правило по полю: вызовов extract в воркере — не больше строк, где есть
+    // образец (предфильтр по строке), и ровно один на запись.
     FilterRuleSet rules = levelRule(QStringLiteral("Level"), QStringLiteral("ERROR"));
     FieldSchemaController::bindRules(tab.get(), rules);
-    tab->model()->setFilterRules(rules);
-    CHECK(tab->model()->isFiltering(), "filter started during the re-extraction runs in the pool");
-    CHECK(c.isReextracting(tab.get()) && !c.isReextracting(neighbour.get()),
-          "the re-extraction belongs to its tab");
-    CHECK(waitFor([&] { return !c.isReextracting(); }, 120000) && finished == 1,
-          "re-extraction with a filter finishes");
-    CHECK(!filteringAtApply, "filters stopped before the new fields go in (invariant 4)");
-    CHECK(settled(*tab) && tab->model()->rowCount() == errorCount(records),
-          QStringLiteral("filter re-applied on the new fields (%1)").arg(tab->model()->rowCount()));
-    CHECK(tab->model()->fieldDisplayFilterEnabled() && tab->model()->visibleFieldIndexes() == QVector<int>{2},
-          "column display back on");
+    model.fieldSource().resetStats();
+    model.setFilterRules(rules);
+    CHECK(model.isFiltering(), "field filter runs in the pool");
+    CHECK(settled(*tab) && model.rowCount() == errorCount(records),
+          QStringLiteral("field filter (%1)").arg(model.rowCount()));
+    const qint64 extracts = model.fieldSource().stats().scanExtracts;
+    CHECK(extracts <= errorCount(records),
+          QStringLiteral("field filter: extract calls %1 <= lines with the text %2")
+              .arg(extracts).arg(errorCount(records)));
+
+    // Смена схемы с правилом по полю — перефильтрация, без reset записей.
+    resets = 0;
+    c.selectSchema(indexOf(c.schemas(), QStringLiteral("B")));
+    CHECK(settled(*tab) && model.rowCount() == errorCount(records) && tab->parserPattern() == b,
+          "rule re-applied with the new schema");
+    c.setVisibleFieldNames({QStringLiteral("Level")});
+    CHECK(settled(*tab) && model.fieldDisplayFilterEnabled()
+              && model.visibleFieldIndexes() == QVector<int>{2},
+          "column display with the chosen column");
     bool levels = true;
-    for (int row = 0; row < 50 && row < tab->model()->rowCount(); ++row)
-        levels = levels && tab->model()->data(tab->model()->index(row), Qt::DisplayRole)
+    for (int row = 0; row < 50 && row < model.rowCount(); ++row)
+        levels = levels && model.data(model.index(row), Qt::DisplayRole)
                                .toString().trimmed() == QLatin1String("ERROR");
     CHECK(levels, "rows show fields of the new schema");
-
-    // Смена схемы посреди расчёта отменяет прежний: записи не тронуты.
-    c.selectSchema(indexOf(c.schemas(), QStringLiteral("A")));
-    CHECK(c.isReextracting(), "third switch re-extracts");
-    c.selectSchema(indexOf(c.schemas(), QStringLiteral("B")));
-    CHECK(waitFor([&] { return !c.isReextracting(); }, 120000), "superseded re-extraction settles");
-    CHECK(settled(*tab) && tab->model()->rowCount() == errorCount(records) && tab->parserPattern() == b,
-          "superseding schema wins");
-    // Вытеснение синхронным путём («Filter blocks» выключен) — расчёт
-    // объявлен законченным (окно прячет прогресс).
-    c.selectSchema(indexOf(c.schemas(), QStringLiteral("A")));
-    CHECK(c.isReextracting(), "fourth switch re-extracts");
-    finished = 0;
-    filteringAtApply = false;
-    c.setExtractionEnabled(false);
-    CHECK(!c.isReextracting() && finished == 1, "superseded re-extraction announces its end");
-    CHECK(settled(*tab) && !tab->model()->fieldDisplayFilterEnabled(), "Filter blocks off");
-    c.setExtractionEnabled(true);
-    CHECK(c.isReextracting(), "fifth switch re-extracts");
-    finished = 0;
-    c.cancelReextraction();
-    CHECK(!c.isReextracting() && finished == 1, "cancel stops the re-extraction and announces it");
-    // Инвариант 4 на одну вкладку: читатели остановлены только у неё, у
-    // соседней ни схемы, ни полей никто не трогал.
-    CHECK(!otherTabStopped, "readers stopped only for the tab whose schema changed");
     CHECK(neighbour->parserPattern().isEmpty() && !neighbour->model()->fieldDisplayFilterEnabled(),
           "the neighbour tab keeps its schema");
 }
@@ -674,7 +624,7 @@ int main(int argc, char** argv)
     const QDir dir(tmp.path());
     checkViews(dir, false);
     checkViews(dir, true);
-    checkBackgroundReextraction(dir);
+    checkLazySchemaSwitch(dir);
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

@@ -62,23 +62,28 @@
 //     применяет (сессия 0.6 — схема верхнего уровня, иначе схема по умолчанию).
 // ============================================================================
 
-// Схема полей вкладки (F-5, PR 1): схема, «Filter blocks» и выбор колонок.
+// Схема полей вкладки (F-5, PR 1): схема, показ выбранных колонок и выбор
+// колонок.
 // Схема — определением (как SchemaEntry::schema) и именем в каталоге для
 // показа; при применении её ищут в каталоге по определению
 // (SessionController::chooseSchema), имя не важно.
-//   {"schema":{"name":"Spring Boot","definition":{…}},"extraction":true,
+//   {"schema":{"name":"Spring Boot","definition":{…}},"showFields":true,
 //    "visibleFields":["Level","Message"]}
 // Нет схемы — нет ключа schema; visibleFields пусто — все колонки.
+// showFields (F-17, шаг 3) — галочка дока «Show selected fields only»:
+// только показ. Поля и правила по полю работают при любом её значении.
+// Снимки до шага 3 несут ключ «extraction» («Filter blocks») — он читается
+// как showFields.
 struct FieldSettings {
     QString schemaName;          // имя в каталоге; пусто — без имени
     QString schema;              // определение; пусто — без схемы
-    bool extraction = false;     // «Filter blocks»
+    bool showFields = false;     // «Show selected fields only» (было «Filter blocks»)
     QStringList visibleFields;   // пусто — все колонки
 
     bool hasSchema() const { return !schema.isEmpty(); }
     bool operator==(const FieldSettings& o) const
     {
-        return schemaName == o.schemaName && schema == o.schema && extraction == o.extraction
+        return schemaName == o.schemaName && schema == o.schema && showFields == o.showFields
             && visibleFields == o.visibleFields;
     }
     bool operator!=(const FieldSettings& o) const { return !(*this == o); }
@@ -197,7 +202,7 @@ struct SessionState {
 
     QString schemaName;          // пусто вместе с schema — без схемы
     QString schema;              // определение схемы (как SchemaEntry::schema)
-    bool fieldExtraction = false;
+    bool showFields = false;     // ключ «fieldExtraction» (его читает 0.6): показ полей
     QStringList visibleFields;   // пусто — все колонки
     int activeTab = -1;          // индекс в tabs; -1 — не задана
     QVector<TabState> tabs;
@@ -221,7 +226,7 @@ struct SessionState {
     // вкладке — его прочитает 0.6.
     FieldSettings topLevelFields() const
     {
-        return FieldSettings{ schemaName, schema, fieldExtraction, visibleFields };
+        return FieldSettings{ schemaName, schema, showFields, visibleFields };
     }
     // Сравнение сохранённых путей — SavedPath::same (путь Windows без учёта
     // регистра на любой ОС, как у SourceIdentity).

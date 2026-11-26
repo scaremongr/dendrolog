@@ -484,7 +484,7 @@ static Saved prepareSource(const QString& path, const QString& schema, bool user
     rule.text = QStringLiteral("line 13");
     FilterRuleSet rules;
     rules.rules = { rule };
-    rules.bindFields(tab->parserFieldNames(), false);
+    rules.bindFields(tab->parserFieldNames());
     model.setFilters({ LogLevel::Info, LogLevel::Warn, LogLevel::Unknown }, QDateTime(), QDateTime(), rules);
     if (userEncoding)
         tab->setFileEncoding(tab->loadedFiles().first(), TextEncoding::Windows1251);
@@ -1460,7 +1460,7 @@ static void checkTabMemory(const QDir& dir, const QString& name, const QString& 
         rule.text = QStringLiteral("line 13");
         FilterRuleSet rules;
         rules.rules = { rule };
-        rules.bindFields(tab->parserFieldNames(), false);
+        rules.bindFields(tab->parserFieldNames());
         model.setFilters({ LogLevel::Info, LogLevel::Warn, LogLevel::Unknown }, QDateTime(), QDateTime(), rules);
         CHECK(settled(*tab), QStringLiteral("фильтр"));
         const int row = rowOfLine(model, path, 170);
@@ -1692,7 +1692,7 @@ static SessionState goldenSession()
     SessionState s;
     s.schemaName = QStringLiteral("Spring Boot");
     s.schema = kGoldenSchema;
-    s.fieldExtraction = true;
+    s.showFields = true;
     s.visibleFields = QStringList{ QStringLiteral("Level"), QStringLiteral("Message") };
     s.tabs.append(goldenState());
     TabState second;
@@ -1727,7 +1727,7 @@ static void checkSessionFormat()
     if (back) {
         CHECK(back->toJson(goldenSessionPath()) == json, QStringLiteral("круговой проход — тот же JSON"));
         CHECK(back->schemaName == golden.schemaName && back->schema == golden.schema
-                  && back->fieldExtraction && back->visibleFields == golden.visibleFields
+                  && back->showFields && back->visibleFields == golden.visibleFields
                   && back->activeTab == 1 && back->tabs.size() == 2,
               QStringLiteral("схема, колонки, активная вкладка"));
         CHECK(back->tabs.value(0).toJson() == golden.tabs[0].toJson()
@@ -1832,7 +1832,7 @@ static void checkSchemasFormat()
     // Верхний уровень — схема активной вкладки (вторая).
     golden.schemaName = QStringLiteral("Plain");
     golden.schema = kPlainSchema;
-    golden.fieldExtraction = false;
+    golden.showFields = false;
     golden.visibleFields.clear();
     const QJsonObject json = golden.toJson(goldenSessionPath());
 
@@ -1851,6 +1851,18 @@ static void checkSchemasFormat()
               QStringLiteral("схема каждой вкладки"));
         CHECK(parsed->toJson(goldenSessionPath()) == stored, QStringLiteral("круговой проход — тот же JSON"));
     }
+    // Снимки до F-17, шаг 3: «extraction» («Filter blocks») читается как
+    // showFields («Show selected fields only»).
+    {
+        QByteArray old = bytes;
+        old.replace("\"showFields\":", "\"extraction\":");
+        CHECK(old != bytes, QStringLiteral("старый ключ подставлен"));
+        const auto legacy = SessionState::fromJson(bytesToObject(old), &error);
+        CHECK(legacy && legacy->tabs.size() == 2
+                  && legacy->tabs[0].view.fields == golden.tabs[0].view.fields
+                  && legacy->tabs[1].view.fields == golden.tabs[1].view.fields,
+              QStringLiteral("старое состояние с extraction читается: ") + error);
+    }
 
     // Эталоны версии 1 — без схем вкладок: их получает схема верхнего уровня
     // (SessionController::open, проверка на живых вкладках ниже).
@@ -1863,7 +1875,7 @@ static void checkSchemasFormat()
           QStringLiteral("вкладки версии 1 без схемы"));
     if (old) {
         const FieldSettings top = old->topLevelFields();
-        CHECK(top.schema == kGoldenSchema && top.schemaName == QStringLiteral("Spring Boot") && top.extraction
+        CHECK(top.schema == kGoldenSchema && top.schemaName == QStringLiteral("Spring Boot") && top.showFields
                   && top.visibleFields == (QStringList{ QStringLiteral("Level"), QStringLiteral("Message") }),
               QStringLiteral("схема верхнего уровня"));
     }
@@ -2404,7 +2416,7 @@ struct Window {
                 SessionController::WindowSettings w;
                 w.schemaName = QStringLiteral("window schema");
                 w.schema = pool.schema;
-                w.fieldExtraction = true;
+                w.showFields = true;
                 w.visibleFields = { QStringLiteral("Level") };
                 return w;
             } });
@@ -2459,7 +2471,7 @@ static void checkLastSession(const QDir& dir, const QString& schema)
         rule.text = QStringLiteral("line 13");
         FilterRuleSet rules;
         rules.rules = { rule };
-        rules.bindFields(t1->parserFieldNames(), false);
+        rules.bindFields(t1->parserFieldNames());
         t1->model()->setFilters({}, QDateTime(), QDateTime(), rules);
         CHECK(settled(*t1), QStringLiteral("фильтр"));
         w.openFile(two);
@@ -2469,7 +2481,7 @@ static void checkLastSession(const QDir& dir, const QString& schema)
         const SessionFile::LoadResult loaded = SessionFile::load(last);
         CHECK(loaded.state && loaded.state->tabs.size() == 2 && loaded.state->activeTab == 0
                   && loaded.state->schema == schema && loaded.state->schemaName == QStringLiteral("window schema")
-                  && loaded.state->fieldExtraction
+                  && loaded.state->showFields
                   && loaded.state->visibleFields == QStringList{ QStringLiteral("Level") },
               QStringLiteral("в файле — вкладки, активная, схема и колонки"));
         CHECK(loaded.state && loaded.state->tabs[0].bookmarks.size() == 1
@@ -3079,7 +3091,7 @@ static void checkSessionSchemas(const QDir& dir, const QString& name)
         SessionState old = *loaded.state;
         for (TabState& tab : old.tabs)
             tab.view.fields.reset();
-        old.fieldExtraction = true;
+        old.showFields = true;
         old.visibleFields.clear();
         SchemaTabPool pool{ &c, {} };
         const auto result = sessions.open(old, sessionPath, [&pool]() { return pool.make(); });
@@ -3205,7 +3217,7 @@ static void checkSessionFileSchemas(const QDir& dir, const QString& name)
               what + QStringLiteral(": колонки — объединение: ") + tab.parserFieldNames().join(','));
         const int row2 = rowOfLine(*tab.model(), f2 ? f2->filePath : QString(), 2);
         const auto entry = row2 >= 0 ? tab.model()->entryAt(row2) : nullptr;
-        CHECK(entry && entry->fields().value(4, entry->message()).trimmed()
+        CHECK(entry && tab.model()->fieldsOf(*entry).value(4, entry->message()).trimmed()
                            == QStringLiteral("WARN"),
               what + QStringLiteral(": строка файла two — поле Severity"));
     };

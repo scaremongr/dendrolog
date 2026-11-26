@@ -1,4 +1,5 @@
 #include "builtinschemas.h"
+#include "linetemplate.h"
 
 #include "logpattern.h"
 
@@ -74,6 +75,27 @@ bool parseSchemaFile(const QByteArray& bytes, const QString& fallbackName,
     const QString text = QString::fromUtf8(bytes).trimmed();
     if (text.isEmpty())
         return false;
+
+    // Шаблон строки, версия 4 (F-17): определение — {type, version, template}
+    // компактно, имя — отдельно, как у блочных схем.
+    {
+        const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8());
+        const QJsonObject obj = doc.object();
+        if (doc.isObject() && obj.value(QStringLiteral("type")).toString()
+                                  == QLatin1String("line-template")) {
+            QString templateText;
+            if (!LineTemplateSchema::templateOf(text, &templateText))
+                return false;
+            if (strict && !LineTemplate(templateText).isValid())
+                return false;
+            const QString embedded = obj.value(QStringLiteral("name")).toString().trimmed();
+            if (name)
+                *name = embedded.isEmpty() ? fallbackName.trimmed() : embedded;
+            if (canonical)
+                *canonical = LineTemplateSchema::definition(templateText);
+            return true;
+        }
+    }
 
     PatternDefinition def;
     if (!LogPattern::deserializeDefinition(text, &def, /*allowLegacy=*/true, strict))

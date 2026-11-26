@@ -203,7 +203,7 @@ static void checkDocument(const QString& what, testdocs::Document& doc, const QS
         rule.isRegex = q.needsRegex();
         rule.caseSensitive = q.caseSensitive;
         rules.rules.append(rule);
-        rules.bindFields({}, false);
+        rules.bindFields({});
         model.setFilterRules(rules);
         CHECK(testdocs::settle(model, 0), label + u": filter settles"_s);
         const bool filtered = model.rowCount() > 0;
@@ -273,7 +273,7 @@ static int bench(const QString& path)
                 rule.text = pattern;
                 rule.isRegex = true;
                 rules.rules.append(rule);
-                rules.bindFields({}, false);
+                rules.bindFields({});
                 t.restart();
                 doc.model->setFilterRules(rules);
                 testdocs::settle(*doc.model, 0);
@@ -337,7 +337,7 @@ static void checkCompiledBeforeWorker()
         rules.rules.append(rule);
         g_compilesMain = 0;
         g_compilesWorker = 0;
-        rules.bindFields({}, false);
+        rules.bindFields({});
         doc.model->setFilterRules(rules);
         testdocs::settle(*doc.model, 0);
         doc.model->setFilterRules(FilterRuleSet());

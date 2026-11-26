@@ -248,7 +248,6 @@ int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineI
     f.logFile = logFile;
     f.index = std::move(index);
     f.cacheFileId = m_textCache.addFile(logFile->filePath, f.encoding.decoder);
-    f.schema = m_model.fileSchemaFor(logFile->filePath);
     m_files.append(std::move(f));
 
     if (reorder)
@@ -579,12 +578,6 @@ void IndexedLogStore::rereadWithNewDecoder()
         emit m_model.modelFiltered(visibleCount());
 }
 
-void IndexedLogStore::refreshFileSchemas()
-{
-    for (IndexedFile& f : m_files)
-        f.schema = m_model.fileSchemaFor(f.logFile->filePath);
-}
-
 void IndexedLogStore::setTextCacheBudget(qint64 bytes)
 {
     m_textCache.setBudgetBytes(bytes);
@@ -715,12 +708,10 @@ std::shared_ptr<LogEntry> IndexedLogStore::materializeEntry(RowRef ref) const
     const QString text = m_textCache.lineText(f.cacheFileId,
                                               index.lineStartOffset(line),
                                               index.lineByteLength(line));
+    // Полей в записи нет (F-17, шаг 3): их даёт FieldSource модели.
     auto entry = std::make_shared<LogEntry>(int(logical), int(line + 1), ts,
                                             index.level(line), text, f.logFile);
-    // Поля извлекаются по требованию — в индексе спаны не хранятся. Только
-    // primary-строки: у continuation полей нет и в резидентном пути.
-    if (f.schema && f.schema->isValid() && index.isPrimary(line))
-        entry->setFields(f.schema->extractFields(entry->message()));
+    entry->setSchemaMatched(!index.isPlainTextLine(line)); // isPlainText — как у индекса
     return entry;
 }
 
@@ -1142,7 +1133,6 @@ public:
         QString path;
         LogFilePtr logFile;
         TextDecoder decoder; // кодировка на момент снапшота (F-1)
-        FileSchemaPtr schema; // схема файла на момент снапшота (F-5)
     };
 
     QStringList paths() const
@@ -1301,19 +1291,6 @@ public:
         return files[fileId].logFile;
     }
 
-    LogEntryFields fieldsAt(qint64 row, const QString& text) const override
-    {
-        // Как materializeEntry: поля — только у первичных строк, схемой
-        // файла, в колонках вкладки.
-        if (row < 0 || row >= rowCount())
-            return LogEntryFields();
-        int fileId; qint64 line;
-        resolve(row, fileId, line);
-        const FileSnap& f = files[fileId];
-        return (f.schema && f.schema->isValid() && f.index.isPrimary(line))
-            ? f.schema->extractFields(text) : LogEntryFields();
-    }
-
     bool timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
                    const std::atomic_bool* cancel) const override
     {
@@ -1396,7 +1373,7 @@ LogScanSnapshot IndexedLogStore::scanSnapshot(bool filteredOnly) const
     impl->files.reserve(m_files.size());
     for (const auto& f : m_files)
         impl->files.append({f.index->snapshot(), f.logFile->filePath, f.logFile,
-                            f.encoding.decoder, f.schema});
+                            f.encoding.decoder});
 
     if (filteredOnly && !m_identityVisible) {
         impl->refs = m_visibleRefs;
@@ -1411,6 +1388,33 @@ LogScanSnapshot IndexedLogStore::scanSnapshot(bool filteredOnly) const
 // ---------------------------------------------------------------------------
 // Фильтрация — всегда асинхронно (текстовые правила читают диск)
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// Первая строка записи строки line (F-17, шаг 3: правило по полю решается по
+// ней). id записей в файле не убывают по номеру строки — lower_bound по id,
+// O(log N) без прохода назад по длинной записи.
+template <typename Index>
+qint64 recordHeadLine(const Index& index, qint64 line)
+{
+    const quint32 id = index.logicalId(line);
+    qint64 lo = 0, hi = line;
+    while (lo < hi) {
+        const qint64 mid = lo + (hi - lo) / 2;
+        if (index.logicalId(mid) < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+quint64 recordToken(int fileId, quint32 logical)
+{
+    return (quint64(quint32(fileId)) << 40) | quint64(logical);
+}
+
+} // namespace
 
 bool IndexedLogStore::refPassesFiltersNow(RowRef ref) const
 {
@@ -1443,10 +1447,23 @@ bool IndexedLogStore::refPassesFiltersNow(RowRef ref) const
         const QString text = m_textCache.lineText(f.cacheFileId,
                                                   index.lineStartOffset(line),
                                                   index.lineByteLength(line));
-        LogEntryFields fields;
-        if (f.schema && f.schema->isValid() && index.isPrimary(line))
-            fields = f.schema->extractFields(text);
-        if (!rules.matchesLine(QStringView(text), fields))
+        // Поля — первой строки записи (F-17, шаг 3), через чанк-кэш.
+        struct Context { const IndexedLogStore* store; const IndexedFile* file; };
+        Context context{ this, &f };
+        const FieldScanner scanner = m_model.fieldSource().scanner();
+        FieldRecordCursor record(&scanner,
+            [](void* ctx, const LogFile*, qint64 l) -> QString {
+                const auto* c = static_cast<const Context*>(ctx);
+                const LineIndex& idx = *c->file->index;
+                const qint64 head = recordHeadLine(idx, l);
+                return c->store->m_textCache.lineText(c->file->cacheFileId,
+                                                      idx.lineStartOffset(head),
+                                                      idx.lineByteLength(head));
+            }, &context);
+        const bool isHead = line == 0 || index.logicalId(line - 1) != index.logicalId(line);
+        record.setLine(recordToken(fileId, index.logicalId(line)), f.logFile.get(), line,
+                       isHead ? &text : nullptr);
+        if (!rules.matchesLine(QStringView(text), &record))
             return false;
     }
     return true;
@@ -1498,14 +1515,15 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
         QString path;
         TextDecoder decoder; // копия: смена кодировки отменяет джоб поколением
         bool hidden = false; // файл скрыт фильтром по файлу (U-23)
-        FileSchemaPtr schema; // схема файла (F-5); поля — в колонках вкладки
+        LogFilePtr file; // схема файла (FieldScanner) — по пути файла
     };
     auto filesIn = std::make_shared<QVector<FileInput>>();
     const QSet<QString>& hiddenPaths = m_model.hiddenFiles();
     for (const auto& f : m_files)
         filesIn->append({f.index->snapshot(), f.logFile->filePath, f.encoding.decoder,
-                         hiddenPaths.contains(f.logFile->filePath),
-                         (f.schema && f.schema->isValid()) ? f.schema : FileSchemaPtr()});
+                         hiddenPaths.contains(f.logFile->filePath), f.logFile});
+    // Снимок схем (F-17, шаг 3): поля первой строки записи — в воркере.
+    const FieldScanner scanner = m_model.fieldSource().scanner();
 
     // Диапазон работы: весь документ, свежий батч одного файла или явный
     // список новых строк поисковой базы.
@@ -1538,7 +1556,7 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
 
     QFuture<QVector<RowRef>> future = QtConcurrent::run(
         [filesIn, workRefs, identityCount, levels, startValid, startMs, endValid,
-         endMs, rules, cancel, progress]() -> QVector<RowRef> {
+         endMs, rules, scanner, cancel, progress]() -> QVector<RowRef> {
             QVector<RowRef> passing;
             const qint64 n = workRefs.isEmpty() ? identityCount : workRefs.size();
             passing.reserve(int(qMin<qint64>(n, 4096)));
@@ -1549,8 +1567,26 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                 paths.append(f.path);
                 decoders.append(f.decoder);
             }
+            // Первые строки записей, не встреченные в проходе (дозапись
+            // посреди записи, поисковая база), — своим ридером с малым окном:
+            // текст текущей строки живёт в буфере основного.
+            SequentialLineReaders headReaders(paths, decoders, 64 * 1024);
             SequentialLineReaders readers(std::move(paths), std::move(decoders));
             const bool needText = rules.isActive();
+            const bool needFields = rules.needsFields();
+            struct HeadContext {
+                const QVector<FileInput>* files;
+                SequentialLineReaders* readers;
+                int fileId = 0;
+            } headContext{ filesIn.get(), &headReaders };
+            FieldRecordCursor record(&scanner,
+                [](void* ctx, const LogFile*, qint64 l) -> QString {
+                    auto* c = static_cast<HeadContext*>(ctx);
+                    const LineIndexSnapshot& idx = (*c->files)[c->fileId].index;
+                    const qint64 head = recordHeadLine(idx, l);
+                    return c->readers->lineAt(c->fileId, idx.lineStartOffset(head),
+                                              idx.lineByteLength(head));
+                }, &headContext);
 
             for (qint64 i = 0; i < n; ++i) {
                 if ((i & 0x1FFF) == 0) {
@@ -1583,10 +1619,15 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                 if (needText) {
                     const QString& text = readers.lineAt(
                         fileId, index.lineStartOffset(line), index.lineByteLength(line));
-                    LogEntryFields fields;
-                    if (input.schema && index.isPrimary(line))
-                        fields = input.schema->extractFields(text);
-                    if (!rules.matchesLine(QStringView(text), fields))
+                    // Запись строки (F-17, шаг 3): строки записи в обоих
+                    // порядках вкладки соседние — первая обычно уже прошла.
+                    if (needFields) {
+                        const bool isHead = line == 0 || index.logicalId(line - 1) != logical;
+                        headContext.fileId = fileId;
+                        record.setLine(recordToken(fileId, logical), input.file.get(), line,
+                                       isHead ? &text : nullptr);
+                    }
+                    if (!rules.matchesLine(QStringView(text), needFields ? &record : nullptr))
                         continue;
                 }
                 passing.append(ref);

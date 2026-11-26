@@ -28,7 +28,7 @@ static FilterRuleSet query(const QString& text, const QString& field = {}, bool 
     rule.fieldName = field;
     rule.isRegex = regex;
     rules.rules.append(rule);
-    rules.bindFields({"Timestamp", "Thread", "Level", "Message"}, !field.isEmpty());
+    rules.bindFields({"Timestamp", "Thread", "Level", "Message"});
     return rules;
 }
 
@@ -489,13 +489,14 @@ int main(int argc, char** argv)
         missing.text = "worker-2";
         missing.fieldName = "NoSuchField";
         combined.rules = {late, missing};
-        combined.bindFields({"Timestamp", "Thread", "Level", "Message"}, true);
+        combined.bindFields({"Timestamp", "Thread", "Level", "Message"});
         CHECK(!combined.fieldMissing(0) && combined.fieldMissing(1), "only the orphan is missing");
         completed(results, [&] { results.searchVisible(*indexed.model, combined); });
         CHECK(results.rowCount() == 5, "missing-column rule does not search the whole row");
-        // Log Fields выключены: колонки не проверяются, поиск по всей строке.
-        combined.bindFields({"Timestamp", "Thread", "Level", "Message"}, false);
-        CHECK(!combined.fieldMissing(1), "fields off: no missing-column state");
+        // Показ полей не меняет привязку (F-17, шаг 3): колонки нет — правило
+        // нейтрально при любом показе, а не поиск по всей строке.
+        combined.bindFields({"Timestamp", "Thread", "Level", "Message"});
+        CHECK(combined.fieldMissing(1), "missing column stays missing regardless of the display");
     }
 
     // A broad query may return more than 200000 matches as row references.

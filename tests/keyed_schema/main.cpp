@@ -5,6 +5,7 @@
 //
 // Режим замера: keyed_schema --bench [строк] — цена горячего пути ключевой
 // схемы против регексной на тех же записях.
+#include "../common/fieldmatch.h"
 #include "filterruleset.h"
 #include "keyedline.h"
 #include "lineclassifier.h"
@@ -305,8 +306,8 @@ void testReaders()
         r.text = text;
         r.fieldName = field;
         set.rules = {r};
-        set.bindFields(p.fieldNames(), true);
-        return set.matchesLine(line, fields);
+        set.bindFields(p.fieldNames());
+        return testfields::matchesOwnRecord(set, testfields::scannerFor(p), line);
     };
     CHECK(ruleOn("Message", QStringLiteral("\"C:\\temp\"")), "filter by field: decoded quotes and backslash");
     CHECK(ruleOn("Message", QStringLiteral("файл")), "filter by field: \\u Cyrillic found as Cyrillic");
@@ -320,8 +321,9 @@ void testReaders()
         r.isRegex = true;
         r.fieldName = QStringLiteral("Message");
         set.rules = {r};
-        set.bindFields(p.fieldNames(), true);
-        CHECK(set.matchesLine(line, fields), "regex filter by field on decoded value");
+        set.bindFields(p.fieldNames());
+        CHECK(testfields::matchesOwnRecord(set, testfields::scannerFor(p), line),
+              "regex filter by field on decoded value");
     }
 
     const QVector<int> visible = {KeyedDefinition::kLevelColumn, KeyedDefinition::kMessageColumn};

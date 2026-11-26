@@ -78,8 +78,11 @@ void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>
     // без reset, выделение и позиция скролла сохраняются.
     QVector<std::shared_ptr<LogEntry>> passing;
     passing.reserve(sortedBatch.size());
+    const FieldScanner scanner = m_model.fieldSource().scanner();
+    FieldRecordCursor record(&scanner);
+    FieldRecordCursor* const fields = m_model.filterRules().needsFields() ? &record : nullptr;
     for (const auto& e : sortedBatch) {
-        if (passesFilters(e))
+        if (passesFilters(e, fields))
             passing.append(e);
     }
 
@@ -722,7 +725,8 @@ static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
                                const QSet<LogLevel>& levels,
                                const QDateTime& startTime,
                                const QDateTime& endTime,
-                               const FilterRuleSet& rules)
+                               const FilterRuleSet& rules,
+                               FieldRecordCursor* record)
 {
     if (!entry) {
         return false;
@@ -743,18 +747,19 @@ static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
         return false;
     }
 
-    if (rules.isActive() && !rules.matches(*entry)) {
+    if (rules.isActive() && !rules.matches(*entry, record)) {
         return false;
     }
 
     return true;
 }
 
-bool ResidentLogStore::passesFilters(const std::shared_ptr<LogEntry>& entry) const
+bool ResidentLogStore::passesFilters(const std::shared_ptr<LogEntry>& entry,
+                                     FieldRecordCursor* record) const
 {
     return entryPassesFilters(entry, hiddenFilePtrs(), m_model.logLevelFilter(),
                               m_model.startTimeFilter(), m_model.endTimeFilter(),
-                              m_model.filterRules());
+                              m_model.filterRules(), record);
 }
 
 void ResidentLogStore::rebuildFilteredEntries()
@@ -762,8 +767,11 @@ void ResidentLogStore::rebuildFilteredEntries()
     m_filteredEntries.clear();
     m_filteredEntries.reserve(m_allEntries.size());
 
+    const FieldScanner scanner = m_model.fieldSource().scanner();
+    FieldRecordCursor record(&scanner);
+    FieldRecordCursor* const fields = m_model.filterRules().needsFields() ? &record : nullptr;
     for (const auto& entry : m_allEntries) {
-        if (passesFilters(entry)) {
+        if (passesFilters(entry, fields)) {
             m_filteredEntries.push_back(entry);
         }
     }
@@ -808,9 +816,13 @@ void ResidentLogStore::startFilterJob()
     const QDateTime endTime = m_model.endTimeFilter();
     const FilterRuleSet rules = m_model.filterRules();
     const QSet<const LogFile*> hidden = hiddenFilePtrs();
+    // Снимок схем (F-17, шаг 3): поля первой строки записи — в воркере.
+    const FieldScanner scanner = m_model.fieldSource().scanner();
 
     QFuture<FilterResult> future = QtConcurrent::run(
-        [entries, hidden, levels, startTime, endTime, rules, cancel]() -> FilterResult {
+        [entries, hidden, levels, startTime, endTime, rules, scanner, cancel]() -> FilterResult {
+            FieldRecordCursor record(&scanner);
+            FieldRecordCursor* const fields = rules.needsFields() ? &record : nullptr;
             FilterResult passing;
             passing.reserve(entries.size());
             for (qsizetype i = 0; i < entries.size(); ++i) {
@@ -818,7 +830,7 @@ void ResidentLogStore::startFilterJob()
                 // ненужный воркер обрывается за миллисекунды.
                 if ((i & 0x1FFF) == 0 && cancel->load(std::memory_order_relaxed))
                     return FilterResult();
-                if (entryPassesFilters(entries[i], hidden, levels, startTime, endTime, rules))
+                if (entryPassesFilters(entries[i], hidden, levels, startTime, endTime, rules, fields))
                     passing.append(entries[i]);
             }
             return passing;

@@ -112,7 +112,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_fullLog = new FullLogController(*m_model, *m_view, this);
     // Схема могла смениться, пока фильтры приостановлены: правила — к нынешней.
     m_fullLog->setRuleBinder([this](FilterRuleSet& rules) {
-        rules.bindFields(parserFieldNames(), m_extractionEnabled);
+        rules.bindFields(parserFieldNames());
     });
     m_view->setFullLogActionEnabled(true);
     connect(returnButton, &QPushButton::clicked, this, [this]() { m_fullLog->returnToFiltered(); });
@@ -341,9 +341,8 @@ void LogViewWidget::rebuildFieldLayout()
 void LogViewWidget::refreshSchemas()
 {
     rebuildFieldLayout();
-    // Извлечение действует, только если у колонок вкладки есть хоть одна
-    // (одно правило для схемы вкладки и схем файлов).
-    m_extractionEnabled = m_extractionFlag && !m_fieldLayout.columns.isEmpty();
+    // Показ колонок действует, только если у вкладки есть хоть одна колонка.
+    m_fieldDisplay = m_showFieldsFlag && !m_fieldLayout.columns.isEmpty();
     applySchemaToModel();
     if (m_model)
         m_model->setAvailableFields(m_fieldLayout.columns);
@@ -353,16 +352,16 @@ void LogViewWidget::applySchemaToModel()
 {
     if (!m_model)
         return;
-    // Схема файла — своя или схема вкладки, пока извлечение включено;
-    // nullptr — файл читается без схемы.
+    // Схема файла — своя или схема вкладки; nullptr — у файла нет схемы.
+    // Галочка показа полей сюда не входит (F-17, шаг 3): поля, правила по
+    // полю и чтение (до шага 7 — граница записи по схеме, ключи ключевой)
+    // действуют при любом показе.
     FileSchemaSet schemas;
-    if (m_extractionEnabled) {
-        if (m_tabSchema && m_tabSchema->isValid() && !m_tabSchema->pattern.fieldNames().isEmpty())
-            schemas.fallback = m_tabSchema;
-        for (auto it = m_fileSchemas.cbegin(); it != m_fileSchemas.cend(); ++it) {
-            const FileSchemaPtr schema = m_layoutSchemas.value(it->schema);
-            schemas.byPath.insert(it.key(), schema && schema->isValid() ? schema : FileSchemaPtr());
-        }
+    if (m_tabSchema && m_tabSchema->isValid() && !m_tabSchema->extractor->fields().isEmpty())
+        schemas.fallback = m_tabSchema;
+    for (auto it = m_fileSchemas.cbegin(); it != m_fileSchemas.cend(); ++it) {
+        const FileSchemaPtr schema = m_layoutSchemas.value(it->schema);
+        schemas.byPath.insert(it.key(), schema && schema->isValid() ? schema : FileSchemaPtr());
     }
     m_model->setFileSchemas(schemas);
 }
@@ -486,10 +485,10 @@ FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
     return m_model ? m_model->fileSchemaFor(filePath) : FileSchemaPtr();
 }
 
-void LogViewWidget::setExtractionEnabled(bool enabled)
+void LogViewWidget::setShowFields(bool enabled)
 {
     const SchemaChange change = beginSchemaChange();
-    m_extractionFlag = enabled;
+    m_showFieldsFlag = enabled;
     refreshSchemas();
     endSchemaChange(change);
 }
@@ -499,7 +498,7 @@ FieldSettings LogViewWidget::fieldSettings() const
     FieldSettings settings;
     settings.schema = parserPattern();
     settings.schemaName = settings.schema.isEmpty() ? QString() : m_schemaName;
-    settings.extraction = m_extractionFlag;
+    settings.showFields = m_showFieldsFlag;
     settings.visibleFields = m_visibleFields;
     return settings;
 }
@@ -514,7 +513,7 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings,
 {
     // Позиция и подписи — до того, как новая схема дойдёт до модели и вида.
     const SchemaChange change = beginSchemaChange();
-    m_extractionFlag = settings.extraction;
+    m_showFieldsFlag = settings.showFields;
     if (settings.schema != parserPattern())
         m_pattern.setPattern(settings.schema);
     m_fileSchemas = normalizedFileSchemas(files);
@@ -530,9 +529,9 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings,
 
 QString LogViewWidget::readingSignature(const QString& filePath) const
 {
-    // Ключевая схема действует при чтении, только пока извлечение включено
-    // (LineClassifier::classifyLine у парсера и индексатора). Колонки сверх
-    // ролей момент, уровень и границу записи не меняют.
+    // Ключевая схема действует при чтении (LineClassifier::classifyLine у
+    // парсера и индексатора; до шага 7 F-17) при любом показе полей.
+    // Колонки сверх ролей момент, уровень и границу записи не меняют.
     const FileSchemaPtr schema = passSchema(filePath);
     const KeyedDefinition* keyed = schema ? schema->pattern.keyed() : nullptr;
     if (!keyed)
@@ -2249,6 +2248,10 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                     context.currentTimestamp = entry->timestamp();
                     context.currentLevel = entry->level();
                     context.nextLineNumber = entry->originalLineNumber() + 1;
+                    // Первая строка записи (F-17, шаг 3): продолжение в
+                    // дозаписи решает правило по полю по ней.
+                    context.currentHead = entry->recordHead()
+                        ? entry->recordHead() : std::shared_ptr<const LogEntry>(entry);
                 }
                 return context;
             };
@@ -2694,7 +2697,7 @@ TabState LogViewWidget::captureState() const
 void LogViewWidget::setStateFilters(const ViewState& view, const QSet<QString>* hiddenFiles)
 {
     FilterRuleSet rules = view.textRules;
-    rules.bindFields(parserFieldNames(), m_extractionEnabled);
+    rules.bindFields(parserFieldNames());
     const QSet<QString> hidden = hiddenFiles ? *hiddenFiles : m_model->hiddenFiles();
     // Те же фильтры — без перефильтрации (и без reset вида).
     if (view.levels == m_model->logLevelFilter() && view.timeFrom == m_model->startTimeFilter()

@@ -7,7 +7,23 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
-- **A field schema per tab.** The schema, **Filter blocks** and the column
+- **Field filters decide for the whole record.** A text-filter or search rule
+  bound to a *Log Fields* column now takes the field from the first line of
+  the record, and the record's other lines follow it: `Thread contains main`
+  keeps the stack traces of `main` records instead of hiding them, and an
+  **Exclude** rule hides a stack trace together with its record instead of
+  leaving it on screen. Rules on the entire row still work line by line.
+- **"Filter blocks" is now "Show selected fields only"** and is only about the
+  display. A rule bound to a column searches that field with the check box on
+  or off (before, with it off, such a rule quietly searched the whole row); a
+  rule on a column the tab's schema does not have is ignored and its card says
+  so. Saved sessions and tab states keep the old setting.
+- **Switching the field schema is instant on any log.** Fields are no longer
+  stored with every line: they are taken from the line text when a line is
+  shown, filtered, searched or exported. Picking another schema no longer
+  re-extracts fields of a large tab in the background (no "Applying field
+  schema…" progress), and a resident tab uses less memory.
+- **A field schema per tab.** The schema, **Show selected fields only** and the column
   selection of the *Log Fields* panel now belong to the active tab: picking
   "nginx access" for one tab no longer takes the columns away from the Spring
   log next to it, and the panel follows the tab you switch to. A new tab gets
@@ -96,7 +112,7 @@ All notable changes to DendroLog are documented here. The format follows
 - **JSON Lines and logfmt.** New built-in field schemas **JSON Lines** (one
   JSON object per line: pino, Bunyan, Serilog CLEF, structlog, zap, ECS) and
   **logfmt** (`key=value` pairs: logrus, Go slog, Loki, Prometheus). With
-  **Filter blocks** on, the time, level and message come from keys in any
+  such a schema the time, level and message come from keys in any
   order: the time as a timestamp string or an epoch number (seconds to
   nanoseconds, picked by size), the level as a word or a number (syslog 0–7,
   pino / Bunyan 10–60, Python on request). They drive the level buttons, the
@@ -110,8 +126,8 @@ All notable changes to DendroLog are documented here. The format follows
   schema** proposes a key-based schema for JSON or logfmt lines. Schema files
   stay at format version 3 (older versions read such a schema as a single
   `Message` column and keep its key part when saving it). Picking a
-  key-based schema on a tab that is already open (or leaving one, or turning
-  **Filter blocks** on or off with it) rereads the tab's files: the order,
+  key-based schema on a tab that is already open (or leaving one) rereads the
+  tab's files: the order,
   moments, levels and records become what opening the file with that schema
   gives, while the current line keeps its place on screen and bookmarks and
   navigation history find their lines again. Entry Details lists every

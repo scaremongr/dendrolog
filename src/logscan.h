@@ -124,11 +124,6 @@ public:
         // иначе каждая строка читала бы 8 МБ.
         virtual std::unique_ptr<LineCursor> lineCursor(qint64 windowBytes) const = 0;
         virtual LogFilePtr sourceFilePtrAt(qint64 row) const = 0;
-        // Поля строки row, чей текст — text (как отдал forEachLine): те же,
-        // что покажет модель. Резидентный снапшот читает поля записи (их
-        // меняет только GUI-поток при остановленных фоновых читателях —
-        // инвариант 4), индексный извлекает схемой, как materializeEntry.
-        virtual LogEntryFields fieldsAt(qint64 row, const QString& text) const = 0;
         // Диапазон меток (LogScanSnapshot::timeRange). По умолчанию — для
         // порядка времени: первая строка с меткой и последняя перед хвостом
         // без меток. Снапшот в порядке файла (одно-файловая индексная
@@ -248,12 +243,6 @@ public:
     {
         return m_impl ? m_impl->sourceFilePtrAt(row) : LogFilePtr();
     }
-    // Поля строки для показа (см. Impl::fieldsAt).
-    LogEntryFields fieldsAt(qint64 row, const QString& text) const
-    {
-        return m_impl ? m_impl->fieldsAt(row, text) : LogEntryFields();
-    }
-
     static LogEntryMeta metaFor(const LogEntry& entry);
 
 private:

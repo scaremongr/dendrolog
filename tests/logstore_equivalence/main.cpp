@@ -187,11 +187,47 @@ static void settleChecked(LogModel& model)
 // Здесь у моделей нет view, а документ загружен: конец фильтра — это
 // !isFiltering(), окно тишины settle() ничего не ловит (P-10).
 constexpr int kFilterQuietMs = 0;
+// Правило по полю решается на записи (F-17, шаг 3): когда все действующие
+// правила — по полю (уровни, время и файл — тоже на записи), запись видна
+// целиком или не видна вовсе: строки-продолжения следуют за своей записью.
+// До шага 3 продолжение давало «не содержит» — стек-трейс прятался от
+// Include своей записи и оставался от Exclude скрытой (ожидание изменено
+// осознанно, docs/design/F-17.md, «Сделано → шаг 3»).
+static void checkRecordsWhole(const LogModel& model, const QString& what)
+{
+    const FilterRuleSet& rules = model.filterRules();
+    bool fieldOnly = rules.isActive();
+    for (int i = 0; i < rules.rules.size() && fieldOnly; ++i) {
+        const FilterRule& r = rules.rules[i];
+        if (r.isActive() && (r.fieldName.isEmpty() || rules.fieldMissing(i)))
+            fieldOnly = false;
+    }
+    if (!fieldOnly)
+        return;
+    using Key = QPair<const LogFile*, int>;
+    QHash<Key, int> total, shown;
+    const LogScanSnapshot all = model.scanSnapshot(false);
+    for (qint64 row = 0; row < all.rowCount(); ++row) {
+        const LogEntryMeta meta = all.metaAt(row);
+        ++total[Key(meta.sourceFile, meta.logicalEntryId)];
+    }
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const LogEntryMeta meta = model.visibleMetaAt(row);
+        ++shown[Key(meta.sourceFile, meta.logicalEntryId)];
+    }
+    int broken = 0;
+    for (auto it = shown.cbegin(); it != shown.cend(); ++it)
+        broken += it.value() == total.value(it.key()) ? 0 : 1;
+    CHECK(broken == 0, what + QStringLiteral(": правило по полю — запись видна целиком (%1 записей разорваны)")
+                                  .arg(broken));
+}
+
 static void applyChecked(LogModel& model, const FilterConfig& cfg,
                          const QStringList& fieldNames)
 {
     CHECK(testdocs::applyConfig(model, cfg, fieldNames, kFilterQuietMs),
           QStringLiteral("модель не пришла в покой"));
+    checkRecordsWhole(model, cfg.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,7 +1650,9 @@ static void runEncodingFixture(const QString& name, const QStringList& utf8Paths
         g_context = name + QStringLiteral(" / ") + cfg.name;
         g_contextFailures = 0;
         applyConfig(*ref.model, cfg, fieldNames, kFilterQuietMs);
+        checkRecordsWhole(*ref.model, cfg.name);
         applyConfig(*enc.model, cfg, fieldNames, kFilterQuietMs);
+        checkRecordsWhole(*enc.model, cfg.name);
         if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
             CHECK(enc.model->rowCount() > 0,
                   QStringLiteral("правило с кириллицей ничего не нашло — фикстура не проверяет фильтр"));
@@ -1624,7 +1662,7 @@ static void runEncodingFixture(const QString& name, const QStringList& utf8Paths
         if (!cfg.rules.rules.isEmpty()) {
             FilterRuleSet query;
             query.rules = { rule(FilterRule::Action::Include, QStringLiteral("журнал")) };
-            query.bindFields(fieldNames, true);
+            query.bindFields(fieldNames);
             LogModel refResults;
             LogModel encResults;
             refResults.searchVisible(*ref.model, query);
@@ -1739,7 +1777,9 @@ static void runResidentEncodingFixture(const QString& name, const QStringList& p
         g_context = name + QStringLiteral(" / ") + cfg.name;
         g_contextFailures = 0;
         applyConfig(*res.model, cfg, fieldNames, kFilterQuietMs);
+        checkRecordsWhole(*res.model, cfg.name);
         applyConfig(*idx.model, cfg, fieldNames, kFilterQuietMs);
+        checkRecordsWhole(*idx.model, cfg.name);
         if (!cfg.rules.rules.isEmpty() && cfg.name != QStringLiteral("кириллица, ничего не найдено"))
             CHECK(res.model->rowCount() > 0,
                   QStringLiteral("правило с кириллицей ничего не нашло на резидентном бэкенде"));
@@ -1748,7 +1788,7 @@ static void runResidentEncodingFixture(const QString& name, const QStringList& p
         if (!cfg.rules.rules.isEmpty()) {
             FilterRuleSet query;
             query.rules = { rule(FilterRule::Action::Include, QStringLiteral("ЖУРНАЛ")) };
-            query.bindFields(fieldNames, true);
+            query.bindFields(fieldNames);
             LogModel resResults;
             LogModel idxResults;
             resResults.searchVisible(*res.model, query);
@@ -2036,14 +2076,17 @@ static void testProvisionalEncodings(const QDir& dir, const QString& schema,
             g_context = QStringLiteral("предварительное, пересмотр дозаписью / ") + cfg.name;
             g_contextFailures = 0;
             applyConfig(*res.model, cfg, fieldNames, kFilterQuietMs);
+            checkRecordsWhole(*res.model, cfg.name);
             applyConfig(*idx.model, cfg, fieldNames, kFilterQuietMs);
+            checkRecordsWhole(*idx.model, cfg.name);
             applyConfig(*ref.model, cfg, fieldNames, kFilterQuietMs);
+            checkRecordsWhole(*ref.model, cfg.name);
             compareVisibleRows(*res.model, *idx.model);
             compareTextWithReference(*res.model, *ref.model, QStringLiteral("резидентный против эталона"));
             if (!cfg.rules.rules.isEmpty()) {
                 FilterRuleSet query;
                 query.rules = { rule(FilterRule::Action::Include, QStringLiteral("ЖУРНАЛ")) };
-                query.bindFields(fieldNames, true);
+                query.bindFields(fieldNames);
                 LogModel resResults, idxResults, refResults;
                 resResults.searchVisible(*res.model, query);
                 idxResults.searchVisible(*idx.model, query);
@@ -2245,7 +2288,7 @@ static void checkKeyedExpectations(const QString& what, const LogModel& m,
             recordOfId.insert(idKey, recordKey);
         const bool firstOfRecord = line == 0 || file->fixture.lineRecord[line - 1] != rec;
         if (firstOfRecord && !expected.message.isEmpty() && messageColumn >= 0) {
-            const QString got = e->fields().value(messageColumn, e->message());
+            const QString got = m.fieldsOf(*e).value(messageColumn, e->message());
             CHECK(got == expected.message,
                   at + QStringLiteral(": Message %1, ожидается %2")
                            .arg(describe(got), describe(expected.message)));
@@ -2563,12 +2606,12 @@ static void checkMixedSchemaRows(const QString& what, const LogModel& m, const F
         const QString at = what + QStringLiteral(": строка %1 (%2:%3)")
                                       .arg(row).arg(keyed ? "ключевой" : "регексный")
                                       .arg(e->originalLineNumber());
-        if (emptySelection && !e->fields().isEmpty()) {
+        if (emptySelection && !m.fieldsOf(*e).isEmpty()) {
             const QString got = m.data(m.index(row, 0), Qt::DisplayRole).toString();
             CHECK(got.isEmpty(), at + QStringLiteral(": пустой выбор колонок — показ %1, ожидается пусто")
                                       .arg(describe(got)));
         }
-        if (!shownNames.isEmpty() && !emptySelection && !e->fields().isEmpty()) {
+        if (!shownNames.isEmpty() && !emptySelection && !m.fieldsOf(*e).isEmpty()) {
             // Своя колонка у файла есть — значение; нет ни одной — сырой текст.
             QStringList parts;
             bool schemaHasShown = false;
@@ -2577,7 +2620,7 @@ static void checkMixedSchemaRows(const QString& what, const LogModel& m, const F
                 const bool own = keyed ? name != QStringLiteral("Worker")
                                        : name != QStringLiteral("Thread");
                 schemaHasShown = schemaHasShown || own;
-                const QString v = e->fields().value(column, e->message(), true);
+                const QString v = m.fieldsOf(*e).value(column, e->message(), true);
                 if (own && !v.isEmpty())
                     parts << v;
             }

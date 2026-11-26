@@ -92,7 +92,7 @@ static std::unique_ptr<LogViewWidget> newTab()
 {
     auto tab = std::make_unique<LogViewWidget>();
     tab->setParserPattern(g_schema);
-    tab->setExtractionEnabled(true);
+    tab->setShowFields(true);
     tab->setSpoolRoot(g_spool);
     tab->resize(800, 300);
     return tab;

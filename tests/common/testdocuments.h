@@ -691,7 +691,7 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     // следующий id записи.
     LogParser::ResumeContext context;
     std::shared_ptr<LogEntry> last;
-    for (const auto& entry : doc.model->residentEntriesForFieldMutation()) {
+    for (const auto& entry : doc.model->residentEntries()) {
         if (!entry || entry->sourceFile() != logFile)
             continue;
         context.nextLogicalEntryId = std::max(context.nextLogicalEntryId,
@@ -704,6 +704,9 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
         context.currentTimestamp = last->timestamp();
         context.currentLevel = last->level();
         context.nextLineNumber = last->originalLineNumber() + 1;
+        // Первая строка записи (F-17, шаг 3) — её берёт продолжение в дозаписи.
+        context.currentHead = last->recordHead() ? last->recordHead()
+                                                 : std::shared_ptr<const LogEntry>(last);
     }
 
     LogParser parser;

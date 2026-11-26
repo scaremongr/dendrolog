@@ -14,15 +14,14 @@
 #include <functional>
 #include <optional>
 
-class FieldReextraction;
 class FilterRuleSet;
 class LogViewWidget;
 class QSettings;
 
 // ============================================================================
 // FieldSchemaController — каталог схем полей и состояние дока Log Fields без
-// виджетов (M-2). Окно держит только вид: комбобокс схем, галочку «Filter
-// blocks» и чекбоксы колонок; всё, что они значат, — здесь.
+// виджетов (M-2). Окно держит только вид: комбобокс схем, галочку «Show
+// selected fields only» и чекбоксы колонок; всё, что они значат, — здесь.
 //
 //   • Каталог: load — порядок из ini, файлы <configDir>/patterns/*.json
 //     (SchemaStore), разовая миграция списков старых версий из ini, установка
@@ -30,7 +29,7 @@ class QSettings;
 //     нетронутую копию, и схема по умолчанию следует за ней); reloadCatalogue —
 //     перечитать каталог, сохранив порядок; replaceCatalogue — итог
 //     редактора схем; save — порядок и схема по умолчанию в ini.
-//   • Схема на вкладку (F-5, PR 1): схема, «Filter blocks» и выбор колонок —
+//   • Схема на вкладку (F-5, PR 1): схема, показ полей и выбор колонок —
 //     состояние вкладки (LogViewWidget::fieldSettings, FieldSettings).
 //     Док показывает вкладку setCurrentView (активную вкладку окна); без
 //     вкладки — схему по умолчанию. Выбор в доке меняет ТОЛЬКО эту вкладку и
@@ -51,28 +50,22 @@ class QSettings;
 //     нет — сессия и закрытая вкладка добавляют её «(from session)», память
 //     файла каталог не засоряет: вкладка остаётся со схемой по умолчанию,
 //     statusMessage сообщает.
-//   • applyToView — схема, флаг и колонки на одной вкладке. Инвариант 4:
-//     поля резидентных записей меняются только на GUI-потоке при
-//     остановленных читателях полей — фильтр-воркер этой вкладки (здесь) и
-//     читатели вне вкладок, выдача Search этой вкладки и Save View As
-//     (Window::stopFieldReaders у окна). До 4000 записей — синхронно, больше
-//     — FieldReextraction в пуле, свой на вкладку. Пока он считает, показ
-//     колонок этой вкладки выключен, что бы ни выбрали в доке: колонки уже
-//     новой схемы, а поля записей ещё старой (поиск окно в это время не
-//     запускает). По концу расчёта читатели, запущенные за это время,
-//     останавливаются снова (фильтр вкладки; у окна — Save View As в CSV /
-//     JSON Lines, который читает поля всегда; текстовый при выключенном
-//     показе полей не читает), затем apply(), перефильтрация
-//     (reapplyFilterIfStale), показ колонок и перепривязка применённых правил
-//     вкладки к новой схеме. Те же схема и флаг (смена только колонок) —
-//     без переизвлечения. Индексная вкладка полей не хранит — ей только
-//     новая схема. Ключевая схема (F-4) идёт тем же путём: это свойство
-//     LogPattern.
+//   • applyToView — схема, флаг и колонки на одной вкладке. Поля — функция
+//     текста и схемы (F-17, шаг 3): записи их не хранят, поэтому смена схемы
+//     — O(1): схема в модели вкладки (FieldSource — поколение, кэш пуст),
+//     перерисовка видимого, перепривязка применённых правил вкладки к новой
+//     раскладке и перефильтрация, только если среди них есть правила по
+//     полю. Ни переизвлечения, ни остановки читателей полей, ни reset.
+//     Ключевая схема (F-4) идёт тем же путём; смену того, что она решает при
+//     чтении, вкладка перечитывает сама (до шага 7 F-17).
+//   • «Show selected fields only» (FieldSettings::showFields) — только показ
+//     выбранных колонок во view; правила по полю и Entry Details от неё не
+//     зависят.
 //   • Схема файла слитой вкладки (F-5, PR 3): «Applies to» дока — все файлы
 //     вкладки (targetFile пуст) или один файл (filePath). Цель — файл: комбобокс
 //     показывает и меняет схему этого файла (applyToFile: своя схема файла
-//     вкладки, тот же путь applyToView — переизвлечение полей, перечитывание
-//     файла при смене ключевой части); «Filter blocks» и колонки — вкладки.
+//     вкладки, тот же путь applyToView — O(1) для полей, перечитывание
+//     файла при смене ключевой части); показ полей и колонки — вкладки.
 //     Цель — все файлы: выбор схемы ставит её вкладке и снимает свои схемы
 //     файлов; при своих схемах у файлов комбобокс — «(mixed)» (isMixed).
 //     Выбор схемы файла схемой по умолчанию не становится. Своя схема файла
@@ -86,12 +79,6 @@ public:
     struct Window {
         // Вкладки окна (порядок не важен).
         std::function<QList<LogViewWidget*>()> views;
-        // Остановить с ожиданием читателей полей вкладки view вне её самой:
-        // выдачу Search (делит записи с источником) и фоновый Save View As.
-        // starting — начало применения схемы (выдачу можно сбросить: её
-        // повторят по schemaApplied); иначе — перед установкой полей фонового
-        // расчёта (останавливать тех, кто читает поля и при выключенном показе).
-        std::function<void(LogViewWidget* view, bool starting)> stopFieldReaders;
     };
 
     explicit FieldSchemaController(QObject* parent = nullptr);
@@ -149,14 +136,14 @@ public:
     // Своя схема файла file вкладки view (ref — имя и определение).
     void applyToFile(LogViewWidget* view, const LogFilePtr& file, const FieldSettings& ref);
 
-    // ---- «Filter blocks» и колонки дока --------------------------------------
-    bool extractionEnabled() const { return shownSettings().extraction; }
-    void setExtractionEnabled(bool enabled);
+    // ---- «Show selected fields only» и колонки дока --------------------------
+    bool showFields() const { return shownSettings().showFields; }
+    void setShowFields(bool enabled);
     QStringList fieldNames() const;
     QStringList visibleFieldNames() const { return shownSettings().visibleFields; }
     QVector<int> visibleFieldIndexes() const;
     // Показ колонок включён: флаг и у схемы есть колонки.
-    bool fieldDisplayEnabled() const { return extractionEnabled() && !fieldNames().isEmpty(); }
+    bool fieldDisplayEnabled() const { return showFields() && !fieldNames().isEmpty(); }
     void setVisibleFieldNames(const QStringList& names);
     // Привязать правила фильтра к колонкам схемы вкладки view (Text Filters,
     // Search — вкладке, к которой их применяют).
@@ -176,12 +163,6 @@ public:
     // каталога — в error; схема действует и без пункта), иначе nullopt.
     std::optional<FieldSettings> resolveSaved(const FieldSettings& saved, bool addMissing,
                                               QString* error = nullptr);
-    // Идёт фоновое переизвлечение — у вкладки view (nullptr — у любой).
-    bool isReextracting(const LogViewWidget* view = nullptr) const;
-    // Остановить фоновые переизвлечения с ожиданием воркеров (выход); записи
-    // остаются со старыми полями, показ колонок — выключенным до следующего
-    // применения. Шлёт reextractionFinished на каждый шедший расчёт.
-    void cancelReextraction();
 
 signals:
     // Список схем или схема дока изменились — перестроить комбобокс.
@@ -190,12 +171,8 @@ signals:
     void fieldsChanged();
     // Применённые правила вкладки перепривязаны к новой схеме.
     void filtersRebound(LogViewWidget* view);
-    // Схема применена к вкладке, поля на месте.
+    // Схема применена к вкладке (окно повторяет поиск по ней).
     void schemaApplied(LogViewWidget* view);
-    void reextractionStarted(int entries);
-    void reextractionProgress(int value);
-    // Расчёт закончен или отменён (cancelReextraction, новая схема вкладки).
-    void reextractionFinished();
     // Для строки состояния (схема памяти файла не в каталоге, ошибка записи).
     void statusMessage(const QString& text);
 
@@ -215,8 +192,6 @@ private:
                            const FieldSettings& saved, bool fromMemory);
     void onLayoutGrown(LogViewWidget* view);
     void applyFieldVisibility(LogViewWidget* view);
-    void cancelReextraction(const LogViewWidget* view);
-    void onReextractionFinished(LogViewWidget* view);
     void finishApplication(LogViewWidget* view);
     void onSavedFieldSettings(LogViewWidget* view, const FieldSettings& saved, bool fromMemory);
 
@@ -225,8 +200,6 @@ private:
     FieldSettings m_defaults;
     QPointer<LogViewWidget> m_current;
     QString m_targetFile; // «Applies to»: пусто — все файлы
-    QHash<const LogViewWidget*, FieldReextraction*> m_jobs;
-    QHash<const FieldReextraction*, int> m_progress; // последнее значение прогресса расчёта
 };
 
 #endif // FIELDSCHEMACONTROLLER_H

@@ -1205,7 +1205,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Filter blocks"))
+                if (cb->text() == QLatin1String("Show selected fields only"))
                     filterBlocks = cb;
                 else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
@@ -1296,7 +1296,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const int ig = tabIndexForFile(win, fresh);
         LogViewWidget* g = ig >= 0 ? tabAt(win, ig) : nullptr;
         check(g && g->parserPattern() == b->parserPattern()
-                  && g->fieldSettings().extraction == b->fieldSettings().extraction,
+                  && g->fieldSettings().showFields == b->fieldSettings().showFields,
               QStringLiteral("the new tab takes the default schema (the last choice)"));
         if (g) {
             tabs(win)->setCurrentIndex(ig);
@@ -1354,7 +1354,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Filter blocks"))
+                if (cb->text() == QLatin1String("Show selected fields only"))
                     filterBlocks = cb;
                 else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
@@ -2862,7 +2862,7 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
         return;
     const auto setFilterBlocks = [&](bool on) {
         for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != on)
+            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
                 cb->click();
     };
 
@@ -2896,9 +2896,14 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
         const QDateTime ts = row >= 0 ? m->visibleTimestampAt(row) : QDateTime();
         return ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
     };
+    // Схема по умолчанию могла остаться ключевой от прошлых сценариев, а
+    // ключевая действует при чтении при любом показе полей (F-17, шаг 3):
+    // сначала регексная.
+    combo->setCurrentIndex(smoke);
+    check(waitAllLoaded(win), QStringLiteral("the tab settles under the regex schema"));
     // Эвристика: строка с эпохой — продолжение записи над ней (её момент).
     check(rowOfEpoch() >= 0 && momentOfEpoch() != keyMoment,
-          QStringLiteral("without the schema the epoch is no moment"));
+          QStringLiteral("without a keyed schema the epoch is no moment"));
 
     combo->setCurrentIndex(jsonLines);
     setFilterBlocks(true);
@@ -2984,7 +2989,7 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
         return;
     const auto setFilterBlocks = [&](bool on) {
         for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != on)
+            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
                 cb->click();
     };
 

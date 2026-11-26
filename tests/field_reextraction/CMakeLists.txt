@@ -1,1 +1,0 @@
-dendrolog_add_test(field_reextraction LIBRARIES dendrolog_core TIMEOUT 120)

@@ -228,19 +228,20 @@ public:
 
     // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
     void setParserPattern(const QString& pattern);
-    void setExtractionEnabled(bool enabled);
-    // Схема полей вкладки (F-5, PR 1): схема, «Filter blocks» и выбор колонок
-    // — состояние вкладки, у соседних вкладок свои. setFieldSettings только
-    // ставит схему и флаг парсерам и стору и запоминает выбор колонок; поля
-    // уже загруженных записей переизвлекает, показ колонок ставит и правила
-    // перепривязывает FieldSchemaController::applyToView (инвариант 4).
+    // «Show selected fields only» (F-17, шаг 3): только показ колонок.
+    void setShowFields(bool enabled);
+    // Схема полей вкладки (F-5, PR 1): схема, показ полей и выбор колонок —
+    // состояние вкладки, у соседних вкладок свои. setFieldSettings ставит
+    // схему модели (поля — функция текста и схемы, F-17, шаг 3: O(1), записи
+    // не трогаются) и парсерам; показ колонок ставит и правила перепривязывает
+    // FieldSchemaController::applyToView.
     // Смена того, что схема решает при ЧТЕНИИ (F-4, PR 3: ключевая часть —
     // момент, уровень и граница записи из ключей), перечитывает файлы вкладки
     // сама (rereadForSchema): регексная → регексная — только поля.
     FieldSettings fieldSettings() const;
     void setFieldSettings(const FieldSettings& settings);
-    // Показ колонок включён: «Filter blocks» и у схемы есть колонки.
-    bool fieldDisplayEnabled() const { return m_extractionEnabled; }
+    // Показ колонок включён: «Show selected fields only» и у схемы есть колонки.
+    bool fieldDisplayEnabled() const { return m_fieldDisplay; }
     // Индексы выбранных колонок в схеме вкладки.
     QVector<int> visibleFieldIndexes() const;
     // Запасная кодировка автоопределения (F-1): однобайтная, которую
@@ -282,7 +283,7 @@ public:
     // ---- Схема файла слитой вкладки (F-5, PR 3) ---------------------------------
     // У файла своя схема (имя в каталоге + определение; FieldSettings, у
     // которого значат только schemaName и schema) либо схема вкладки. Своя
-    // хранится, только пока отличается от схемы вкладки; «Filter blocks» и
+    // хранится, только пока отличается от схемы вкладки; показ полей и
     // выбор колонок — вкладки. Колонки вкладки — объединение колонок схем её
     // файлов по имени (FieldLayout): файл со своей схемой дописывает недостающие
     // в конец, смена схемы пользователем строит раскладку заново.
@@ -294,11 +295,10 @@ public:
     // Схема вкладки и свои схемы файлов разом (files — filePath → схема; схема,
     // равная схеме вкладки, и файл не из вкладки отбрасываются). Однопараметрный
     // setFieldSettings свои схемы файлов оставляет. Смена ключевой части схемы
-    // файла (F-4) перечитывает только этот файл; поля записей переизвлекает
-    // FieldSchemaController::applyToView (инвариант 4).
-    // Как и однопараметрный, поля уже загруженных резидентных записей не
-    // переизвлекают (это делает контроллер): пользовательский путь —
-    // FieldSchemaController::applyToView / applyToFile.
+    // файла (F-4) перечитывает только этот файл; поля — функция текста и
+    // схемы (F-17, шаг 3), их ничто не переизвлекает. Пользовательский путь
+    // (показ колонок, перепривязка правил) — FieldSchemaController::
+    // applyToView / applyToFile.
     void setFieldSettings(const FieldSettings& settings, const QHash<QString, FieldSettings>& files);
     void setFileSchema(const LogFilePtr& logFile, const FieldSettings& schema);
     // Файл вкладки по ключу источника (RecordLocator::sourceKey); nullptr — нет.
@@ -309,7 +309,8 @@ public:
     // savedFileSchemaFound. Схема, уже ждущая этот источник (явная —
     // addLogFile со схемой), не заменяется.
     void setPendingFileSchema(const QString& sourceKey, const FieldSettings& schema);
-    // У файла есть (или идут) строки: смена его схемы — переизвлечение.
+    // У файла есть (или идут) строки: смена его схемы — смена схемы на
+    // загруженных строках (иначе схема ждёт файл и только растит раскладку).
     bool fileHasRows(const LogFilePtr& logFile) const;
 
     // Быстрый поиск (F3 / Shift+F3) — в фоне (QuickSearch): найденная строка
@@ -756,10 +757,9 @@ private:
 
     // Индексатор больших файлов (ленивый: создаётся при первом индексном файле).
     LogIndexer* m_indexer = nullptr;
-    // Зеркало флага извлечения полей (для индексатора/индексного store):
-    // «Filter blocks» и у схемы есть колонки.
-    bool m_extractionEnabled = false;
-    // Схема полей вкладки (F-5): имя схемы в каталоге, «Filter blocks» как
+    // Показ колонок: «Show selected fields only» и у схемы есть колонки.
+    bool m_fieldDisplay = false;
+    // Схема полей вкладки (F-5): имя схемы в каталоге, показ полей как
     // выбрал пользователь, выбранные колонки, сама схема и раскладка колонок
     // вкладки (PR 2: одна схема на все файлы — columnOf тождественен; схема
     // на файл — PR 3). Схемы файлов, которыми читают парсеры, индексатор и
@@ -794,7 +794,7 @@ private:
     QHash<QString, FieldSettings> normalizedFileSchemas(const QHash<QString, FieldSettings>& files) const;
     FileSchemaPtr passSchema(const QString& filePath) const;
     QString m_schemaName;
-    bool m_extractionFlag = false;
+    bool m_showFieldsFlag = false;
     QStringList m_visibleFields;
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback(); // из AppSettings в конструкторе
 
