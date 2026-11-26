@@ -2003,8 +2003,9 @@ static int runBench(const QString& path, const QString& patternString)
     QElapsedTimer t;
     t.start();
     indexer.startIndexing(lf, index);
+    // Шаг опроса 1 мс: прогон — доли секунды, шаг 20 мс давал шум ~4 % (S-17).
     while (!done)
-        QThread::msleep(20);
+        QThread::msleep(1);
     std::fprintf(stderr, "bench: %lld lines, %lld logical, %.3f s\n",
                  (long long)index->lineCount(),
                  (long long)index->logicalEntryCount(), t.elapsed() / 1000.0);

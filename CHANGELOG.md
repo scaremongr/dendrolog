@@ -53,6 +53,10 @@ All notable changes to DendroLog are documented here. The format follows
   stay at format version 3 (older versions read such a schema as a single
   `Message` column and keep its key part when saving it). For now the keys
   are applied when a file is read: pick the schema before opening the file.
+  Indexing a large JSON Lines or logfmt file with the schema costs about the
+  same as without it (within 10 %): a line is read only up to its time and
+  level keys. A bare logfmt timestamp (`ts=2026-11-18T10:00:00Z`) is read
+  from its key, not taken from the leftmost timestamp in the line.
 - **Command output as a growing log.** **File → Open Command Output…** runs
   a command (`kubectl logs -f deploy/api`, `journalctl -f`, `adb logcat`) and
   opens its output — stdout and stderr together, as in a terminal — in a tab
