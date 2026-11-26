@@ -132,6 +132,14 @@ public:
     /// spans point at the values as in the file; escaped strings carry the
     /// FieldSpan escaped bit (read via LogEntryFields::value).
     LogEntryFields extractFields(const QString& line) const;
+    /// Fields of a line from a result matchLine() already gave for it —
+    /// extractFields without a second match (SchemaFit, F-17). Regex
+    /// schemas only; keyed — empty (use extractFields).
+    LogEntryFields fieldsFromMatch(const QString& line, const LineMatchResult& match) const;
+    /// Output field that receives the free text of a line (the last
+    /// free-text field, typically "Message"; keyed — the Message column);
+    /// -1 — none.
+    int tailFieldIndex() const;
 
     // ---- Ключевая схема (F-4) ----
     bool isKeyed() const noexcept { return m_valid && m_definition.keyed.has_value(); }

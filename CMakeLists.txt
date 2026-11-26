@@ -130,6 +130,8 @@ set(DENDROLOG_CORE_SOURCES
     src/logpattern.cpp
     src/patternheuristics.h
     src/patternheuristics.cpp
+    src/schemafit.h
+    src/schemafit.cpp
     src/filterruleset.h
     src/filterruleset.cpp
     src/textmatchhighlighter.h

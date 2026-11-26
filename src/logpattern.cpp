@@ -1141,8 +1141,22 @@ LogEntryFields LogPattern::extractFields(const QString& line) const
         return keyedFields(hits);
     }
 
-    const LineMatchResult match = matchLine(line);
-    if (!match.ok)
+    return fieldsFromMatch(line, matchLine(line));
+}
+
+int LogPattern::tailFieldIndex() const
+{
+    if (!m_valid)
+        return -1;
+    if (m_definition.keyed)
+        return KeyedDefinition::kMessageColumn;
+    return m_fieldIndexOfBlock.value(m_tailFieldBlockIndex, -1);
+}
+
+LogEntryFields LogPattern::fieldsFromMatch(const QString& line, const LineMatchResult& match) const
+{
+    LogEntryFields result;
+    if (!m_valid || m_definition.keyed || !match.ok)
         return result;
 
     const QStringView lineView(line);

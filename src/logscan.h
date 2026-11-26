@@ -119,7 +119,10 @@ public:
             const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&
                 visit) const = 0;
         virtual QString textAt(qint64 row) const = 0;
-        virtual std::unique_ptr<LineCursor> lineCursor() const = 0;
+        // windowBytes — окно чтения индексного бэкенда (0 — обычное, 8 МБ):
+        // разреженный обход (строки далеко друг от друга) берёт малое окно,
+        // иначе каждая строка читала бы 8 МБ.
+        virtual std::unique_ptr<LineCursor> lineCursor(qint64 windowBytes) const = 0;
         virtual LogFilePtr sourceFilePtrAt(qint64 row) const = 0;
         // Поля строки row, чей текст — text (как отдал forEachLine): те же,
         // что покажет модель. Резидентный снапшот читает поля записи (их
@@ -225,6 +228,14 @@ public:
     {
         if (m_impl)
             m_impl->forEachLineBackward(fromRow, visit);
+    }
+
+    // Курсор чтения текста по строкам в порядке обхода (см. LineCursor);
+    // пустой снапшот — nullptr. Принадлежит одному потоку.
+    // windowBytes — см. Impl::lineCursor (0 — обычное окно).
+    std::unique_ptr<LineCursor> lineCursor(qint64 windowBytes = 0) const
+    {
+        return m_impl ? m_impl->lineCursor(windowBytes) : nullptr;
     }
 
     // Материализовать текст одной строки (редкие точечные обращения).

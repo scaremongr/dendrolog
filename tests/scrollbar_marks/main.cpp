@@ -127,7 +127,7 @@ public:
     void forEachLine(qint64, const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&) const override {}
     void forEachLineBackward(qint64, const std::function<bool(qint64, const LogEntryMeta&, QStringView)>&) const override {}
     QString textAt(qint64) const override { return QString(); }
-    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor() const override { return nullptr; }
+    std::unique_ptr<LogScanSnapshot::LineCursor> lineCursor(qint64) const override { return nullptr; }
     LogFilePtr sourceFilePtrAt(qint64) const override { return m_data->file; }
     LogEntryFields fieldsAt(qint64, const QString&) const override { return LogEntryFields(); }
 

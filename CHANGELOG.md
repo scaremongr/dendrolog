@@ -37,6 +37,18 @@ All notable changes to DendroLog are documented here. The format follows
   and **Settings → Appearance → Show ANSI colors** turn the colors off (the
   codes stay hidden). Bookmarks and saved positions on lines that contain
   escape codes, saved by an earlier version, are reported as not found.
+- **How many lines a field schema parses.** The schema editor (`Tools →
+  Field Schemas…`) shows under the preview the share of the sample lines the
+  edited schema parses — "Parsed 92% of 12 record lines · 1 did not match"
+  — and, when a log is open, the same on lines of the tab's file (its start
+  and lines spread over the whole file), recounted after each edit. Only
+  lines that start a record count: stack traces and other continuation lines
+  are not misses. A schema with a too heavy regular expression is reported as
+  too slow instead of freezing the window.
+- **A fitting schema from the list.** The **▾** arrow next to **Suggest
+  schema** offers first the schemas of the list that parse the open log (or
+  the preview lines) best, with their share of parsed lines; then the draft
+  built from the sample lines, as before.
 - **A field schema per file in a merged tab.** A tab with several files gets
   an **Applies to** line under the schema list of *Log Fields*: **All files**
   or one of the tab's files. Pick a file and the schema list shows and changes
