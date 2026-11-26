@@ -222,6 +222,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/bookmarkpanelwidget.cpp
     src/sessioncontroller.h
     src/sessioncontroller.cpp
+    src/fieldschemacontroller.h
+    src/fieldschemacontroller.cpp
     src/sessionreportdialog.h
     src/sessionreportdialog.cpp
     src/searchresultsnavigator.h

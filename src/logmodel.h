@@ -115,7 +115,7 @@ public:
     LogScanSnapshot scanSnapshot(bool filteredOnly) const;
 
     // ЕДИНСТВЕННЫЙ легальный доступ к записям как к мутируемому набору —
-    // для переизвлечения полей схемы (MainWindow::applyPatternToAllViews).
+    // для переизвлечения полей схемы (FieldSchemaController::applyToAllViews).
     // Осмыслен только для резидентного бэкенда.
     QVector<std::shared_ptr<LogEntry>> residentEntriesForFieldMutation() const;
 

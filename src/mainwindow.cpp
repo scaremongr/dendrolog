@@ -34,7 +34,7 @@
 #include "viewexport.h"
 #include "searchresultscontroller.h"
 #include "searchresultsnavigator.h"
-#include "fieldreextraction.h"
+#include "fieldschemacontroller.h"
 #include "welcomewidget.h"
 #include "compactstyle.h"
 #include "searchpanelwidget.h"
@@ -181,6 +181,10 @@ MainWindow::MainWindow(QWidget *parent)
     setupStatisticsDock();
     setupBookmarksDock();
     setupDirectoryScanner();
+    m_schemas = new FieldSchemaController(this);
+    m_schemas->setWindow({
+        [this]() { return logViews(); },
+        [this]() { stopFieldReaders(); } });
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
     // ДО loadSettings — restoreState() должен знать тулбар по objectName.
@@ -358,11 +362,10 @@ MainWindow::MainWindow(QWidget *parent)
         [this]() { return qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()); },
         [this]() {
             SessionController::WindowSettings w;
-            w.schema = m_conversionPattern;
-            w.schemaName = SessionController::schemaNameFor(m_patternList,
-                m_conversionPatternCombo ? m_conversionPatternCombo->currentIndex() : -1, m_conversionPattern);
-            w.fieldExtraction = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-            w.visibleFields = selectedVisibleFieldNames();
+            w.schema = m_schemas->activeSchema();
+            w.schemaName = m_schemas->activeSchemaName();
+            w.fieldExtraction = m_schemas->extractionEnabled();
+            w.visibleFields = m_schemas->visibleFieldNames();
             return w;
         } });
     // Ctrl+Shift+T — вернуть закрытую вкладку; прошлый сеанс — ссылкой на
@@ -1020,8 +1023,9 @@ MainWindow::~MainWindow()
 {
     // Make sure no re-extraction worker still reads entries we are about to
     // release (closeEvent usually handles this, but not every teardown path
-    // goes through it).
-    cancelFieldExtraction();
+    // goes through it). Its signals no longer reach the window being torn down.
+    disconnect(m_schemas, nullptr, this, nullptr);
+    m_schemas->cancelReextraction();
     // Вкладки разрушаются позже, в ~QWidget, когда полей окна уже нет: их
     // сигналы (destroyed вкладки → SessionController::reportChanged, смена
     // текущей вкладки) не должны дойти до лямбд и слотов окна (UBSan,
@@ -1037,7 +1041,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     // Stop any background field re-extraction before our members (which its
     // workers reference) are torn down.
-    cancelFieldExtraction();
+    m_schemas->cancelReextraction();
     saveSettings();
     // Последняя сессия (R-5) — только при штатном выходе и только первичным
     // окном; пустое окно прошлую не затирает (SessionController).
@@ -1272,21 +1276,8 @@ void MainWindow::saveSettings()
     s.endGroup();
 
     s.beginGroup("View");
-    {
-        s.setValue("fieldFilterEnabled",
-                   m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked());
-        s.setValue("fieldVisibleNames", selectedVisibleFieldNames());
-    }
-    s.setValue("conversionPattern", m_conversionPattern);
-    // Schemas themselves live as files in <configDir>/patterns/ (see
-    // SchemaStore); the INI only remembers their display order, keyed by name.
-    {
-        QStringList order;
-        order.reserve(m_patternList.size());
-        for (const auto& e : m_patternList)
-            order << e.name;
-        s.setValue("schemaOrder", order);
-    }
+    // Схема, «Filter blocks», колонки и порядок каталога — FieldSchemaController.
+    m_schemas->save(s);
     s.endGroup();
 
     s.beginGroup("Filters");
@@ -1362,88 +1353,11 @@ void MainWindow::loadSettings()
     ui->actionWordWrap->setChecked(AppSettings::instance().wordWrap());
 
     s.beginGroup("View");
-    const bool filterEnabled = s.value("fieldFilterEnabled", false).toBool();
-    m_savedVisibleFieldNames = s.value("fieldVisibleNames").toStringList();
-    const int legacyMask = s.value("fieldVisibilityMask", -1).toInt();
-
-    m_conversionPattern = s.value("conversionPattern").toString();
-    {
-        // Schemas are loaded from <exe>/patterns/*.json; the INI keeps only
-        // their display order, by name.
-        const QStringList order = s.value("schemaOrder").toStringList();
-        m_patternList = SchemaStore::loadAll(order);
-
-        // One-time migration of the old INI-stored schema list into files.
-        if (m_patternList.isEmpty()) {
-            const QStringList names  = s.value("patternNames").toStringList();
-            const QStringList values = s.value("patternValues").toStringList();
-            const int cnt = qMin(names.size(), values.size());
-            m_patternList.reserve(cnt);
-            for (int i = 0; i < cnt; ++i)
-                m_patternList.append({names[i], values[i], {}, {}});
-            // Even older single-string list.
-            if (m_patternList.isEmpty()) {
-                const QStringList old = s.value("conversionPatternList").toStringList();
-                for (const auto& p : old)
-                    if (!p.trimmed().isEmpty())
-                        m_patternList.append({p.trimmed(), p.trimmed(), {}, {}});
-            }
-            if (!m_patternList.isEmpty()) {
-                SchemaStore::sync(m_patternList);
-                s.remove("patternNames");
-                s.remove("patternValues");
-                s.remove("conversionPatternList");
-            }
-        }
-        // Built-in schemas (Logback, nginx, syslog, …) — after the migration
-        // above, which only runs on an empty folder. Never overwrites the
-        // user's files; a corrected built-in replaces only an untouched copy,
-        // and the active schema follows it.
-        const BuiltinSchemas::InstallReport builtins = SchemaStore::installBuiltins();
-        if (builtins.changed()) {
-            for (const auto& replaced : builtins.replaced) {
-                if (m_conversionPattern == replaced.first)
-                    m_conversionPattern = replaced.second;
-            }
-            m_patternList = SchemaStore::loadAll(order);
-        }
-        if (m_conversionPatternCombo) {
-            m_conversionPatternCombo->blockSignals(true);
-            m_conversionPatternCombo->clear();
-            for (const auto& e : m_patternList)
-                addSchemaComboItem(m_conversionPatternCombo, e);
-            // No active schema (the default — extraction off) must show as
-            // none, not as the first schema that addItem() selects by itself.
-            m_conversionPatternCombo->setCurrentIndex(-1);
-            // Restore the active selection
-            for (int i = 0; i < m_patternList.size(); ++i) {
-                if (m_patternList[i].schema == m_conversionPattern) {
-                    m_conversionPatternCombo->setCurrentIndex(i);
-                    break;
-                }
-            }
-            m_conversionPatternCombo->blockSignals(false);
-        }
-    }
-
-    if (m_savedVisibleFieldNames.isEmpty() && legacyMask >= 0) {
-        const QStringList legacyFieldNames = LogPattern(m_conversionPattern).fieldNames();
-        for (int i = 0; i < legacyFieldNames.size() && i < 31; ++i) {
-            if (legacyMask & (1 << i))
-                m_savedVisibleFieldNames.append(legacyFieldNames[i]);
-        }
-    }
-
-    if (m_fieldFilterEnabledCheckBox) {
-        m_fieldFilterEnabledCheckBox->blockSignals(true);
-        m_fieldFilterEnabledCheckBox->setChecked(filterEnabled);
-        m_fieldFilterEnabledCheckBox->blockSignals(false);
-    }
-    rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
+    // Каталог схем (с миграцией и встроенными схемами), активная схема,
+    // «Filter blocks» и колонки; док следует за контроллером по сигналам.
+    m_schemas->load(s);
     s.endGroup();
 
-    // Чекбокс Log Fields восстановлен с blockSignals — синхронизировать
-    // кнопку-индикатор Fields вручную.
     updateFilterStatusButtons();
 
     s.beginGroup("Filters");
@@ -1536,6 +1450,7 @@ void MainWindow::setupFieldVisibilityDock()
     connect(m_conversionPatternCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onPatternComboChanged);
+    connect(m_schemas, &FieldSchemaController::catalogueChanged, this, &MainWindow::syncSchemaCombo);
     schemaRow->addWidget(m_conversionPatternCombo, 1);
 
     auto* manageBtn = new QPushButton(tr("Manage..."), contents);
@@ -1575,15 +1490,8 @@ void MainWindow::setupFieldVisibilityDock()
     m_allFieldsCheckBox->setCheckState(Qt::Checked);
     connect(m_allFieldsCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
         if (static_cast<Qt::CheckState>(state) == Qt::PartiallyChecked) return;
-        const bool checkAll = (state == Qt::Checked);
-        for (QCheckBox* cb : m_fieldCheckBoxes) {
-            if (!cb)
-                continue;
-            cb->blockSignals(true);
-            cb->setChecked(checkAll);
-            cb->blockSignals(false);
-        }
-        onFieldVisibilityChanged();
+        m_schemas->setVisibleFieldNames(static_cast<Qt::CheckState>(state) == Qt::Checked
+                                            ? m_schemas->fieldNames() : QStringList());
     });
     filterControlsLayout->addWidget(m_allFieldsCheckBox);
 
@@ -1605,14 +1513,38 @@ void MainWindow::setupFieldVisibilityDock()
     fieldsScroll->setWidget(fieldsHost);
     rootLayout->addWidget(fieldsScroll, 1);
 
+    connect(m_schemas, &FieldSchemaController::fieldsChanged, this, &MainWindow::syncFieldControls);
+    connect(m_schemas, &FieldSchemaController::filtersRebound, this,
+            [this](LogViewWidget* view) { refreshMainViewHighlights(view); });
+    connect(m_schemas, &FieldSchemaController::schemaApplied, this, [this]() {
+        // Схема изменилась — список колонок в конструкторе фильтров; поиск,
+        // сброшенный в начале применения, повторяется с правилами, привязанными
+        // к новым полям, если панель результатов на виду (иначе его запустит её
+        // появление).
+        updateFilterPanelFieldNames();
+        if (searchResultsLive())
+            runSearchIntoResults();
+    });
+    connect(m_schemas, &FieldSchemaController::reextractionStarted, this, [this](int entries) {
+        // Тот же прогресс в строке состояния, что у загрузки файла.
+        m_statusLabel->setText(tr("Applying field schema…"));
+        m_progressBar->setRange(0, entries);
+        m_progressBar->setValue(0);
+        m_progressBar->show();
+    });
+    connect(m_schemas, &FieldSchemaController::reextractionProgress,
+            m_progressBar, &QProgressBar::setValue);
+    connect(m_schemas, &FieldSchemaController::reextractionFinished, this, [this]() {
+        m_progressBar->hide();
+        updateStatusBarDefaultText();
+    });
     connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
         if (m_fieldFilterControlsWidget)
             m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
-        // applyPatternToAllViews() включает/выключает извлечение полей,
-        // ре-экстрагирует поля на уже загруженных записях и перепривязывает
-        // колоночные правила конструктора фильтров (галочка "Filter blocks"
-        // управляет доступностью строгой фильтрации по колонкам).
-        applyPatternToAllViews();
+        // Контроллер включает/выключает извлечение полей, переизвлекает поля
+        // загруженных записей и перепривязывает колоночные правила (галочка
+        // «Filter blocks» управляет строгой фильтрацией по колонкам).
+        m_schemas->setExtractionEnabled(enabled);
     });
     if (m_fieldFilterControlsWidget)
         m_fieldFilterControlsWidget->setEnabled(false);
@@ -1623,66 +1555,90 @@ void MainWindow::setupFieldVisibilityDock()
     ui->fieldVisibilityDockWidget->setSizePolicy(QSizePolicy::Preferred,
                                                   QSizePolicy::Preferred);
 
-    rebuildFieldVisibilityControls(LogPattern(m_conversionPattern).fieldNames());
+    syncSchemaCombo();
+    syncFieldControls();
 }
 
-void MainWindow::rebuildFieldVisibilityControls(const QStringList& fieldNames)
+void MainWindow::syncSchemaCombo()
+{
+    if (!m_conversionPatternCombo)
+        return;
+    m_conversionPatternCombo->blockSignals(true);
+    m_conversionPatternCombo->clear();
+    for (const auto& e : m_schemas->schemas())
+        addSchemaComboItem(m_conversionPatternCombo, e);
+    // No active schema (the default — extraction off) must show as none, not
+    // as the first schema that addItem() selects by itself.
+    m_conversionPatternCombo->setCurrentIndex(m_schemas->activeIndex());
+    m_conversionPatternCombo->blockSignals(false);
+}
+
+void MainWindow::syncFieldControls()
 {
     if (!m_fieldCheckboxLayout)
         return;
 
-    while (QLayoutItem* item = m_fieldCheckboxLayout->takeAt(0)) {
-        if (QWidget* widget = item->widget())
-            delete widget;
-        delete item;
-    }
-    m_fieldCheckBoxes.clear();
-
-    bool anySavedMatch = false;
-    for (const QString& fieldName : fieldNames) {
-        auto* cb = new QCheckBox(fieldName, m_fieldFilterControlsWidget);
-        const bool shouldCheck = m_savedVisibleFieldNames.isEmpty()
-            || m_savedVisibleFieldNames.contains(fieldName);
-        anySavedMatch = anySavedMatch || (!m_savedVisibleFieldNames.isEmpty() && shouldCheck);
-        cb->setChecked(shouldCheck);
-        connect(cb, &QCheckBox::toggled, this, &MainWindow::onFieldVisibilityChanged);
-        m_fieldCheckBoxes.push_back(cb);
-        m_fieldCheckboxLayout->addWidget(cb);
-    }
-
-    if (!fieldNames.isEmpty() && !m_savedVisibleFieldNames.isEmpty() && !anySavedMatch) {
-        for (QCheckBox* cb : m_fieldCheckBoxes)
-            cb->setChecked(true);
-    }
-
-    if (fieldNames.isEmpty()) {
-        auto* placeholder = new QLabel(
-            tr("No active schema. Build one in 'Manage...' and apply it to the open tabs."),
-            m_fieldFilterControlsWidget);
-        placeholder->setWordWrap(true);
-        m_fieldCheckboxLayout->addWidget(placeholder);
+    const QStringList fieldNames = m_schemas->fieldNames();
+    // Чекбоксы перестраиваются только при смене колонок: смена выбора
+    // приходит и из обработчика самого чекбокса.
+    if (!m_fieldControlsBuilt || fieldNames != m_shownFieldNames) {
+        while (QLayoutItem* item = m_fieldCheckboxLayout->takeAt(0)) {
+            if (QWidget* widget = item->widget())
+                delete widget;
+            delete item;
+        }
+        m_fieldCheckBoxes.clear();
+        for (const QString& fieldName : fieldNames) {
+            auto* cb = new QCheckBox(fieldName, m_fieldFilterControlsWidget);
+            connect(cb, &QCheckBox::toggled, this, &MainWindow::onFieldVisibilityChanged);
+            m_fieldCheckBoxes.push_back(cb);
+            m_fieldCheckboxLayout->addWidget(cb);
+        }
+        if (fieldNames.isEmpty()) {
+            auto* placeholder = new QLabel(
+                tr("No active schema. Build one in 'Manage...' and apply it to the open tabs."),
+                m_fieldFilterControlsWidget);
+            placeholder->setWordWrap(true);
+            m_fieldCheckboxLayout->addWidget(placeholder);
+        }
+        m_shownFieldNames = fieldNames;
+        m_fieldControlsBuilt = true;
     }
 
-    if (m_allFieldsCheckBox)
+    const QStringList visible = m_schemas->visibleFieldNames();
+    int checkedCount = 0;
+    for (QCheckBox* cb : m_fieldCheckBoxes) {
+        const bool checked = visible.contains(cb->text());
+        checkedCount += checked ? 1 : 0;
+        cb->blockSignals(true);
+        cb->setChecked(checked);
+        cb->blockSignals(false);
+    }
+    if (m_allFieldsCheckBox) {
         m_allFieldsCheckBox->setEnabled(!m_fieldCheckBoxes.isEmpty());
-    if (m_fieldFilterControlsWidget && m_fieldFilterEnabledCheckBox)
-        m_fieldFilterControlsWidget->setEnabled(m_fieldFilterEnabledCheckBox->isChecked() && !m_fieldCheckBoxes.isEmpty());
-
-    onFieldVisibilityChanged();
-}
-
-QVector<int> MainWindow::selectedVisibleFieldIndexes() const
-{
-    QVector<int> indexes;
-    indexes.reserve(m_fieldCheckBoxes.size());
-    for (int i = 0; i < m_fieldCheckBoxes.size(); ++i) {
-        if (m_fieldCheckBoxes[i] && m_fieldCheckBoxes[i]->isChecked())
-            indexes.push_back(i);
+        m_allFieldsCheckBox->blockSignals(true);
+        if (m_fieldCheckBoxes.isEmpty() || checkedCount == 0)
+            m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
+        else if (checkedCount == m_fieldCheckBoxes.size())
+            m_allFieldsCheckBox->setCheckState(Qt::Checked);
+        else
+            m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
+        m_allFieldsCheckBox->blockSignals(false);
     }
-    return indexes;
+    if (m_fieldFilterEnabledCheckBox
+        && m_fieldFilterEnabledCheckBox->isChecked() != m_schemas->extractionEnabled()) {
+        m_fieldFilterEnabledCheckBox->blockSignals(true);
+        m_fieldFilterEnabledCheckBox->setChecked(m_schemas->extractionEnabled());
+        m_fieldFilterEnabledCheckBox->blockSignals(false);
+    }
+    if (m_fieldFilterControlsWidget)
+        m_fieldFilterControlsWidget->setEnabled(m_schemas->extractionEnabled()
+                                                && !m_fieldCheckBoxes.isEmpty());
+    // Кнопка-индикатор Fields тулбара Filters.
+    updateFilterStatusButtons();
 }
 
-QStringList MainWindow::selectedVisibleFieldNames() const
+QStringList MainWindow::checkedFieldNames() const
 {
     QStringList names;
     names.reserve(m_fieldCheckBoxes.size());
@@ -1695,67 +1651,19 @@ QStringList MainWindow::selectedVisibleFieldNames() const
 
 void MainWindow::onFieldVisibilityChanged()
 {
-    m_savedVisibleFieldNames = selectedVisibleFieldNames();
-
-    if (m_allFieldsCheckBox) {
-        int checkedCount = 0;
-        for (QCheckBox* cb : m_fieldCheckBoxes)
-            if (cb && cb->isChecked())
-                ++checkedCount;
-        m_allFieldsCheckBox->blockSignals(true);
-        if (m_fieldCheckBoxes.isEmpty() || checkedCount == 0)
-            m_allFieldsCheckBox->setCheckState(Qt::Unchecked);
-        else if (checkedCount == m_fieldCheckBoxes.size())
-            m_allFieldsCheckBox->setCheckState(Qt::Checked);
-        else
-            m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
-        m_allFieldsCheckBox->blockSignals(false);
-    }
-    applyFieldVisibilityToAllViews();
-}
-
-void MainWindow::applyFieldVisibilityToAllViews()
-{
-    const bool filterEnabled = m_fieldFilterEnabledCheckBox
-        && m_fieldFilterEnabledCheckBox->isChecked()
-        && !m_fieldCheckBoxes.isEmpty();
-    const QVector<int> visibleIndexes = filterEnabled ? selectedVisibleFieldIndexes()
-                                                      : QVector<int>();
-
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
-            lv->model()->setFieldDisplaySelection(filterEnabled, visibleIndexes);
-    }
-}
-
-void MainWindow::onConversionPatternApply()
-{
-    applyPatternToAllViews();
+    m_schemas->setVisibleFieldNames(checkedFieldNames());
 }
 
 void MainWindow::onPatternComboChanged(int index)
 {
-    if (index >= 0 && index < m_patternList.size())
-        m_conversionPattern = m_patternList[index].schema;
-    else
-        m_conversionPattern.clear();
-
-    // Combo selection change must immediately rebind parser schema and field list.
-    applyPatternToAllViews();
+    m_schemas->selectSchema(index);
 }
 
 void MainWindow::onManagePatterns()
 {
     // Refresh from the folder so schema files dropped in (or edited) since the
     // last load are picked up, preserving the current display order.
-    {
-        QStringList order;
-        order.reserve(m_patternList.size());
-        for (const auto& e : m_patternList)
-            order << e.name;
-        m_patternList = SchemaStore::loadAll(order);
-    }
+    m_schemas->reloadCatalogue();
 
     // Offer log lines as live-preview samples, starting from the row the
     // user is currently looking at (top of the log when nothing is
@@ -1777,76 +1685,22 @@ void MainWindow::onManagePatterns()
         }
     }
 
-    ConversionPatternDialog dlg(m_patternList, this, sampleLines, m_conversionPattern);
+    ConversionPatternDialog dlg(m_schemas->schemas(), this, sampleLines, m_schemas->activeSchema());
     if (dlg.exec() != QDialog::Accepted) return;
 
-    m_patternList = dlg.resultPatterns();
-
-    // Persist the (possibly edited) list back to the patterns folder.
-    QString syncError;
-    if (!SchemaStore::sync(m_patternList, &syncError) && !syncError.isEmpty())
+    const QString syncError = m_schemas->replaceCatalogue(dlg.resultPatterns(), dlg.chosenPattern(),
+                                                          dlg.chosenResultIndex());
+    if (!syncError.isEmpty())
         QMessageBox::warning(this, tr("Schemas"),
             tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
-
-    // Rebuild combo names.  Set index to -1 first so any subsequent
-    // setCurrentIndex() always triggers currentIndexChanged, even for index 0.
-    m_conversionPatternCombo->blockSignals(true);
-    m_conversionPatternCombo->clear();
-    for (const auto& e : m_patternList)
-        addSchemaComboItem(m_conversionPatternCombo, e);
-    m_conversionPatternCombo->setCurrentIndex(-1);
-    m_conversionPatternCombo->blockSignals(false);
-
-    const QString chosen    = dlg.chosenPattern();
-    const int     chosenIdx = dlg.chosenResultIndex();
-    if (!chosen.isEmpty()) {
-        m_conversionPattern = chosen;
-        // Directly select by result index — no string comparison needed.
-        if (chosenIdx >= 0 && chosenIdx < m_conversionPatternCombo->count())
-            m_conversionPatternCombo->setCurrentIndex(chosenIdx);
-        applyPatternToAllViews();
-    } else {
-        // Dialog closed without "Use Selected" — restore previous active pattern
-        // in the combo, or leave unselected if it's no longer in the list.
-        for (int i = 0; i < m_patternList.size(); ++i) {
-            if (m_patternList[i].schema == m_conversionPattern) {
-                m_conversionPatternCombo->setCurrentIndex(i);
-                break;
-            }
-        }
-    }
 }
 
-
-void MainWindow::cancelFieldExtraction()
+void MainWindow::stopFieldReaders()
 {
-    if (!m_fieldExtraction)
-        return;
-    // Workers stop and are waited for; entries keep their old fields intact.
-    m_fieldExtraction->cancel();
-    m_fieldExtraction->deleteLater();
-    m_fieldExtraction = nullptr;
-}
-
-void MainWindow::cancelFilterJobsOnAllViews()
-{
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
-            lv->model()->cancelPendingFilter(true);
-    }
-}
-
-void MainWindow::applyPatternToAllViews()
-{
-    // A schema switch supersedes any re-extraction still in flight.
-    cancelFieldExtraction();
-    // Resident filter workers read entry->fields(): each tab's own and the
-    // Search Results one, which shares entries with its source (clear() waits
-    // for it). Stop them all before the synchronous field mutation below
-    // (invariant 4). finishPatternApplication() re-applies what was cancelled.
+    // Выдача Search делит записи с источником: clear() ждёт её фильтр.
+    // Повторит поиск schemaApplied; посреди фонового расчёта поиск не
+    // запускается (runSearchIntoResults).
     clearSearchResults();
-    cancelFilterJobsOnAllViews();
     // A background Save View As reads the fields of resident entries too.
     if (m_exportJob && m_exportJob->isRunning()) {
         m_exportCancelReason = tr("Save View As cancelled: the field schema changed. "
@@ -1854,131 +1708,13 @@ void MainWindow::applyPatternToAllViews()
                                    .arg(QFileInfo(m_exportJob->destination()).fileName());
         m_exportJob->cancel(/*wait=*/true);
     }
-
-    auto pattern = std::make_shared<LogPattern>(m_conversionPattern);
-    rebuildFieldVisibilityControls(pattern->fieldNames());
-
-    const bool filterEnabled = m_fieldFilterEnabledCheckBox
-        && m_fieldFilterEnabledCheckBox->isChecked()
-        && !m_fieldCheckBoxes.isEmpty();
-    const bool doExtract = filterEnabled && pattern->isValid();
-
-    // Point every view's parser at the new schema up-front so newly loaded
-    // lines are parsed correctly even while the back-fill runs.
-    QVector<std::shared_ptr<LogEntry>> entries;
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (!lv)
-            continue;
-
-        lv->setParserPattern(m_conversionPattern);
-        lv->setExtractionEnabled(filterEnabled);
-
-        if (!lv->model())
-            continue;
-
-        // Индексный бэкенд: спаны полей не хранятся — извлечение идёт по
-        // требованию новым паттерном (он уже передан через setParserPattern).
-        // Мутировать нечего; отображение обновит finishPatternApplication().
-        if (lv->model()->isIndexedBackend())
-            continue;
-
-        for (const auto& entry : lv->model()->residentEntriesForFieldMutation()) {
-            if (!entry)
-                continue;
-            if (doExtract)
-                entries.append(entry);
-            else
-                entry->setFields(LogEntryFields());
-        }
-    }
-
-    // Small batches (or "no extraction") complete instantly on the GUI
-    // thread — no worker, no progress bar, no display flicker.
-    constexpr int kAsyncThreshold = 4000;
-    if (!doExtract || entries.size() < kAsyncThreshold) {
-        for (const auto& entry : entries)
-            entry->setFields(pattern->extractFields(entry->message()));
-        finishPatternApplication();
-        return;
-    }
-
-    // Large batch: re-extract in the background and show the same status-bar
-    // progress as file loading. Workers do not touch the entries, so filters
-    // started meanwhile read the old fields safely. Field display is OFF for
-    // the duration: the column checkboxes already describe the new schema,
-    // while the entries still carry spans of the old one.
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model())
-            lv->model()->setFieldDisplaySelection(false, QVector<int>());
-    }
-
-    m_fieldExtraction = new FieldReextraction(std::move(entries), pattern, this);
-    connect(m_fieldExtraction, &FieldReextraction::progressRangeChanged,
-            m_progressBar, &QProgressBar::setRange);
-    connect(m_fieldExtraction, &FieldReextraction::progressValueChanged,
-            m_progressBar, &QProgressBar::setValue);
-    connect(m_fieldExtraction, &FieldReextraction::finished,
-            this, &MainWindow::onFieldExtractionFinished);
-
-    m_statusLabel->setText(tr("Applying field schema…"));
-    m_progressBar->setRange(0, m_fieldExtraction->entryCount());
-    m_progressBar->setValue(0);
-    m_progressBar->show();
-    m_fieldExtraction->start();
-}
-
-void MainWindow::onFieldExtractionFinished()
-{
-    if (!m_fieldExtraction)
-        return;
-    // Filters started while the fields were being computed (Apply, level
-    // buttons, appended lines) read entry->fields(): stop them before the new
-    // fields go in; finishPatternApplication() re-applies them.
-    cancelFilterJobsOnAllViews();
-    m_fieldExtraction->apply();
-    m_fieldExtraction->deleteLater();
-    m_fieldExtraction = nullptr;
-
-    m_progressBar->hide();
-    updateStatusBarDefaultText();
-
-    finishPatternApplication();
-}
-
-void MainWindow::finishPatternApplication()
-{
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (lv && lv->model()) {
-            lv->model()->refreshDisplay();
-            // Фильтр-джоб, отменённый на время переизвлечения полей, мог
-            // оставить список строк со старыми настройками — доводим.
-            lv->model()->reapplyFilterIfStale();
-        }
-    }
-
-    // Re-enables field display with the active selection (it was turned off
-    // during a background re-extraction).
-    applyFieldVisibilityToAllViews();
-
-    // Схема изменилась — обновляем список колонок в конструкторе фильтров и
-    // перепривязываем уже применённые колоночные правила каждой вкладки
-    // (не навязывая правила панели вкладкам без фильтров).
-    updateFilterPanelFieldNames();
-    rebindFiltersOnAllViews();
-    // Поиск сброшен в начале применения схемы — повторяем его с правилами,
-    // привязанными к новым полям, если панель результатов на виду (иначе
-    // его запустит её появление).
-    if (searchResultsLive())
-        runSearchIntoResults();
 }
 
 LogViewWidget* MainWindow::createLogViewWidget()
 {
     auto* view = new LogViewWidget(this);
-    view->setParserPattern(m_conversionPattern);
+    // Схема, «Filter blocks» и колонки окна.
+    m_schemas->configureView(view);
     attachLineWrapAction(view->view());
     // Память файла (R-4): вкладка читает и пишет её сама; окну — сообщения
     // и флаг авто-обновления, который могла поставить память.
@@ -2039,13 +1775,6 @@ LogViewWidget* MainWindow::createLogViewWidget()
     });
     // Отметки поиска на скроллбаре (R-6): view сам решает, источник ли он.
     view->view()->scrollbarMarks()->setSearch(m_searchController);
-    const bool filterEnabled = m_fieldFilterEnabledCheckBox
-        && m_fieldFilterEnabledCheckBox->isChecked()
-        && !m_fieldCheckBoxes.isEmpty();
-    view->setExtractionEnabled(filterEnabled);
-    if (view->model())
-        view->model()->setFieldDisplaySelection(filterEnabled, selectedVisibleFieldIndexes());
-
     // Новый документ открывается БЕЗ фильтров и маркеров: применение
     // пер-вкладочное — пользователь нажимает Apply в панели фильтров,
     // когда хочет отфильтровать именно этот документ. Сами правила в
@@ -2642,13 +2371,12 @@ void MainWindow::updateFilterStatusButtons()
 
     // Fields (глобальный — действует на все вкладки)
     {
-        const bool active = m_fieldFilterEnabledCheckBox
-                         && m_fieldFilterEnabledCheckBox->isChecked();
+        const bool active = m_schemas->extractionEnabled();
         m_fieldFilterStatusAction->setChecked(active);
         m_fieldFilterStatusAction->setToolTip(active
             ? tr("Field filtering: %1 of %2 blocks shown (all tabs)\nClick to show full lines")
-                  .arg(selectedVisibleFieldIndexes().size())
-                  .arg(m_fieldCheckBoxes.size())
+                  .arg(m_schemas->visibleFieldIndexes().size())
+                  .arg(m_schemas->fieldNames().size())
             : tr("Field filtering is off\nClick to show only the blocks selected in the Log Fields panel"));
     }
 
@@ -3826,8 +3554,7 @@ void MainWindow::applyTextFiltersToActiveView()
     // Фильтрация пер-вкладочная: Apply действует только на текущий документ.
     // Остальные документы сохраняют свои (или никакие) фильтры.
     FilterRuleSet rules = m_filterPanel->ruleSet();
-    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-    rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+    m_schemas->bindRules(rules);
 
     if (m_activeLogView->model())
         m_activeLogView->model()->setFilterRules(rules);
@@ -3913,8 +3640,9 @@ void MainWindow::refreshMainViewHighlights(LogViewWidget* view)
 void MainWindow::runSearchIntoResults()
 {
     // Fields are being recomputed for the new schema: rules bound to it would
-    // not match the entries' old spans. finishPatternApplication() searches.
-    if (m_fieldExtraction)
+    // not match the entries' old spans. FieldSchemaController::schemaApplied
+    // searches.
+    if (m_schemas->isReextracting())
         return;
     if (!m_searchRequested || !m_searchQuery || !m_searchController || !m_activeLogView
         || !m_activeLogView->model())
@@ -3925,8 +3653,7 @@ void MainWindow::runSearchIntoResults()
     // всегда попадает точно на строку. Пустой или испорченный запрос контроллер
     // превращает в пустую выдачу с объясняющей подписью.
     FilterRuleSet rules = m_searchQuery->ruleSet();
-    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-    rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+    m_schemas->bindRules(rules);
     m_searchRules = rules;
 
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
@@ -3969,31 +3696,10 @@ void MainWindow::applyRowMarkersToActiveView()
     m_activeLogView->model()->setRowMarkers(m_markerPanel->markers());
 }
 
-void MainWindow::rebindFiltersOnAllViews()
-{
-    // Схема полей или галочка "Filter blocks" изменились: каждая вкладка
-    // сохраняет СВОЙ применённый набор правил, но колоночные привязки
-    // должны быть пересчитаны под новую схему.
-    const QStringList fieldNames = LogPattern(m_conversionPattern).fieldNames();
-    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-
-    for (int t = 0; t < ui->tabWidget->count(); ++t) {
-        auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(t));
-        if (!lv || !lv->model())
-            continue;
-        FilterRuleSet rules = lv->model()->filterRules();
-        if (!rules.isActive())
-            continue; // у документа нет фильтров — нечего перепривязывать
-        rules.bindFields(fieldNames, fieldScope);
-        lv->model()->setFilterRules(rules);
-        refreshMainViewHighlights(lv);
-    }
-}
-
 void MainWindow::updateFilterPanelFieldNames()
 {
-    const bool fieldScope = m_fieldFilterEnabledCheckBox && m_fieldFilterEnabledCheckBox->isChecked();
-    const QStringList fieldNames = LogPattern(m_conversionPattern).fieldNames();
+    const bool fieldScope = m_schemas->extractionEnabled();
+    const QStringList fieldNames = m_schemas->fieldNames();
     if (m_filterPanel)
         m_filterPanel->setFieldNames(fieldNames, fieldScope);
     if (m_searchQuery)
@@ -4343,51 +4049,11 @@ void MainWindow::saveSessionAs()
 
 void MainWindow::applySessionSchema(const SessionState& session)
 {
-    // Сессия без схемы схему окна не трогает: открытые вкладки не теряют поля.
-    if (!session.hasSchema())
-        return;
-    // Каталог схем — источник правды, и его могли изменить с прошлой загрузки
-    // (sync ниже удалил бы файлы, которых нет в устаревшем списке).
-    const auto reloadSchemas = [this](const QString& extraName) {
-        QStringList order;
-        for (const auto& e : m_patternList)
-            order << e.name;
-        if (!extraName.isEmpty())
-            order << extraName;
-        m_patternList = SchemaStore::loadAll(order);
-        m_conversionPatternCombo->blockSignals(true);
-        m_conversionPatternCombo->clear();
-        for (const auto& e : m_patternList)
-            addSchemaComboItem(m_conversionPatternCombo, e);
-        m_conversionPatternCombo->blockSignals(false);
-    };
-    reloadSchemas(QString());
-    const SessionController::SchemaChoice choice =
-        SessionController::chooseSchema(m_patternList, session.schemaName, session.schema);
-    int index = choice.index;
-    if (choice.added) { // нет в каталоге — добавить под именем с пометкой
-        m_patternList.append(choice.newEntry);
-        QString error;
-        if (!SchemaStore::sync(m_patternList, &error) && !error.isEmpty())
-            statusBar()->showMessage(tr("Could not save the session schema: %1").arg(error), 10000);
-        reloadSchemas(choice.newEntry.name);
-        index = -1;
-        for (int i = 0; i < m_patternList.size(); ++i)
-            if (m_patternList[i].name == choice.newEntry.name)
-                index = i;
-    }
-    // Не записалась в каталог — схема всё равно действует, без пункта в списке.
-    m_conversionPattern = index >= 0 ? m_patternList[index].schema : session.schema;
-    m_conversionPatternCombo->blockSignals(true);
-    m_conversionPatternCombo->setCurrentIndex(index);
-    m_conversionPatternCombo->blockSignals(false);
-    if (m_fieldFilterEnabledCheckBox) {
-        m_fieldFilterEnabledCheckBox->blockSignals(true);
-        m_fieldFilterEnabledCheckBox->setChecked(session.fieldExtraction);
-        m_fieldFilterEnabledCheckBox->blockSignals(false);
-    }
-    m_savedVisibleFieldNames = session.visibleFields;
-    applyPatternToAllViews();
+    // Сессия без схемы схему окна не трогает (контроллер); не записалась в
+    // каталог — схема всё равно действует, без пункта в списке.
+    const QString error = m_schemas->applySessionSchema(session);
+    if (!error.isEmpty())
+        statusBar()->showMessage(tr("Could not save the session schema: %1").arg(error), 10000);
     updateFilterStatusButtons();
 }
 
@@ -4721,9 +4387,7 @@ void MainWindow::onViewTextAction(LogListView::TextAction action, const QString&
         } else {
             FilterRuleSet rules = applied;
             rules.rules.append(m_filterPanel->quickRule(text, exclude));
-            const bool fieldScope = m_fieldFilterEnabledCheckBox
-                                 && m_fieldFilterEnabledCheckBox->isChecked();
-            rules.bindFields(LogPattern(m_conversionPattern).fieldNames(), fieldScope);
+            m_schemas->bindRules(rules);
             model->setFilterRules(rules);
             refreshMainViewHighlights(m_activeLogView);
             m_statusLabel->setText(tr("Filter added to this tab. The Text Filters panel "

@@ -155,6 +155,12 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- While a new field schema was being applied to a large tab in the
+  background, ticking a block in **Log Fields** showed the new columns over
+  the old fields (and Save View As started then could read the fields while
+  they were replaced); the blocks now come back when the schema is applied.
+- The progress bar of a schema being applied stayed on screen when
+  **Filter blocks** was turned off before it finished.
 - File colours were missing (all grey) on a merged tab of large files.
 - Lines over 10 000 hidden characters lost a few characters at the edge
   that `+N` did not count.

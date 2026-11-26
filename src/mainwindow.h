@@ -56,7 +56,7 @@ class LogPattern;
 class SearchResultsController;
 class SessionReportDialog;
 class SearchResultsNavigator;
-class FieldReextraction;
+class FieldSchemaController;
 class QModelIndex;
 class QDialog;
 class QDragEnterEvent;
@@ -191,7 +191,6 @@ private slots:
 
     // Field-visibility dock slots
     void onFieldVisibilityChanged();
-    void onConversionPatternApply();
     void onPatternComboChanged(int index);
     void onManagePatterns();
 
@@ -364,14 +363,13 @@ private:
     QWidget* m_fieldFilterControlsWidget = nullptr;
     QVBoxLayout* m_fieldCheckboxLayout = nullptr;
     QComboBox* m_conversionPatternCombo = nullptr;
-    QString    m_conversionPattern;             // Global pattern (for next file opens)
-    SchemaStore::SchemaList m_patternList;      // schemas with metadata, as on disk
-    QStringList m_savedVisibleFieldNames;
+    // Колонки, по которым построены чекбоксы (перестройка — только при их смене).
+    QStringList m_shownFieldNames;
+    bool m_fieldControlsBuilt = false;
 
-    // Background field re-extraction (schema switch). Workers never write to
-    // the entries: new fields are applied on the GUI thread once it finishes,
-    // with background filters stopped (see FieldReextraction).
-    FieldReextraction* m_fieldExtraction = nullptr;
+    // Каталог схем, активная схема, «Filter blocks», колонки и их применение
+    // ко вкладкам (M-2); окно — только вид дока Log Fields.
+    FieldSchemaController* m_schemas = nullptr;
 
     // Settings persistence
     void saveSettings();
@@ -499,20 +497,9 @@ private:
     void updateTabLabel(LogViewWidget* view);
     // Построить и показать контекстное меню заголовка вкладки index.
     void onTabContextMenu(int index, const QPoint& globalPos);
-    // Apply current field-visibility mask to every open LogViewWidget's model
-    void applyFieldVisibilityToAllViews();
-    // Apply current pattern to every open LogViewWidget's parser
-    void applyPatternToAllViews();
-    // Final display/filter refresh after fields have been (re)extracted.
-    void finishPatternApplication();
-    // Called when the background field re-extraction finishes.
-    void onFieldExtractionFinished();
-    // Abort any in-flight background field re-extraction and wait for its
-    // workers; entries keep their old fields.
-    void cancelFieldExtraction();
-    // Stop (and wait for) every tab's background filter: they read
-    // entry->fields(), which is about to change (invariant 4).
-    void cancelFilterJobsOnAllViews();
+    // Читатели полей вне вкладок — выдача Search и Save View As — перед
+    // сменой полей записей (инвариант 4; FieldSchemaController::Window).
+    void stopFieldReaders();
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.
@@ -535,15 +522,13 @@ private:
     bool searchResultsLive() const;
     // Применить row-маркеры к активной вкладке.
     void applyRowMarkersToActiveView();
-    // Перепривязать УЖЕ применённые правила каждой вкладки к новой схеме
-    // полей (вызывается при смене схемы / галочки "Filter blocks").
-    void rebindFiltersOnAllViews();
     // Синхронизировать список колонок конструктора фильтров с активной
     // схемой Log Fields и состоянием галочки "Filter blocks".
     void updateFilterPanelFieldNames();
-    void rebuildFieldVisibilityControls(const QStringList& fieldNames);
-    QVector<int> selectedVisibleFieldIndexes() const;
-    QStringList selectedVisibleFieldNames() const;
+    // Док Log Fields по состоянию FieldSchemaController.
+    void syncSchemaCombo();
+    void syncFieldControls();
+    QStringList checkedFieldNames() const;
 
 };
 

@@ -1144,6 +1144,64 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         check(waitAllLoaded(win) && a->parserPattern() == first, QStringLiteral("schema switches back"));
     }
 
+    // «Filter blocks» и колонки дока Log Fields — на всех вкладках; кнопка
+    // Fields тулбара Filters — та же галочка (FieldSchemaController, M-2).
+    if (combo && combo->count() > 0) {
+        QCheckBox* filterBlocks = nullptr;
+        // Чекбоксы колонок окно может пересоздать при смене схемы и флага —
+        // искать заново после каждого такого шага.
+        const auto columnBoxes = [&]() {
+            QList<QCheckBox*> found;
+            for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
+                if (cb->text() == QLatin1String("Filter blocks"))
+                    filterBlocks = cb;
+                else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
+                    found << cb;
+            }
+            return found;
+        };
+        QList<QCheckBox*> columns = columnBoxes();
+        check(filterBlocks && !columns.isEmpty(),
+              QStringLiteral("Log Fields shows Filter blocks and the columns (%1)").arg(columns.size()));
+        QAction* fieldsStatus = filtersToolBarAction(win, QStringLiteral("Fields"));
+        if (filterBlocks && !columns.isEmpty() && fieldsStatus) {
+            const bool wasOn = filterBlocks->isChecked();
+            if (!wasOn)
+                filterBlocks->click();
+            check(waitAllLoaded(win), QStringLiteral("tabs settle after Filter blocks"));
+            columns = columnBoxes();
+            const auto everyTab = [&](const std::function<bool(LogModel*)>& pred) {
+                bool all = true;
+                for (int i = 0; i < tabs(win)->count(); ++i)
+                    all = all && tabAt(win, i)->model() && pred(tabAt(win, i)->model());
+                return all;
+            };
+            check(fieldsStatus->isChecked()
+                      && everyTab([](LogModel* m) { return m->fieldDisplayFilterEnabled(); }),
+                  QStringLiteral("Filter blocks reaches every tab and the Fields button"));
+            for (QCheckBox* cb : columns)
+                if (!cb->isChecked())
+                    cb->click();
+            const int all = int(columns.size());
+            columns.first()->click(); // снять первую колонку
+            check(everyTab([&](LogModel* m) {
+                      return m->visibleFieldIndexes().size() == all - 1
+                          && !m->visibleFieldIndexes().contains(0);
+                  }),
+                  QStringLiteral("column choice reaches every tab"));
+            columns.first()->click();
+            check(everyTab([&](LogModel* m) { return m->visibleFieldIndexes().size() == all; }),
+                  QStringLiteral("column choice comes back"));
+            fieldsStatus->trigger();
+            check(waitAllLoaded(win) && !filterBlocks->isChecked() && !fieldsStatus->isChecked()
+                      && everyTab([](LogModel* m) { return !m->fieldDisplayFilterEnabled(); }),
+                  QStringLiteral("Fields button turns Filter blocks off on every tab"));
+            check(model->rowCount() == allRows, QStringLiteral("Filter blocks keeps the rows"));
+            if (wasOn)
+                filterBlocks->click();
+        }
+    }
+
     section(QStringLiteral("timeline range"));
     auto* timeline = win.findChild<TimelineHistogramWidget*>();
     check(timeline, QStringLiteral("window has a timeline"));
