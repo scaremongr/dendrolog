@@ -20,10 +20,15 @@
 #include "appsettings.h"
 #include "builtinschemas.h"
 #include "conversionpatterndialog.h"
+#include "patternblockcard.h"
 #include "logpattern.h"
 #include "schemastore.h"
 
 #include <QApplication>
+#include <QComboBox>
+#include <QElapsedTimer>
+#include <QLabel>
+#include <QPlainTextEdit>
 #include <QDir>
 #include <QFile>
 #include <QInputDialog>
@@ -611,13 +616,20 @@ void testKeyedSchema()
         const int row = rowOf(table, QStringLiteral("App logfmt v2"));
         check(row >= 0, "keyed: dialog lists the schema");
         table->setCurrentCell(row, 0);
-        // Правка блоков не подействовала бы (ключевая часть главнее) —
-        // карточки и Add Block недоступны.
-        auto* addBlock = child<QPushButton>(&dlg, "addBlockBtn");
+        // Ключевая схема открывается в ключевом режиме редактора (F-4,
+        // PR 4): формат, роли, колонки, единица и шкала — из файла;
+        // цепочка блоков скрыта.
+        auto* format = child<QComboBox>(&dlg, "formatCombo");
         auto* blocksScroll = child<QScrollArea>(&dlg, "blocksScroll");
-        check(addBlock && !addBlock->isEnabled(), "keyed: Add Block disabled");
-        check(blocksScroll && blocksScroll->widget() && !blocksScroll->widget()->isEnabled(),
-              "keyed: block cards are read-only");
+        auto* keyedCard = child<QWidget>(&dlg, "keyedCard");
+        auto* columns = child<QLineEdit>(&dlg, "columnsEdit");
+        auto* levels = child<QComboBox>(&dlg, "numericLevelsCombo");
+        if (!format || !blocksScroll || !keyedCard || !columns || !levels)
+            return;
+        check(format->currentData().toString() == QLatin1String("logfmt"), "keyed: editor shows logfmt");
+        check(!blocksScroll->isVisibleTo(&dlg) && keyedCard->isVisibleTo(&dlg), "keyed: keyed card instead of blocks");
+        check(columns->text() == QLatin1String("logger, trace_id"), "keyed: columns in the editor");
+        check(levels->currentData().toString() == QLatin1String("python"), "keyed: numeric levels in the editor");
         typeInto(description, QStringLiteral("Edited in dialog"));
         apply->click();
         list = dlg.resultPatterns();
@@ -640,6 +652,202 @@ void testKeyedSchema()
     list.removeIf([](const SchemaStore::SchemaEntry& e) { return e.name == QLatin1String("App logfmt v2"); });
     check(SchemaStore::sync(list), "keyed: sync after removing a schema");
     check(readBytes(futurePath) == futureBytes, "keyed: unparsed future schema survives sync");
+}
+// Ключевой режим редактора (F-4, PR 4): формат Blocks / JSON / logfmt,
+// ключи ролей, колонки, единица эпохи и шкала уровней; Apply / Revert;
+// переключение формата туда и обратно не теряет блоки; «Add keys from
+// sample»; Auto-detect на образце JSON предлагает ключевую схему; живой
+// предпросмотр распознаёт строки образца.
+void selectData(QComboBox* combo, const char* data)
+{
+    const int i = combo->findData(QString::fromLatin1(data));
+    check(i >= 0, QStringLiteral("combo %1 has %2").arg(combo->objectName(), QString::fromLatin1(data)));
+    combo->setCurrentIndex(i);
+}
+
+bool waitPreview(QLabel* status, const QString& wanted)
+{
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < 10000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        if (status->text().contains(wanted))
+            return true;
+    }
+    return false;
+}
+
+QJsonArray blocksOf(const QJsonObject& obj) { return obj.value(QStringLiteral("blocks")).toArray(); }
+
+void testKeyedEditor()
+{
+    clearPatterns();
+    const QString plainPath = patterns().filePath(QStringLiteral("plain.json"));
+    check(writeBytes(plainPath, handWrittenSchema(QStringLiteral("Plain"), QStringLiteral("Regex"))),
+          "editor: write regex schema");
+    const QJsonArray plainBlocks = blocksOf(readJson(plainPath));
+
+    SchemaStore::SchemaList list = SchemaStore::loadAll();
+    {
+        ConversionPatternDialog dlg(list);
+        auto* table = child<QTableWidget>(&dlg, "schemaTable");
+        auto* name = child<QLineEdit>(&dlg, "nameEdit");
+        auto* apply = child<QPushButton>(&dlg, "applyBtn");
+        auto* revert = child<QPushButton>(&dlg, "revertBtn");
+        auto* add = child<QPushButton>(&dlg, "addSchemaBtn");
+        auto* autoDetect = child<QPushButton>(&dlg, "autoDetectBtn");
+        auto* format = child<QComboBox>(&dlg, "formatCombo");
+        auto* blocksScroll = child<QScrollArea>(&dlg, "blocksScroll");
+        auto* addBlock = child<QPushButton>(&dlg, "addBlockBtn");
+        auto* keyedCard = child<QWidget>(&dlg, "keyedCard");
+        auto* timeKeys = child<QLineEdit>(&dlg, "timeKeysEdit");
+        auto* levelKeys = child<QLineEdit>(&dlg, "levelKeysEdit");
+        auto* messageKeys = child<QLineEdit>(&dlg, "messageKeysEdit");
+        auto* columns = child<QLineEdit>(&dlg, "columnsEdit");
+        auto* epoch = child<QComboBox>(&dlg, "epochUnitCombo");
+        auto* levels = child<QComboBox>(&dlg, "numericLevelsCombo");
+        auto* addKeys = child<QPushButton>(&dlg, "addSampleKeysBtn");
+        auto* sample = child<QPlainTextEdit>(&dlg, "sampleEdit");
+        auto* status = child<QLabel>(&dlg, "previewStatusLabel");
+        auto* validation = child<QLabel>(&dlg, "validationLabel");
+        if (!table || !name || !apply || !revert || !add || !autoDetect || !format || !blocksScroll
+                || !addBlock || !keyedCard || !timeKeys || !levelKeys || !messageKeys || !columns
+                || !epoch || !levels || !addKeys || !sample || !status || !validation)
+            return;
+
+        // Регексная схема: режим Blocks; JSON и обратно — те же блоки.
+        table->setCurrentCell(rowOf(table, QStringLiteral("Plain")), 0);
+        check(format->currentData().toString() == QLatin1String("blocks"), "editor: regex schema in Blocks mode");
+        check(blocksScroll->isVisibleTo(&dlg) && !keyedCard->isVisibleTo(&dlg), "editor: blocks shown, keyed card hidden");
+        const int cards = dlg.findChildren<PatternBlockCard*>().size();
+        selectData(format, "json");
+        check(!blocksScroll->isVisibleTo(&dlg) && keyedCard->isVisibleTo(&dlg) && !addBlock->isVisibleTo(&dlg),
+              "editor: JSON mode shows the keyed card instead of the blocks");
+        check(timeKeys->text() == KeyedDefinition::defaultTimeKeys().join(QStringLiteral(", "))
+                  && levelKeys->text() == KeyedDefinition::defaultLevelKeys().join(QStringLiteral(", "))
+                  && messageKeys->text() == KeyedDefinition::defaultMessageKeys().join(QStringLiteral(", ")),
+              "editor: default role keys prefilled");
+        check(apply->isEnabled(), "editor: format switch makes the editor dirty");
+        selectData(format, "blocks");
+        QCoreApplication::processEvents();
+        check(dlg.findChildren<PatternBlockCard*>().size() == cards, "editor: back to Blocks keeps the cards");
+        apply->click();
+        list = dlg.resultPatterns();
+        check(SchemaStore::sync(list), "editor: sync after the round trip");
+        check(blocksOf(readJson(plainPath)) == plainBlocks && !readJson(plainPath).contains(QStringLiteral("keyed")),
+              "editor: Blocks → JSON → Blocks loses no block");
+
+        // Новая ключевая схема: формат, ключи, колонки, единица и шкала.
+        add->click();
+        typeInto(name, QStringLiteral("App JSON"));
+        selectData(format, "json");
+        typeInto(timeKeys, QStringLiteral("when, ts"));
+        typeInto(columns, QStringLiteral("service, trace_id"));
+        selectData(epoch, "ms");
+        selectData(levels, "python");
+        check(validation->text().contains(QStringLiteral("valid")), "editor: keyed schema is valid");
+        sample->setPlainText(QStringLiteral(
+            "{\"when\":1763474136456,\"level\":40,\"msg\":\"a\",\"service\":\"api\"}\n"
+            "{\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"info\",\"msg\":\"b\",\"trace_id\":\"t1\",\"user\":\"bob\"}\n"
+            "not json at all"));
+        check(waitPreview(status, QStringLiteral("2 matched")), "editor: live preview recognises the JSON lines: " + status->text());
+        check(status->text().contains(QStringLiteral("1 not recognized")), "editor: preview counts the plain line");
+        apply->click();
+
+        // Revert возвращает применённое.
+        typeInto(columns, QStringLiteral("x"));
+        revert->click();
+        check(columns->text() == QLatin1String("service, trace_id"), "editor: Revert restores the columns");
+        check(format->currentData().toString() == QLatin1String("json"), "editor: Revert keeps JSON mode");
+
+        // Колонка с именем роли — ошибка проверки.
+        typeInto(columns, QStringLiteral("level"));
+        check(validation->text().contains(QStringLiteral("twice")), "editor: column clashing with a role is invalid: " + validation->text());
+        revert->click();
+
+        // «Add keys from sample» — ключи образцов, которых нет в колонках.
+        addKeys->click();
+        check(columns->text() == QLatin1String("service, trace_id, user"),
+              "editor: keys from the sample appended: " + columns->text());
+        apply->click();
+
+        // Auto-detect на образце logfmt — ключевая схема logfmt.
+        add->click();
+        typeInto(name, QStringLiteral("Detected"));
+        sample->setPlainText(QStringLiteral(
+            "ts=2026-11-18T10:00:00Z level=info msg=\"Starting\" caller=main.go:12\n"
+            "ts=2026-11-18T10:00:01Z level=error msg=\"boom\" caller=db.go:7"));
+        autoDetect->click();
+        check(format->currentData().toString() == QLatin1String("logfmt"), "editor: Auto-detect proposes logfmt");
+        check(columns->text() == QLatin1String("caller"), "editor: Auto-detect fills columns: " + columns->text());
+        apply->click();
+
+        // Строка JSON в меньшинстве — регексное предложение, не ключевое.
+        add->click();
+        typeInto(name, QStringLiteral("Mostly plain"));
+        sample->setPlainText(QStringLiteral(
+            "{\"level\":\"info\",\"msg\":\"x\"}\n"
+            "2026-11-18 10:00:00 INFO first\n"
+            "2026-11-18 10:00:01 WARN second"));
+        autoDetect->click();
+        check(format->currentData().toString() == QLatin1String("blocks"),
+              "editor: a JSON line in the minority gives a block schema");
+        apply->click();
+
+        list = dlg.resultPatterns();
+    }
+    check(SchemaStore::sync(list), "editor: sync keyed schemas");
+    const QJsonObject app = readJson(patterns().filePath(QStringLiteral("App JSON.json")));
+    const QJsonObject keyed = app.value(QStringLiteral("keyed")).toObject();
+    check(app.value(QStringLiteral("version")).toInt() == 3, "editor: keyed schema saved as version 3");
+    check(keyed.value(QStringLiteral("format")).toString() == QLatin1String("json")
+              && keyed.value(QStringLiteral("timeKeys")).toArray() == QJsonArray({"when", "ts"})
+              && keyed.value(QStringLiteral("extraColumns")).toArray() == QJsonArray({"service", "trace_id", "user"})
+              && keyed.value(QStringLiteral("epochUnit")).toString() == QLatin1String("ms")
+              && keyed.value(QStringLiteral("numericLevels")).toString() == QLatin1String("python")
+              && keyed.value(QStringLiteral("levelKeys")).toArray()
+                     == QJsonArray::fromStringList(KeyedDefinition::defaultLevelKeys()),
+          "editor: keyed part saved: " + QString::fromUtf8(QJsonDocument(keyed).toJson(QJsonDocument::Compact)));
+    check(blocksOf(app).size() == 1, "editor: fallback Message block saved");
+    const SchemaStore::SchemaList loaded = SchemaStore::loadAll();
+    const SchemaStore::SchemaEntry* detected = findByName(loaded, QStringLiteral("Detected"));
+    check(detected && LogPattern(detected->schema).isKeyed()
+              && LogPattern(detected->schema).keyed()->format == KeyedDefinition::Format::Logfmt,
+          "editor: auto-detected logfmt schema saved");
+    // Файл, сохранённый редактором, ничем не отличается от загруженного:
+    // следующая правка каталога его не переписывает.
+    const QByteArray before = readBytes(patterns().filePath(QStringLiteral("App JSON.json")));
+    check(SchemaStore::sync(SchemaStore::loadAll()), "editor: sync again");
+    check(readBytes(patterns().filePath(QStringLiteral("App JSON.json"))) == before, "editor: saved keyed file is stable");
+
+    // Ключ, который через запятую не записать («a,b», « pad »), переживает
+    // Apply правки описания: нетронутое поле отдаёт список как был.
+    {
+        PatternDefinition def;
+        KeyedDefinition k;
+        k.extraColumns = {QStringLiteral("a,b"), QStringLiteral(" pad ")};
+        def.keyed = k;
+        QJsonObject obj = QJsonDocument::fromJson(LogPattern::serializeDefinition(def).toUtf8()).object();
+        obj.insert(QStringLiteral("name"), QStringLiteral("Commas"));
+        writeBytes(patterns().filePath(QStringLiteral("commas.json")), QJsonDocument(obj).toJson());
+    }
+    list = SchemaStore::loadAll();
+    {
+        ConversionPatternDialog dlg(list);
+        auto* table = child<QTableWidget>(&dlg, "schemaTable");
+        auto* description = child<QLineEdit>(&dlg, "descriptionEdit");
+        auto* apply = child<QPushButton>(&dlg, "applyBtn");
+        if (!table || !description || !apply)
+            return;
+        table->setCurrentCell(rowOf(table, QStringLiteral("Commas")), 0);
+        typeInto(description, QStringLiteral("touched"));
+        apply->click();
+        list = dlg.resultPatterns();
+    }
+    check(SchemaStore::sync(list), "editor: sync commas");
+    check(readJson(patterns().filePath(QStringLiteral("commas.json"))).value(QStringLiteral("keyed")).toObject()
+                  .value(QStringLiteral("extraColumns")).toArray() == QJsonArray({"a,b", " pad "}),
+          "editor: keys with a comma or padding survive Apply");
 }
 } // namespace
 
@@ -673,6 +881,7 @@ int main(int argc, char** argv)
 
     testDialog();
     testKeyedSchema();
+    testKeyedEditor();
 
     clearPatterns();
     QFile::remove(AppSettings::iniFilePath());

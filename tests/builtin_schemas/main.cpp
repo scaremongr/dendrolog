@@ -23,8 +23,10 @@
 #include "testdocuments.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
@@ -58,10 +60,23 @@ struct Sample {
     QString line;
     bool    continuation = false;   // строка-продолжение: схема её не принимает
     Fields  fields;
+    qint64  ms = kNoTimestampMs;    // заданный момент записи (ключевые схемы); нет — не сверяется
 };
 
 Sample rec(const QString& line, const Fields& fields) { return {line, false, fields}; }
+// Запись ключевой схемы с заданным моментом (F-4): время берётся из ключа.
+Sample krec(const QString& line, const Fields& fields, qint64 ms) { return {line, false, fields, ms}; }
 Sample cont(const QString& line) { return {line, true, {}}; }
+
+qint64 utcMs(const char* iso)
+{
+    return QDateTime::fromString(QString::fromLatin1(iso), Qt::ISODateWithMs).toMSecsSinceEpoch();
+}
+
+qint64 localMs(int y, int mo, int d, int h, int mi, int s)
+{
+    return QDateTime(QDate(y, mo, d), QTime(h, mi, s)).toMSecsSinceEpoch();
+}
 
 struct SchemaCase {
     QString file;
@@ -295,6 +310,73 @@ QVector<SchemaCase> cases()
             {{"Level", "CRITICAL"}, {"Logger", "root"}, {"Message", "Out of disk space"}}),
     }});
 
+    // Ключевые схемы (F-4, PR 4): поля и момент — из ключей; значения
+    // полей — раскодированные (LogEntryFields::value).
+    c.append({QStringLiteral("json-lines.json"), QStringLiteral("JSON Lines"), {
+        krec(QStringLiteral(R"({"ts":"2026-11-18T13:55:36.123Z","level":"info","msg":"Server started","port":8080})"),
+             {{"Timestamp", "2026-11-18T13:55:36.123Z"}, {"Level", "info"}, {"Message", "Server started"}},
+             utcMs("2026-11-18T13:55:36.123Z")),
+        // pino: эпоха в мс и числовой уровень.
+        krec(QStringLiteral(R"({"level":30,"time":1763474136456,"pid":123,"hostname":"web01","msg":"request completed"})"),
+             {{"Timestamp", "1763474136456"}, {"Level", "30"}, {"Message", "request completed"}},
+             1763474136456LL),
+        krec(QStringLiteral(R"({"level":50,"time":1763474137000,"msg":"Failed to open \"C:\\temp\\a.log\"\nretrying","err":{"type":"Error"}})"),
+             {{"Timestamp", "1763474137000"}, {"Level", "50"},
+              {"Message", QStringLiteral("Failed to open \"C:\\temp\\a.log\"\nretrying")}},
+             1763474137000LL),
+        cont(QStringLiteral("java.lang.IllegalStateException: boom")),
+        cont(QStringLiteral("\tat com.example.Main.run(Main.java:42)")),
+        // Serilog CLEF: дробь в 7 знаков и зона.
+        krec(QStringLiteral(R"({"@t":"2026-11-18T13:55:38.0000000+01:00","@l":"Warning","@mt":"Disk {Drive} low","Drive":"C:"})"),
+             {{"Timestamp", "2026-11-18T13:55:38.0000000+01:00"}, {"Level", "Warning"}, {"Message", "Disk {Drive} low"}},
+             utcMs("2026-11-18T12:55:38Z")),
+        // structlog: «event», ключи в любом порядке.
+        krec(QStringLiteral(R"({"event":"user logged in","level":"debug","timestamp":"2026-11-18T13:55:39.5Z","user":"bob"})"),
+             {{"Timestamp", "2026-11-18T13:55:39.5Z"}, {"Level", "debug"}, {"Message", "user logged in"}},
+             utcMs("2026-11-18T13:55:39.500Z")),
+        // ECS: ключ «log.level» дословно; затем путь во вложенный объект.
+        krec(QStringLiteral(R"({"@timestamp":"2026-11-18T13:55:40Z","log.level":"error","message":"db timeout"})"),
+             {{"Timestamp", "2026-11-18T13:55:40Z"}, {"Level", "error"}, {"Message", "db timeout"}},
+             utcMs("2026-11-18T13:55:40Z")),
+        cont(QStringLiteral(R"(  "pretty": "printed")")),
+        krec(QStringLiteral(R"({"time":"2026-11-18T13:55:41Z","log":{"level":"warn","logger":"app"},"msg":"cache miss"})"),
+             {{"Timestamp", "2026-11-18T13:55:41Z"}, {"Level", "warn"}, {"Message", "cache miss"}},
+             utcMs("2026-11-18T13:55:41Z")),
+        // json.dumps по умолчанию: кириллица \u-последовательностями, эпоха в секундах.
+        krec(QStringLiteral(R"({"ts":1763474142,"level":"info","msg":"\u041f\u0440\u0438\u0432\u0435\u0442"})"),
+             {{"Timestamp", "1763474142"}, {"Level", "info"}, {"Message", QStringLiteral("Привет")}},
+             1763474142000LL),
+    }});
+
+    c.append({QStringLiteral("logfmt.json"), QStringLiteral("logfmt"), {
+        krec(QStringLiteral(R"(ts=2026-11-18T13:55:36.123Z level=info msg="Server started" port=8080)"),
+             {{"Timestamp", "2026-11-18T13:55:36.123Z"}, {"Level", "info"}, {"Message", "Server started"}},
+             utcMs("2026-11-18T13:55:36.123Z")),
+        // Время без зоны — локальное, как у строки без схемы.
+        krec(QStringLiteral(R"(time="2026-11-18 13:55:37" level=warning msg="disk \"/var\" almost full" component=storage)"),
+             {{"Timestamp", "2026-11-18 13:55:37"}, {"Level", "warning"}, {"Message", "disk \"/var\" almost full"}},
+             localMs(2026, 11, 18, 13, 55, 37)),
+        // logrus.
+        krec(QStringLiteral(R"(time="2026-11-18T13:55:38+01:00" level=error msg="connection refused" err="dial tcp 10.0.0.1:5432: connect: connection refused")"),
+             {{"Timestamp", "2026-11-18T13:55:38+01:00"}, {"Level", "error"}, {"Message", "connection refused"}},
+             utcMs("2026-11-18T12:55:38Z")),
+        cont(QStringLiteral("goroutine 1 [running]:")),
+        cont(QStringLiteral("\tmain.main()")),
+        cont(QStringLiteral("  /usr/local/go/src/runtime/panic.go:770 +0x132")),
+        // Go slog.
+        krec(QStringLiteral(R"(time=2026-11-18T13:55:39.000+00:00 level=DEBUG source=main.go:42 msg="cache miss" key=user:42)"),
+             {{"Timestamp", "2026-11-18T13:55:39.000+00:00"}, {"Level", "DEBUG"}, {"Message", "cache miss"}},
+             utcMs("2026-11-18T13:55:39Z")),
+        // Loki / Prometheus: сообщение после других ключей.
+        krec(QStringLiteral(R"(ts=2026-11-18T13:55:40.5Z caller=main.go:12 level=info msg="Starting Loki")"),
+             {{"Timestamp", "2026-11-18T13:55:40.5Z"}, {"Level", "info"}, {"Message", "Starting Loki"}},
+             utcMs("2026-11-18T13:55:40.500Z")),
+        // Эпоха в секундах и «lvl».
+        krec(QStringLiteral(R"(t=1763474141 lvl=warn msg="shutting down")"),
+             {{"Timestamp", "1763474141"}, {"Level", "warn"}, {"Message", "shutting down"}},
+             1763474141000LL),
+    }});
+
     return c;
 }
 
@@ -323,7 +405,7 @@ QString describeFields(const LogPattern& pattern, const QString& line, const Log
     QStringList parts;
     const QStringList names = pattern.fieldNames();
     for (int i = 0; i < names.size(); ++i)
-        parts << QStringLiteral("%1=«%2»").arg(names[i], f.get(i, line).toString());
+        parts << QStringLiteral("%1=«%2»").arg(names[i], f.value(i, line));
     return parts.join(QStringLiteral(", "));
 }
 
@@ -337,7 +419,7 @@ QString compareFields(const LogPattern& pattern, const QString& line,
             return QStringLiteral("в схеме нет поля %1").arg(it.key());
     }
     for (int i = 0; i < names.size(); ++i) {
-        const QString got = f.get(i, line).toString();
+        const QString got = f.value(i, line);
         const QString want = expected.value(names[i]);
         if (got != want)
             return QStringLiteral("поле %1: «%2», ожидалось «%3»; все поля: %4")
@@ -413,8 +495,52 @@ bool expectsTime(const SchemaCase& sc, const Sample& s)
     return sc.file != QStringLiteral("python-basicconfig.json");   // времени нет вовсе
 }
 
+bool isKeyedCase(const SchemaCase& sc)
+{
+    return LogPattern(schemaOf(sc.file)).isKeyed();
+}
+
+// Ключевая схема (F-4): момент и «распознана» — из ключей
+// (LineClassifier::classifyKeyed), заданный момент каждой записи; строки
+// продолжений схема не распознаёт. Формат строки по образцу
+// (PatternHeuristics::detectLineFormat) — формат схемы, у регексных
+// схем — «блоки».
+void testKeyedClassification(const SchemaCase& sc)
+{
+    const LogPattern pattern(schemaOf(sc.file));
+    const bool keyed = pattern.isKeyed();
+    PatternHeuristics::LineFormat expected = PatternHeuristics::LineFormat::Blocks;
+    if (keyed)
+        expected = pattern.keyed()->format == KeyedDefinition::Format::Logfmt
+            ? PatternHeuristics::LineFormat::Logfmt : PatternHeuristics::LineFormat::Json;
+    const LineClassifier classifier;
+    for (const Sample& s : sc.samples) {
+        if (s.continuation)
+            continue;
+        check(PatternHeuristics::detectLineFormat(s.line) == expected,
+              QStringLiteral("%1: формат строки по образцу: %2").arg(sc.file, s.line));
+        if (!keyed)
+            continue;
+        const KeyedClassification k = classifier.classifyKeyed(pattern, s.line);
+        check(k.matched && k.hasTs && k.tsMs == s.ms,
+              QStringLiteral("%1: момент из ключа %2, ожидалось %3: %4")
+                  .arg(sc.file).arg(k.tsMs).arg(s.ms).arg(s.line));
+        check(k.hasLevel, QStringLiteral("%1: уровень из ключа: %2").arg(sc.file, s.line));
+    }
+    if (!keyed)
+        return;
+    for (const Sample& s : sc.samples)
+        if (s.continuation)
+            check(!classifier.classifyKeyed(pattern, s.line).matched,
+                  QStringLiteral("%1: продолжение не распознано: %2").arg(sc.file, s.line));
+    check(pattern.fieldNames().mid(0, 3) == QStringList({"Timestamp", "Level", "Message"}),
+          QStringLiteral("%1: колонки ролей").arg(sc.file));
+}
+
 void testClassifierTime(const SchemaCase& sc)
 {
+    if (isKeyedCase(sc))
+        return;   // время — из ключа: testKeyedClassification
     const LineClassifier classifier;
     for (const Sample& s : sc.samples) {
         if (s.continuation)
@@ -498,6 +624,10 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
         check(r.ms == x.ms,
               QStringLiteral("%1: момент строки %2 у бэкендов: %3 | %4")
                   .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms));
+        if (!s.continuation && s.ms != kNoTimestampMs)
+            check(r.ms == s.ms && x.ms == s.ms,
+                  QStringLiteral("%1: момент строки %2: %3 | %4, ожидалось %5")
+                      .arg(sc.file).arg(i + 1).arg(r.ms).arg(x.ms).arg(s.ms));
         if (!s.continuation)
             check(hasTimestampMs(r.ms) == expectsTime(sc, s),
                   QStringLiteral("%1: у записи строки %2 %3момент: %4")
@@ -520,6 +650,8 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
 // Пустая схема = схема не участвует, как при выключенном Filter blocks.
 void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
 {
+    if (isKeyedCase(sc))
+        return;   // эпоху числом и уровень из ключа без схемы не видно (F-4)
     for (const Sample& s : sc.samples)
         if (!s.continuation && !expectsTime(sc, s))
             return;   // запись без метки отличает только схема (basicConfig)
@@ -801,6 +933,76 @@ void testUpgradeFromQ5()
     }
 }
 
+// Встроенные ключевые схемы (F-4, PR 4) доезжают до пользователя прежнего
+// выпуска: ставятся рядом с его схемами, своя схема с тем же файлом или
+// именем их отклоняет; пересохранение нетронутой не делает её «изменённой».
+void testKeyedArrival()
+{
+    const QStringList keyedFiles = {QStringLiteral("json-lines.json"), QStringLiteral("logfmt.json")};
+    for (const QString& f : keyedFiles) {
+        const QJsonObject obj = QJsonDocument::fromJson(readAll(QDir(kSourceDir).filePath(f))).object();
+        check(obj.value(QStringLiteral("version")).toInt() == 3 && obj.contains(QStringLiteral("keyed")),
+              QStringLiteral("%1: формат версии 3 с ключевой частью").arg(f));
+        const QJsonArray blocks = obj.value(QStringLiteral("blocks")).toArray();
+        check(blocks.size() == 1
+                  && blocks[0].toObject().value(QStringLiteral("name")).toString() == QLatin1String("Message"),
+              QStringLiteral("%1: запасной блок Message для версий без F-4").arg(f));
+        check(LogPattern(schemaOf(f)).isKeyed(), QStringLiteral("%1: ключевая схема").arg(f));
+    }
+
+    QTemporaryDir tmpDir;
+    const QDir tmp(tmpDir.path());
+    // Прежний выпуск — без ключевых схем.
+    const QString old = makeSource(tmp, QStringLiteral("v06"));
+    for (const QString& f : keyedFiles)
+        QFile::remove(QDir(old).filePath(f));
+
+    const QString target = tmp.filePath(QStringLiteral("arrive/patterns"));
+    BuiltinSchemas::InstallReport r = BuiltinSchemas::install(old, target);
+    check(r.errors.isEmpty() && !r.installed.contains(keyedFiles[0]), QStringLiteral("прежний выпуск поставлен"));
+    r = BuiltinSchemas::install(kSourceDir, target);
+    check(r.errors.isEmpty() && r.installed == keyedFiles && r.updated.isEmpty(),
+          QStringLiteral("доезжают обе ключевые схемы: %1").arg(r.installed.join(QLatin1Char(' '))));
+    for (const QString& f : keyedFiles)
+        check(readAll(QDir(target).filePath(f)) == readAll(QDir(kSourceDir).filePath(f)),
+              QStringLiteral("%1 скопирован байт в байт").arg(f));
+    r = BuiltinSchemas::install(kSourceDir, target);
+    check(!r.changed() && r.declined.isEmpty(), QStringLiteral("ключевые: повторный запуск ничего не делает"));
+
+    // Пересохранение каноническим определением (так пишет каталог схем) —
+    // та же схема: следующий выпуск её обновит.
+    {
+        const QString p = QDir(target).filePath(keyedFiles[0]);
+        QJsonObject obj = QJsonDocument::fromJson(readAll(p)).object();
+        const QJsonObject canonical = QJsonDocument::fromJson(schemaOf(keyedFiles[0]).toUtf8()).object();
+        for (auto it = canonical.begin(); it != canonical.end(); ++it)
+            obj.insert(it.key(), it.value());
+        check(writeAll(p, QJsonDocument(obj).toJson(QJsonDocument::Compact)), QStringLiteral("пересохранение"));
+        const QString v2 = makeSource(tmp, QStringLiteral("v2keyed"));
+        QJsonObject fixedKeyed = obj.value(QStringLiteral("keyed")).toObject();
+        fixedKeyed.insert(QStringLiteral("extraColumns"), QJsonArray({QStringLiteral("logger")}));
+        check(patchSchema(QDir(v2).filePath(keyedFiles[0]), QStringLiteral("keyed"), fixedKeyed),
+              QStringLiteral("исправление ключевой части в новом выпуске"));
+        r = BuiltinSchemas::install(v2, target);
+        check(r.updated == QStringList{keyedFiles[0]},
+              QStringLiteral("пересохранённая нетронутая обновляется: %1").arg(r.updated.join(QLatin1Char(' '))));
+    }
+
+    // У пользователя уже есть свой logfmt.json и своя схема «JSON Lines».
+    const QString target2 = tmp.filePath(QStringLiteral("own/patterns"));
+    QDir().mkpath(target2);
+    const QByteArray ownLogfmt = "{\"name\": \"My logfmt\", \"blocks\": [{\"name\": \"Message\", \"kind\": \"remainder\"}]}";
+    const QByteArray ownJson = "{\"name\": \"JSON Lines\", \"blocks\": [{\"name\": \"Message\", \"kind\": \"remainder\"}]}";
+    check(writeAll(QDir(target2).filePath(QStringLiteral("logfmt.json")), ownLogfmt), QStringLiteral("свой logfmt.json"));
+    check(writeAll(QDir(target2).filePath(QStringLiteral("my-json.json")), ownJson), QStringLiteral("своя «JSON Lines»"));
+    r = BuiltinSchemas::install(old, target2);
+    r = BuiltinSchemas::install(kSourceDir, target2);
+    check(r.declined == keyedFiles,
+          QStringLiteral("свои файл и имя отклоняют ключевые: %1").arg(r.declined.join(QLatin1Char(' '))));
+    check(readAll(QDir(target2).filePath(QStringLiteral("logfmt.json"))) == ownLogfmt, QStringLiteral("свой logfmt.json цел"));
+    check(!QFile::exists(QDir(target2).filePath(QStringLiteral("json-lines.json"))), QStringLiteral("дубль имени не создан"));
+}
+
 void testQrc()
 {
     const QString qrc = QString::fromUtf8(readAll(QDir(kSourceDir).filePath(QStringLiteral("../resources.qrc"))));
@@ -836,9 +1038,11 @@ int main(int argc, char** argv)
         testBackends(sc, QDir(tmpDir.path()));
         testBackendsWithoutExtraction(sc, QDir(tmpDir.path()));
         testClassifierTime(sc);
+        testKeyedClassification(sc);
     }
     testInstall();
     testUpgradeFromQ5();
+    testKeyedArrival();
     testAutoDetectTimestamp();
     testQrc();
 

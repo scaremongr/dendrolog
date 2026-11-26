@@ -1,0 +1,47 @@
+{
+    "name": "logfmt",
+    "description": "key=value pairs (logrus, Go slog, Grafana Loki, Prometheus): time, level and message are taken from keys; quoted values are shown decoded.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ],
+    "keyed": {
+        "format": "logfmt",
+        "timeKeys": [
+            "ts",
+            "time",
+            "timestamp",
+            "@timestamp",
+            "@t",
+            "t"
+        ],
+        "levelKeys": [
+            "level",
+            "lvl",
+            "severity",
+            "loglevel",
+            "levelname",
+            "log.level",
+            "@l"
+        ],
+        "messageKeys": [
+            "msg",
+            "message",
+            "@m",
+            "@mt",
+            "event"
+        ],
+        "extraColumns": [],
+        "epochUnit": "auto",
+        "numericLevels": "auto"
+    }
+}

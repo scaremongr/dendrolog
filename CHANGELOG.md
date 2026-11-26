@@ -7,6 +7,24 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **JSON Lines and logfmt.** New built-in field schemas **JSON Lines** (one
+  JSON object per line: pino, Bunyan, Serilog CLEF, structlog, zap, ECS) and
+  **logfmt** (`key=value` pairs: logrus, Go slog, Loki, Prometheus). With
+  **Filter blocks** on, the time, level and message come from keys in any
+  order: the time as a timestamp string or an epoch number (seconds to
+  nanoseconds, picked by size), the level as a word or a number (syslog 0–7,
+  pino / Bunyan 10–60, Python on request). They drive the level buttons, the
+  time filter, the timeline and the merge order of several files, on both
+  storage paths. Field values are shown and filtered decoded (`\"`, `\\`,
+  `\uXXXX`); a line that is not a JSON object or logfmt pairs (a stack trace,
+  indented pretty JSON) continues the record above it. The schema editor gets
+  a **Format** switch — `Blocks`, `JSON`, `logfmt` — with the time, level and
+  message keys, extra columns (**Add keys from sample**), the epoch unit and
+  the numeric level scale, previewed live on the sample lines; **Suggest
+  schema** proposes a key-based schema for JSON or logfmt lines. Schema files
+  stay at format version 3 (older versions read such a schema as a single
+  `Message` column and keep its key part when saving it). For now the keys
+  are applied when a file is read: pick the schema before opening the file.
 - **Compressed logs.** A `.gz` file opens in a tab like any log — from the
   Open dialog, a drop, the command line, Recent Files or the Directory
   Scanner; gzip is recognised

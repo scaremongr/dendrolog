@@ -1,0 +1,47 @@
+{
+    "name": "JSON Lines",
+    "description": "One JSON object per line (pino, Bunyan, Serilog CLEF, structlog, zap, ECS): time, level and message are taken from keys, epoch numbers and numeric levels included.",
+    "version": 3,
+    "type": "dynamic-block-schema",
+    "linePrefix": "",
+    "blocks": [
+        {
+            "name": "Message",
+            "kind": "remainder",
+            "leadingText": "",
+            "closingText": "",
+            "separator": "",
+            "customRegex": ""
+        }
+    ],
+    "keyed": {
+        "format": "json",
+        "timeKeys": [
+            "ts",
+            "time",
+            "timestamp",
+            "@timestamp",
+            "@t",
+            "t"
+        ],
+        "levelKeys": [
+            "level",
+            "lvl",
+            "severity",
+            "loglevel",
+            "levelname",
+            "log.level",
+            "@l"
+        ],
+        "messageKeys": [
+            "msg",
+            "message",
+            "@m",
+            "@mt",
+            "event"
+        ],
+        "extraColumns": [],
+        "epochUnit": "auto",
+        "numericLevels": "auto"
+    }
+}

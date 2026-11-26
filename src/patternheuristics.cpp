@@ -213,8 +213,183 @@ QString levelDetectPattern()
 // Auto-detect
 // ---------------------------------------------------------------- //
 
+// ---------------------------------------------------------------- //
+// Ключевая схема по образцам (F-4, PR 4)
+// ---------------------------------------------------------------- //
+
+namespace {
+
+QString pairKey(QStringView line, const KeyedLine::Pair& pair)
+{
+    const QStringView key = line.mid(pair.keyStart, pair.keyLength);
+    return pair.keyEscaped ? KeyedLine::unescape(key) : key.toString();
+}
+
+// Ключи верхнего уровня строки (повторный — один раз). objects — ключи,
+// чьё значение — вложенный объект.
+QStringList topLevelKeys(QStringView line, KeyedDefinition::Format format,
+                         QSet<QString>* objects = nullptr)
+{
+    QStringList keys;
+    KeyedLine::PairReader reader(line, format);
+    KeyedLine::Pair pair;
+    while (reader.next(&pair)) {
+        const QString key = pairKey(line, pair);
+        if (key.isEmpty() || keys.contains(key))
+            continue;
+        keys.append(key);
+        if (objects && pair.kind == KeyedLine::ValueKind::Object)
+            objects->insert(key);
+    }
+    return keys;
+}
+
+KeyedDefinition::Format keyedFormat(LineFormat format)
+{
+    return format == LineFormat::Logfmt ? KeyedDefinition::Format::Logfmt
+                                        : KeyedDefinition::Format::JsonObject;
+}
+
+LineFormat lineFormatOf(KeyedDefinition::Format format)
+{
+    return format == KeyedDefinition::Format::Logfmt ? LineFormat::Logfmt : LineFormat::Json;
+}
+
+} // namespace
+
+LineFormat detectLineFormat(QStringView line)
+{
+    if (line.isEmpty())
+        return LineFormat::Blocks;
+    KeyedLine::Pair pair;
+    if (line.front() == QLatin1Char('{')) {
+        KeyedLine::PairReader reader(line, KeyedDefinition::Format::JsonObject);
+        return reader.next(&pair) ? LineFormat::Json : LineFormat::Blocks;
+    }
+    KeyedLine::PairReader reader(line, KeyedDefinition::Format::Logfmt);
+    if (!reader.structured())
+        return LineFormat::Blocks;
+    int pairs = 0;
+    while (pairs < 2 && reader.next(&pair))
+        ++pairs;
+    return pairs >= 2 ? LineFormat::Logfmt : LineFormat::Blocks;
+}
+
+QStringList keyedSampleKeys(const QStringList& sampleLines, const KeyedDefinition& definition,
+                            double minShare)
+{
+    const LineFormat wanted = lineFormatOf(definition.format);
+    QSet<QString> excluded;   // точные ключи ролей и колонок
+    for (const QStringList* list : {&definition.timeKeys, &definition.levelKeys,
+                                    &definition.messageKeys, &definition.extraColumns})
+        for (const QString& key : *list)
+            excluded.insert(key);
+    QSet<QString> takenNames;  // имена колонок без учёта регистра
+    for (const QString& name : definition.columnNames())
+        takenNames.insert(name.trimmed().toLower());
+    // Первый сегмент пути ключа роли («log» у «log.level»): вложенный объект
+    // под ним — место роли, колонкой он повторил бы её.
+    QSet<QString> rolePathHeads;
+    for (const QStringList* list : {&definition.timeKeys, &definition.levelKeys,
+                                    &definition.messageKeys})
+        for (const QString& key : *list)
+            if (key.contains(QLatin1Char('.')))
+                rolePathHeads.insert(key.section(QLatin1Char('.'), 0, 0));
+    QSet<QString> objectKeys;
+
+    QStringList order;
+    QHash<QString, int> counts;
+    int lines = 0;
+    for (const QString& line : sampleLines) {
+        if (detectLineFormat(line) != wanted)
+            continue;
+        ++lines;
+        for (const QString& key : topLevelKeys(line, definition.format, &objectKeys)) {
+            if (!counts.contains(key))
+                order.append(key);
+            ++counts[key];
+        }
+    }
+
+    QStringList result;
+    for (const QString& key : order) {
+        // Ключ с запятой или пробелом по краям редактор (список через
+        // запятую) не запишет — не предлагать.
+        if (excluded.contains(key) || key.trimmed() != key || key.isEmpty()
+                || key.contains(QLatin1Char(',')))
+            continue;
+        if (rolePathHeads.contains(key) && objectKeys.contains(key))
+            continue;
+        if (counts.value(key) <= minShare * lines)
+            continue;
+        const QString folded = key.trimmed().toLower();
+        if (takenNames.contains(folded))
+            continue;
+        takenNames.insert(folded);
+        result.append(key);
+    }
+    return result;
+}
+
+bool suggestKeyedSchema(const QStringList& sampleLines, PatternDefinition* definition)
+{
+    int nonEmpty = 0, json = 0, logfmt = 0;
+    for (const QString& line : sampleLines) {
+        if (line.trimmed().isEmpty())
+            continue;
+        ++nonEmpty;
+        switch (detectLineFormat(line)) {
+        case LineFormat::Json:   ++json; break;
+        case LineFormat::Logfmt: ++logfmt; break;
+        case LineFormat::Blocks: break;
+        }
+    }
+    const LineFormat format = json * 2 > nonEmpty ? LineFormat::Json
+        : logfmt * 2 > nonEmpty ? LineFormat::Logfmt
+        : LineFormat::Blocks;
+    if (format == LineFormat::Blocks)
+        return false;
+
+    KeyedDefinition keyed;
+    keyed.format = keyedFormat(format);
+    // Ключ роли в другом регистре («Timestamp», «LogLevel», «Message» у
+    // .NET) — ключ этой роли: колонка с именем роли была бы повтором.
+    // Короче трёх символов — не повышается («T» — не «t»).
+    for (const QString& line : sampleLines) {
+        if (detectLineFormat(line) != format)
+            continue;
+        for (const QString& key : topLevelKeys(line, keyed.format)) {
+            if (key.size() < 3)
+                continue;
+            for (QStringList* roleKeys : {&keyed.timeKeys, &keyed.levelKeys, &keyed.messageKeys}) {
+                if (roleKeys->contains(key))
+                    break;
+                if (roleKeys->contains(key, Qt::CaseInsensitive)) {
+                    roleKeys->append(key);
+                    break;
+                }
+            }
+        }
+    }
+    keyed.extraColumns = keyedSampleKeys(sampleLines, keyed, 0.5);
+
+    PatternDefinition def;
+    PatternBlock message;
+    message.name = QStringLiteral("Message");
+    message.matchKind = PatternBlock::MatchKind::Remainder;
+    def.blocks.append(message);
+    def.keyed = keyed;
+    *definition = def;
+    return true;
+}
+
 PatternDefinition suggestSchema(const QString& sampleLine)
 {
+    if (detectLineFormat(sampleLine) != LineFormat::Blocks) {
+        PatternDefinition keyed;
+        if (suggestKeyedSchema({sampleLine}, &keyed))
+            return keyed;
+    }
     PatternDefinition def;
     const QString line = sampleLine;
     const int n = line.size();

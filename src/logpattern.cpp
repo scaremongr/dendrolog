@@ -638,8 +638,13 @@ bool LogPattern::validateDefinition(const PatternDefinition& definition,
     if (definition.keyed) {
         // Ключевая схема: блоки — запасные (их пишет serializeDefinition),
         // проверяются колонки — правила фильтров привязаны к ним по имени.
+        const KeyedDefinition& k = *definition.keyed;
+        // Строку распознаёт только ключ роли: без них схема не узнает ни
+        // одной строки (keyedline.h).
+        if (k.timeKeys.isEmpty() && k.levelKeys.isEmpty() && k.messageKeys.isEmpty())
+            return fail(QObject::tr("Set at least one time, level or message key."));
         QSet<QString> seen;
-        for (const QString& name : definition.keyed->columnNames()) {
+        for (const QString& name : k.columnNames()) {
             const QString trimmed = name.trimmed();
             if (trimmed.isEmpty())
                 return fail(QObject::tr("Column key is empty."));

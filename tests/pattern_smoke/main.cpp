@@ -392,6 +392,128 @@ int main(int argc, char** argv)
               QString("kernel Source Line extracted, got '%1'").arg(fieldValue(kp, good, "Source Line")));
     }
 
+    // 13. Формат строки и ключевая схема по образцам (F-4, PR 4)
+    {
+        using PatternHeuristics::LineFormat;
+        const struct { const char* line; LineFormat format; } formats[] = {
+            { R"({"ts":"2026-11-18T10:00:00Z","level":"info","msg":"started"})", LineFormat::Json },
+            { R"({"time":1700000000123,"level":30,"msg":"x"})", LineFormat::Json },
+            { R"({"a":1})", LineFormat::Json },
+            { R"({"msg":"cut in the mid)", LineFormat::Blocks },   // ни одной полной пары
+            { R"({})", LineFormat::Blocks },
+            { R"(  {"ts":1,"msg":"indented"})", LineFormat::Blocks },
+            { R"({main} INFO started)", LineFormat::Blocks },
+            { R"(ts=2026-11-18T10:00:00Z level=info msg="request done" status=200)", LineFormat::Logfmt },
+            { R"(level=warn msg=x)", LineFormat::Logfmt },
+            { R"(user=bob logged in)", LineFormat::Blocks },        // одна пара — не logfmt
+            { R"(2026-11-18 10:00:00 INFO a=b c=d)", LineFormat::Blocks },
+            { R"(Caused by: x=1 y=2)", LineFormat::Blocks },
+            { "", LineFormat::Blocks },
+            { "2025-06-11 12:00:01,123 [worker-1] ERROR Some.Logger - message here", LineFormat::Blocks },
+        };
+        for (const auto& f : formats) {
+            const QString line = QString::fromUtf8(f.line);
+            CHECK(PatternHeuristics::detectLineFormat(line) == f.format,
+                  QString("detectLineFormat(%1) = %2").arg(line).arg(int(f.format)));
+        }
+
+        // JSON: формат, роли, колонки из ключей большинства образцов.
+        const QStringList json = {
+            R"({"ts":"2026-11-18T10:00:00Z","level":"info","msg":"a","service":"api","trace_id":"t1"})",
+            R"({"ts":"2026-11-18T10:00:01Z","level":"warn","msg":"b","service":"api","user":"bob"})",
+            "",
+            R"({"time":1763460002,"level":"error","message":"c","service":"db","user":"eve"})",
+        };
+        PatternDefinition d;
+        CHECK(PatternHeuristics::suggestKeyedSchema(json, &d) && d.keyed
+                  && d.keyed->format == KeyedDefinition::Format::JsonObject,
+              "suggestKeyedSchema: JSON lines → keyed JSON schema");
+        if (d.keyed) {
+            CHECK(d.keyed->extraColumns == QStringList({"service", "user"}),
+                  QString("suggested columns: keys of most samples, roles excluded: %1")
+                      .arg(d.keyed->extraColumns.join(",")));
+            CHECK(d.keyed->timeKeys == KeyedDefinition::defaultTimeKeys()
+                      && d.keyed->levelKeys == KeyedDefinition::defaultLevelKeys(),
+                  "suggested role keys: defaults");
+            LogPattern kp(LogPattern::serializeDefinition(d));
+            CHECK(kp.isKeyed() && kp.matchLine(json[0]).ok, "suggested schema recognises its sample");
+            CHECK(fieldValue(kp, json[0], "service") == "api", "suggested column extracted");
+            // Остальные ключи образцов — для кнопки «Add keys from sample».
+            CHECK(PatternHeuristics::keyedSampleKeys(json, *d.keyed) == QStringList({"trace_id"}),
+                  QString("keys from sample beyond the columns: %1")
+                      .arg(PatternHeuristics::keyedSampleKeys(json, *d.keyed).join(",")));
+        }
+
+        // Ключи ролей не в том регистре (.NET JSON console) становятся
+        // ключами ролей, а не колонками с именем роли.
+        const QStringList dotnet = {
+            R"({"Timestamp":"2026-11-18T10:00:00Z","EventId":0,"LogLevel":"Warning","Category":"App","Message":"hi"})",
+        };
+        PatternDefinition dn;
+        CHECK(PatternHeuristics::suggestKeyedSchema(dotnet, &dn) && dn.keyed
+                  && dn.keyed->timeKeys.contains("Timestamp") && dn.keyed->levelKeys.contains("LogLevel")
+                  && dn.keyed->messageKeys.contains("Message")
+                  && dn.keyed->extraColumns == QStringList({"EventId", "Category"}),
+              QString("role keys in another case join the roles: columns %1")
+                  .arg(dn.keyed ? dn.keyed->extraColumns.join(",") : QString()));
+        if (dn.keyed) {
+            LogPattern dp(LogPattern::serializeDefinition(dn));
+            CHECK(dp.isValid() && fieldValue(dp, dotnet[0], "Level") == "Warning",
+                  ".NET sample: Level from LogLevel");
+        }
+
+        // logfmt в большинстве (одна строка — продолжение).
+        const QStringList logfmt = {
+            R"(ts=2026-11-18T10:00:00Z level=info msg="Starting" caller=main.go:12)",
+            R"(goroutine 1 [running]:)",
+            R"(ts=2026-11-18T10:00:01Z level=error msg="boom" caller=db.go:7 err="timeout")",
+        };
+        PatternDefinition lf;
+        CHECK(PatternHeuristics::suggestKeyedSchema(logfmt, &lf) && lf.keyed
+                  && lf.keyed->format == KeyedDefinition::Format::Logfmt
+                  && lf.keyed->extraColumns == QStringList({"caller"}),
+              "suggestKeyedSchema: logfmt majority → keyed logfmt schema");
+
+        // Вложенный объект под путём ключа роли («log» у «log.level») —
+        // не колонка; ключ из одной буквы не становится ключом роли.
+        const QStringList ecs = {
+            R"({"@timestamp":"2026-11-18T10:00:00Z","log":{"level":"info","logger":"a"},"message":"m"})",
+            R"({"@timestamp":"2026-11-18T10:00:01Z","log":{"level":"warn","logger":"b"},"message":"n"})",
+        };
+        PatternDefinition ed;
+        CHECK(PatternHeuristics::suggestKeyedSchema(ecs, &ed) && ed.keyed && ed.keyed->extraColumns.isEmpty(),
+              "ECS: the nested object of log.level is not a column");
+        PatternDefinition td;
+        CHECK(PatternHeuristics::suggestKeyedSchema({"ts=1 level=info msg=x T=42", "ts=2 level=info msg=y T=43"}, &td)
+                  && td.keyed && !td.keyed->timeKeys.contains("T")
+                  && td.keyed->extraColumns == QStringList({"T"}),
+              "a one-letter key is not promoted to a role key");
+        PatternDefinition noRoles;
+        KeyedDefinition empty;
+        empty.timeKeys.clear();
+        empty.levelKeys.clear();
+        empty.messageKeys.clear();
+        noRoles.keyed = empty;
+        CHECK(!LogPattern::validateDefinition(noRoles), "keyed schema without role keys is invalid");
+
+        // Обычные строки — не ключевая схема; suggestSchema по строке JSON /
+        // logfmt предлагает ключевую.
+        PatternDefinition none;
+        CHECK(!PatternHeuristics::suggestKeyedSchema(
+                  {"2025-06-11 12:00:01,123 [worker-1] ERROR Some.Logger - message here",
+                   R"({"ts":1,"msg":"x"})", "plain text"}, &none),
+              "suggestKeyedSchema: minority of JSON lines is not enough");
+        CHECK(PatternHeuristics::suggestSchema(json[0]).keyed.has_value(),
+              "suggestSchema on a JSON line → keyed schema");
+        CHECK(PatternHeuristics::suggestSchema(logfmt[0]).keyed
+                  && PatternHeuristics::suggestSchema(logfmt[0]).keyed->format
+                         == KeyedDefinition::Format::Logfmt,
+              "suggestSchema on a logfmt line → keyed logfmt schema");
+        CHECK(!PatternHeuristics::suggestSchema(
+                   "2025-06-11 12:00:01,123 [worker-1] ERROR Some.Logger - message here").keyed,
+              "suggestSchema on a plain line → blocks");
+    }
+
     qInfo().noquote() << (g_failures == 0 ? "\nALL TESTS PASSED"
                                           : QString("\n%1 TEST(S) FAILED").arg(g_failures));
     return g_failures == 0 ? 0 : 1;

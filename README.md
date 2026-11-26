@@ -43,7 +43,10 @@
 - **Field schemas** — split entries into structured fields (timestamp, level,
   thread, message…); ready-made schemas for Logback / Log4j, Spring Boot,
   nginx / Apache, syslog / journalctl, Serilog and Python logging, auto-detect
-  from a sample line or import a **Grok** expression.
+  from a sample line or import a **Grok** expression. **JSON Lines** and
+  **logfmt** logs take time, level and message from keys (epoch numbers and
+  pino levels included) with decoded values; build your own key-based schema
+  in the editor or let auto-detect propose it.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
   to show only, hide, highlight or find lines with it. **Show in Full Log**
