@@ -128,10 +128,18 @@ struct ViewState {
     static std::optional<LogLevel> levelFromName(QStringView name);
 };
 
-// Файл вкладки: идентичность по концу прочитанного и ручной выбор кодировки.
+// Файл вкладки: идентичность по концу прочитанного, ручной выбор кодировки и
+// своя схема полей файла слитой вкладки (F-5, PR 3).
+//   {"source":{…},"encoding":"Windows-1251",
+//    "schema":{"name":"nginx access","definition":{…}}}
+// schema — необязательное поле (версия формата не растёт): только если схема
+// файла отличается от схемы вкладки (ViewState.fields); у памяти файла слитой
+// вкладки — схема файла. "schema":null — файл без схемы во вкладке со схемой.
+// Значение — FieldSettings, у которого значат только schemaName и schema.
 struct TabSource {
     SourceIdentity source;
     std::optional<TextEncoding> userEncoding; // nullopt — решает автоматика
+    std::optional<FieldSettings> schema;      // nullopt — схема вкладки
 
     QJsonObject toJson() const;
     static std::optional<TabSource> fromJson(const QJsonObject& json, QString* error = nullptr);

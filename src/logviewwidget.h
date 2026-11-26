@@ -51,8 +51,16 @@ public:
     // первой строки — без лишнего перечитывания. Файл уже во вкладке — к нему
     // применяется выбор пользователя из initial (если он есть).
     void addLogFile(const QString &filePath, const FileEncoding& initial);
+    // То же со своей схемой файла (F-5, PR 3; FieldSettings — только имя и
+    // определение): файл читается ею с первой строки. Схема, равная схеме
+    // вкладки, своей не считается. Файл уже во вкладке — схема не меняется
+    // (смена — setFileSchema).
+    void addLogFile(const QString &filePath, const FileEncoding& initial,
+                    const FieldSettings& schema);
     // Объединение вкладок: файлы other добавляются сюда со своими состояниями
-    // кодировки (выбор пользователя и решение автоматики не теряются), а его
+    // кодировки (выбор пользователя и решение автоматики не теряются) и
+    // схемами (F-5, PR 3: схема файла в other — своя здесь, если отличается
+    // от схемы этой вкладки; колонки вкладки растут), а его
     // закладки — до файлов (BookmarkStore::restore): строки находятся по ходу
     // загрузки, заметки не теряются.
     void addFilesFrom(const LogViewWidget& other);
@@ -271,6 +279,39 @@ public:
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
+    // ---- Схема файла слитой вкладки (F-5, PR 3) ---------------------------------
+    // У файла своя схема (имя в каталоге + определение; FieldSettings, у
+    // которого значат только schemaName и schema) либо схема вкладки. Своя
+    // хранится, только пока отличается от схемы вкладки; «Filter blocks» и
+    // выбор колонок — вкладки. Колонки вкладки — объединение колонок схем её
+    // файлов по имени (FieldLayout): файл со своей схемой дописывает недостающие
+    // в конец, смена схемы пользователем строит раскладку заново.
+    // Схема, которой читается файл (своя или вкладки).
+    FieldSettings fileSchema(const LogFilePtr& logFile) const;
+    // Свои схемы файлов: filePath → схема.
+    QHash<QString, FieldSettings> fileSchemas() const { return m_fileSchemas; }
+    bool hasFileSchemas() const { return !m_fileSchemas.isEmpty(); }
+    // Схема вкладки и свои схемы файлов разом (files — filePath → схема; схема,
+    // равная схеме вкладки, и файл не из вкладки отбрасываются). Однопараметрный
+    // setFieldSettings свои схемы файлов оставляет. Смена ключевой части схемы
+    // файла (F-4) перечитывает только этот файл; поля записей переизвлекает
+    // FieldSchemaController::applyToView (инвариант 4).
+    // Как и однопараметрный, поля уже загруженных резидентных записей не
+    // переизвлекают (это делает контроллер): пользовательский путь —
+    // FieldSchemaController::applyToView / applyToFile.
+    void setFieldSettings(const FieldSettings& settings, const QHash<QString, FieldSettings>& files);
+    void setFileSchema(const LogFilePtr& logFile, const FieldSettings& schema);
+    // Файл вкладки по ключу источника (RecordLocator::sourceKey); nullptr — нет.
+    LogFilePtr fileForSourceKey(const QString& sourceKey) const;
+    // Своя схема источника, который ещё откроется (снимок, память файла):
+    // файл получит её, как только появится во вкладке (файл уже во вкладке,
+    // но без строк — сразу). Ставит FieldSchemaController по
+    // savedFileSchemaFound. Схема, уже ждущая этот источник (явная —
+    // addLogFile со схемой), не заменяется.
+    void setPendingFileSchema(const QString& sourceKey, const FieldSettings& schema);
+    // У файла есть (или идут) строки: смена его схемы — переизвлечение.
+    bool fileHasRows(const LogFilePtr& logFile) const;
+
     // Быстрый поиск (F3 / Shift+F3) — в фоне (QuickSearch): найденная строка
     // становится текущей, когда скан закончится. Новый поиск отменяет прежний.
     // Невалидный запрос (TextQuery::isValid) не запускается — проверяет вызывающий.
@@ -400,6 +441,15 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // и ставит FieldSchemaController (подписан в configureView) — синхронно,
     // до привязки правил снимка. fromMemory — снимок из памяти файла.
     void savedFieldSettingsFound(const FieldSettings& fields, bool fromMemory);
+    // Снимок или память файла несут свою схему файла (TabSource.schema, F-5,
+    // PR 3): её ищет в каталоге FieldSchemaController и ставит —
+    // setPendingFileSchema (файл ещё не открыт) или схемой файла (applyToView).
+    void savedFileSchemaFound(const QString& sourceKey, const FieldSettings& schema,
+                              bool fromMemory);
+    // Файл со своей схемой дописал колонки вкладки (раскладка выросла, поля
+    // загруженных записей не меняются): контроллер ставит показ колонок и
+    // перепривязывает правила.
+    void fieldLayoutGrown();
     // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
     void offeredFiltersChanged(bool available);
     // Показ полного лога (R-3) начался или закончился — индикаторы фильтров
@@ -546,12 +596,17 @@ private:
     void startFullReload(const LogFilePtr& logFile);
 
     // ---- Перечитывание по смене схемы (F-4, PR 3) ----------------------------
-    // Что из схемы вкладки действует при чтении файла: ключевая часть без
-    // колонок, пока извлечение включено; пусто — эвристика (регексная схема
-    // при смене только переизвлекает поля, как прежде).
-    QString readingSignature() const;
-    // setParserPattern без проверки подписи (её делает вызывающий setter).
-    void applyParserPattern(const QString& pattern);
+    // Что из схемы файла действует при чтении: ключевая часть без колонок,
+    // пока извлечение включено; пусто — эвристика (регексная схема при смене
+    // только переизвлекает поля, как прежде). На файл (F-5, PR 3): смена схемы
+    // одного файла перечитывает только его.
+    QString readingSignature(const QString& filePath) const;
+    QHash<QString, QString> readingSignatures() const;
+    // Смена схемы: подписи файлов и позиция — до (begin), сравнение и
+    // перечитывание изменившихся — после (end).
+    struct SchemaChange;
+    SchemaChange beginSchemaChange() const;
+    void endSchemaChange(const SchemaChange& change);
     // Один файл: резидентный — startReencode(rekey), индексный — полная
     // переиндексация (startFullReload).
     void rereadForSchema(const LogFilePtr& logFile);
@@ -570,12 +625,24 @@ private:
         quint64 userActions = 0;
     };
     std::optional<RereadPosition> m_rereadPosition;
+    // Резидентная вкладка (F-5, PR 3): позиция на всё время перечитываний по
+    // смене схемы. Перечитанный файл подменяет записи под reset, и вид
+    // восстанавливает ЗАПИСЬ (начало многострочной), а не строку: строка
+    // другого файла после такого reset запрашивается у локатора заново.
+    std::optional<RereadPosition> m_heldPosition;
+    void requestPosition(const RereadPosition& pos);
+    struct SchemaChange {
+        QHash<QString, QString> signatures; // filePath → readingSignature
+        std::optional<RereadPosition> position;
+    };
     // Строка и её место на экране ДО смены схемы (смена схемы в модели
     // успевает сдвинуть вид); follow-tail — nullopt.
     std::optional<RereadPosition> captureRereadPosition() const;
-    // Подпись сменилась: файлы перечитываются (в полёте — по окончании
-    // прохода, schemaRereadPending), позиция — снятая до смены.
-    void rereadAfterSchemaChange(const std::optional<RereadPosition>& position);
+    // Подпись сменилась у файлов changed (filePath): они перечитываются (в
+    // полёте — по окончании прохода, schemaRereadPending), позиция — снятая до
+    // смены, если её файл среди них.
+    void rereadAfterSchemaChange(const std::optional<RereadPosition>& position,
+                                 const QSet<QString>& changed);
     void requestRereadPosition(const LogFilePtr& logFile);
     // Загрузка файла закончилась — закладки его строк сверяются (fullLoad —
     // файл прочитан с нуля).
@@ -702,13 +769,33 @@ private:
     LogPattern m_pattern;
     FieldLayout m_fieldLayout;
     FileSchemaPtr m_tabSchema;
+    // Свои схемы файлов (F-5, PR 3): filePath → схема (только отличающиеся от
+    // схемы вкладки); схемы источников, которые ещё откроются: sourceKey → схема.
+    QHash<QString, FieldSettings> m_fileSchemas;
+    QHash<QString, FieldSettings> m_pendingFileSchemas;
+    // Выбор колонок снимка (applyState): колонки, которые принесут схемы
+    // файлов снимка, показываются по нему, пока ждущие схемы не разобраны.
+    std::optional<QStringList> m_stateVisibleFields;
+    // Схемы раскладки по определению (одно определение — один указатель:
+    // модель сравнивает наборы схем по указателям) и что раскладка уже
+    // содержит: определения схемы вкладки и своих схем файлов по порядку.
+    QHash<QString, FileSchemaPtr> m_layoutSchemas;
+    QStringList m_layoutInputs;
+    QStringList layoutInputs() const;
+    FileSchemaPtr layoutSchema(const QString& definition);
+    // Раскладка (если входы изменились), флаг извлечения, схемы модели,
+    // колонки модели — после любой смены схемы.
+    void refreshSchemas();
     void rebuildFieldLayout();
     void applySchemaToModel();
+    // Своя схема файла, ждавшая его (setPendingFileSchema): ставится, пока у
+    // файла нет строк, раскладка растёт.
+    void adoptPendingSchema(const LogFilePtr& logFile);
+    QHash<QString, FieldSettings> normalizedFileSchemas(const QHash<QString, FieldSettings>& files) const;
     FileSchemaPtr passSchema(const QString& filePath) const;
     QString m_schemaName;
     bool m_extractionFlag = false;
     QStringList m_visibleFields;
-    void applyExtraction(bool enabled);
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback(); // из AppSettings в конструкторе
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.

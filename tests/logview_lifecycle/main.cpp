@@ -2477,6 +2477,235 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
     }
 }
 
+
+// F-5, PR 3: схема файла слитой вкладки. Регексный лог и JSON Lines в одной
+// вкладке; у JSON Lines — своя ключевая схема: смена схемы этого файла
+// перечитывает только его (строки регексного файла не трогаются), вкладка
+// равна открытой сразу с этими схемами, закладки и текущая строка на месте.
+// Переход порога и объединение вкладок схемы файлов не теряют.
+static QByteArray asciiKeyed(int records)
+{
+    keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, records);
+    fx.bytes.replace("Запрос", "Request").replace("\\u041a\\u044d\\u0448", "Cache");
+    return fx.bytes;
+}
+
+static QByteArray mixedRegexLog(int lines)
+{
+    // В те же минуты, что ключевой файл (keyedfx::baseMs — 10:00 UTC): строки
+    // файлов перемежаются при слиянии.
+    QByteArray out;
+    const QDateTime base = QDateTime::fromMSecsSinceEpoch(keyedfx::baseMs());
+    for (int i = 0; i < lines; ++i)
+        out += base.addSecs(i).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")).toLatin1()
+             + " [w] " + (i % 7 == 0 ? "ERROR" : "INFO") + " - regex line " + QByteArray::number(i)
+             + '\n';
+    return out;
+}
+
+static FieldSettings schemaRef(const QString& schema)
+{
+    FieldSettings ref;
+    ref.schema = schema;
+    return ref;
+}
+
+static QVector<SchemaRow> freshMerged(const QStringList& paths, const FieldSettings& tabSettings,
+                                      const QHash<QString, QString>& own, const QString& what)
+{
+    LogViewWidget fresh;
+    fresh.setFieldSettings(tabSettings);
+    for (const QString& path : paths) {
+        if (own.contains(path))
+            fresh.addLogFile(path, FileEncoding(), schemaRef(own.value(path)));
+        else
+            fresh.addLogFile(path);
+    }
+    CHECK(settled(fresh), what + ": the fresh tab loads");
+    return schemaRows(*fresh.model());
+}
+
+static LogFilePtr fileOf(const LogViewWidget& tab, const QString& path)
+{
+    for (const LogFilePtr& f : tab.loadedFiles())
+        if (f && LogViewWidget::samePath(f->filePath, path))
+            return f;
+    return nullptr;
+}
+
+static int rowOfFileLine(const LogModel& model, const QString& path, qint64 line)
+{
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const RecordKey key = model.keyAt(row);
+        if (key.file && LogViewWidget::samePath(key.file->filePath, path) && key.line == line)
+            return row;
+    }
+    return -1;
+}
+
+static void checkFileSchemas(const QDir& dir, const QString& name, const QString& regexSchema)
+{
+    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
+    const QString regexPath = testdocs::writeFile(dir, name + "-fs-regex.log", mixedRegexLog(200));
+    const QString keyedPath = testdocs::writeFile(dir, name + "-fs-keyed.jsonl", asciiKeyed(120));
+    const QStringList paths{ regexPath, keyedPath };
+    const FieldSettings tabSettings = schemaSettings(regexSchema);
+
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setFieldSettings(tabSettings);
+    tab.addLogFile(regexPath);
+    tab.addLogFile(keyedPath);
+    tab.show();
+    CHECK(settled(tab), name + " file schemas: initial load");
+    CHECK(testdocs::idleViews(), "views settle");
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    CHECK(model.isIndexedBackend() == (name == QLatin1String("indexed")), name + ": backend");
+    CHECK(!tab.hasFileSchemas(), name + ": no own file schemas yet");
+
+    // Закладки в обоих файлах, текущая строка — в регексном, посреди экрана.
+    const LogFilePtr keyedFile = fileOf(tab, keyedPath);
+    const LogFilePtr regexFile = fileOf(tab, regexPath);
+    CHECK(keyedFile && regexFile, name + ": both files in the tab");
+    const qint64 regexMark = 61, keyedMark = 33, currentLine = 90;
+    CHECK(tab.bookmarks().add(rowOfFileLine(model, regexPath, regexMark)) >= 0, name + ": bookmark A");
+    CHECK(tab.bookmarks().add(rowOfFileLine(model, keyedPath, keyedMark)) >= 0, name + ": bookmark B");
+    view.goToRow(rowOfFileLine(model, regexPath, currentLine));
+    CHECK(testdocs::idleViews(), "views settle");
+
+    // Регексный файл не перечитывается: у резидентной вкладки его записи — те
+    // же объекты.
+    std::shared_ptr<LogEntry> regexEntry;
+    if (!model.isIndexedBackend())
+        regexEntry = model.entryAt(rowOfFileLine(model, regexPath, 5));
+
+    const auto checkPlace = [&](const QString& what, int top) {
+        const QModelIndex cur = view.currentIndex();
+        CHECK(cur.isValid() && model.keyAt(cur.row()).line == currentLine
+                  && LogViewWidget::samePath(model.keyAt(cur.row()).file->filePath, regexPath),
+              what + ": the current line is kept");
+        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
+              what + ": the current row stays selected");
+        CHECK(cur.isValid() && view.visualRect(cur).top() == top,
+              what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
+                         .arg(top).arg(cur.isValid() ? view.visualRect(cur).top() : -1));
+        QVector<qint64> marked;
+        for (int row : tab.bookmarks().visibleRows())
+            marked << model.keyAt(row).line;
+        std::sort(marked.begin(), marked.end());
+        CHECK(marked == (QVector<qint64>{ keyedMark, regexMark }),
+              what + ": the bookmarks are on their lines");
+    };
+
+    {
+        const QString what = name + " keyed file → JSON Lines";
+        const int top = view.visualRect(view.currentIndex()).top();
+        tab.setFileSchema(keyedFile, schemaRef(keyed));
+        CHECK(tab.isLoading(), what + ": the keyed file is reread");
+        CHECK(settled(tab), what + ": settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        CHECK(tab.fileSchema(keyedFile).schema == keyed && tab.fileSchema(regexFile).schema == regexSchema,
+              what + ": each file has its schema");
+        CHECK(tab.hasFileSchemas() && tab.fileSchemas().size() == 1, what + ": one own schema");
+        CHECK(schemaRows(model) == freshMerged(paths, tabSettings, {{keyedPath, keyed}}, what),
+              what + ": rows equal a tab opened with these schemas");
+        if (regexEntry)
+            CHECK(model.entryAt(rowOfFileLine(model, regexPath, 5)) == regexEntry,
+                  what + ": the regex file is not reread");
+        CHECK(model.availableFields().contains(QStringLiteral("Thread"))
+                  && model.availableFields().contains(QStringLiteral("Level")),
+              what + ": the tab columns are the union of both schemas");
+        checkPlace(what, top);
+    }
+    {
+        // Регексный файл → другая регексная схема: ничего не перечитывается.
+        const QString what = name + " regex file → plain";
+        PatternDefinition plainDef;
+        plainDef.blocks = {testdocs::patternBlock(PatternBlock::MatchKind::Remainder,
+                                                  QStringLiteral("Message"))};
+        const int top = view.visualRect(view.currentIndex()).top();
+        tab.setFileSchema(regexFile, schemaRef(LogPattern::serializeDefinition(plainDef)));
+        CHECK(!tab.isLoading(), what + ": nothing is reread");
+        CHECK(settled(tab), what + ": settles");
+        CHECK(tab.fileSchemas().size() == 2, what + ": two own schemas");
+        checkPlace(what, top);
+        tab.setFileSchema(regexFile, schemaRef(regexSchema));
+        CHECK(settled(tab) && tab.fileSchemas().size() == 1, what + ": back to the tab schema");
+    }
+
+    // Две смены подряд, вторая — у другого файла посреди перечитывания
+    // первого: позиция в первом файле не теряется (ревью PR 3).
+    {
+        const QString what = name + " two files in a row";
+        const qint64 line = 51; // запись в ключевом файле
+        view.goToRow(rowOfFileLine(model, keyedPath, line));
+        CHECK(testdocs::idleViews(), "views settle");
+        tab.setFileSchema(keyedFile, schemaRef(QString()));   // ключевая → без схемы: перечитывание
+        tab.setFileSchema(regexFile, schemaRef(keyed));      // регексный — ключевой: перечитывание
+        CHECK(settled(tab), what + ": settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        const QModelIndex cur = view.currentIndex();
+        CHECK(cur.isValid() && model.keyAt(cur.row()).line == line
+                  && LogViewWidget::samePath(model.keyAt(cur.row()).file->filePath, keyedPath),
+              what + QStringLiteral(": the current line is kept (%1)")
+                         .arg(cur.isValid() ? model.keyAt(cur.row()).line : -1));
+        CHECK(schemaRows(model) == freshMerged(paths, tabSettings, {{keyedPath, QString()}, {regexPath, keyed}}, what),
+              what + ": rows equal a tab opened with these schemas");
+        tab.setFieldSettings(tabSettings, {{keyedFile->filePath, schemaRef(keyed)}});
+        CHECK(settled(tab) && tab.fileSchemas().size() == 1, what + ": back");
+    }
+
+    // Объединение вкладок: файлы приносят свои схемы.
+    {
+        const QString what = name + " merge";
+        const QString morePath = testdocs::writeFile(dir, name + "-fs-more.jsonl", asciiKeyed(40));
+        LogViewWidget other;
+        other.setFieldSettings(schemaSettings(keyed));
+        other.addLogFile(morePath);
+        CHECK(settled(other), what + ": the other tab loads");
+        tab.addFilesFrom(other);
+        CHECK(settled(tab), what + ": settles");
+        const LogFilePtr more = fileOf(tab, morePath);
+        CHECK(more && tab.fileSchema(more).schema == keyed, what + ": the added file keeps its schema");
+        CHECK(schemaRows(model) == freshMerged({ regexPath, keyedPath, morePath }, tabSettings,
+                                               {{keyedPath, keyed}, {morePath, keyed}}, what),
+              what + ": rows equal a tab opened with these schemas");
+    }
+}
+
+// Переход порога: схема файла резидентной слитой вкладки переживает
+// конверсию в индексную (большой файл, добавленный во вкладку, конвертирует
+// её целиком — все файлы перечитываются индексатором).
+static void checkFileSchemaThreshold(const QDir& dir, const QString& regexSchema)
+{
+    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
+    const QString regexPath = testdocs::writeFile(dir, "fs-threshold.log", mixedRegexLog(200));
+    const QString keyedPath = testdocs::writeFile(dir, "fs-threshold.jsonl", asciiKeyed(80));
+    const QString bigPath = testdocs::writeFile(dir, "fs-threshold-big.log", mixedRegexLog(24000));
+    AppSettings::instance().setIndexedThresholdMB(1);
+    LogViewWidget tab;
+    tab.setFieldSettings(schemaSettings(regexSchema));
+    tab.addLogFile(regexPath);
+    tab.addLogFile(keyedPath, FileEncoding(), schemaRef(keyed));
+    CHECK(settled(tab), "file schema threshold: initial load");
+    CHECK(!tab.model()->isIndexedBackend(), "file schema threshold: starts resident");
+    const LogFilePtr keyedFile = fileOf(tab, keyedPath);
+    CHECK(keyedFile && tab.fileSchema(keyedFile).schema == keyed,
+          "file schema threshold: the keyed file opened with its schema");
+    tab.addLogFile(bigPath);
+    CHECK(settled(tab), "file schema threshold: conversion settles");
+    CHECK(tab.model()->isIndexedBackend(), "file schema threshold: converted");
+    CHECK(keyedFile && tab.fileSchema(keyedFile).schema == keyed
+              && tab.model()->fileSchemaFor(keyedFile->filePath)
+              && tab.model()->fileSchemaFor(keyedFile->filePath)->pattern.keyed(),
+          "file schema threshold: the keyed file keeps its schema");
+    CHECK(schemaRows(*tab.model())
+              == freshMerged({ regexPath, keyedPath, bigPath }, schemaSettings(regexSchema),
+                             {{keyedPath, keyed}}, "file schema threshold"),
+          "file schema threshold: rows equal an indexed tab opened with these schemas");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2493,6 +2722,7 @@ int main(int argc, char** argv)
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
     checkKeyedTail(dir, QStringLiteral("resident"));
     checkKeyedSchemaSwitch(dir, QStringLiteral("resident"), schema);
+    checkFileSchemas(dir, QStringLiteral("resident"), schema);
     checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("resident merged"), schema, HeadScenario::Merged);
     checkHeadRewrite(dir, QStringLiteral("crossed threshold"), schema, HeadScenario::CrossedThreshold);
@@ -2513,6 +2743,7 @@ int main(int argc, char** argv)
     checkWideAboveThreshold(dir, schema);
     checkThresholdKeepsEncoding(dir, schema);
     checkProvisionalThreshold(dir, schema);
+    checkFileSchemaThreshold(dir, schema);
     settings.setIndexedThresholdMB(0);
     checkProvisionalRevision(dir, QStringLiteral("indexed"), schema);
     checkProvisionalNoExtraWork(dir, QStringLiteral("indexed"), schema);
@@ -2520,6 +2751,7 @@ int main(int argc, char** argv)
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkKeyedTail(dir, QStringLiteral("indexed"));
     checkKeyedSchemaSwitch(dir, QStringLiteral("indexed"), schema);
+    checkFileSchemas(dir, QStringLiteral("indexed"), schema);
     checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("indexed merged"), schema, HeadScenario::Merged);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);

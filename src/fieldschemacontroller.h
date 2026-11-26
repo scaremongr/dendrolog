@@ -2,6 +2,7 @@
 #define FIELDSCHEMACONTROLLER_H
 
 #include "documentstate.h"
+#include "logfile.h"
 #include "schemastore.h"
 
 #include <QHash>
@@ -67,6 +68,16 @@ class QSettings;
 //     без переизвлечения. Индексная вкладка полей не хранит — ей только
 //     новая схема. Ключевая схема (F-4) идёт тем же путём: это свойство
 //     LogPattern.
+//   • Схема файла слитой вкладки (F-5, PR 3): «Applies to» дока — все файлы
+//     вкладки (targetFile пуст) или один файл (filePath). Цель — файл: комбобокс
+//     показывает и меняет схему этого файла (applyToFile: своя схема файла
+//     вкладки, тот же путь applyToView — переизвлечение полей, перечитывание
+//     файла при смене ключевой части); «Filter blocks» и колонки — вкладки.
+//     Цель — все файлы: выбор схемы ставит её вкладке и снимает свои схемы
+//     файлов; при своих схемах у файлов комбобокс — «(mixed)» (isMixed).
+//     Выбор схемы файла схемой по умолчанию не становится. Своя схема файла
+//     из снимка (TabSource.schema) приходит сигналом вкладки
+//     savedFileSchemaFound и ищется в каталоге, как схема вкладки.
 // ============================================================================
 class FieldSchemaController : public QObject {
     Q_OBJECT
@@ -112,14 +123,31 @@ public:
     const FieldSettings& defaults() const { return m_defaults; }
     // Что показывает док: схема вкладки дока или схема по умолчанию.
     FieldSettings shownSettings() const;
+    // Схема вкладки дока (без цели «Applies to») или схема по умолчанию.
+    FieldSettings tabSettings() const;
 
     // ---- Схема дока ----------------------------------------------------------
-    int activeIndex() const { return indexOf(shownSettings()); }
-    QString activeSchema() const { return shownSettings().schema; }
+    int activeIndex() const { return isMixed() ? -1 : indexOf(shownSettings()); }
+    // Схема вкладки дока (не цели «Applies to»): верхний уровень сессии.
+    QString activeSchema() const { return tabSettings().schema; }
     // Имя для сессии (SessionController::schemaNameFor).
     QString activeSchemaName() const;
+    // Схема, которую показывает комбобокс: цели «Applies to» (редактор схем).
+    QString shownSchema() const { return shownSettings().schema; }
     // Выбор в комбобоксе (-1 — без схемы).
     void selectSchema(int index);
+
+    // ---- «Applies to» (F-5, PR 3) --------------------------------------------
+    // Цель выбора схемы у вкладки дока: пусто — все файлы, иначе filePath
+    // файла вкладки. Смена вкладки дока возвращает «все файлы». Шлёт
+    // catalogueChanged и fieldsChanged.
+    void setTargetFile(const QString& filePath);
+    QString targetFile() const;
+    // У вкладки дока при цели «все файлы» схемы файлов разные: комбобокс —
+    // «(mixed)», activeIndex — -1.
+    bool isMixed() const;
+    // Своя схема файла file вкладки view (ref — имя и определение).
+    void applyToFile(LogViewWidget* view, const LogFilePtr& file, const FieldSettings& ref);
 
     // ---- «Filter blocks» и колонки дока --------------------------------------
     bool extractionEnabled() const { return shownSettings().extraction; }
@@ -137,8 +165,10 @@ public:
     // ---- Вкладки -------------------------------------------------------------
     // Новая вкладка: схема по умолчанию; подписка на её сохранённую схему.
     void configureView(LogViewWidget* view);
-    // Схема, флаг и колонки на вкладке view (см. заголовок).
-    void applyToView(LogViewWidget* view, const FieldSettings& settings);
+    // Схема, флаг и колонки на вкладке view (см. заголовок); files — свои
+    // схемы файлов (filePath → схема; nullptr — оставить как есть).
+    void applyToView(LogViewWidget* view, const FieldSettings& settings,
+                     const QHash<QString, FieldSettings>* files = nullptr);
     // «Apply Schema to All Tabs»: схема дока на все вкладки.
     void applyToAllViews();
     // Сохранённая схема вкладки против каталога: найдена по определению —
@@ -177,8 +207,13 @@ private:
     // Выбор колонок для схемы: выбранные имена, которые в ней есть; ни
     // одного (или выбор пуст) — все колонки.
     static QStringList keptColumns(const QStringList& visible, const QStringList& fieldNames);
-    // Выбор в доке: вкладке дока и в схему по умолчанию.
-    void chooseShown(const FieldSettings& settings);
+    // Выбор в доке: вкладке дока и в схему по умолчанию; clearFiles — снять
+    // свои схемы файлов (выбор схемы для всех файлов).
+    void chooseShown(const FieldSettings& settings, bool clearFiles = false);
+    LogFilePtr targetLogFile() const;
+    void onSavedFileSchema(LogViewWidget* view, const QString& sourceKey,
+                           const FieldSettings& saved, bool fromMemory);
+    void onLayoutGrown(LogViewWidget* view);
     void applyFieldVisibility(LogViewWidget* view);
     void cancelReextraction(const LogViewWidget* view);
     void onReextractionFinished(LogViewWidget* view);
@@ -189,6 +224,7 @@ private:
     SchemaStore::SchemaList m_list;
     FieldSettings m_defaults;
     QPointer<LogViewWidget> m_current;
+    QString m_targetFile; // «Applies to»: пусто — все файлы
     QHash<const LogViewWidget*, FieldReextraction*> m_jobs;
     QHash<const FieldReextraction*, int> m_progress; // последнее значение прогресса расчёта
 };

@@ -276,48 +276,208 @@ LogViewWidget::~LogViewWidget()
 
 void LogViewWidget::setParserPattern(const QString& pattern)
 {
-    const QString before = readingSignature();
-    const auto position = captureRereadPosition();
-    applyParserPattern(pattern);
-    if (readingSignature() != before)
-        rereadAfterSchemaChange(position);
-}
-
-void LogViewWidget::applyParserPattern(const QString& pattern)
-{
+    const SchemaChange change = beginSchemaChange();
     if (pattern != parserPattern())
         m_schemaName.clear(); // имя каталога описывало прежнюю схему
     m_pattern.setPattern(pattern);
-    rebuildFieldLayout();
-    // Извлечение действует, только если у схемы есть колонки (одно правило
-    // с setExtractionEnabled и setFieldSettings).
-    m_extractionEnabled = m_extractionFlag && !parserFieldNames().isEmpty();
-    applySchemaToModel();
-    if (m_model)
-        m_model->setAvailableFields(m_fieldLayout.columns);
+    m_fileSchemas = normalizedFileSchemas(m_fileSchemas);
+    refreshSchemas();
+    endSchemaChange(change);
+}
+
+QStringList LogViewWidget::layoutInputs() const
+{
+    // Схема вкладки, затем свои схемы файлов в порядке файлов вкладки —
+    // порядок колонок раскладки (объединение по имени).
+    QStringList inputs{ m_pattern.patternString() };
+    for (const LogFilePtr& f : m_loadedFiles) {
+        if (!f)
+            continue;
+        const auto it = m_fileSchemas.constFind(f->filePath);
+        if (it != m_fileSchemas.constEnd() && it->hasSchema())
+            inputs << it->schema;
+    }
+    return inputs;
+}
+
+FileSchemaPtr LogViewWidget::layoutSchema(const QString& definition)
+{
+    if (definition.isEmpty())
+        return nullptr;
+    const auto it = m_layoutSchemas.constFind(definition);
+    if (it != m_layoutSchemas.constEnd())
+        return it.value();
+    FileSchemaPtr schema = m_fieldLayout.schemaFor(definition);
+    m_layoutSchemas.insert(definition, schema);
+    return schema;
 }
 
 void LogViewWidget::rebuildFieldLayout()
 {
     // Смена схемы пользователем — раскладка заново (поля вкладки
-    // переизвлекает контроллер). Одна схема на вкладку: колонки — её поля.
-    // Та же схема — та же раскладка и тот же указатель (модель сравнивает
-    // наборы схем по указателям).
-    if (m_tabSchema && m_tabSchema->pattern.patternString() == m_pattern.patternString())
+    // переизвлекает контроллер). Те же входы — та же раскладка и те же
+    // указатели (модель сравнивает наборы схем по указателям).
+    // Порядок не сравнивается: файл со своей схемой, ставший ею позже
+    // соседа (распаковка), растит раскладку в конец — пересборка в порядке
+    // файлов переставила бы колонки под полями уже разобранных записей.
+    const QStringList inputs = layoutInputs();
+    if (m_tabSchema && !m_layoutInputs.isEmpty() && inputs.first() == m_layoutInputs.first()
+        && QSet<QString>(inputs.cbegin(), inputs.cend())
+               == QSet<QString>(m_layoutInputs.cbegin(), m_layoutInputs.cend()))
         return;
     m_fieldLayout.clear();
+    m_layoutSchemas.clear();
     m_tabSchema = m_fieldLayout.schemaFor(m_pattern);
+    m_layoutSchemas.insert(m_pattern.patternString(), m_tabSchema);
+    m_layoutInputs = { m_pattern.patternString() };
+    for (int i = 1; i < inputs.size(); ++i) {
+        layoutSchema(inputs[i]);
+        if (!m_layoutInputs.contains(inputs[i]))
+            m_layoutInputs << inputs[i];
+    }
+}
+
+void LogViewWidget::refreshSchemas()
+{
+    rebuildFieldLayout();
+    // Извлечение действует, только если у колонок вкладки есть хоть одна
+    // (одно правило для схемы вкладки и схем файлов).
+    m_extractionEnabled = m_extractionFlag && !m_fieldLayout.columns.isEmpty();
+    applySchemaToModel();
+    if (m_model)
+        m_model->setAvailableFields(m_fieldLayout.columns);
 }
 
 void LogViewWidget::applySchemaToModel()
 {
     if (!m_model)
         return;
-    // Схема файла — схема вкладки, пока извлечение включено; nullptr —
-    // файлы читаются без схемы.
+    // Схема файла — своя или схема вкладки, пока извлечение включено;
+    // nullptr — файл читается без схемы.
     FileSchemaSet schemas;
-    schemas.fallback = m_extractionEnabled ? m_tabSchema : FileSchemaPtr();
+    if (m_extractionEnabled) {
+        if (m_tabSchema && m_tabSchema->isValid() && !m_tabSchema->pattern.fieldNames().isEmpty())
+            schemas.fallback = m_tabSchema;
+        for (auto it = m_fileSchemas.cbegin(); it != m_fileSchemas.cend(); ++it) {
+            const FileSchemaPtr schema = m_layoutSchemas.value(it->schema);
+            schemas.byPath.insert(it.key(), schema && schema->isValid() ? schema : FileSchemaPtr());
+        }
+    }
     m_model->setFileSchemas(schemas);
+}
+
+QHash<QString, FieldSettings>
+LogViewWidget::normalizedFileSchemas(const QHash<QString, FieldSettings>& files) const
+{
+    // Только файлы вкладки и только схемы, отличные от схемы вкладки; от
+    // FieldSettings — имя и определение.
+    QHash<QString, FieldSettings> out;
+    for (auto it = files.cbegin(); it != files.cend(); ++it) {
+        if (it->schema == m_pattern.patternString())
+            continue;
+        const bool loaded = std::any_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
+            [&it](const LogFilePtr& f) { return f && f->filePath == it.key(); });
+        if (!loaded)
+            continue;
+        FieldSettings schema;
+        schema.schema = it->schema;
+        schema.schemaName = it->hasSchema() ? it->schemaName : QString();
+        out.insert(it.key(), schema);
+    }
+    return out;
+}
+
+FieldSettings LogViewWidget::fileSchema(const LogFilePtr& logFile) const
+{
+    if (logFile) {
+        const auto it = m_fileSchemas.constFind(logFile->filePath);
+        if (it != m_fileSchemas.constEnd())
+            return *it;
+    }
+    FieldSettings schema;
+    schema.schema = parserPattern();
+    schema.schemaName = schema.schema.isEmpty() ? QString() : m_schemaName;
+    return schema;
+}
+
+void LogViewWidget::setFileSchema(const LogFilePtr& logFile, const FieldSettings& schema)
+{
+    if (!logFile)
+        return;
+    QHash<QString, FieldSettings> files = m_fileSchemas;
+    files.insert(logFile->filePath, schema);
+    setFieldSettings(fieldSettings(), files);
+}
+
+LogFilePtr LogViewWidget::fileForSourceKey(const QString& sourceKey) const
+{
+    for (const LogFilePtr& f : m_loadedFiles)
+        if (f && RecordLocator::sourceKey(*f) == sourceKey)
+            return f;
+    return nullptr;
+}
+
+void LogViewWidget::setPendingFileSchema(const QString& sourceKey, const FieldSettings& schema)
+{
+    // Явная схема (addLogFile со схемой) главнее памяти файла.
+    if (!m_pendingFileSchemas.contains(sourceKey))
+        m_pendingFileSchemas.insert(sourceKey, schema);
+    // Файл уже во вкладке, но строк у него нет (сжатый ждёт распаковки).
+    const LogFilePtr file = fileForSourceKey(sourceKey);
+    if (file && !fileHasRows(file))
+        adoptPendingSchema(file);
+}
+
+bool LogViewWidget::fileHasRows(const LogFilePtr& logFile) const
+{
+    if (!logFile || isArchivePending(logFile))
+        return false;
+    const auto it = m_fileReloadStates.constFind(logFile->filePath);
+    return it != m_fileReloadStates.constEnd() && (it->initialLoadDone || it->loadInFlight);
+}
+
+void LogViewWidget::adoptPendingSchema(const LogFilePtr& logFile)
+{
+    if (!logFile || m_pendingFileSchemas.isEmpty())
+        return;
+    const auto it = m_pendingFileSchemas.find(RecordLocator::sourceKey(*logFile));
+    if (it == m_pendingFileSchemas.end())
+        return;
+    const FieldSettings schema = it.value();
+    m_pendingFileSchemas.erase(it);
+    if (schema.schema == parserPattern())
+        return;
+    // Строк у файла ещё нет: раскладка растёт (колонки дописываются в конец —
+    // индексы полей загруженных записей не устаревают), переизвлекать нечего.
+    const QStringList before = m_fieldLayout.columns;
+    // Выбраны были все колонки — новые тоже показываются.
+    const bool allVisible = std::all_of(before.cbegin(), before.cend(),
+        [this](const QString& name) { return m_visibleFields.contains(name); });
+    FieldSettings own;
+    own.schema = schema.schema;
+    own.schemaName = schema.hasSchema() ? schema.schemaName : QString();
+    m_fileSchemas.insert(logFile->filePath, own);
+    if (own.hasSchema()) {
+        layoutSchema(own.schema);
+        if (!m_layoutInputs.contains(own.schema))
+            m_layoutInputs << own.schema;
+    }
+    // Новые колонки: по выбору снимка (сессия, Ctrl+Shift+T — колонки схем
+    // файлов в нём есть), иначе — показаны, если были показаны все прежние.
+    for (const QString& name : std::as_const(m_fieldLayout.columns)) {
+        if (before.contains(name) || m_visibleFields.contains(name))
+            continue;
+        const bool show = m_stateVisibleFields
+            ? (m_stateVisibleFields->isEmpty() || m_stateVisibleFields->contains(name))
+            : allVisible;
+        if (show)
+            m_visibleFields << name;
+    }
+    if (m_pendingFileSchemas.isEmpty())
+        m_stateVisibleFields.reset();
+    refreshSchemas();
+    if (m_fieldLayout.columns != before)
+        emit fieldLayoutGrown();
 }
 
 FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
@@ -327,12 +487,10 @@ FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
 
 void LogViewWidget::setExtractionEnabled(bool enabled)
 {
-    const QString before = readingSignature();
-    const auto position = captureRereadPosition();
+    const SchemaChange change = beginSchemaChange();
     m_extractionFlag = enabled;
-    applyExtraction(enabled && !parserFieldNames().isEmpty());
-    if (readingSignature() != before)
-        rereadAfterSchemaChange(position);
+    refreshSchemas();
+    endSchemaChange(change);
 }
 
 FieldSettings LogViewWidget::fieldSettings() const
@@ -347,37 +505,66 @@ FieldSettings LogViewWidget::fieldSettings() const
 
 void LogViewWidget::setFieldSettings(const FieldSettings& settings)
 {
-    const QString before = readingSignature();
-    // Позиция — до того, как новая схема дойдёт до модели и вида.
-    const auto position = captureRereadPosition();
+    setFieldSettings(settings, m_fileSchemas);
+}
+
+void LogViewWidget::setFieldSettings(const FieldSettings& settings,
+                                     const QHash<QString, FieldSettings>& files)
+{
+    // Позиция и подписи — до того, как новая схема дойдёт до модели и вида.
+    const SchemaChange change = beginSchemaChange();
     m_extractionFlag = settings.extraction;
     if (settings.schema != parserPattern())
-        applyParserPattern(settings.schema); // ставит и извлечение по новому флагу
+        m_pattern.setPattern(settings.schema);
+    m_fileSchemas = normalizedFileSchemas(files);
     m_schemaName = settings.schema.isEmpty() ? QString() : settings.schemaName;
     m_visibleFields = settings.visibleFields;
-    const bool effective = settings.extraction && !parserFieldNames().isEmpty();
-    if (effective != m_extractionEnabled)
-        applyExtraction(effective);
-    if (readingSignature() != before)
-        rereadAfterSchemaChange(position);
+    refreshSchemas();
+    endSchemaChange(change);
 }
 
 // =============================================================================
 // Перечитывание по смене схемы (F-4, PR 3)
 // =============================================================================
 
-QString LogViewWidget::readingSignature() const
+QString LogViewWidget::readingSignature(const QString& filePath) const
 {
     // Ключевая схема действует при чтении, только пока извлечение включено
     // (LineClassifier::classifyLine у парсера и индексатора). Колонки сверх
     // ролей момент, уровень и границу записи не меняют.
-    const KeyedDefinition* keyed = m_extractionEnabled ? m_pattern.keyed() : nullptr;
+    const FileSchemaPtr schema = passSchema(filePath);
+    const KeyedDefinition* keyed = schema ? schema->pattern.keyed() : nullptr;
     if (!keyed)
         return QString();
     PatternDefinition def;
     def.keyed = *keyed;
     def.keyed->extraColumns.clear();
     return LogPattern::serializeDefinition(def);
+}
+
+QHash<QString, QString> LogViewWidget::readingSignatures() const
+{
+    QHash<QString, QString> out;
+    for (const LogFilePtr& f : m_loadedFiles)
+        if (f)
+            out.insert(f->filePath, readingSignature(f->filePath));
+    return out;
+}
+
+LogViewWidget::SchemaChange LogViewWidget::beginSchemaChange() const
+{
+    return SchemaChange{ readingSignatures(), captureRereadPosition() };
+}
+
+void LogViewWidget::endSchemaChange(const SchemaChange& change)
+{
+    const QHash<QString, QString> after = readingSignatures();
+    QSet<QString> changed;
+    for (auto it = after.cbegin(); it != after.cend(); ++it)
+        if (change.signatures.value(it.key()) != it.value())
+            changed.insert(it.key());
+    if (!changed.isEmpty())
+        rereadAfterSchemaChange(change.position, changed);
 }
 
 std::optional<LogViewWidget::RereadPosition> LogViewWidget::captureRereadPosition() const
@@ -398,21 +585,25 @@ std::optional<LogViewWidget::RereadPosition> LogViewWidget::captureRereadPositio
                            anchor.offset, anchor.selected, m_view->userActionCount() };
 }
 
-void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>& position)
+void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>& position,
+                                            const QSet<QString>& changed)
 {
     // Позиция снята до смены схемы (captureRereadPosition). Восстановленная
     // позиция, которая ещё ждёт строку (applyState), ищется заново после
-    // сброса строк: ключ, найденный в старых строках, пропадёт.
-    m_rereadPosition.reset();
-    const auto rereadsSource = [this](const QString& sourceKey) {
+    // сброса строк: ключ, найденный в старых строках, пропадёт. Позиция в
+    // файле, который не перечитывается, остаётся на месте сама (якорь вида);
+    // позиция, которая ждёт перечитывания другого файла, остаётся ждать.
+    const auto rereadsSource = [this, &changed](const QString& sourceKey) {
         for (const LogFilePtr& f : std::as_const(m_loadedFiles)) {
-            if (!f || RecordLocator::sourceKey(*f) != sourceKey)
+            if (!f || RecordLocator::sourceKey(*f) != sourceKey || !changed.contains(f->filePath))
                 continue;
             const FileReloadState st = m_fileReloadStates.value(f->filePath);
             return !st.unsupported && (st.loadInFlight || st.initialLoadDone);
         }
         return false;
     };
+    if (m_rereadPosition && rereadsSource(m_rereadPosition->sourceKey))
+        m_rereadPosition.reset();
     if (isPositionPending()) {
         // Файл позиции ещё не читался (распаковка, загрузка сорвалась) —
         // запрос остаётся своим: его первая загрузка уже с новой схемой.
@@ -427,11 +618,15 @@ void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>&
                 m_model->recordLocator().cancel(m_pendingPosition.token);
             m_pendingPosition = {};
         }
-    } else {
+    } else if (position && rereadsSource(position->sourceKey)) {
         m_rereadPosition = position;
     }
+    // Резидентная вкладка держит позицию до конца всех перечитываний (первая
+    // смена — её позиция: последующие снимают уже сдвинутый вид).
+    if (!m_model->isIndexedBackend() && !m_heldPosition)
+        m_heldPosition = m_rereadPosition ? m_rereadPosition : position;
     for (const LogFilePtr& logFile : std::as_const(m_loadedFiles)) {
-        if (!logFile)
+        if (!logFile || !changed.contains(logFile->filePath))
             continue;
         const auto it = m_fileReloadStates.find(logFile->filePath);
         if (it == m_fileReloadStates.end() || it->unsupported)
@@ -446,6 +641,10 @@ void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>&
         if (it->initialLoadDone)
             rereadForSchema(logFile);
     }
+    if (m_heldPosition
+        && std::none_of(m_fileReloadStates.cbegin(), m_fileReloadStates.cend(),
+                        [](const FileReloadState& s) { return s.reencodeRekey || s.schemaRereadPending; }))
+        m_heldPosition.reset();
     updateLoadingState();
 }
 
@@ -494,7 +693,11 @@ void LogViewWidget::requestRereadPosition(const LogFilePtr& logFile)
     // проход — ключи этого через миг снова сменятся.
     if (m_fileReloadStates.value(logFile->filePath).schemaRereadPending)
         return;
-    const RereadPosition pos = *std::exchange(m_rereadPosition, std::nullopt);
+    requestPosition(*std::exchange(m_rereadPosition, std::nullopt));
+}
+
+void LogViewWidget::requestPosition(const RereadPosition& pos)
+{
     if (m_pendingPosition.token)
         m_model->recordLocator().cancel(m_pendingPosition.token);
     m_pendingPosition = {};
@@ -516,12 +719,6 @@ QVector<int> LogViewWidget::visibleFieldIndexes() const
         if (m_visibleFields.contains(names[i]))
             indexes.push_back(i);
     return indexes;
-}
-
-void LogViewWidget::applyExtraction(bool enabled)
-{
-    m_extractionEnabled = enabled;
-    applySchemaToModel();
 }
 
 void LogViewWidget::setFallbackEncoding(TextEncoding encoding)
@@ -730,6 +927,22 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
     m_model->replaceEntriesForFile(logFile->filePath, entries);
     if (rekey)
         m_model->recordLocator().residentBatch(fileOrder);
+    if (rekey && m_heldPosition) {
+        // Reset этого файла вернул вид к записи строки другого файла, а не к
+        // строке: строку ищет локатор (поздний проход). Файл строки ещё
+        // перечитывается — найдёт его собственное окончание.
+        const LogFilePtr positionFile = fileForSourceKey(m_heldPosition->sourceKey);
+        const bool own = positionFile == logFile;
+        const bool ownPending = positionFile && !own
+            && (m_fileReloadStates.value(positionFile->filePath).reencodeRekey
+                || m_fileReloadStates.value(positionFile->filePath).schemaRereadPending);
+        if (!own && !ownPending && positionFile)
+            requestPosition(*m_heldPosition);
+        const bool rereading = std::any_of(m_fileReloadStates.cbegin(), m_fileReloadStates.cend(),
+            [](const FileReloadState& s) { return s.reencodeRekey || s.schemaRereadPending; });
+        if (!rereading)
+            m_heldPosition.reset();
+    }
     locatorFileLoaded(logFile);
     if (rekey) {
         bookmarksFileLoaded(logFile, true);
@@ -845,6 +1058,20 @@ void LogViewWidget::addLogFile(const QString &filePath)
     addLogFile(filePath, FileEncoding());
 }
 
+void LogViewWidget::addLogFile(const QString& filePath, const FileEncoding& initial,
+                               const FieldSettings& schema)
+{
+    // Схема ждёт файл по ключу источника: обычный файл, .gz (путь архива) —
+    // их путь; член архива (каталог сканера) — ArchiveRegistry ниже.
+    QString key = RecordLocator::pathKey(normalizedPath(filePath));
+    if (const auto member = ArchiveRegistry::instance().locate(normalizedPath(filePath)))
+        key = RecordLocator::pathKey(member->archivePath) + QChar(0x01) + member->member;
+    m_pendingFileSchemas.insert(key, schema);
+    addLogFile(filePath, initial);
+    // Файл уже был во вкладке (или не открылся) — схема не ждёт дальше.
+    m_pendingFileSchemas.remove(key);
+}
+
 void LogViewWidget::addFilesFrom(const LogViewWidget& other)
 {
     // Файлы переезжают со своим состоянием — память файла здесь не читается
@@ -860,6 +1087,17 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
     // процессе (и спул stdin — Ephemeral) проходит проверку.
     for (const BookmarkState& b : other.bookmarks().states())
         bookmarks().restore(b);
+    // Схемы файлов (F-5, PR 3): схема файла в other — своя здесь, если
+    // отличается от схемы этой вкладки. Файл получает её, когда появится
+    // (adoptPendingSchema); уже открытый файл схемы не меняет.
+    QStringList schemaKeys;
+    for (const LogFilePtr& lf : other.loadedFiles()) {
+        if (!lf)
+            continue;
+        const QString key = RecordLocator::sourceKey(*lf);
+        m_pendingFileSchemas.insert(key, other.fileSchema(lf));
+        schemaKeys << key;
+    }
     for (const LogFilePtr& lf : other.loadedFiles()) {
         if (!lf)
             continue;
@@ -894,11 +1132,14 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
         copy->setSource(lf->source());
         copy->spool = lf->spool;
         m_loadedFiles.append(copy);
+        adoptPendingSchema(copy);
         ArchiveState& as = m_archives[copy->filePath];
         as.unpacked = true;
         as.archiveStamp = other.m_archives.value(lf->filePath).archiveStamp;
         startLoad(copy, other.fileEncoding(lf));
     }
+    for (const QString& key : std::as_const(schemaKeys))
+        m_pendingFileSchemas.remove(key);
     m_memoryApplying = wasApplying;
 }
 
@@ -963,6 +1204,7 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
 
     auto logFile = std::make_shared<LogFile>(filePath);
     m_loadedFiles.append(logFile);
+    adoptPendingSchema(logFile);
     startLoad(logFile, initial);
 }
 
@@ -990,6 +1232,7 @@ void LogViewWidget::addStream(const std::shared_ptr<SpoolItem>& spool, const QSt
     logFile->setSource(source);
     logFile->spool = spool;
     m_loadedFiles.append(logFile);
+    adoptPendingSchema(logFile);
     startLoad(logFile, initial);
 }
 
@@ -1312,6 +1555,7 @@ void LogViewWidget::addArchive(const QString& archivePath, const FileEncoding& i
     logFile->setSource(source);
     logFile->spool = item;
     m_loadedFiles.append(logFile);
+    adoptPendingSchema(logFile);
 
     ArchiveState& as = m_archives[logFile->filePath];
     as.initial = initial;
@@ -2375,6 +2619,10 @@ TabState LogViewWidget::captureState() const
         const FileEncoding encoding = fileEncoding(lf);
         if (encoding.source == FileEncoding::Source::User)
             ts.userEncoding = encoding.decoder.encoding();
+        // Своя схема файла (F-5, PR 3) — только если отличается от схемы вкладки.
+        const auto own = m_fileSchemas.constFind(lf->filePath);
+        if (own != m_fileSchemas.constEnd())
+            ts.schema = *own;
         sourceIndex.insert(lf->filePath, int(state.sources.size()));
         state.sources.append(ts);
     }
@@ -2464,8 +2712,27 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
 
     // Схема полей (F-5) — до фильтров: правила привязываются к схеме вкладки.
     // Ищет её в каталоге и ставит FieldSchemaController (синхронно).
-    if (view.fields)
-        emit savedFieldSettingsFound(*view.fields, m_memoryApplying);
+    // Своя схема единственного файла снимка — схема вкладки (F-5, PR 3).
+    std::optional<FieldSettings> fields = view.fields;
+    if (state.sources.size() == 1 && state.sources[0].schema) {
+        FieldSettings f = fields.value_or(fieldSettings());
+        f.schemaName = state.sources[0].schema->schemaName;
+        f.schema = state.sources[0].schema->schema;
+        fields = f;
+    }
+    if (fields)
+        emit savedFieldSettingsFound(*fields, m_memoryApplying);
+    if (fields && state.sources.size() > 1)
+        m_stateVisibleFields = fields->visibleFields;
+    // Свои схемы файлов (F-5, PR 3) — после схемы вкладки: схема, равная ей,
+    // своей не станет. Файл получит схему, когда откроется ниже (или сразу,
+    // если он уже во вкладке).
+    if (state.sources.size() > 1) {
+        for (const TabSource& source : state.sources)
+            if (source.schema)
+                emit savedFileSchemaFound(RecordLocator::sourceKey(source.source), *source.schema,
+                                          m_memoryApplying);
+    }
 
     // Закладки — до файлов: строки ищутся по ходу загрузки (RecordLocator).
     // Переписанный источник — отказ (Missing: серая, с фрагментом и
@@ -2591,6 +2858,18 @@ void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource
     }
     for (const BookmarkState& b : moved)
         bookmarks().restore(b);
+    // Своя схема файла (F-5, PR 3) ждала его по прежнему пути — переезжает.
+    {
+        const QString oldKey = source.source.member.isEmpty()
+            ? RecordLocator::pathKey(savedPath)
+            : RecordLocator::pathKey(savedPath) + QChar(0x01) + source.source.member;
+        const auto pending = m_pendingFileSchemas.find(oldKey);
+        if (pending != m_pendingFileSchemas.end()) {
+            const FieldSettings schema = pending.value();
+            m_pendingFileSchemas.erase(pending);
+            m_pendingFileSchemas.insert(RecordLocator::sourceKey(source.source), schema);
+        }
+    }
     FileEncoding initial;
     if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
         initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
@@ -2757,10 +3036,35 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
         // Первый файл вкладки — состояние целиком, фильтры предложением.
         applyState(memory.toTabState(), StateFilters::Offer);
     } else {
-        // Второй файл или память без ViewState — закладки и выбор кодировки;
-        // файл снимка (applyState) — только закладки: кодировку даёт снимок.
+        // Второй файл или память без ViewState — закладки, выбор кодировки и
+        // схема файла (F-5, PR 3: своя у файла слитой вкладки, иначе схема
+        // одно-файловой вкладки; «без схемы» не навязывается — схема этой
+        // вкладки); файл снимка (applyState) — только закладки: кодировку и
+        // схему даёт снимок.
         for (const BookmarkState& b : memory.bookmarks)
             bookmarks().restore(b);
+        if (!m_applyingState) {
+            std::optional<FieldSettings> schema = memory.source.schema;
+            if (!schema && memory.view && memory.view->fields)
+                schema = *memory.view->fields;
+            if (schema && schema->hasSchema()) {
+                if (others == 0) {
+                    // Первый файл вкладки — его схема и есть схема вкладки.
+                    FieldSettings tab = fieldSettings();
+                    tab.schemaName = schema->schemaName;
+                    tab.schema = schema->schema;
+                    emit savedFieldSettingsFound(tab, true);
+                } else {
+                    FieldSettings ref;
+                    ref.schemaName = schema->schemaName;
+                    ref.schema = schema->schema;
+                    const QString key = member.isEmpty()
+                        ? RecordLocator::pathKey(filePath)
+                        : RecordLocator::pathKey(filePath) + QChar(0x01) + member;
+                    emit savedFileSchemaFound(key, ref, true);
+                }
+            }
+        }
         FileEncoding encoding = initial;
         if (!m_applyingState && initial.source != FileEncoding::Source::User && memory.source.userEncoding
             && TextEncodings::isDecodable(*memory.source.userEncoding))
@@ -2839,8 +3143,25 @@ void LogViewWidget::saveFileMemory()
             if (*it)
                 memory.bookmarks.append(b);
         }
-        if (single)
+        if (single) {
             memory.view = state.view;
+            // Своя схема единственного файла — схема его вкладки в памяти.
+            if (memory.source.schema && memory.view->fields) {
+                memory.view->fields->schemaName = memory.source.schema->schemaName;
+                memory.view->fields->schema = memory.source.schema->schema;
+            }
+            memory.source.schema.reset();
+        } else {
+            // Файл слитой вкладки помнит свою схему (F-5, PR 3) — какой бы она
+            // ни была: своей или схемой вкладки.
+            const QString sourceKey = RecordLocator::sourceKey(source.source);
+            for (const LogFilePtr& lf : std::as_const(m_loadedFiles)) {
+                if (lf && RecordLocator::sourceKey(*lf) == sourceKey) {
+                    memory.source.schema = fileSchema(lf);
+                    break;
+                }
+            }
+        }
         const QString key = FileMemoryStore::keyFor(source.source.path, source.source.member);
         m_fileMemory->save(memory, m_memoryBase.value(key));
         m_memoryBase.insert(key, recordsOf(memory.bookmarks));

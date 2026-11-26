@@ -1063,7 +1063,8 @@ static void checkFileMemoryFormat()
     bad.insert("source", QJsonObject()); // Ephemeral (спул stdin) не пишется
     refused(bad, QStringLiteral("пустой источник"));
     QJsonObject extra = json;
-    extra.insert("schema", "из будущей версии F-5");
+    // «schema» с F-5 (PR 3) — схема файла (TabSource.schema), не чужой ключ.
+    extra.insert("fromFutureVersion", "из будущей версии");
     CHECK(FileMemory::fromJson(extra).has_value(), QStringLiteral("лишние ключи не мешают"));
 }
 
@@ -1892,6 +1893,75 @@ static void checkSchemasFormat()
     refusedView(QJsonObject{ { "schema", QJsonObject{ { "name", "x" } } } }, QStringLiteral("schema без определения"));
     refusedView(QJsonObject{ { "extraction", "yes" } }, QStringLiteral("extraction не bool"));
     refusedView(QJsonObject{ { "visibleFields", QJsonArray{ 1 } } }, QStringLiteral("visibleFields не строки"));
+}
+
+
+// Схема файла слитой вкладки (F-5, PR 3): TabSource.schema — необязательное
+// поле, версия формата не растёт. Эталон session-file-schemas.json: у первой
+// вкладки второй файл со своей схемой и первый — без схемы (null).
+static SessionState fileSchemasSession()
+{
+    SessionState golden = goldenSession();
+    golden.tabs[0].view.fields = FieldSettings{ QStringLiteral("Spring Boot"), kGoldenSchema, true,
+                                                { QStringLiteral("Level") } };
+    golden.tabs[0].sources[0].schema = FieldSettings();
+    golden.tabs[0].sources[1].schema = FieldSettings{ QStringLiteral("Plain"), kPlainSchema, false, {} };
+    return golden;
+}
+
+static void checkFileSchemasFormat()
+{
+    g_context = QStringLiteral("сессия: схема файла, формат");
+    const SessionState golden = fileSchemasSession();
+    const QJsonObject json = golden.toJson(goldenSessionPath());
+    if (qEnvironmentVariableIsSet("DOCUMENT_STATE_PRINT_FILE_SCHEMAS")) {
+        QByteArray out = QJsonDocument(json).toJson(QJsonDocument::Indented);
+        if (!root().isEmpty())
+            out.replace(root().toUtf8(), "@ROOT@");
+        std::fwrite(out.constData(), 1, size_t(out.size()), stdout);
+    }
+    QFile file(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/session-file-schemas.json"));
+    CHECK(file.open(QIODevice::ReadOnly), QStringLiteral("эталон открывается"));
+    QByteArray bytes = file.readAll();
+    bytes.replace("@ROOT@", root().toUtf8());
+    const QJsonObject stored = bytesToObject(bytes);
+    CHECK(json == stored, QStringLiteral("сессия со схемами файлов пишется ровно в эталон"));
+    QString error;
+    const auto parsed = SessionState::fromJson(stored, &error);
+    CHECK(parsed.has_value(), QStringLiteral("эталон читается: ") + error);
+    if (parsed) {
+        const TabState& tab = parsed->tabs.value(0);
+        CHECK(tab.sources.size() == 2 && tab.sources[0].schema && !tab.sources[0].schema->hasSchema()
+                  && tab.sources[1].schema
+                  && tab.sources[1].schema->schema == kPlainSchema
+                  && tab.sources[1].schema->schemaName == QStringLiteral("Plain"),
+              QStringLiteral("схемы файлов: null — без схемы, объект — своя"));
+        CHECK(!parsed->tabs.value(1).sources.value(0).schema,
+              QStringLiteral("файл без ключа — схема вкладки"));
+        CHECK(parsed->toJson(goldenSessionPath()) == stored, QStringLiteral("круговой проход — тот же JSON"));
+    }
+    // Прежние эталоны: схемы файлов нет ни у одного источника.
+    for (const char* name : { "session-v1.json", "session-schemas.json" }) {
+        QFile old(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/") + QLatin1String(name));
+        CHECK(old.open(QIODevice::ReadOnly), QStringLiteral("эталон ") + QLatin1String(name));
+        QByteArray oldBytes = old.readAll();
+        oldBytes.replace("@ROOT@", root().toUtf8());
+        const auto o = SessionState::fromJson(bytesToObject(oldBytes), &error);
+        bool none = o.has_value();
+        if (o)
+            for (const TabState& t : o->tabs)
+                for (const TabSource& src : t.sources)
+                    none = none && !src.schema;
+        CHECK(none, QStringLiteral("прежний эталон без схем файлов: ") + QLatin1String(name));
+    }
+    // Отказ на битом поле.
+    TabSource src = golden.tabs[0].sources[1];
+    for (const QJsonValue& bad : { QJsonValue(5), QJsonValue(QJsonObject{ { "name", "x" } }),
+                                   QJsonValue(QJsonObject{ { "definition", "{}" } }) }) {
+        QJsonObject sj = src.toJson();
+        sj.insert(QStringLiteral("schema"), bad);
+        CHECK(!TabSource::fromJson(sj), QStringLiteral("отказ: битая схема файла"));
+    }
 }
 
 static void checkSessionFile(const QDir& dir)
@@ -3088,6 +3158,168 @@ static void checkSessionSchemas(const QDir& dir, const QString& name)
     }
 }
 
+
+// Схема файла слитой вкладки (F-5, PR 3) на живых вкладках: сессия (своя
+// схема файла снимается в TabSource.schema и возвращается, схема не из
+// каталога — «(from session)»), память файла (файл слитой вкладки помнит
+// свою схему; добавленный вторым — получает её, открытый первым — она
+// становится схемой вкладки).
+static void checkSessionFileSchemas(const QDir& dir, const QString& name)
+{
+    g_context = name + QStringLiteral(" / сессия: схема файла (F-5, PR 3)");
+    const QString a = columnSchema(QStringLiteral("Level"), QStringLiteral("Message"));
+    const QString b = columnSchema(QStringLiteral("Severity"), QStringLiteral("Text"));
+    const QString foreign = columnSchema(QStringLiteral("Lvl"), QStringLiteral("Body"));
+    QString error;
+    CHECK(SchemaStore::sync({ { QStringLiteral("A"), a, {}, {} }, { QStringLiteral("B"), b, {}, {} } }, &error),
+          QStringLiteral("каталог схем: ") + error);
+    FieldSchemaController c;
+    {
+        QSettings ini(QDir(AppSettings::configDir()).filePath(QStringLiteral("file-schemas-%1.ini").arg(name)),
+                      QSettings::IniFormat);
+        ini.beginGroup(QStringLiteral("View"));
+        c.load(ini);
+    }
+    const QString one = writeFile(dir, name + QStringLiteral("-fs-one.log"), logBytes(300));
+    const QString two = writeFile(dir, name + QStringLiteral("-fs-two.log"), logBytes(200, 7, "two"));
+    const QString sessionPath = dir.filePath(name + QStringLiteral("-file-schemas.dlsession"));
+    const auto fileOf = [](LogViewWidget& tab, const QString& path) -> LogFilePtr {
+        for (const LogFilePtr& f : tab.loadedFiles())
+            if (f && LogViewWidget::samePath(f->filePath, path))
+                return f;
+        return nullptr;
+    };
+    const QStringList unionColumns{ QStringLiteral("Timestamp"), QStringLiteral("Thread"),
+                                    QStringLiteral("Level"), QStringLiteral("Message"),
+                                    QStringLiteral("Severity"), QStringLiteral("Text") };
+    // Каждый файл — своей схемой: у строки файла two колонка Severity, у one — Level.
+    const auto checkTab = [&](LogViewWidget& tab, const QString& bName, const QString& what) {
+        const LogFilePtr f1 = fileOf(tab, one);
+        const LogFilePtr f2 = fileOf(tab, two);
+        CHECK(f1 && f2 && tab.fileSchema(f1).schema == a && tab.fileSchema(f2).schema == b
+                  && tab.parserPattern() == a,
+              what + QStringLiteral(": схема вкладки A, у файла two — B"));
+        CHECK(f2 && tab.fileSchema(f2).schemaName == bName,
+              what + QStringLiteral(": имя схемы файла: ") + (f2 ? tab.fileSchema(f2).schemaName : QString()));
+        CHECK(tab.parserFieldNames() == unionColumns,
+              what + QStringLiteral(": колонки — объединение: ") + tab.parserFieldNames().join(','));
+        const int row2 = rowOfLine(*tab.model(), f2 ? f2->filePath : QString(), 2);
+        const auto entry = row2 >= 0 ? tab.model()->entryAt(row2) : nullptr;
+        CHECK(entry && entry->fields().value(4, entry->message()).trimmed()
+                           == QStringLiteral("WARN"),
+              what + QStringLiteral(": строка файла two — поле Severity"));
+    };
+
+    SessionController sessions;
+    {
+        SchemaTabPool pool{ &c, {} };
+        LogViewWidget* t = pool.make();
+        c.applyToView(t, FieldSettings{ QStringLiteral("A"), a, true, {} });
+        t->addLogFile(one);
+        t->addLogFile(two);
+        CHECK(settled(*t), QStringLiteral("вкладка"));
+        c.setCurrentView(t);
+        c.setTargetFile(fileOf(*t, two) ? fileOf(*t, two)->filePath : QString());
+        CHECK(!c.targetFile().isEmpty(), QStringLiteral("цель — файл two"));
+        c.selectSchema(1); // B
+        CHECK(settled(*t), QStringLiteral("схема файла"));
+        checkTab(*t, QStringLiteral("B"), QStringLiteral("живая вкладка"));
+        CHECK(c.shownSchema() == b && c.activeSchema() == a,
+              QStringLiteral("док показывает схему файла, схема вкладки — прежняя"));
+        c.setTargetFile(QString());
+        CHECK(c.isMixed() && c.activeIndex() == -1, QStringLiteral("все файлы — «(mixed)»"));
+        // Колонка только схемы файла (Severity) показана, Message — нет.
+        c.setVisibleFieldNames({ QStringLiteral("Level"), QStringLiteral("Severity") });
+        CHECK(settled(*t) && t->fieldSettings().visibleFields
+                                 == (QStringList{ QStringLiteral("Level"), QStringLiteral("Severity") }),
+              QStringLiteral("выбор колонок вкладки"));
+        const SessionState session = sessions.capture({ t }, t);
+        CHECK(session.tabs.size() == 1 && session.tabs[0].sources.size() == 2
+                  && !session.tabs[0].sources[0].schema && session.tabs[0].sources[1].schema
+                  && session.tabs[0].sources[1].schema->schema == b,
+              QStringLiteral("снята своя схема только второго файла"));
+        CHECK(SessionFile::save(sessionPath, session, &error), QStringLiteral("запись: ") + error);
+        c.setCurrentView(nullptr);
+    }
+    const SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+    CHECK(loaded.state.has_value(), QStringLiteral("читается: ") + loaded.error);
+    if (!loaded.state)
+        return;
+    {
+        SchemaTabPool pool{ &c, {} };
+        const auto result = sessions.open(*loaded.state, sessionPath, [&pool]() { return pool.make(); });
+        CHECK(result.tabs.size() == 1, QStringLiteral("вкладка сессии"));
+        if (result.tabs.size() == 1) {
+            CHECK(settled(*result.tabs[0]), QStringLiteral("загрузка"));
+            checkTab(*result.tabs[0], QStringLiteral("B"), QStringLiteral("открытая сессия"));
+            CHECK(result.tabs[0]->fieldSettings().visibleFields
+                      == (QStringList{ QStringLiteral("Level"), QStringLiteral("Severity") }),
+                  QStringLiteral("выбор колонок — как в сессии, с колонкой схемы файла: ")
+                      + result.tabs[0]->fieldSettings().visibleFields.join(','));
+            CHECK(result.tabs[0]->model()->isIndexedBackend() == (name == QLatin1String("indexed")),
+                  QStringLiteral("бэкенд"));
+        }
+    }
+    {
+        // Схемы файла нет в каталоге — сессия добавляет «(from session)».
+        SessionState strange = *loaded.state;
+        strange.tabs[0].sources[1].schema = FieldSettings{ QStringLiteral("Mine"), foreign, false, {} };
+        const int before = int(c.schemas().size());
+        SchemaTabPool pool{ &c, {} };
+        const auto result = sessions.open(strange, sessionPath, [&pool]() { return pool.make(); });
+        CHECK(int(c.schemas().size()) == before + 1, QStringLiteral("схема файла добавлена в каталог"));
+        if (result.tabs.size() == 1) {
+            CHECK(settled(*result.tabs[0]), QStringLiteral("загрузка"));
+            const LogFilePtr f2 = fileOf(*result.tabs[0], two);
+            CHECK(f2 && result.tabs[0]->fileSchema(f2).schema == foreign
+                      && result.tabs[0]->fileSchema(f2).schemaName.contains(QLatin1String("from session")),
+                  QStringLiteral("файл — схема «(from session)»"));
+        }
+        SchemaStore::sync({ { QStringLiteral("A"), a, {}, {} }, { QStringLiteral("B"), b, {}, {} } });
+        c.reloadCatalogue();
+    }
+
+    g_context = name + QStringLiteral(" / память файла: схема файла слитой вкладки");
+    {
+        FileMemoryStore store(dir.filePath(name + QStringLiteral("-file-schemas-memory")));
+        {
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* t = pool.make();
+            t->setFileMemory(&store);
+            c.applyToView(t, FieldSettings{ QStringLiteral("A"), a, true, {} });
+            t->addLogFile(one);
+            t->addLogFile(two);
+            CHECK(settled(*t), QStringLiteral("вкладка"));
+            c.applyToFile(t, fileOf(*t, two), FieldSettings{ QStringLiteral("B"), b, false, {} });
+            CHECK(settled(*t), QStringLiteral("схема файла"));
+            checkTab(*t, QStringLiteral("B"), QStringLiteral("до закрытия"));
+            t->saveFileMemory();
+        }
+        store.waitForWrites();
+        {
+            // one, затем two: two — вторым, со своей схемой из памяти.
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* t = pool.make();
+            t->setFileMemory(&store);
+            c.applyToView(t, FieldSettings{ QStringLiteral("A"), a, true, {} });
+            t->addLogFile(one);
+            t->addLogFile(two);
+            CHECK(settled(*t), QStringLiteral("загрузка"));
+            checkTab(*t, QStringLiteral("B"), QStringLiteral("память: второй файл"));
+        }
+        {
+            // two один: его схема — схема вкладки.
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* t = pool.make();
+            t->setFileMemory(&store);
+            t->addLogFile(two);
+            CHECK(settled(*t), QStringLiteral("загрузка"));
+            CHECK(t->parserPattern() == b && !t->hasFileSchemas(),
+                  QStringLiteral("память: первый файл — схема вкладки B"));
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -3098,6 +3330,7 @@ int main(int argc, char** argv)
     checkFileMemoryFormat();
     checkSessionFormat();
     checkSchemasFormat();
+    checkFileSchemasFormat();
     checkSessionSchema();
 
     QTemporaryDir tmp;
@@ -3139,6 +3372,7 @@ int main(int argc, char** argv)
     for (const bool indexed : { false, true }) {
         settings.setIndexedThresholdMB(indexed ? 0 : 512);
         checkSessionSchemas(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
+        checkSessionFileSchemas(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
     }
     settings.setIndexedThresholdMB(512);
 

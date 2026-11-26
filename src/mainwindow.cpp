@@ -1480,6 +1480,29 @@ void MainWindow::setupFieldVisibilityDock()
     allTabsBtn->setText(tr("All Tabs"));
     schemaRow->addWidget(allTabsBtn);
     rootLayout->addLayout(schemaRow);
+
+    // «Applies to» (F-5, PR 3): у слитой вкладки схема — всем файлам или
+    // одному. У вкладки из одного файла строки нет.
+    m_schemaTargetRow = new QWidget(contents);
+    auto* targetLayout = new QHBoxLayout(m_schemaTargetRow);
+    targetLayout->setContentsMargins(0, 0, 0, 0);
+    auto* targetLabel = new QLabel(tr("Applies to:"), m_schemaTargetRow);
+    targetLayout->addWidget(targetLabel);
+    m_schemaTargetCombo = new QComboBox(m_schemaTargetRow);
+    m_schemaTargetCombo->setObjectName(QStringLiteral("schemaTargetCombo"));
+    m_schemaTargetCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_schemaTargetCombo->setMinimumContentsLength(8);
+    m_schemaTargetCombo->setToolTip(tr("Which files of the merged tab the schema applies to: "
+                                       "all of them, or one file with its own schema"));
+    targetLabel->setBuddy(m_schemaTargetCombo);
+    connect(m_schemaTargetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index >= 0)
+                    m_schemas->setTargetFile(m_schemaTargetCombo->itemData(index).toString());
+            });
+    targetLayout->addWidget(m_schemaTargetCombo, 1);
+    m_schemaTargetRow->hide();
+    rootLayout->addWidget(m_schemaTargetRow);
     rootLayout->addSpacing(CompactStyle::kSpacing);
 
     // ---- Master enable/disable toggle ----
@@ -1600,9 +1623,43 @@ void MainWindow::syncSchemaCombo()
     for (const auto& e : m_schemas->schemas())
         addSchemaComboItem(m_conversionPatternCombo, e);
     // No active schema (the default — extraction off) must show as none, not
-    // as the first schema that addItem() selects by itself.
-    m_conversionPatternCombo->setCurrentIndex(m_schemas->activeIndex());
+    // as the first schema that addItem() selects by itself. Files of the
+    // merged tab with different schemas — «(mixed)» (F-5, PR 3).
+    m_conversionPatternCombo->setPlaceholderText(m_schemas->isMixed() ? tr("(mixed)") : tr("(none)"));
+    m_conversionPatternCombo->setCurrentIndex(m_schemas->isMixed() ? -1 : m_schemas->activeIndex());
     m_conversionPatternCombo->blockSignals(false);
+
+    // «Applies to»: все файлы и каждый файл вкладки дока.
+    if (m_schemaTargetCombo) {
+        LogViewWidget* view = m_schemas->currentView();
+        const QList<LogFilePtr> files = view ? view->loadedFiles() : QList<LogFilePtr>();
+        m_schemaTargetCombo->blockSignals(true);
+        m_schemaTargetCombo->clear();
+        m_schemaTargetCombo->addItem(tr("All files"), QString());
+        // Одинаковые имена (app.log с двух серверов) — с папкой.
+        QHash<QString, int> nameCount;
+        for (const LogFilePtr& f : files)
+            if (f)
+                ++nameCount[f->displayName];
+        for (const LogFilePtr& f : files) {
+            if (!f)
+                continue;
+            QString label = f->displayName;
+            if (nameCount.value(f->displayName) > 1) {
+                const QFileInfo shown(f->displayPath());
+                label = tr("%1 (%2)").arg(f->displayName,
+                                          QDir::toNativeSeparators(shown.dir().dirName()));
+            }
+            m_schemaTargetCombo->addItem(label, f->filePath);
+            m_schemaTargetCombo->setItemData(m_schemaTargetCombo->count() - 1,
+                                             QDir::toNativeSeparators(f->displayPath()),
+                                             Qt::ToolTipRole);
+        }
+        const int target = m_schemaTargetCombo->findData(m_schemas->targetFile());
+        m_schemaTargetCombo->setCurrentIndex(target >= 0 ? target : 0);
+        m_schemaTargetCombo->blockSignals(false);
+        m_schemaTargetRow->setVisible(files.size() > 1);
+    }
 }
 
 void MainWindow::syncFieldControls()
@@ -1717,7 +1774,7 @@ void MainWindow::onManagePatterns()
         }
     }
 
-    ConversionPatternDialog dlg(m_schemas->schemas(), this, sampleLines, m_schemas->activeSchema());
+    ConversionPatternDialog dlg(m_schemas->schemas(), this, sampleLines, m_schemas->shownSchema());
     if (dlg.exec() != QDialog::Accepted) return;
 
     const QString syncError = m_schemas->replaceCatalogue(dlg.resultPatterns(), dlg.chosenPattern(),
