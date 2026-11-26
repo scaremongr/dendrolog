@@ -138,6 +138,8 @@ set(DENDROLOG_CORE_SOURCES
     src/linetemplate.cpp
     src/schemaconverter.h
     src/schemaconverter.cpp
+    src/schemainference.h
+    src/schemainference.cpp
     src/filterruleset.h
     src/filterruleset.cpp
     src/textmatchhighlighter.h
