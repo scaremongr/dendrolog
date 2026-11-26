@@ -624,6 +624,112 @@ static void checkTabClose(const QDir& dir, const QString& schema)
     CHECK(!history, QStringLiteral("история ушла вместе с вкладкой"));
 }
 
+// Общая обвязка мест (M-8, LocatedPlaces): закладки и история одной вкладки
+// стоят на одних строках и делят RecordLocator модели. Ответ локатора
+// доходит до своего владельца и только до него: после удаления и возврата
+// файла, переписывания и возврата содержимого статус закладки и запись
+// истории одной строки совпадают; снятая закладка и очищенная история
+// чужие места не трогают.
+static void checkSharedPlaces(const QDir& dir, const QString& name, const QString& schema)
+{
+    g_context = name + QStringLiteral(" / закладки и история");
+    const QByteArray content = tabFixture();
+    const QString path = writeFile(dir, name + "-shared.log", content);
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.setParserPattern(schema);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), QStringLiteral("загрузка"));
+    LogModel& model = *tab.model();
+    NavHistory& h = tab.navHistory();
+    BookmarkStore& bm = tab.bookmarks();
+    const auto lineOfRecord = [](int i) { return qint64(i + 1 + (i + 4) / 10); };
+    const qint64 lines[] = { lineOfRecord(30), lineOfRecord(70), lineOfRecord(140) };
+
+    select(tab, rowOfLine(model, lines[0]));
+    tab.view()->goToRow(rowOfLine(model, lines[1]), NavKind::GoTo);
+    tab.view()->goToRow(rowOfLine(model, lines[2]), NavKind::Timeline);
+    int ids[3];
+    for (int i = 0; i < 3; ++i)
+        ids[i] = bm.add(rowOfLine(model, lines[i]));
+    CHECK(historyLines(h) == QVector<qint64>({ lines[0], lines[1], lines[2] }),
+          QStringLiteral("три места истории: ") + linesOf(model, h));
+
+    // Состояние места истории на строке line: 1 — сверено, 0 — ищется,
+    // -1 — пропало.
+    const auto historyState = [&](qint64 line) {
+        for (const NavEntry& e : h.entries())
+            if (e.line == line)
+                return e.lost ? -1 : e.verified ? 1 : 0;
+        return -2;
+    };
+    const auto bookmarkState = [&](int id) {
+        switch (bm.status(id)) {
+        case BookmarkStore::Status::Visible:
+        case BookmarkStore::Status::Hidden:
+            return 1;
+        case BookmarkStore::Status::Pending:
+            return 0;
+        case BookmarkStore::Status::Missing:
+            return -1;
+        }
+        return -2;
+    };
+    const auto expectStates = [&](const QString& what, const int (&expected)[3]) {
+        for (int i = 0; i < 3; ++i) {
+            CHECK(historyState(lines[i]) == expected[i],
+                  what + QStringLiteral(": история, строка %1 — %2, а не %3")
+                             .arg(lines[i]).arg(expected[i]).arg(historyState(lines[i])));
+            CHECK(bookmarkState(ids[i]) == expected[i],
+                  what + QStringLiteral(": закладка, строка %1 — %2, а не %3")
+                             .arg(lines[i]).arg(expected[i]).arg(bookmarkState(ids[i])));
+            const int row = bm.visibleRow(ids[i]);
+            if (expected[i] == 1 && row >= 0) {
+                const Bookmark* b = bm.find(ids[i]);
+                CHECK(b && b->line == lines[i]
+                          && b->preview == model.messageAt(row).left(BookmarkStore::kPreviewLength),
+                      what + QStringLiteral(": закладка на своей строке %1").arg(lines[i]));
+            }
+        }
+    };
+    expectStates(QStringLiteral("поставлены"), { 1, 1, 1 });
+
+    CHECK(QFile::remove(path), QStringLiteral("файл удалён"));
+    reload(tab);
+    expectStates(QStringLiteral("файла нет"), { 0, 0, 0 });
+    CHECK(writeBytes(path, content), QStringLiteral("файл создан заново"));
+    reload(tab);
+    expectStates(QStringLiteral("файл вернули"), { 1, 1, 1 });
+
+    // Записи до 50 те же, дальше другой текст: места 70 и 140 — чужие строки.
+    QByteArray rewritten = tabFixture(50);
+    const QByteArray other = tabFixture(200, "other ");
+    const int cut = other.indexOf(record(50, "INFO", "other 50"));
+    CHECK(cut > 0, QStringLiteral("фикстура переписанного файла"));
+    rewritten += other.mid(cut);
+    CHECK(writeBytes(path, rewritten), QStringLiteral("переписан"));
+    reload(tab);
+    expectStates(QStringLiteral("переписан"), { 1, -1, -1 });
+
+    // Закладку 140 сняли, историю не трогали: место истории 140 по-прежнему
+    // ищется при возврате содержимого и находится.
+    CHECK(bm.remove(ids[2]), QStringLiteral("закладка снята"));
+    CHECK(writeBytes(path, content), QStringLiteral("содержимое возвращено"));
+    reload(tab);
+    CHECK(historyState(lines[1]) == 1 && historyState(lines[2]) == 1,
+          QStringLiteral("места истории нашлись после возврата содержимого"));
+    CHECK(bookmarkState(ids[1]) == 1 && bm.find(ids[2]) == nullptr,
+          QStringLiteral("закладка 70 нашлась, снятая не вернулась"));
+
+    // История очищена — закладки живут дальше и после следующего сброса.
+    h.clear();
+    CHECK(QFile::remove(path) && writeBytes(path, content), QStringLiteral("файл пересоздан"));
+    reload(tab);
+    CHECK(bookmarkState(ids[0]) == 1 && bookmarkState(ids[1]) == 1 && bm.count() == 2,
+          QStringLiteral("закладки после очистки истории"));
+}
+
 // Переписанный файл сдвинул границы записей (ключи строк другие), а место
 // истории скрыто фильтром, когда загрузка кончилась. Строку находит
 // RecordLocator — по номеру и тексту среди ВСЕХ строк порции, — и возврат
@@ -844,11 +950,13 @@ int main(int argc, char** argv)
     checkHiddenAtReload(dir, QStringLiteral("resident"), schema);
     checkHiddenEncodingChange(dir, QStringLiteral("resident"), schema);
     checkSearchResultsQuiet(dir, schema);
+    checkSharedPlaces(dir, QStringLiteral("resident"), schema);
     settings.setIndexedThresholdMB(0);
     checkTab(dir, QStringLiteral("indexed"), schema);
     checkEncodingChange(dir, QStringLiteral("indexed"), schema);
     checkHiddenAtReload(dir, QStringLiteral("indexed"), schema);
     checkHiddenEncodingChange(dir, QStringLiteral("indexed"), schema);
+    checkSharedPlaces(dir, QStringLiteral("indexed"), schema);
     settings.setIndexedThresholdMB(512);
     checkConversion(dir, schema);
     checkTabClose(dir, schema);

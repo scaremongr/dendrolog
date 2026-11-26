@@ -1,6 +1,7 @@
 #ifndef BOOKMARKSTORE_H
 #define BOOKMARKSTORE_H
 
+#include "locatedplaces.h"
 #include "recordid.h"
 
 #include <QJsonObject>
@@ -60,13 +61,10 @@ class RecordLocator;
 //     (RecordLocator::watchCompletion → completed).
 // ============================================================================
 
-struct Bookmark {
+// Закладка — место в логе (LocatedPlace: ключ, идентификатор, путь, номер,
+// фрагмент; состояние поиска строки — общая обвязка M-8) плюс заметка.
+struct Bookmark : LocatedPlace {
     int id = -1;
-    RecordKey key;          // ключ строки на момент последней проверки
-    RecordId record;        // номер строки + отпечаток текста (R-1)
-    QString filePath;
-    qint64 line = 0;        // номер физической строки в файле, с 1
-    QString preview;        // первые kPreviewLength символов текста строки
     QString note;
     QDateTime created;
 };
@@ -88,11 +86,9 @@ struct BookmarkState {
     static std::optional<BookmarkState> fromJson(const QJsonObject& json, QString* error = nullptr);
 };
 
-class BookmarkStore : public QObject {
+class BookmarkStore : public LocatedPlaces {
     Q_OBJECT
 public:
-    static constexpr int kPreviewLength = 200;
-
     enum class Status {
         Visible,  // строка показана — в жёлобе отметка, F2 к ней ходит
         Hidden,   // строка в данных, но скрыта фильтром
@@ -183,41 +179,25 @@ signals:
     // статус Visible/Hidden панель пересчитывает по сигналам модели сама).
     void changed();
 
+protected:
+    LocatedPlace* placeById(int id) override;
+    void forEachPlace(const std::function<void(int, LocatedPlace&)>& fn) override;
+    void placeResolved(int id, const RecordKey& previousKey) override;
+    void placeRefused(int id) override;
+    void placeCompleted(int id, bool keyChanged) override;
+
 private:
-    struct Item {
-        Bookmark bookmark;
-        bool verified = true;  // строка найдена после последнего сброса
-        bool lost = false;     // строка не найдена
-        int token = 0;         // запрос к RecordLocator (поиск, слежение)
-        SourceIdentity source; // идентичность при постановке / из сохранения
-    };
     using LineKey = std::pair<const LogFile*, qint64>;
 
     static LineKey lineKey(const Bookmark& b) { return { b.key.file.get(), b.line }; }
-    RecordLocator& locator() const;
-    QString previewOf(int row) const;
-    // Фрагменты сверенных закладок файла, чьи строки видны, — по тексту
-    // модели. true — какой-то изменился.
-    bool updateVisiblePreviews(const QString& filePath);
     void notifyRow(int row);
     void scheduleChanged();
-    // Строка закладки сброшена: искать заново (RecordLocator::reacquire).
-    void reacquire(int id, Item& item);
-    void releaseToken(Item& item);
-    // Привязать item к строке row (постановка, повторная постановка):
-    // ключ, идентификатор, слежение за недописанной строкой.
-    void bindToRow(int id, Item& item, int row);
-    void onResolved(int token, const RecordKey& key);
-    void onRefused(int token);
-    void onCompleted(int token, const RecordId& record, const RecordKey& key);
-    // Сохранённая закладка без строки (ещё не нашла её или получила отказ):
-    // ждёт файл со своим путём (RecordLocator::request).
-    void requestSaved(int id, Item& item);
+    // Привязать закладку к строке row (постановка, повторная постановка):
+    // ключ, идентификатор, слежение за недописанной строкой, источник.
+    void bindBookmark(int id, Bookmark& b, int row);
 
-    LogModel& m_model;
-    QHash<int, Item> m_items;
+    QHash<int, Bookmark> m_items;
     QHash<LineKey, int> m_byLine;
-    QHash<int, int> m_byToken; // токен локатора → id закладки
     int m_nextId = 1;
     QTimer m_changedTimer;
 };

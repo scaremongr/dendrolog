@@ -3,61 +3,36 @@
 #include "recordlocator.h"
 
 NavHistory::NavHistory(LogModel& model)
-    : QObject(&model)
-    , m_model(model)
+    : LocatedPlaces(model)
 {
-    RecordLocator& loc = locator();
-    connect(&loc, &RecordLocator::resolved, this, [this](int token, const RecordKey& key) {
-        NavEntry* e = entryByToken(token);
-        if (!e)
-            return;
-        if (e->record.hasText)
-            e->token = 0; // недописанную строку локатор ведёт дальше
-        e->key = key;
-        e->verified = true;
-        e->lost = false;
-        emit changed();
-    });
-    connect(&loc, &RecordLocator::refused, this, [this](int token, RecordLocator::Refusal) {
-        NavEntry* e = entryByToken(token);
-        if (!e)
-            return;
-        e->token = 0;
-        e->verified = true;
-        e->lost = true;
-        emit changed();
-    });
-    connect(&loc, &RecordLocator::completed, this,
-            [this](int token, const RecordId& record, const RecordKey& key) {
-        if (NavEntry* e = entryByToken(token)) {
-            e->token = 0;
-            e->record = record;
-            // Дописанная строка могла начать запись: ключ другой.
-            if (key.isValid() && key.file == e->key.file && key.line == e->line)
-                e->key = key;
-        }
-    });
 }
 
-RecordLocator& NavHistory::locator() const
-{
-    return m_model.recordLocator();
-}
-
-NavEntry* NavHistory::entryByToken(int token)
+LocatedPlace* NavHistory::placeById(int id)
 {
     for (NavEntry& e : m_entries)
-        if (e.token == token)
+        if (e.id == id)
             return &e;
     return nullptr;
 }
 
-void NavHistory::release(NavEntry& e)
+void NavHistory::forEachPlace(const std::function<void(int, LocatedPlace&)>& fn)
 {
-    if (e.token) {
-        locator().cancel(e.token);
-        e.token = 0;
-    }
+    for (NavEntry& e : m_entries)
+        fn(e.id, e);
+}
+
+void NavHistory::placeResolved(int, const RecordKey&)
+{
+    emit changed();
+}
+
+void NavHistory::placeRefused(int)
+{
+    emit changed();
+}
+
+void NavHistory::placeCompleted(int, bool)
+{
 }
 
 void NavHistory::releaseTokens(qsizetype from, qsizetype end)
@@ -66,26 +41,12 @@ void NavHistory::releaseTokens(qsizetype from, qsizetype end)
         release(m_entries[i]);
 }
 
-void NavHistory::reacquire(NavEntry& e)
-{
-    release(e);
-    e.verified = false;
-    e.lost = false; // файл могли вернуть к прежнему содержимому
-    if (e.key.isValid())
-        e.token = locator().reacquire(e.key.file, e.record);
-}
-
-NavEntry NavHistory::makeEntry(int row, NavKind kind, bool origin) const
+NavEntry NavHistory::makeEntry(int row, NavKind kind, bool origin)
 {
     NavEntry e;
-    e.key = m_model.keyAt(row);
-    if (!e.key.isValid())
+    if (!fill(e, row))
         return e;
-    e.filePath = e.key.file->filePath;
-    e.line = e.key.line;
-    const QString text = m_model.messageAt(row);
-    e.preview = text.left(kPreviewLength);
-    e.record = locator().idFor(e.key, text);
+    e.id = m_nextId++;
     e.kind = kind;
     e.origin = origin;
     return e;
@@ -95,7 +56,7 @@ void NavHistory::recordJump(int fromRow, int toRow, NavKind kind)
 {
     if (kind == NavKind::History)
         return;
-    const int rows = m_model.rowCount();
+    const int rows = model().rowCount();
     if (toRow < 0 || toRow >= rows)
         return;
     NavEntry to = makeEntry(toRow, kind, false);
@@ -141,11 +102,8 @@ void NavHistory::recordJump(int fromRow, int toRow, NavKind kind)
     // Недописанная последняя строка: отпечаток — когда её допишут.
     for (qsizetype i = qMax<qsizetype>(0, m_entries.size() - 2); i < m_entries.size(); ++i) {
         NavEntry& e = m_entries[i];
-        if (e.token == 0 && e.verified && !e.record.hasText && e.record.isValid()) {
-            const int row = m_model.rowForKey(e.key);
-            if (row >= 0)
-                e.token = locator().watchCompletion(e.key, e.record, m_model.messageAt(row));
-        }
+        if (e.token == 0 && e.verified && !e.record.hasText && e.record.isValid())
+            watchCompletion(e.id, e, model().rowForKey(e.key));
     }
     m_pos = int(m_entries.size()) - 1;
     m_lastWasJump = true;
@@ -198,12 +156,12 @@ int NavHistory::resolve(NavEntry& e)
         return -1;
     // Строка видна — фрагмент освежаем: она могла быть предварительной
     // (хвост без '\n') и дописаться.
-    const int row = m_model.rowForKey(e.key);
+    const int row = model().rowForKey(e.key);
     if (row >= 0) {
-        e.preview = m_model.messageAt(row).left(kPreviewLength);
+        e.preview = previewOf(row);
         return row;
     }
-    return m_model.nearestRowForKey(e.key);
+    return model().nearestRowForKey(e.key);
 }
 
 int NavHistory::step(int direction, int currentRow)
@@ -247,24 +205,15 @@ void NavHistory::clear()
 // содержимому — пропавшее место ищется заново (как у закладок).
 void NavHistory::invalidateFile(const QString& filePath)
 {
-    for (NavEntry& e : m_entries)
-        if (e.filePath == filePath)
-            reacquire(e);
+    invalidatePlacesOfFile(filePath);
 }
 
 void NavHistory::refreshPreviews(const QString& filePath)
 {
-    for (NavEntry& e : m_entries) {
-        if (e.filePath != filePath || !e.verified || e.lost)
-            continue;
-        const int row = m_model.rowForKey(e.key);
-        if (row >= 0)
-            e.preview = m_model.messageAt(row).left(kPreviewLength);
-    }
+    refreshVisiblePreviews(filePath);
 }
 
 void NavHistory::invalidateAll()
 {
-    for (NavEntry& e : m_entries)
-        reacquire(e);
+    invalidateAllPlaces();
 }

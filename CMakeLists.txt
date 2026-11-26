@@ -88,6 +88,8 @@ set(DENDROLOG_CORE_SOURCES
     src/recordlocator.cpp
     src/bookmarkstore.h
     src/bookmarkstore.cpp
+    src/locatedplaces.h
+    src/locatedplaces.cpp
     src/documentstate.h
     src/documentstate.cpp
     src/filememorystore.h

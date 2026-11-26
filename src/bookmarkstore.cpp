@@ -7,24 +7,25 @@
 #include <algorithm>
 
 BookmarkStore::BookmarkStore(LogModel& model)
-    : QObject(&model)
-    , m_model(model)
+    : LocatedPlaces(model)
 {
     // Найденные и потерянные строки приходят пачками (порция загрузки) —
     // changed панели одним сигналом на пачку.
     m_changedTimer.setSingleShot(true);
     m_changedTimer.setInterval(0);
     connect(&m_changedTimer, &QTimer::timeout, this, &BookmarkStore::changed);
-    RecordLocator& loc = locator();
-    connect(&loc, &RecordLocator::resolved, this, &BookmarkStore::onResolved);
-    connect(&loc, &RecordLocator::refused, this,
-            [this](int token, RecordLocator::Refusal) { onRefused(token); });
-    connect(&loc, &RecordLocator::completed, this, &BookmarkStore::onCompleted);
 }
 
-RecordLocator& BookmarkStore::locator() const
+LocatedPlace* BookmarkStore::placeById(int id)
 {
-    return m_model.recordLocator();
+    const auto it = m_items.find(id);
+    return it == m_items.end() ? nullptr : &it.value();
+}
+
+void BookmarkStore::forEachPlace(const std::function<void(int, LocatedPlace&)>& fn)
+{
+    for (auto it = m_items.begin(); it != m_items.end(); ++it)
+        fn(it.key(), it.value());
 }
 
 void BookmarkStore::scheduleChanged()
@@ -37,8 +38,8 @@ QVector<Bookmark> BookmarkStore::bookmarks() const
 {
     QVector<Bookmark> list;
     list.reserve(m_items.size());
-    for (const Item& item : m_items)
-        list.append(item.bookmark);
+    for (const Bookmark& b : m_items)
+        list.append(b);
     std::sort(list.begin(), list.end(), [](const Bookmark& a, const Bookmark& b) {
         if (a.filePath != b.filePath)
             return a.filePath < b.filePath;
@@ -52,99 +53,73 @@ QVector<Bookmark> BookmarkStore::bookmarks() const
 const Bookmark* BookmarkStore::find(int id) const
 {
     const auto it = m_items.constFind(id);
-    return it == m_items.constEnd() ? nullptr : &it->bookmark;
+    return it == m_items.constEnd() ? nullptr : &it.value();
 }
 
 int BookmarkStore::idAtRow(int row) const
 {
     if (m_items.isEmpty())
         return -1;
-    const RecordKey key = m_model.keyAt(row);
+    const RecordKey key = model().keyAt(row);
     if (!key.isValid())
         return -1;
     const auto it = m_byLine.constFind(LineKey(key.file.get(), key.line));
     if (it == m_byLine.constEnd())
         return -1;
-    const Item& item = m_items[it.value()];
+    const auto bit = m_items.constFind(it.value());
+    if (bit == m_items.constEnd())
+        return -1;
+    const Bookmark& b = bit.value();
     // Строка с тем же номером, но из другой записи или с другой меткой — уже
     // не та строка (перезагрузка): отметки нет, пока её не перепроверят.
-    if (!item.verified || item.lost || item.bookmark.key != key)
+    if (!b.isLive() || b.key != key)
         return -1;
     return it.value();
 }
 
-QString BookmarkStore::previewOf(int row) const
-{
-    return m_model.messageAt(row).left(kPreviewLength);
-}
-
 void BookmarkStore::notifyRow(int row)
 {
-    m_model.notifyBookmarkRow(row);
+    model().notifyBookmarkRow(row);
 }
 
-void BookmarkStore::releaseToken(Item& item)
+void BookmarkStore::bindBookmark(int id, Bookmark& b, int row)
 {
-    if (item.token == 0)
-        return;
-    locator().cancel(item.token);
-    m_byToken.remove(item.token);
-    item.token = 0;
-}
-
-void BookmarkStore::bindToRow(int id, Item& item, int row)
-{
-    releaseToken(item);
-    const RecordKey key = m_model.keyAt(row);
-    Bookmark& b = item.bookmark;
     if (b.key.isValid() && m_byLine.value(lineKey(b), -1) == id)
         m_byLine.remove(lineKey(b));
-    b.key = key;
-    b.filePath = key.file->filePath;
-    b.line = key.line;
-    b.preview = previewOf(row);
-    b.record = locator().idFor(key, m_model.messageAt(row));
-    item.verified = true;
-    item.lost = false;
-    if (const auto source = locator().sourceFor(key.file))
-        item.source = *source;
+    bindToRow(id, b, row);
+    if (const auto source = locator().sourceFor(b.key.file))
+        b.source = *source;
     m_byLine.insert(lineKey(b), id);
-    // Последняя строка без '\n': отпечаток — когда её допишут.
-    if (!b.record.hasText) {
-        item.token = locator().watchCompletion(key, b.record, m_model.messageAt(row));
-        if (item.token)
-            m_byToken.insert(item.token, id);
-    }
 }
 
 int BookmarkStore::add(int row, const QString& note)
 {
-    const RecordKey key = m_model.keyAt(row);
+    const RecordKey key = model().keyAt(row);
     if (!key.isValid())
         return -1;
     const LineKey lk(key.file.get(), key.line);
     const auto existing = m_byLine.constFind(lk);
     if (existing != m_byLine.constEnd()) {
         const int id = existing.value();
-        Item& item = m_items[id];
-        if (item.verified && !item.lost && item.bookmark.key == key)
+        Bookmark& b = m_items[id];
+        if (b.isLive() && b.key == key)
             return id;
         // Закладка этой строки потеряла её (перезагрузка, переписанный файл):
         // пользователь поставил её заново — привязываем, заметку сохраняем.
-        bindToRow(id, item, row);
+        bindBookmark(id, b, row);
         if (!note.isEmpty())
-            item.bookmark.note = note;
+            b.note = note;
         notifyRow(row);
         emit changed();
         return id;
     }
 
     const int id = m_nextId++;
-    Item& item = m_items[id];
-    item.bookmark.id = id;
-    item.bookmark.note = note;
-    item.bookmark.created = QDateTime::currentDateTime();
-    bindToRow(id, item, row);
+    Bookmark& b = m_items[id];
+    b.id = id;
+    b.note = note;
+    b.created = QDateTime::currentDateTime();
+    bindBookmark(id, b, row);
     notifyRow(row);
     emit changed();
     return id;
@@ -156,9 +131,9 @@ bool BookmarkStore::remove(int id)
     if (it == m_items.end())
         return false;
     const int row = visibleRow(id);
-    releaseToken(it.value());
-    if (m_byLine.value(lineKey(it->bookmark), -1) == id)
-        m_byLine.remove(lineKey(it->bookmark));
+    release(it.value());
+    if (m_byLine.value(lineKey(it.value()), -1) == id)
+        m_byLine.remove(lineKey(it.value()));
     m_items.erase(it);
     notifyRow(row);
     emit changed();
@@ -180,11 +155,10 @@ void BookmarkStore::clear()
     if (m_items.isEmpty())
         return;
     const QVector<int> rows = visibleRows();
-    for (Item& item : m_items)
-        releaseToken(item);
+    for (Bookmark& b : m_items)
+        release(b);
     m_items.clear();
     m_byLine.clear();
-    m_byToken.clear();
     for (const int row : rows)
         notifyRow(row);
     emit changed();
@@ -193,9 +167,9 @@ void BookmarkStore::clear()
 bool BookmarkStore::setNote(int id, const QString& note)
 {
     const auto it = m_items.find(id);
-    if (it == m_items.end() || it->bookmark.note == note)
+    if (it == m_items.end() || it->note == note)
         return false;
-    it->bookmark.note = note;
+    it->note = note;
     emit changed();
     return true;
 }
@@ -205,14 +179,14 @@ BookmarkStore::Status BookmarkStore::status(int id) const
     const auto it = m_items.constFind(id);
     if (it == m_items.constEnd() || it->lost)
         return Status::Missing;
-    const RecordKey& key = it->bookmark.key;
-    if (m_model.rowForKey(key) >= 0)
+    const RecordKey& key = it->key;
+    if (model().rowForKey(key) >= 0)
         return it->verified ? Status::Visible : Status::Pending;
-    if (m_model.nearestRowForKey(key) >= 0)
+    if (model().nearestRowForKey(key) >= 0)
         return Status::Hidden;
     // nearestRowForKey не отличает «строки нет» от «не видно ни одной
     // строки»: при пустом видимом наборе проверенная закладка — скрытая.
-    if (m_model.rowCount() == 0 && it->verified && m_model.totalLineCount() > 0)
+    if (model().rowCount() == 0 && it->verified && model().totalLineCount() > 0)
         return Status::Hidden;
     return Status::Pending;
 }
@@ -220,9 +194,9 @@ BookmarkStore::Status BookmarkStore::status(int id) const
 int BookmarkStore::visibleRow(int id) const
 {
     const auto it = m_items.constFind(id);
-    if (it == m_items.constEnd() || !it->verified || it->lost)
+    if (it == m_items.constEnd() || !it->isLive())
         return -1;
-    return m_model.rowForKey(it->bookmark.key);
+    return model().rowForKey(it->key);
 }
 
 int BookmarkStore::targetRow(int id) const
@@ -232,7 +206,7 @@ int BookmarkStore::targetRow(int id) const
     switch (status(id)) {
     case Status::Visible:
     case Status::Hidden:
-        return m_model.nearestRowForKey(m_items[id].bookmark.key);
+        return model().nearestRowForKey(m_items.constFind(id)->key);
     case Status::Pending:
     case Status::Missing:
         break;
@@ -244,10 +218,10 @@ QVector<int> BookmarkStore::visibleRows() const
 {
     QVector<int> rows;
     rows.reserve(m_items.size());
-    for (const Item& item : m_items) {
-        if (!item.verified || item.lost)
+    for (const Bookmark& b : m_items) {
+        if (!b.isLive())
             continue;
-        const int row = m_model.rowForKey(item.bookmark.key);
+        const int row = model().rowForKey(b.key);
         if (row >= 0)
             rows.append(row);
     }
@@ -275,154 +249,67 @@ int BookmarkStore::nextRow(int startRow, bool forward, bool wrap) const
 }
 
 // ---------------------------------------------------------------------------
-// Сброс строк и ответы RecordLocator
+// Сброс строк и ответы RecordLocator (общая обвязка — LocatedPlaces)
 // ---------------------------------------------------------------------------
-
-void BookmarkStore::reacquire(int id, Item& item)
-{
-    releaseToken(item);
-    item.verified = false;
-    item.lost = false; // файл могли вернуть к прежнему содержимому
-    item.token = locator().reacquire(item.bookmark.key.file, item.bookmark.record);
-    m_byToken.insert(item.token, id);
-}
-
-void BookmarkStore::requestSaved(int id, Item& item)
-{
-    releaseToken(item);
-    item.verified = false;
-    item.lost = false;
-    item.token = locator().request(item.source, item.bookmark.record);
-    m_byToken.insert(item.token, id);
-}
 
 void BookmarkStore::invalidateFile(const QString& filePath)
 {
-    const QString key = RecordLocator::pathKey(filePath);
-    for (auto it = m_items.begin(); it != m_items.end(); ++it) {
-        Item& item = it.value();
-        if (item.bookmark.key.file) {
-            if (item.bookmark.key.file->filePath == filePath)
-                reacquire(it.key(), item);
-        } else if (item.lost && RecordLocator::pathKey(item.bookmark.filePath) == key) {
-            // Сохранённая закладка получила отказ (файл был другим) — файл
-            // читается заново, проверяем ещё раз. Ждущая ждёт сама.
-            requestSaved(it.key(), item);
-        }
-    }
+    invalidatePlacesOfFile(filePath);
 }
 
 void BookmarkStore::recheckSource(const QString& sourceKey)
 {
-    for (auto it = m_items.begin(); it != m_items.end(); ++it) {
-        Item& item = it.value();
-        if (!item.bookmark.key.file && item.lost && item.source.isValid()
-            && RecordLocator::sourceKey(item.source) == sourceKey)
-            requestSaved(it.key(), item);
-    }
+    recheckSavedSource(sourceKey);
 }
 
 void BookmarkStore::invalidateAll()
 {
-    for (auto it = m_items.begin(); it != m_items.end(); ++it) {
-        if (it->bookmark.key.file)
-            reacquire(it.key(), it.value());
-        else if (it->lost)
-            requestSaved(it.key(), it.value());
-    }
+    invalidateAllPlaces();
 }
 
-void BookmarkStore::onResolved(int token, const RecordKey& key)
+void BookmarkStore::placeResolved(int id, const RecordKey& previousKey)
 {
-    const auto tit = m_byToken.constFind(token);
-    if (tit == m_byToken.constEnd())
-        return;
-    const int id = tit.value();
-    Item& item = m_items[id];
-    Bookmark& b = item.bookmark;
-    // Недописанная строка: локатор следит за ней тем же токеном до completed.
-    if (b.record.hasText) {
-        m_byToken.remove(token);
-        item.token = 0;
-    }
-    const LineKey lk(key.file.get(), key.line);
+    Bookmark& b = m_items[id];
+    const LineKey previous(previousKey.file.get(), previousKey.line);
+    const bool hadLine = previousKey.isValid() && m_byLine.value(previous, -1) == id;
+    const LineKey lk = lineKey(b);
     const int other = m_byLine.value(lk, -1);
+    if (hadLine && previous != lk)
+        m_byLine.remove(previous);
     if (other >= 0 && other != id) {
         // Сохранённая закладка нашла строку, на которой уже стоит другая:
         // одна закладка на строку, заметка не теряется.
-        Item& kept = m_items[other];
-        if (kept.bookmark.note.isEmpty())
-            kept.bookmark.note = b.note;
-        releaseToken(item);
+        Bookmark& kept = m_items[other];
+        if (kept.note.isEmpty())
+            kept.note = b.note;
+        release(b);
         m_items.remove(id);
+        if (hadLine)
+            notifyRow(model().rowForKey(previousKey));
         scheduleChanged();
         return;
     }
-    if (b.key.isValid() && m_byLine.value(lineKey(b), -1) == id)
-        m_byLine.remove(lineKey(b));
-    b.key = key;
-    b.filePath = key.file->filePath;
-    b.line = key.line;
-    item.verified = true;
-    item.lost = false;
     m_byLine.insert(lk, id);
-    notifyRow(m_model.rowForKey(key));
+    notifyRow(model().rowForKey(b.key));
     scheduleChanged();
 }
 
-void BookmarkStore::onRefused(int token)
+void BookmarkStore::placeRefused(int)
 {
-    const auto tit = m_byToken.constFind(token);
-    if (tit == m_byToken.constEnd())
-        return;
-    Item& item = m_items[tit.value()];
-    m_byToken.erase(tit);
-    item.token = 0;
-    item.verified = true;
-    item.lost = true;
     scheduleChanged();
 }
 
-void BookmarkStore::onCompleted(int token, const RecordId& record, const RecordKey& key)
+void BookmarkStore::placeCompleted(int id, bool keyChanged)
 {
-    const auto tit = m_byToken.constFind(token);
-    if (tit == m_byToken.constEnd())
+    if (!keyChanged)
         return;
-    const int id = tit.value();
-    Item& item = m_items[id];
-    m_byToken.erase(tit);
-    item.token = 0;
-    Bookmark& b = item.bookmark;
-    b.record = record;
-    // Дописанная строка могла начать запись: ключ другой, строка та же.
-    if (key.isValid() && key != b.key && key.file == b.key.file && key.line == b.line) {
-        b.key = key;
-        notifyRow(m_model.rowForKey(key));
-        scheduleChanged();
-    }
-}
-
-bool BookmarkStore::updateVisiblePreviews(const QString& filePath)
-{
-    bool anyChange = false;
-    for (Item& item : m_items) {
-        if (item.bookmark.filePath != filePath || !item.verified || item.lost)
-            continue;
-        const int row = m_model.rowForKey(item.bookmark.key);
-        if (row < 0)
-            continue;
-        const QString preview = previewOf(row);
-        if (preview != item.bookmark.preview) {
-            item.bookmark.preview = preview;
-            anyChange = true;
-        }
-    }
-    return anyChange;
+    notifyRow(model().rowForKey(m_items[id].key));
+    scheduleChanged();
 }
 
 void BookmarkStore::refreshPreviews(const QString& filePath)
 {
-    if (updateVisiblePreviews(filePath))
+    if (refreshVisiblePreviews(filePath))
         emit changed();
 }
 
@@ -430,7 +317,7 @@ void BookmarkStore::fileLoaded(const QString& filePath, bool fullLoad)
 {
     // Дочитан хвост: строка закладки могла быть предварительной (без '\n') и
     // дописаться — ключ тот же, текст длиннее; фрагмент показывает новый.
-    if (!fullLoad && updateVisiblePreviews(filePath))
+    if (!fullLoad && refreshVisiblePreviews(filePath))
         emit changed();
 }
 
@@ -441,20 +328,20 @@ void BookmarkStore::fileLoaded(const QString& filePath, bool fullLoad)
 std::optional<BookmarkState> BookmarkStore::state(int id) const
 {
     const auto it = m_items.constFind(id);
-    if (it == m_items.constEnd() || !it->bookmark.record.isValid())
+    if (it == m_items.constEnd() || !it->record.isValid())
         return std::nullopt;
     BookmarkState s;
     s.source = it->source;
     // Строка найдена — идентичность по концу прочитанного сейчас.
-    if (it->verified && !it->lost && it->bookmark.key.file)
-        if (const auto source = locator().sourceFor(it->bookmark.key.file))
+    if (it->isLive() && it->key.file)
+        if (const auto source = locator().sourceFor(it->key.file))
             s.source = *source;
     if (!s.source.isValid())
         return std::nullopt;
-    s.record = it->bookmark.record;
-    s.note = it->bookmark.note;
-    s.preview = it->bookmark.preview;
-    s.created = it->bookmark.created;
+    s.record = it->record;
+    s.note = it->note;
+    s.preview = it->preview;
+    s.created = it->created;
     return s;
 }
 
@@ -475,9 +362,9 @@ int BookmarkStore::restore(const BookmarkState& state)
     // закладка стоит на распакованной копии, а сохранённая — на архиве.
     const QString pathKey = RecordLocator::sourceKey(state.source);
     for (auto it = m_items.begin(); it != m_items.end(); ++it) {
-        Bookmark& b = it->bookmark;
+        Bookmark& b = it.value();
         const QString key = b.key.file ? RecordLocator::sourceKey(*b.key.file)
-            : it->source.isValid() ? RecordLocator::sourceKey(it->source)
+            : b.source.isValid() ? RecordLocator::sourceKey(b.source)
                                    : RecordLocator::pathKey(b.filePath);
         if (b.line == state.record.line && key == pathKey) {
             if (b.note.isEmpty() && !state.note.isEmpty()) {
@@ -488,16 +375,16 @@ int BookmarkStore::restore(const BookmarkState& state)
         }
     }
     const int id = m_nextId++;
-    Item& item = m_items[id];
-    item.bookmark.id = id;
-    item.bookmark.filePath = state.source.path;
-    item.bookmark.line = state.record.line;
-    item.bookmark.record = state.record;
-    item.bookmark.preview = state.preview.left(kPreviewLength);
-    item.bookmark.note = state.note;
-    item.bookmark.created = state.created;
-    item.source = state.source;
-    requestSaved(id, item);
+    Bookmark& b = m_items[id];
+    b.id = id;
+    b.filePath = state.source.path;
+    b.line = state.record.line;
+    b.record = state.record;
+    b.preview = state.preview.left(kPreviewLength);
+    b.note = state.note;
+    b.created = state.created;
+    b.source = state.source;
+    requestSaved(id, b);
     emit changed();
     return id;
 }
