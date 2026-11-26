@@ -277,6 +277,13 @@ cmake --build build-asan --parallel && ctest --test-dir build-asan --output-on-f
   вытесняет из теневой ячейки TSan запись о гоночном доступе, и гонка
   пропадает. Упал любой `*race` — прослойка ослепила TSan, зелёным остальным
   тестам верить нельзя.
+- Слот (указатель на метод или лямбда) на объекте Qt с партнёром в чужом потоке
+  (`QNetworkReply` — делегат на HTTP-потоке `QNetworkAccessManager`) не
+  подключать: осиротев в `~QObject` объекта, он освобождается
+  `cleanOrphanedConnections` того потока, под мьютексом соединений Qt, и TSan
+  видит гонку `operator new` / `delete` слота (S-29). Ребро слоем не дать —
+  оба вызова внутри libQt6Core; подключаться к объекту своего потока
+  (`QNetworkAccessManager::finished(reply)`, образец — `AiSchemaClient`).
 - Тест, который ждёт «тишины» по таймеру, под санитайзером ненадёжен: ждать
   состояние (`testdocs::settle` смотрит `isFiltering()`), а не время.
 

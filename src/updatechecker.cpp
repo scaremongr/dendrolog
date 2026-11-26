@@ -25,6 +25,9 @@ UpdateChecker::UpdateChecker(QObject* parent)
 {
     // GitHub отвечает 301 при переименовании репозитория — следуем молча.
     m_nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Конец ответа — сигнал менеджера, а не ответа: слот на ответе освобождал
+    // бы HTTP-поток Qt (S-29, CLAUDE.md «Санитайзеры»).
+    connect(m_nam, &QNetworkAccessManager::finished, this, &UpdateChecker::onReplyFinished);
 }
 
 QString UpdateChecker::repoUrl()
@@ -57,35 +60,37 @@ void UpdateChecker::check()
     req.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
     req.setTransferTimeout(10000);
 
-    QNetworkReply* reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        m_busy = false;
+    m_nam->get(req);
+}
 
-        if (reply->error() != QNetworkReply::NoError) {
-            emit checkFailed(reply->errorString());
-            return;
-        }
+void UpdateChecker::onReplyFinished(QNetworkReply* reply)
+{
+    reply->deleteLater();
+    m_busy = false;
 
-        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
-        QString tag = obj.value(QStringLiteral("tag_name")).toString();
-        if (tag.startsWith(QLatin1Char('v')))
-            tag.remove(0, 1);
+    if (reply->error() != QNetworkReply::NoError) {
+        emit checkFailed(reply->errorString());
+        return;
+    }
 
-        const QVersionNumber latest  = QVersionNumber::fromString(tag);
-        const QVersionNumber current =
-            QVersionNumber::fromString(QCoreApplication::applicationVersion());
-        if (latest.isNull()) {
-            // Релизов ещё нет или tag_name неожиданного формата.
-            emit checkFailed(QStringLiteral("no releases found"));
-            return;
-        }
+    const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+    QString tag = obj.value(QStringLiteral("tag_name")).toString();
+    if (tag.startsWith(QLatin1Char('v')))
+        tag.remove(0, 1);
 
-        if (latest > current) {
-            const QString url = obj.value(QStringLiteral("html_url")).toString();
-            emit updateAvailable(tag, url.isEmpty() ? releasesUrl() : url);
-        } else {
-            emit upToDate();
-        }
-    });
+    const QVersionNumber latest  = QVersionNumber::fromString(tag);
+    const QVersionNumber current =
+        QVersionNumber::fromString(QCoreApplication::applicationVersion());
+    if (latest.isNull()) {
+        // Релизов ещё нет или tag_name неожиданного формата.
+        emit checkFailed(QStringLiteral("no releases found"));
+        return;
+    }
+
+    if (latest > current) {
+        const QString url = obj.value(QStringLiteral("html_url")).toString();
+        emit updateAvailable(tag, url.isEmpty() ? releasesUrl() : url);
+    } else {
+        emit upToDate();
+    }
 }

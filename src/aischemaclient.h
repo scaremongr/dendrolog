@@ -133,12 +133,15 @@ public:
     int connectionAttempts() const { return m_totalAttempts; }
 
 signals:
+    /// Итог запроса. Ответ сети приходит изнутри QNetworkAccessManager::finished
+    /// (S-29): удалять клиента из обработчика — только deleteLater, синхронное
+    /// удаление освободило бы менеджер посреди его сигнала.
     void finished(const AiSchemaClient::Result& result);
     void retrying(int attempt, int delayMs);
 
 private:
     void startAttempt();
-    void onReplyFinished();
+    void onReplyFinished(QNetworkReply* reply);
     void onTimeout();
     void finish(Result result);
     void finishLater(Result result);
