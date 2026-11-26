@@ -60,8 +60,12 @@ int BookmarkStore::idAtRow(int row) const
 {
     if (m_items.isEmpty())
         return -1;
-    const RecordKey key = model().keyAt(row);
-    if (!key.isValid())
+    return idForKey(model().keyAt(row));
+}
+
+int BookmarkStore::idForKey(const RecordKey& key) const
+{
+    if (m_items.isEmpty() || !key.isValid())
         return -1;
     const auto it = m_byLine.constFind(LineKey(key.file.get(), key.line));
     if (it == m_byLine.constEnd())
@@ -77,9 +81,12 @@ int BookmarkStore::idAtRow(int row) const
     return it.value();
 }
 
-void BookmarkStore::notifyRow(int row)
+void BookmarkStore::notifyKey(const RecordKey& key)
 {
-    model().notifyBookmarkRow(row);
+    if (!key.isValid())
+        return;
+    model().notifyBookmarkRow(model().rowForKey(key));
+    emit markChanged(key);
 }
 
 void BookmarkStore::bindBookmark(int id, Bookmark& b, int row)
@@ -109,7 +116,7 @@ int BookmarkStore::add(int row, const QString& note)
         bindBookmark(id, b, row);
         if (!note.isEmpty())
             b.note = note;
-        notifyRow(row);
+        notifyKey(b.key);
         emit changed();
         return id;
     }
@@ -120,7 +127,7 @@ int BookmarkStore::add(int row, const QString& note)
     b.note = note;
     b.created = QDateTime::currentDateTime();
     bindBookmark(id, b, row);
-    notifyRow(row);
+    notifyKey(b.key);
     emit changed();
     return id;
 }
@@ -130,12 +137,12 @@ bool BookmarkStore::remove(int id)
     const auto it = m_items.find(id);
     if (it == m_items.end())
         return false;
-    const int row = visibleRow(id);
+    const RecordKey key = it->isLive() ? it->key : RecordKey();
     release(it.value());
     if (m_byLine.value(lineKey(it.value()), -1) == id)
         m_byLine.remove(lineKey(it.value()));
     m_items.erase(it);
-    notifyRow(row);
+    notifyKey(key);
     emit changed();
     return true;
 }
@@ -154,13 +161,17 @@ void BookmarkStore::clear()
 {
     if (m_items.isEmpty())
         return;
-    const QVector<int> rows = visibleRows();
-    for (Bookmark& b : m_items)
+    QVector<RecordKey> keys;
+    keys.reserve(m_items.size());
+    for (Bookmark& b : m_items) {
+        if (b.isLive())
+            keys.append(b.key);
         release(b);
+    }
     m_items.clear();
     m_byLine.clear();
-    for (const int row : rows)
-        notifyRow(row);
+    for (const RecordKey& key : std::as_const(keys))
+        notifyKey(key);
     emit changed();
 }
 
@@ -285,12 +296,12 @@ void BookmarkStore::placeResolved(int id, const RecordKey& previousKey)
         release(b);
         m_items.remove(id);
         if (hadLine)
-            notifyRow(model().rowForKey(previousKey));
+            notifyKey(previousKey);
         scheduleChanged();
         return;
     }
     m_byLine.insert(lk, id);
-    notifyRow(model().rowForKey(b.key));
+    notifyKey(b.key);
     scheduleChanged();
 }
 
@@ -303,7 +314,7 @@ void BookmarkStore::placeCompleted(int id, bool keyChanged)
 {
     if (!keyChanged)
         return;
-    notifyRow(model().rowForKey(m_items[id].key));
+    notifyKey(m_items[id].key);
     scheduleChanged();
 }
 

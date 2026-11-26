@@ -30,7 +30,7 @@ struct DocumentStats {
     // и «Connection to 10.0.0.9 lost» в одну строку статистики.
     struct Template {
         QString    text;               // нормализованный шаблон (для показа)
-        QString    example;            // исходная строка первого вхождения
+        QString    example;            // исходная строка первого вхождения (самого раннего по времени, S-23)
         int        count = 0;          // записей с этим шаблоном
         LogLevel   level = LogLevel::Unknown; // уровень первого вхождения
         qint64     firstMs = kNoTimestampMs, lastMs = kNoTimestampMs; // время первого/последнего (мс epoch)

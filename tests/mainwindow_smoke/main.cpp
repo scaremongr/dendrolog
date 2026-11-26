@@ -332,6 +332,9 @@ void press(MainWindow& win, const QKeySequence& seq)
     QTest::keyClick(target, k.key(), k.keyboardModifiers());
 }
 
+void searchResultBookmarks(MainWindow& win, LogViewWidget* tab, LogListView* resultsView,
+                           LogModel* resultsModel);
+
 void pressCommand(MainWindow& win, const QString& id)
 {
     if (QAction* a = command(win, id))
@@ -830,6 +833,8 @@ void scenarioNavigate(MainWindow& win, const Fixtures& fx)
                                      && resultsModel->rowCount() == expected; }),
               QStringLiteral("Search panel lists every match (%1 expected, %2 shown)")
                   .arg(expected).arg(resultsModel ? resultsModel->rowCount() : -1));
+        if (resultsModel && resultsModel->rowCount() >= 3)
+            searchResultBookmarks(win, tab, resultsView, resultsModel);
     }
     searchDock->toggleViewAction()->trigger();
     check(!searchDock->isVisible(), QStringLiteral("Search panel hides by its action"));
@@ -2779,6 +2784,76 @@ void rowContextMenu(LogViewWidget* tab, int row, int x = -1)
     const QPoint at(x >= 0 ? x : v->textLeft() + 8, rect.center().y());
     QContextMenuEvent e(QContextMenuEvent::Mouse, at, v->viewport()->mapToGlobal(at));
     QApplication::sendEvent(v->viewport(), &e);
+}
+
+// Закладки из выдачи Search (U-19): Ctrl+F2 в фокусе выдачи и пункты
+// контекстного меню её строки ставят закладку на строку вкладки-источника,
+// отметка выдачи следует за закладкой, панель Bookmarks её видит. В конце
+// закладок нет — дальше сценарий считает их с нуля.
+void searchResultBookmarks(MainWindow& win, LogViewWidget* tab, LogListView* resultsView,
+                           LogModel* resultsModel)
+{
+    LogModel* model = tab->model();
+    BookmarkStore& store = tab->bookmarks();
+    const int selectedBefore = tab->view()->userSelectedRow();
+    const auto marked = [&](int resultRow) {
+        return resultsModel->data(resultsModel->index(resultRow, 0), LogModel::BookmarkRole).toBool();
+    };
+    const auto sourceMarked = [&](int resultRow) {
+        const int row = model->rowForKey(resultsModel->keyAt(resultRow));
+        return row >= 0 && store.isBookmarkedRow(row);
+    };
+    check(store.isEmpty(), QStringLiteral("no bookmarks before the Search panel"));
+
+    // Ctrl+F2 в фокусе выдачи — закладка строки источника.
+    resultsView->setCurrentIndex(resultsModel->index(1, 0));
+    // Выбор в выдаче перевёл вкладку на ту же строку — увести выбор вкладки,
+    // чтобы Ctrl+F2 по вкладке не сошёл за Ctrl+F2 по выдаче.
+    const int otherRow = model->rowForKey(resultsModel->keyAt(1)) == 0 ? 1 : 0;
+    tab->view()->goToRow(otherRow);
+    resultsView->setFocus(Qt::MouseFocusReason);
+    check(resultsView->userSelectedRow() == 1, QStringLiteral("result row 1 selected"));
+    pressCommand(win, QStringLiteral("toggleBookmark"));
+    check(waitFor([&]() { return store.count() == 1; }, 5000), QStringLiteral("Ctrl+F2 in the results adds a bookmark"));
+    check(sourceMarked(1) && marked(1), QStringLiteral("the bookmark is on the source line and marked in the results"));
+    check(!marked(0) && !marked(2) && !store.isBookmarkedRow(otherRow),
+          QStringLiteral("other result rows and the tab's selected line stay unmarked"));
+
+    // Панель Bookmarks видит закладку.
+    auto* bookmarkDock = win.findChild<QDockWidget*>(QStringLiteral("bookmarksDockWidget"));
+    pressCommand(win, QStringLiteral("panelBookmarks"));
+    check(waitFor([&]() { return bookmarkDock->isVisible(); }), QStringLiteral("Bookmarks panel shown"));
+    auto* count = bookmarkDock->findChild<QLabel*>(QStringLiteral("bookmarkCount"));
+    check(waitFor([&]() { return count && count->text().contains(QLatin1Char('1')); }, 5000),
+          QStringLiteral("Bookmarks panel counts the result bookmark: %1").arg(count ? count->text() : QString()));
+    pressCommand(win, QStringLiteral("panelBookmarks"));
+    check(waitFor([&]() { return !bookmarkDock->isVisible(); }), QStringLiteral("Bookmarks panel hidden"));
+
+    // Контекстное меню строки выдачи: поставить и снять.
+    const auto resultMenu = [&](int resultRow, const QString& item) {
+        bool picked = false;
+        pickMenuItem(item, &picked);
+        const QRect rect = resultsView->visualRect(resultsModel->index(resultRow, 0));
+        const QPoint at(resultsView->textLeft() + 8, rect.center().y());
+        QContextMenuEvent e(QContextMenuEvent::Mouse, at, resultsView->viewport()->mapToGlobal(at));
+        QApplication::sendEvent(resultsView->viewport(), &e);
+        g_driver->dropExpectations();
+        return picked;
+    };
+    check(resultMenu(2, QStringLiteral("Add Bookmark")), QStringLiteral("result row menu offers Add Bookmark"));
+    check(waitFor([&]() { return store.count() == 2; }, 5000) && sourceMarked(2) && marked(2),
+          QStringLiteral("Add Bookmark from the results bookmarks the source line"));
+    check(resultMenu(2, QStringLiteral("Remove Bookmark")), QStringLiteral("result row menu offers Remove Bookmark"));
+    check(waitFor([&]() { return store.count() == 1; }, 5000) && !sourceMarked(2) && !marked(2),
+          QStringLiteral("Remove Bookmark from the results removes it from the source"));
+
+    // Снята в логе — отметка выдачи гаснет.
+    const int sourceRow = model->rowForKey(resultsModel->keyAt(1));
+    check(!tab->toggleBookmark(sourceRow) && !marked(1), QStringLiteral("removed in the log - unmarked in the results"));
+    check(store.isEmpty(), QStringLiteral("no bookmarks left"));
+    // Выбор строк выдачи переходил по вкладке — вернуть прежний выбор.
+    if (selectedBefore >= 0)
+        tab->view()->goToRow(selectedBefore);
 }
 
 // Правый щелчок по вкладке.

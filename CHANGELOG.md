@@ -82,6 +82,12 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **Bookmarks in the Search panel.** A result line shows the ribbon of its
+  bookmark in the tab, its context menu has **Add Bookmark / Remove Bookmark**
+  and **Add Bookmark with Note… / Edit Bookmark Note…**, and `Ctrl+F2` with
+  the results focused bookmarks the tab line of the selected result. The
+  bookmark is the tab's: the log and the Bookmarks panel show it at once, and
+  a bookmark set or removed there shows in the results at once.
 - **Find a Schema.** `Tools → Find a Schema…` (and **Find…** in the *Log
   Fields* panel) offers ways to split the lines of the active tab into fields,
   each with the share of record lines it parses: the best schemas from your
@@ -335,6 +341,14 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Statistics no longer report pauses that are not there.** On a large
+  log shown in file order whose timestamps go back and forth, *Statistics*
+  measured a "Gap" between neighbouring lines, so a step back in time and the
+  next step forward made a long pause out of a five-minute one. Pauses are now
+  measured between moments that are neighbours in time, so the same file shows
+  the same gaps below and above the large-file threshold. The first occurrence
+  of a message template (its example and the jump to it) is now the earliest
+  one in time as well.
 - **Colored console logs with time-only timestamps past midnight.** In a log
   like `ESC[2m13:55:36 INFO …` (the time behind a color code) the days were
   counted back from the file's modification time without seeing the

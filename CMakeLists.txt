@@ -114,6 +114,8 @@ set(DENDROLOG_CORE_SOURCES
     src/logscan.cpp
     src/timehistogram.h
     src/timehistogram.cpp
+    src/timegaps.h
+    src/timegaps.cpp
     src/lineclassifier.h
     src/lineclassifier.cpp
     src/lineformat.h

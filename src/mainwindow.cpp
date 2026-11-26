@@ -738,6 +738,13 @@ MainWindow::MainWindow(QWidget *parent)
     {
         QAction* toggle = new QAction(tr("Add / Remove Bookmark"), this);
         connect(toggle, &QAction::triggered, this, [this]() {
+            // Фокус в выдаче Search (U-19) — закладка строки вкладки-источника.
+            QWidget* focus = QApplication::focusWidget();
+            if (m_searchResultsView && focus
+                && (focus == m_searchResultsView || m_searchResultsView->isAncestorOf(focus))) {
+                toggleSearchResultBookmark(m_searchResultsView->userSelectedRow());
+                return;
+            }
             if (m_activeLogView && !m_activeLogView->toggleBookmarkAtSelection())
                 m_statusLabel->setText(tr("Select a line to bookmark it"));
         });
@@ -2216,6 +2223,21 @@ void MainWindow::setupSearchDock()
             this, &MainWindow::changeFontSize);
     connect(m_searchResultsView, &LogListView::timeFilterBoundRequested,
             this, &MainWindow::onTimeFilterBoundRequested);
+    // Закладки из выдачи (U-19): пункты меню строки — на строку источника.
+    m_searchResultsView->setBookmarkActionsEnabled(true);
+    connect(m_searchResultsView, &LogListView::bookmarkActionRequested, this,
+            [this](int row, LogListView::BookmarkAction action) {
+        if (action == LogListView::BookmarkAction::Toggle) {
+            toggleSearchResultBookmark(row);
+            return;
+        }
+        bool created = false;
+        const int id = m_searchController->addBookmark(row, &created);
+        if (id >= 0)
+            editBookmarkNote(id, created);
+        else
+            m_statusLabel->setText(tr("The line is no longer shown in the tab - search again"));
+    });
 
     m_searchDockWidget->setWidget(m_searchPanel);
     addDockWidget(Qt::BottomDockWidgetArea, m_searchDockWidget);
@@ -4530,6 +4552,16 @@ void MainWindow::onBookmarkJumpFinished(bool forward, LogViewWidget::LevelJumpOu
         break;
     }
     showJumpStatus(text);
+}
+
+void MainWindow::toggleSearchResultBookmark(int resultRow)
+{
+    if (resultRow < 0) {
+        m_statusLabel->setText(tr("Select a line to bookmark it"));
+        return;
+    }
+    if (!m_searchController->toggleBookmark(resultRow))
+        m_statusLabel->setText(tr("The line is no longer shown in the tab - search again"));
 }
 
 void MainWindow::editBookmarkNote(int bookmarkId, bool created)

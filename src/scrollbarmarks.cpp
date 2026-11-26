@@ -121,12 +121,28 @@ void ScrollbarMarks::connectModel()
                                   [this]() { invalidate(); });
     m_modelConnections << connect(model, &QAbstractItemModel::rowsMoved, this,
                                   [this]() { invalidate(); });
-    m_modelConnections << connect(&model->bookmarks(), &BookmarkStore::changed, this,
-                                  [this]() {
-                                      refreshBookmarks();
-                                      ++m_serial;
-                                      emit marksChanged();
-                                  });
+    // Закладки выдачи Search — закладки вкладки-источника (U-19).
+    m_modelConnections << connect(model, &LogModel::bookmarkSourceChanged, this, [this]() {
+        connectBookmarks();
+        refreshBookmarks();
+        ++m_serial;
+        emit marksChanged();
+    });
+    connectBookmarks();
+}
+
+void ScrollbarMarks::connectBookmarks()
+{
+    disconnect(m_bookmarkConnection);
+    m_bookmarkConnection = {};
+    if (!m_model)
+        return;
+    LogModel* owner = m_model->bookmarkSource() ? m_model->bookmarkSource() : m_model.data();
+    m_bookmarkConnection = connect(&owner->bookmarks(), &BookmarkStore::changed, this, [this]() {
+        refreshBookmarks();
+        ++m_serial;
+        emit marksChanged();
+    });
 }
 
 void ScrollbarMarks::disconnectModel()
@@ -134,6 +150,8 @@ void ScrollbarMarks::disconnectModel()
     for (const QMetaObject::Connection& c : std::as_const(m_modelConnections))
         disconnect(c);
     m_modelConnections.clear();
+    disconnect(m_bookmarkConnection);
+    m_bookmarkConnection = {};
 }
 
 void ScrollbarMarks::setSearch(SearchResultsController* search)
@@ -246,7 +264,18 @@ void ScrollbarMarks::refreshBookmarks()
     out.clear();
     if (!m_model)
         return;
-    const QVector<int> rows = m_model->bookmarks().visibleRows();
+    QVector<int> rows;
+    if (LogModel* source = m_model->bookmarkSource()) {
+        // Выдача Search (U-19): закладки источника, ряды — свои, по ключу.
+        for (const Bookmark& b : source->bookmarks().bookmarks()) {
+            const int row = b.isLive() ? m_model->rowForKey(b.key) : -1;
+            if (row >= 0)
+                rows.append(row);
+        }
+        std::sort(rows.begin(), rows.end());
+    } else {
+        rows = m_model->bookmarks().visibleRows();
+    }
     out.reserve(rows.size());
     for (int row : rows)
         out.append(row);

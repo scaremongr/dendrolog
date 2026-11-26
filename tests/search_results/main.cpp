@@ -1,4 +1,7 @@
 #include "searchresultscontroller.h"
+#include "bookmarkstore.h"
+#include "scrollbarmarks.h"
+#include <QSet>
 #include "testdocuments.h"
 #include <QTemporaryDir>
 #include <QTimer>
@@ -420,6 +423,144 @@ static void testLabelsFromSource(const QDir& dir, const QString& schema)
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Закладки в выдаче (U-19): отметка — закладка строки источника (его
+// BookmarkStore), правка из выдачи ставит закладку в источнике, правка в
+// источнике сразу видна в выдаче. Оба бэкенда, одна и слитая вкладка.
+// ---------------------------------------------------------------------------
+
+// Роль BookmarkRole каждой строки выдачи против перебора закладок источника
+// по ключам.
+static bool resultMarksMatchSource(LogModel& results, LogModel& source)
+{
+    QSet<QPair<const LogFile*, qint64>> marked;
+    for (const Bookmark& b : source.bookmarks().bookmarks())
+        if (source.bookmarks().visibleRow(b.id) >= 0)
+            marked.insert({b.key.file.get(), b.key.line});
+    for (int row = 0; row < results.rowCount(); ++row) {
+        const RecordKey key = results.keyAt(row);
+        const bool expected = marked.contains({key.file.get(), key.line});
+        if (results.data(results.index(row), LogModel::BookmarkRole).toBool() != expected)
+            return false;
+    }
+    return true;
+}
+
+static void testBookmarksInResults(const QDir& dir, const QString& schema)
+{
+    for (const bool indexed : {false, true}) {
+        for (const bool mergedTab : {false, true}) {
+            // Свои файлы на прогон: прежний дописан.
+            const QString prefix = QStringLiteral("bm-%1-%2-").arg(int(indexed)).arg(int(mergedTab));
+            const QString one = testdocs::writeFile(dir, prefix + "one.log", growingBase(0));
+            const QString two = testdocs::writeFile(dir, prefix + "two.log", growingBase(10));
+            const QString tag = QStringLiteral("bookmarks %1 %2")
+                .arg(indexed ? "indexed" : "resident", mergedTab ? "merged" : "single");
+            const QStringList paths = mergedTab ? QStringList{one, two} : QStringList{one};
+            auto doc = indexed ? testdocs::buildIndexed(paths, schema, testdocs::IndexedLoad::Concurrent)
+                               : testdocs::buildResident(paths, schema);
+            LogModel& source = *doc.model;
+            SearchResultsController c;
+            // Отметки скроллбара выдачи — до setSource: источник закладок
+            // меняется у уже подключённой модели.
+            ScrollbarMarks marks;
+            marks.setModel(c.model());
+            c.setSource(&source);
+            const int matches = mergedTab ? 40 : 20;
+            c.search(query("NEEDLE"));
+            CHECK(waitResults(c, matches), tag + ": initial search");
+            LogModel& results = *c.model();
+
+            // Закладка в источнике до поиска и после — видна в выдаче.
+            const int firstSource = c.sourceRowOf(0);
+            CHECK(firstSource >= 0 && source.keyAt(firstSource) == results.keyAt(0),
+                  tag + ": result row maps to its source line");
+            int changes = 0;
+            QObject::connect(&results, &QAbstractItemModel::dataChanged,
+                [&](const QModelIndex& a, const QModelIndex& b, const QList<int>& roles) {
+                    if (roles.contains(LogModel::BookmarkRole) && a.row() <= 3 && b.row() >= 3)
+                        ++changes;
+                });
+            const int src3 = c.sourceRowOf(3);
+            CHECK(source.bookmarks().toggle(src3), tag + ": bookmark set in the source");
+            CHECK(results.data(results.index(3), LogModel::BookmarkRole).toBool(),
+                  tag + ": result row shows the source bookmark");
+            CHECK(changes == 1, tag + ": the result row is repainted once");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks match the source");
+
+            // Из выдачи: поставить — закладка в источнике на своей строке.
+            const auto set = c.toggleBookmark(5);
+            CHECK(set && *set, tag + ": toggle from the results sets a bookmark");
+            const int src5 = c.sourceRowOf(5);
+            CHECK(source.bookmarks().isBookmarkedRow(src5), tag + ": bookmark lands on the source line");
+            CHECK(source.bookmarks().count() == 2, tag + ": exactly one bookmark added");
+            CHECK(results.data(results.index(5), LogModel::BookmarkRole).toBool(),
+                  tag + ": the result row is marked");
+            // Заметка из выдачи: та же закладка, не новая.
+            bool created = true;
+            const int id5 = c.addBookmark(5, &created);
+            CHECK(id5 >= 0 && !created && source.bookmarks().count() == 2,
+                  tag + ": add on a bookmarked result row returns the existing bookmark");
+            created = false;
+            const int id7 = c.addBookmark(7, &created);
+            CHECK(id7 >= 0 && created && source.bookmarks().isBookmarkedRow(c.sourceRowOf(7)),
+                  tag + ": add on an unmarked result row creates the bookmark in the source");
+
+            // Снять в источнике — роль в выдаче гаснет.
+            changes = 0;
+            CHECK(!source.bookmarks().toggle(src3), tag + ": bookmark removed in the source");
+            CHECK(!results.data(results.index(3), LogModel::BookmarkRole).toBool(),
+                  tag + ": result row loses its mark");
+            CHECK(changes == 1, tag + ": the result row is repainted on removal");
+            // Снять из выдачи.
+            const auto unset = c.toggleBookmark(7);
+            CHECK(unset && !*unset && !source.bookmarks().find(id7), tag + ": toggle from the results removes");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks match after removals");
+            {
+                QVector<qint64> expected;
+                for (int row = 0; row < results.rowCount(); ++row)
+                    if (results.data(results.index(row), LogModel::BookmarkRole).toBool())
+                        expected.append(row);
+                CHECK(!expected.isEmpty()
+                          && marks.marks().rows[ScrollbarMarkSet::Bookmark] == expected,
+                      tag + ": scrollbar marks of the results are the source bookmarks");
+            }
+
+            // Дозапись: выдача растёт вставками, отметки на месте; закладка на
+            // дописанной строке видна.
+            QByteArray tail;
+            for (int i = 0; i < 3; ++i)
+                tail += logLine(100, "INFO", "NEEDLE tail " + QByteArray::number(i));
+            CHECK(indexed ? testdocs::appendIndexedTail(doc, 0, tail, schema)
+                          : testdocs::appendResidentTail(doc, 0, tail, schema),
+                  tag + ": append tail");
+            CHECK(waitResults(c, matches + 3), tag + ": appended matches are found");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks survive the append");
+            const int lastResult = results.rowCount() - 1;
+            CHECK(c.toggleBookmark(lastResult).value_or(false), tag + ": bookmark an appended match");
+            CHECK(source.bookmarks().isBookmarkedRow(c.sourceRowOf(lastResult)),
+                  tag + ": appended line bookmarked in the source");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks match after the append");
+
+            // Перестройка выдачи (фильтр источника) — отметки по-прежнему
+            // закладки источника.
+            source.setLogLevelFilter({LogLevel::Error});
+            CHECK(waitResults(c, mergedTab ? 20 : 10), tag + ": rebuilt results");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks match after the rebuild");
+            source.setLogLevelFilter({});
+            CHECK(waitResults(c, matches + 3), tag + ": results back");
+            CHECK(resultMarksMatchSource(results, source), tag + ": marks match after the filter is reset");
+            source.bookmarks().clear();
+            CHECK(resultMarksMatchSource(results, source), tag + ": clear in the source clears the results");
+
+            // Без источника — нет строк выдачи и ни одной закладки из неё.
+            c.setSource(nullptr);
+            CHECK(!c.toggleBookmark(0) && c.addBookmark(0) < 0, tag + ": no source - nothing to bookmark");
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -436,6 +577,7 @@ int main(int argc, char** argv)
         bytes += QByteArray::number(row) + '\n';
     }
     testLabelsFromSource(dir, schema);
+    testBookmarksInResults(dir, schema);
     const QString path = testdocs::writeFile(dir, "large.log", bytes);
     auto indexed = testdocs::buildIndexed({path}, schema);
     CHECK(indexed.errors.isEmpty(), "load indexed fixture");

@@ -146,6 +146,10 @@ private:
     QPointer<LogModel> m_model;
     QPointer<SearchResultsController> m_search;
     QVector<QMetaObject::Connection> m_modelConnections;
+    // changed хранилища, чьи закладки показывает модель (своё или источника
+    // выдачи Search, U-19).
+    QMetaObject::Connection m_bookmarkConnection;
+    void connectBookmarks();
     QVector<QMetaObject::Connection> m_searchConnections;
     ScrollbarMarkSet m_marks;
     quint64 m_serial = 0;

@@ -342,6 +342,12 @@ public:
     // labeledFile и fileColorOrdinal отвечают за источник, его fileSetChanged /
     // fileLinesChanged пересылаются как свои. nullptr — свои.
     void setFileLabelSource(LogModel* source);
+    // Закладки — у другой модели (U-19): роль BookmarkRole выдачи Search —
+    // закладка строки вкладки-источника (BookmarkStore::idForKey по ключу
+    // строки, O(1)); его markChanged перерисовывает свой ряд (rowForKey).
+    // Свои закладки модели при этом не показываются. nullptr — свои.
+    void setBookmarkSource(LogModel* source);
+    LogModel* bookmarkSource() const { return m_bookmarkSource; }
     // Файл строки среди labeledFiles или nullptr. O(1).
     const LabeledFile* labeledFile(const LogFile* file) const;
     // Порядковый номер цвета файла (по пути); -1 — файла не было.
@@ -364,6 +370,8 @@ signals:
     // Набор файлов со строками или их метки сменились (U-23): view меняет
     // ширину колонки меток, легенда — чипы.
     void fileSetChanged();
+    // Сменилась модель, чьи закладки показывает эта (setBookmarkSource, U-19).
+    void bookmarkSourceChanged();
     // Число строк файлов могло смениться (легенда).
     void fileLinesChanged();
     // Настройки фильтров (уровни, время, текстовые правила) заданы заново —
@@ -435,6 +443,8 @@ private:
     QHash<const LogFile*, int> m_labeledIndex;
     int m_fileLabelMaxChars = 16;
     QPointer<LogModel> m_labelSource;
+    QPointer<LogModel> m_bookmarkSource;
+    QMetaObject::Connection m_bookmarkSourceConnection;
     QVector<QMetaObject::Connection> m_labelSourceConnections;
 
     QStringList m_availableFieldNames;

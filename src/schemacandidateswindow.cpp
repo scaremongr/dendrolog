@@ -315,6 +315,10 @@ void SchemaCandidatesWindow::showVariant()
     const SchemaCandidates::Variant& variant = variants[v];
     m_title->setText(variant.title);
     m_template->setText(variant.templateText);
+    // Шаблон — с начала: setText ставит курсор в конец, и длинный шаблон
+    // показывался прокрученным к хвосту; прокрутка к тому же зависела от
+    // ширины текста при смене темы (theme_mode на Windows, S-29).
+    m_template->setCursorPosition(0);
     m_template->setVisible(!variant.templateText.isEmpty());
     m_summary->setText(SchemaFit::summary(variant.fit));
     QStringList notes = variant.notes;
