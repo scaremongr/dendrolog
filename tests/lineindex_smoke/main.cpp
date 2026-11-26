@@ -16,6 +16,7 @@
 // ============================================================================
 
 #include "filechangedetector.h"
+#include "ansiescape.h"
 #include "lineclassifier.h"
 #include "lineindex.h"
 #include "logentry.h"
@@ -592,6 +593,175 @@ static void testClockTimestamps(const QDir& dir)
     lateEntries += parseAppend(lateLf, lateSize, lateEntries.last());
     checkMoments(QStringLiteral("clock_late.log"), *lateIndex, lateEntries,
                  { localMs(d1, 10, 0, 0), localMs(d1, 23, 30, 0), localMs(d2, 0, 15, 0) });
+}
+
+// S-25. Время без даты за кодом ANSI (лог консоли): проход видит текст без
+// кодов (F-3), и предпросмотр дат (clockRunInFile) обязан видеть его же —
+// цветной лог через полночь даёт те же моменты, что бесцветный, на обоих
+// путях, в дозаписи и в сканере. Код перед меткой длиннее головы в 64 байта
+// (OSC-ссылка) — тоже.
+static void testClockTimestampsAnsi(const QDir& dir)
+{
+    const QDate d0(2026, 11, 16), d1(2026, 11, 17), d2(2026, 11, 18);
+    const QByteArray osc = "\x1b]8;;https://example.com/a/rather/long/hyperlink/target/that/"
+                           "does/not/fit/into/the/head/of/sixty-four/bytes\x1b\\";
+    // Ссылка длиннее 2 КБ: у предпросмотра нет предела на коды перед меткой.
+    const QByteArray longOsc = "\x1b]8;;https://example.com/" + QByteArray(2500, 'x') + "\x1b\\";
+    const QByteArray plain =
+        "23:50:00.000 [main] INFO  app - started\n"
+        "23:59:59.500 [main] DEBUG app - tick\n"
+        "00:00:01,250 [main] INFO  app - after midnight\n"
+        "12:00:00 [main] INFO  app - noon\n"
+        "[23:00:00 INF] evening\n"
+        "[00:30:00 ERR] next day\n"
+        "00:40:00.5 [main] ERROR app - last\n";
+    const QByteArray colored =
+        "\x1b[2m23:50:00.000\x1b[0m [main] \x1b[32mINFO\x1b[0m  app - started\n"
+        "\x1b[2m23:59:59.500\x1b[0m [main] DEBUG app - tick\n"
+        "\x1b[2;37m00:00:01,250\x1b[0m [main] \x1b[32mINFO\x1b[0m  app - after midnight\n"
+        "\x1b[38;5;245m\x1b[1m12:00:00\x1b[0m [main] INFO  app - noon\n"
+        "\x1b[90m[\x1b[0m23:00:00 \x1b[32mINF\x1b[0m\x1b[90m]\x1b[0m evening\n"
+        "[" + longOsc + "00:30:00 ERR] next day\n"
+        + osc + "\x1b[2m00:40:00.5\x1b[0m [main] \x1b[31mERROR\x1b[0m app - last\n";
+    const QVector<qint64> expected = {
+        localMs(d0, 23, 50, 0), localMs(d0, 23, 59, 59, 500),
+        localMs(d1, 0, 0, 1, 250), localMs(d1, 12, 0, 0), localMs(d1, 23, 0, 0),
+        localMs(d2, 0, 30, 0), localMs(d2, 0, 40, 0, 500),
+    };
+    const QDateTime mtime(d2, QTime(0, 45));
+    QString scanned[2];
+    for (int k = 0; k < 2; ++k) {
+        const QString tag = k ? QStringLiteral("clock_ansi.log") : QStringLiteral("clock_plain.log");
+        const QString path = writeFile(dir, tag, k ? colored : plain);
+        setMtime(path, mtime);
+        auto lf = std::make_shared<LogFile>(path);
+        const auto entries = parseFile(lf);
+        const auto index = indexFile(lf);
+        checkMoments(tag, *index, entries, expected);
+        const LogParser parser;
+        const LogParser::StatsScan scan = parser.analyzeFileForStats(path, LogParser::StatsResume());
+        CHECK(scan.stats.totalEntries == 7
+                  && scan.stats.firstEntryTimestamp.toMSecsSinceEpoch() == expected.first()
+                  && scan.stats.lastEntryTimestamp.toMSecsSinceEpoch() == expected.last(),
+              qPrintable(QString("%1 scanner: From/To %2 / %3, %4 records").arg(tag,
+                             scan.stats.firstEntryTimestamp.toString(Qt::ISODateWithMs),
+                             scan.stats.lastEntryTimestamp.toString(Qt::ISODateWithMs))
+                             .arg(scan.stats.totalEntries)));
+        // Тот же предпросмотр напрямую: переходы через полночь посчитаны.
+        const ClockRun run = LineClassifier::clockRunInFile(path, 0);
+        const ClockRun runWide = LineClassifier::clockRunInFile(path, 0, QStringConverter::Utf8, true);
+        scanned[k] = QStringLiteral("%1/%2").arg(run.lastTimeMs).arg(run.rollovers);
+        CHECK(run.lastTimeMs == runWide.lastTimeMs && run.rollovers == runWide.rollovers,
+              qPrintable(tag + ": byte and text look-ahead agree"));
+    }
+    // Фаззинг: байтовый предпросмотр (голова, снятие по порогам, строки
+    // через границу мегабайтного буфера) против потокового — тот снимает
+    // коды со всей строки, как проход. Коды разной длины, оборванные,
+    // одиночный ESC, время за «[», строки без времени.
+    {
+        QRandomGenerator rng(25);
+        const auto code = [&]() -> QByteArray {
+            switch (rng.bounded(6)) {
+            case 0: return "\x1b[" + QByteArray::number(rng.bounded(108)) + "m";
+            case 1: return "\x1b[38;5;" + QByteArray::number(rng.bounded(256)) + "m";
+            case 2: return "\x1b]8;;https://e.x/" + QByteArray(int(rng.bounded(3000)), 'u') + "\x1b\\";
+            case 3: return "\x1b]0;title" + QByteArray(int(rng.bounded(200)), 't') + "\x07";
+            case 4: return "\x1b";   // одиночный
+            default: return "\x1b[2;3";   // оборванный посторонним символом следом
+            }
+        };
+        QByteArray fuzz;
+        for (int i = 0; i < 3000; ++i) {
+            QByteArray line;
+            const bool bracket = rng.bounded(4) == 0;
+            if (bracket)
+                line += '[';
+            for (int c = int(rng.bounded(4)); c > 0; --c)
+                line += code();
+            const QTime t = QTime(0, 0).addSecs(int(rng.bounded(86400)));
+            line += rng.bounded(8) == 0 ? QByteArray("no time here") : t.toString("HH:mm:ss").toLatin1();
+            for (int c = int(rng.bounded(3)); c > 0; --c)
+                line += code() + " text";
+            if (bracket)
+                line += ']';
+            fuzz += line + (rng.bounded(5) == 0 ? "\r\n" : "\n");
+        }
+        const QString fuzzPath = writeFile(dir, QStringLiteral("clock_ansi_fuzz.log"), fuzz);
+        const ClockRun bytes = LineClassifier::clockRunInFile(fuzzPath, 0);
+        const ClockRun text = LineClassifier::clockRunInFile(fuzzPath, 0, QStringConverter::Utf8, false);
+        ClockRun expected;   // эталон: строка целиком без кодов, как у прохода
+        for (const QByteArray& raw : fuzz.split('\n')) {
+            const QString line = QString::fromUtf8(AnsiEscape::strip(raw));
+            const qint32 t = LineClassifier::clockTimeOfDay(QStringView(line).left(64));
+            if (t >= 0)
+                expected.feed(t);
+        }
+        CHECK(fuzz.size() > (1 << 20) && expected.rollovers > 100
+                  && bytes.lastTimeMs == expected.lastTimeMs && bytes.rollovers == expected.rollovers
+                  && text.lastTimeMs == expected.lastTimeMs && text.rollovers == expected.rollovers,
+              qPrintable(QString("clock_ansi_fuzz.log: bytes %1/%2, text %3/%4, expected %5/%6")
+                             .arg(bytes.lastTimeMs).arg(bytes.rollovers)
+                             .arg(text.lastTimeMs).arg(text.rollovers)
+                             .arg(expected.lastTimeMs).arg(expected.rollovers)));
+    }
+    CHECK(scanned[0] == scanned[1],
+          qPrintable(QString("clock look-ahead: plain %1, colored %2 (last time/rollovers)")
+                         .arg(scanned[0], scanned[1])));
+
+    // UTF-16 (резидентный путь, предпросмотр потоком).
+    {
+        QStringEncoder enc(QStringConverter::Utf16LE, QStringConverter::Flag::WriteBom);
+        // Три строки через полночь: без предпросмотра первая получила бы d2.
+        const QByteArray wide = enc.encode(QString::fromUtf8(
+            "\x1b[2m23:30:00\x1b[0m INFO a\n" + osc + "00:15:00 INFO b\n"
+            "\x1b[2m12:00:00\x1b[0m INFO c\n"));
+        const QString widePath = writeFile(dir, QStringLiteral("clock_ansi_utf16.log"), wide);
+        setMtime(widePath, QDateTime(d2, QTime(12, 0, 1)));
+        const auto wideEntries = parseFile(std::make_shared<LogFile>(widePath));
+        CHECK(wideEntries.size() == 3 && entryMs(*wideEntries[0]) == localMs(d1, 23, 30, 0)
+                  && entryMs(*wideEntries[1]) == localMs(d2, 0, 15, 0)
+                  && entryMs(*wideEntries[2]) == localMs(d2, 12, 0, 0),
+              "clock_ansi_utf16.log: dates through the UTF-16 look-ahead");
+    }
+
+    // Дозапись в файл без времени без даты: предпросмотр — от начала дозаписи,
+    // строки цветные.
+    const QString late = writeFile(dir, QStringLiteral("clock_ansi_late.log"),
+                                   "\x1b[2m2026-11-17 10:00:00\x1b[0m INFO iso first\n");
+    setMtime(late, QDateTime(d1, QTime(10, 0, 1)));
+    auto lateLf = std::make_shared<LogFile>(late);
+    auto lateIndexLf = std::make_shared<LogFile>(late);
+    auto lateEntries = parseFile(lateLf);
+    const auto lateIndex = indexFile(lateIndexLf);
+    const qint64 lateSize = QFileInfo(late).size();
+    const LogParser scanner;
+    const LogParser::StatsScan head = scanner.analyzeFileForStats(late, LogParser::StatsResume());
+    // Три строки: без предпросмотра (переход через полночь не виден) первая
+    // получила бы d2 — как ближайшая к mtime.
+    appendToFile(late, "\x1b[2m23:30:00\x1b[0m INFO a\n" + longOsc + "00:15:00 INFO b\n"
+                       "\x1b[2m12:00:00\x1b[0m INFO c\n");
+    setMtime(late, QDateTime(d2, QTime(12, 0, 1)));
+    {
+        LogIndexer indexer;
+        indexAppend(indexer, lateIndexLf, lateIndex, false);
+    }
+    lateEntries += parseAppend(lateLf, lateSize, lateEntries.last());
+    const QVector<qint64> lateExpected = {
+        localMs(d1, 10, 0, 0), localMs(d1, 23, 30, 0), localMs(d2, 0, 15, 0),
+        localMs(d2, 12, 0, 0)
+    };
+    checkMoments(QStringLiteral("clock_ansi_late.log"), *lateIndex, lateEntries, lateExpected);
+    compareIndexes(QStringLiteral("clock_ansi_late.log"), *lateIndex,
+                   *indexFile(std::make_shared<LogFile>(late)));
+    const LogParser::StatsScan tail = scanner.analyzeFileForStats(late, head.next);
+    const LogParser::FileStats merged = LogParser::mergeStats(head.complete, tail.stats);
+    CHECK(merged.totalEntries == 4
+              && merged.firstEntryTimestamp.toMSecsSinceEpoch() == lateExpected.first()
+              && merged.lastEntryTimestamp.toMSecsSinceEpoch() == lateExpected.last(),
+          qPrintable(QString("clock_ansi_late.log scanner tail: %1 … %2, %3 records")
+                         .arg(merged.firstEntryTimestamp.toString(Qt::ISODate),
+                              merged.lastEntryTimestamp.toString(Qt::ISODate))
+                         .arg(merged.totalEntries)));
 }
 
 // F-12. Границы записей без слова уровня на обоих путях загрузки: запись
@@ -3030,6 +3200,7 @@ int main(int argc, char** argv)
     testGolden(dir);
     testNewTimestampFormsBackends(dir);
     testClockTimestamps(dir);
+    testClockTimestampsAnsi(dir);
     testRecordBoundariesBackends(dir);
     testLevelVocabularyBackends(dir);
     testBom(dir);

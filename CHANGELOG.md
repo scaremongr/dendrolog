@@ -291,6 +291,12 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Colored console logs with time-only timestamps past midnight.** In a log
+  like `ESC[2m13:55:36 INFO …` (the time behind a color code) the days were
+  counted back from the file's modification time without seeing the
+  midnights, so every line could get the wrong date. The colored log now gets
+  the same dates as the same log without colors, on any file size and after
+  an append.
 - **Timeline and Statistics on a large file whose timestamps go back and
   forth.** A file opened alone above the index threshold (512 MB) is shown in
   file order, and the time scale used to run from its first to its last
