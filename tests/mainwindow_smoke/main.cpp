@@ -3103,7 +3103,10 @@ void scenarioScannerPanel(MainWindow& win, const Fixtures& fx)
     refresh->click();
     check(waitFor([&]() { return shown().contains(QStringLiteral("late.log")) && !scanner->isRescanning(); }),
           QStringLiteral("refresh picks up a new file [%1]").arg(shown().join(',')));
-    QFile::remove(late);
+    // Удалить, как пользователь: на Windows файл, который анализ сканера ещё
+    // читает (элемент дерева появляется раньше счётчиков), не удаляется.
+    check(waitFor([&]() { return QFile::remove(late) || !QFileInfo::exists(late); }, 10000),
+          QStringLiteral("late.log can be removed after the refresh"));
     refresh->click();
     check(waitFor([&]() { return shown() == all && !scanner->isRescanning(); }),
           QStringLiteral("refresh drops a removed file [%1]").arg(shown().join(',')));
