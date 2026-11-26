@@ -89,7 +89,7 @@
   The Directory Scanner searches file contents in the same encodings.
 - **Smart text handling** — syntax highlighting, token-aware double-click
   selection, open URLs/paths from the log, per-line word wrap.
-- **Save View As** — export exactly what you see (filters + field selection).
+- **Save View As** — export exactly what you see (filters + field selection) as text, CSV or JSON Lines.
 - Light/dark theme: follows the OS or is picked by hand; fully configurable
   shortcuts, EN/RU help.
 
