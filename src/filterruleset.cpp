@@ -62,6 +62,8 @@ void FilterRuleSet::bindFields(const QStringList& fieldNames, bool fieldScopeAct
             ? -1
             : static_cast<int>(fieldNames.indexOf(rule.fieldName));
 
+        // Скомпилирован с JIT здесь, на потоке, собирающем правила (S-11):
+        // копия набора в фильтр-воркере делит готовый шаблон и не компилирует его.
         if (rule.isRegex && !rule.text.isEmpty()) {
             m_compiledRegexes[i] = UserRegex::compile(
                 rule.text, rule.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);

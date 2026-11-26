@@ -15,10 +15,8 @@
 ContentQuery::ContentQuery(const QString& text, bool isRegex, Qt::CaseSensitivity cs)
     : m_text(text), m_isRegex(isRegex), m_cs(cs)
 {
-    if (m_isRegex) {
-        m_re = UserRegex::compile(text, cs);
-        m_re.optimize();
-    }
+    if (m_isRegex)
+        m_re = UserRegex::compile(text, cs); // уже с JIT: воркеры не компилируют
 }
 
 bool ContentQuery::isUsable() const

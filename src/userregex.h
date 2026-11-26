@@ -32,7 +32,16 @@ namespace UserRegex {
 // Опции компиляции регекса пользователя.
 QRegularExpression::PatternOptions options(Qt::CaseSensitivity cs);
 
-// Скомпилированный (ещё не оптимизированный) регекс пользователя.
+// Скомпилированный регекс пользователя — сразу, с JIT (optimize()), а не
+// на первом совпадении (S-11). Копии QRegularExpression делят один
+// скомпилированный шаблон, поэтому правило, собранное на GUI-потоке
+// (FilterRuleSet::bindFields, TextMatchHighlighter::setPatterns, TextMatcher,
+// ContentQuery), уходит в воркеры готовым: первый воркер, дошедший до
+// строки, его больше не компилирует. Каждый match() по-прежнему на миг берёт
+// мьютекс общего шаблона (Qt проверяет, скомпилирован ли он), — это цена
+// Qt, а не компиляция. В Qt 6 optimize() — та же компиляция, что у isValid():
+// JIT идёт сразу, а не после N совпадений, как в Qt 5. Невалидный шаблон
+// компиляцию не проходит (isValid() == false), как и прежде.
 QRegularExpression compile(const QString& pattern, Qt::CaseSensitivity cs);
 
 } // namespace UserRegex
