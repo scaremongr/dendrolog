@@ -1,4 +1,5 @@
 #include "lineclassifier.h"
+#include "ansiescape.h"
 #include "logfile.h"
 #include "logpattern.h"
 
@@ -683,6 +684,7 @@ ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
         while (in.readLineInto(&line)) {
             if (aborted())
                 return ClockRun();
+            AnsiEscape::stripInPlace(line);   // проход видит текст без кодов (F-3, S-25)
             const qint32 t = clockTimeAt(line.constData(), qMin(line.size(), kHead));
             if (t >= 0)
                 run.feed(t);
@@ -692,17 +694,44 @@ ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
     if (!file.seek(offset))
         return run;
     // Голова каждой строки — до 64 байтов: время без даты — ASCII в начале
-    // строки в любой однобайтной кодировке и в UTF-8.
+    // строки в любой однобайтной кодировке и в UTF-8. Проход видит текст без
+    // ANSI-кодов (F-3), и предпросмотр — тоже (S-25): `ESC[2m13:55:36 …` —
+    // та же метка, что у прохода. Строка без ESC стоит как прежде — memchr
+    // по 64 байтам. Строка с ESC копит сырые байты (escRaw) и снимает коды
+    // на порогах 128, 256, 512, … байтов, пока текста без кодов не наберётся
+    // 64 символа: снятие префикса даёт префикс снятой строки (оборванная
+    // последовательность снимается до места обрыва), поэтому набранные 64
+    // символа окончательны, а работа — O(головы), а не O(строки). Предела у
+    // кодов перед меткой нет — как у прохода.
     QByteArray buf(1 << 20, Qt::Uninitialized);
-    char carry[kHead];
+    char carry[kHead];       // голова: без ESC — сырые байты, с ESC — снятые
     qsizetype carryLen = 0;
-    bool inLine = false;   // в carry — начало строки, конец которой ещё не встречен
-    const auto finishLine = [&](const char* data, qsizetype len) {
-        for (qsizetype k = 0; k < len; ++k)
-            head[k] = QLatin1Char(data[k]);
-        const qint32 t = clockTimeAt(head, len);
+    bool carryEsc = false;   // в строке до головы встретился ESC — копим escRaw
+    bool headDone = false;   // голова строки собрана, остаток строки не нужен
+    QByteArray escRaw;       // сырые байты строки с ESC (с начала строки)
+    QByteArray escText;      // снятый escRaw
+    qsizetype nextCheck = 0; // размер escRaw, на котором снимать снова
+    bool inLine = false;     // начата строка, конец которой ещё не встречен
+    const auto stripRaw = [&] {
+        escText.resize(escRaw.size());
+        const qsizetype n = AnsiEscape::stripBytes(escRaw.constData(), escRaw.size(), escText.data());
+        carryLen = qMin(n, kHead);
+        std::memcpy(carry, escText.constData(), size_t(carryLen));
+        return n;
+    };
+    const auto finishLine = [&] {
+        if (carryEsc && !headDone)
+            stripRaw();
+        for (qsizetype k = 0; k < carryLen; ++k)
+            head[k] = QLatin1Char(carry[k]);
+        const qint32 t = clockTimeAt(head, carryLen);
         if (t >= 0)
             run.feed(t);
+        carryLen = 0;
+        carryEsc = false;
+        headDone = false;
+        escRaw.clear();
+        inLine = false;
     };
     for (;;) {
         if (aborted())
@@ -715,23 +744,37 @@ ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
         while (pos < got) {
             const char* nl = static_cast<const char*>(std::memchr(p + pos, '\n', size_t(got - pos)));
             const qsizetype end = nl ? nl - p : qsizetype(got);
-            const qsizetype take = qMin<qsizetype>(kHead - carryLen, end - pos);
-            if (take > 0) {
-                std::memcpy(carry + carryLen, p + pos, size_t(take));
-                carryLen += take;
+            inLine = true;
+            if (!carryEsc && !headDone) {
+                const qsizetype take = qMin<qsizetype>(kHead - carryLen, end - pos);
+                if (take > 0 && AnsiEscape::hasEscape(p + pos, take)) {
+                    carryEsc = true;
+                    escRaw = QByteArray(carry, carryLen);
+                    nextCheck = 128;
+                } else if (take > 0) {
+                    std::memcpy(carry + carryLen, p + pos, size_t(take));
+                    carryLen += take;
+                }
+                if (!carryEsc)
+                    headDone = carryLen == kHead;
             }
-            if (!nl) {
-                inLine = true;
+            for (qsizetype at = pos; carryEsc && !headDone && at < end;) {
+                const qsizetype take = qMin<qsizetype>(nextCheck - escRaw.size(), end - at);
+                escRaw.append(p + at, take);
+                at += take;
+                if (escRaw.size() >= nextCheck) {
+                    headDone = stripRaw() >= kHead;
+                    nextCheck *= 2;
+                }
+            }
+            if (!nl)
                 break;
-            }
-            finishLine(carry, carryLen);
-            carryLen = 0;
-            inLine = false;
+            finishLine();
             pos = end + 1;
         }
     }
-    if (inLine && carryLen > 0)
-        finishLine(carry, carryLen);   // последняя строка без '\n' — её видит и проход
+    if (inLine && (carryLen > 0 || !escRaw.isEmpty()))
+        finishLine();   // последняя строка без '\n' — её видит и проход
     return run;
 }
 

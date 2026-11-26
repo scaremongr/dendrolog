@@ -290,7 +290,11 @@ QString systemPrompt()
     QFile file(QStringLiteral(":/ai/schema-system.txt"));
     if (!file.open(QIODevice::ReadOnly))
         return QString();
-    return QString::fromUtf8(file.readAll());
+    // Тело запроса одинаково на всех платформах: на Windows рабочее дерево
+    // может держать ресурс с CRLF (core.autocrlf).
+    QString text = QString::fromUtf8(file.readAll());
+    text.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+    return text;
 }
 
 QString userText(const QStringList& preparedLines)
