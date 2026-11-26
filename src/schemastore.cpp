@@ -92,7 +92,9 @@ bool isSchemaFormatKey(const QString& key)
         || key == QLatin1String("type")
         || key == QLatin1String("linePrefix")
         || key == QLatin1String("blocks")
-        || key == QLatin1String("keyed")    // F-4: ключевая часть схемы
+        // «keyed» (F-4) с F-17, шаг 7 — метаданные: схема читается своим
+        // запасным блоком, а ключевая часть хранится как была (её читают
+        // прежние версии).
         || key == QLatin1String("template"); // F-17: шаблон строки (версия 4)
 }
 

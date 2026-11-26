@@ -69,9 +69,9 @@ public:
     // Полей в записи нет: поля — функция текста и схемы (FieldSource).
     const std::shared_ptr<const LogEntry>& recordHead() const { return m_head; }
     void setRecordHead(std::shared_ptr<const LogEntry> head) { m_head = std::move(head); }
-    // Схема при загрузке узнала строку (граница записи по схеме, до шага 7
-    // F-17). Только для isPlainText; ставит парсер до публикации.
-    void setSchemaMatched(bool matched) { m_schemaMatched = matched; }
+    // Формат строк файла (JSON / logfmt, F-17, шаг 7) узнал строку. Только
+    // для isPlainText; ставит парсер до публикации.
+    void setFormatMatched(bool matched) { m_formatMatched = matched; }
 
     // Стиль ANSI строки (F-3): спаны SGR в координатах message(); nullptr —
     // в строке не было кодов с видимым стилем (у большинства строк). Ставит
@@ -88,11 +88,11 @@ public:
     // уровень унаследованы от её первой строки, поэтому true возможен только
     // там, где группировка в логические записи номинальна (не-лог файл целиком
     // слипается в запись #0; преамбула до первой настоящей записи — туда же).
-    // «Структурные поля» — схема при загрузке узнала строку (паритет с
+    // «Структурные поля» — формат строк узнал строку (паритет с
     // индексом: LineIndex::isPlainTextLine). Запись неизменяема после
     // публикации: воркеры статистики и таймлайна читают это без синхронизации.
     bool isPlainText() const {
-        return !m_timestamp.isValid() && m_level == LogLevel::Unknown && !m_schemaMatched;
+        return !m_timestamp.isValid() && m_level == LogLevel::Unknown && !m_formatMatched;
     }
 
     bool operator<(const LogEntry& other) const {
@@ -139,7 +139,7 @@ private:
     int m_originalLineNumber;
     QDateTime m_timestamp;
     LogLevel m_level;
-    bool m_schemaMatched = false;   // встаёт в выравнивание после m_level
+    bool m_formatMatched = false;   // встаёт в выравнивание после m_level
     QString m_message;
     LogFilePtr m_sourceFile;
     std::shared_ptr<const LogEntry> m_head;

@@ -255,6 +255,7 @@ private:
     QToolButton* m_cancelUnpackButton = nullptr; // F-2: распаковка активной вкладки
     bool m_unpackStatusShown = false;            // строка состояния показывает распаковку
     class EncodingIndicator* m_encodingIndicator = nullptr; // кодировка файла текущей строки
+    class LineFormatIndicator* m_lineFormatIndicator = nullptr; // формат строк файла (F-17, шаг 7)
 
     // Time filter widgets (added to ui->timeFilterToolBar)
     QDateTimeEdit* m_timeFilterFrom;

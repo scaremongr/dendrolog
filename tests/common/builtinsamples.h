@@ -273,9 +273,17 @@ inline QVector<SchemaCase> cases()
             {{"Level", "CRITICAL"}, {"Logger", "root"}, {"Message", "Out of disk space"}}),
     }});
 
-    // Ключевые схемы (F-4, PR 4): поля и момент — из ключей; значения
-    // полей — раскодированные (LogEntryFields::value).
-    c.append({QStringLiteral("json-lines.json"), QStringLiteral("JSON Lines"), {
+    return c;
+}
+
+// Форматы строк JSON Lines и logfmt (F-17, шаг 7; до него — встроенные
+// ключевые схемы F-4, PR 4): поля и момент — из ключей ролей по умолчанию,
+// значения полей — раскодированные (LogEntryFields::value). «file» — имя
+// формата («json» / «logfmt»), а не файл схемы.
+inline QVector<SchemaCase> formatCases()
+{
+    QVector<SchemaCase> c;
+    c.append({QStringLiteral("json"), QStringLiteral("JSON Lines"), {
         krec(QStringLiteral(R"({"ts":"2026-11-18T13:55:36.123Z","level":"info","msg":"Server started","port":8080})"),
              {{"Timestamp", "2026-11-18T13:55:36.123Z"}, {"Level", "info"}, {"Message", "Server started"}},
              utcMs("2026-11-18T13:55:36.123Z")),
@@ -311,7 +319,7 @@ inline QVector<SchemaCase> cases()
              1763474142000LL),
     }});
 
-    c.append({QStringLiteral("logfmt.json"), QStringLiteral("logfmt"), {
+    c.append({QStringLiteral("logfmt"), QStringLiteral("logfmt"), {
         krec(QStringLiteral(R"(ts=2026-11-18T13:55:36.123Z level=info msg="Server started" port=8080)"),
              {{"Timestamp", "2026-11-18T13:55:36.123Z"}, {"Level", "info"}, {"Message", "Server started"}},
              utcMs("2026-11-18T13:55:36.123Z")),

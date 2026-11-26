@@ -2,8 +2,7 @@
 #define LOGPARSER_H
 
 #include "logentry.h"
-#include "fieldlayout.h"
-#include "logpattern.h"
+#include "lineformat.h"
 #include "lineclassifier.h"
 #include "textencoding.h"
 #include <QVector>
@@ -51,6 +50,11 @@ public:
         // опоры и в конце разбора сдвигаются так, чтобы последняя такая
         // строка получила дату по mtime: то же, что у вкладки с предпросмотром.
         ClockDateState clock;
+        // Подпись формата строк (LineFormat::readingSignature), которым
+        // посчитана голова (F-17, шаг 7). Хвост, у которого детектор теперь
+        // решает иначе (малый файл дорос до 20 строк), не продолжается:
+        // parseSuccess = false — вызывающий считает файл заново целиком.
+        QString formatSignature;
     };
 
     // Итог разбора: `stats` — все прочитанные строки, включая последнюю без
@@ -77,12 +81,12 @@ public:
     // cancelled (может быть nullptr) проверяется между кусками по 1 МБ и
     // внутри распаковки; прерванный разбор — parseSuccess = false.
     static constexpr qsizetype kMaxStatsLineBytes = 4 * 1024 * 1024;
-    // keyedSchema — ключевая схема (F-4), если у вкладки включено извлечение
-    // полей: метка, уровень и граница записи из ключей, как у загрузки.
-    // Сканер каталога схему не задаёт (nullptr — эвристика).
+    // lineFormat — формат строк файла (F-17, шаг 7); nullptr — решается по
+    // началу файла тем же детектором, что у вкладки (LineFormatDetector) —
+    // так зовёт сканер каталога.
     StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from,
                                   const std::atomic<bool>* cancelled = nullptr,
-                                  const LogPattern* keyedSchema = nullptr) const;
+                                  const LineFormat* lineFormat = nullptr) const;
     StatsScan analyzeFileForStats(const QString& filePath) const
     {
         return analyzeFileForStats(filePath, StatsResume());
@@ -114,13 +118,13 @@ public slots:
     // Полный разбор файла. encoding — состояние кодировки файла на старте
     // (F-1): по умолчанию «не решено»; выбор пользователя (Source::User)
     // переживает перечитывание и автоматикой не меняется.
-    // schema (F-5) — схема, которой читается файл в этом проходе (до шага 7
-    // F-17): ключевая решает метку, уровень и границу записи, регексная —
-    // только границу (строка, не первичная без схемы, первична, если схема
-    // её узнала). Полей записи не хранят (F-17, шаг 3). nullptr — без схемы.
-    // Схема берётся на старте прохода и живёт с ним.
+    // lineFormat — формат строк файла на старте прохода (F-17, шаг 7):
+    // «не решён» (по умолчанию) — решается по началу файла до первой строки
+    // (LineFormatDetector::advance, сигнал lineFormatDecided раньше первой
+    // порции); решённый и выбор пользователя — как есть. Схемы полей
+    // загрузчик не знает.
     void startParsing(const LogFilePtr& logFile, FileEncoding encoding = {},
-                      FileSchemaPtr schema = {});
+                      LineFormat lineFormat = {});
     // Incremental parse: read only bytes starting at startOffset (a line
     // boundary), continuing the numbering and the current record of context.
     // streamEncoding — то, что сообщил tailState: у дозаписи нет BOM, поэтому
@@ -131,7 +135,7 @@ public slots:
     void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                           const ResumeContext& context,
                           TextEncoding streamEncoding = TextEncoding::Utf8,
-                          FileEncoding encoding = {}, FileSchemaPtr schema = {});
+                          FileEncoding encoding = {}, LineFormat lineFormat = {});
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
@@ -141,6 +145,11 @@ signals:
     // состояние и передаёт его следующему проходу (дозапись, перечитывание,
     // переход порога в индексный бэкенд).
     void encodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
+    // Формат строк файла решён в начале прохода (F-17, шаг 7) — раньше
+    // первой порции. afterLines — решение пришло в дозаписи: строки,
+    // прочитанные прежними проходами, читались как Plain (вкладка
+    // перечитывает файл, если формат читает иначе — LineFormat::readsLikePlain).
+    void lineFormatDecided(const LogFilePtr& logFile, const LineFormat& format, bool afterLines);
     void entriesParsed(const QVector<std::shared_ptr<LogEntry>>& entriesBatch, const LogFilePtr& logFile);
     // Right before parsingFinished of a successful parse: the exact byte
     // offset reading stopped at (the next incremental parse starts there), and
@@ -157,12 +166,10 @@ signals:
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
 
 private:
-    // The worker methods receive the pass's immutable schema (F-5: a parameter
-    // of the pass, not a member), so changing the tab's schema while a parse
-    // is in flight is race-free. The one parse loop for both the initial load (initial: progress and
+    // The worker methods receive the pass's line format by value. The one parse loop for both the initial load (initial: progress and
     // parsingStarted/Failed) and an incremental read.
     void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
-                   const ResumeContext& context, const FileSchema* schema,
+                   const ResumeContext& context, LineFormat lineFormat,
                    bool initial,
                    TextEncoding streamEncoding, FileEncoding encoding,
                    TextEncoding fallback);

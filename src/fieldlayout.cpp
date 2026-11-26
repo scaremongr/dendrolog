@@ -1,4 +1,5 @@
 #include "fieldlayout.h"
+#include "lineformat.h"
 #include "linetemplate.h"
 #include "logfile.h"
 
@@ -65,11 +66,22 @@ FieldExtractorPtr FieldLayout::extractorFor(const LogPattern& pattern)
 
 FileSchemaPtr FieldLayout::schemaFor(const LogPattern& pattern)
 {
+    return schemaFor(extractorFor(pattern), pattern.patternString());
+}
+
+FileSchemaPtr FieldLayout::schemaFor(const QString& definition)
+{
+    KeyedDefinition keys;
+    if (LineFormat::keysFromFieldDefinition(definition, &keys))
+        return schemaFor(std::make_shared<const KeyedExtractor>(keys), definition);
+    return schemaFor(LogPattern(definition));
+}
+
+FileSchemaPtr FieldLayout::schemaFor(FieldExtractorPtr extractor, const QString& definition)
+{
     auto schema = std::make_shared<FileSchema>();
-    schema->extractor = extractorFor(pattern);
-    // Шаблон строки загрузке не виден: pattern пустой.
-    if (!dynamic_cast<const TemplateExtractor*>(schema->extractor.get()))
-        schema->pattern = pattern;
+    schema->extractor = std::move(extractor);
+    schema->definition = definition;
     const QStringList names = schema->isValid() ? schema->extractor->fields() : QStringList();
     schema->columnOf.reserve(names.size());
     for (int i = 0; i < names.size(); ++i) {

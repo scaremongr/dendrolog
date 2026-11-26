@@ -6,6 +6,7 @@
 #include "ui_mainwindow.h"
 #include "logviewwidget.h"
 #include "encodingindicator.h"
+#include "lineformatindicator.h"
 #include "logtabwidget.h"
 #include "conversionpatterndialog.h"
 #include "gotodialog.h"
@@ -1946,6 +1947,8 @@ void MainWindow::setupStatusBar()
     m_progressBar->setFixedWidth(200);
     m_progressBar->hide();
     ui->statusbar->addPermanentWidget(m_progressBar);
+    m_lineFormatIndicator = new LineFormatIndicator(this); // формат строк (F-17, шаг 7)
+    ui->statusbar->addPermanentWidget(m_lineFormatIndicator);
     m_encodingIndicator = new EncodingIndicator(this); // логика — во вкладке (F-1)
     ui->statusbar->addPermanentWidget(m_encodingIndicator);
 
@@ -2769,6 +2772,7 @@ void MainWindow::onCurrentTabChanged(int index)
         updateNavHistoryActions();
     }
     m_encodingIndicator->setTab(currentView);
+    m_lineFormatIndicator->setTab(currentView);
     // Переключение на вкладку — тоже «фокус на view»: с авто-обновлением она
     // должна показывать актуальные данные сразу, а не со следующего тика.
     if (currentView && currentView->autoReload())

@@ -753,3 +753,16 @@ bool Lookup::scan(QStringView line, Hits* hits, int neededColumns) const
 }
 
 } // namespace KeyedLine
+
+QVector<std::pair<QString, QString>> KeyedLine::keyValuePairs(QStringView line,
+                                                              KeyedDefinition::Format format)
+{
+    QVector<std::pair<QString, QString>> pairs;
+    PairReader reader(line, format);
+    Pair p;
+    while (reader.next(&p)) {
+        const QStringView key = line.mid(p.keyStart, p.keyLength);
+        pairs.append({p.keyEscaped ? unescape(key) : key.toString(), valueText(line, p)});
+    }
+    return pairs;
+}

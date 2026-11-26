@@ -548,14 +548,13 @@ void testPrefilterEscapes(Backend b, const QDir& dir)
         bytes += R"({"ts":"2026-03-05T10:00:00Z","level":"info","msg":"open файл"})" "\n";
         bytes += R"({"ts":"2026-03-05T10:00:01Z","level":"info","msg":"plain text"})" "\n";
         bytes += R"({"ts":"2026-03-05T10:00:02Z","level":"error","msg":"say \"hi\" there"})" "\n";
+        // Формат строк решается на 20 непустых строках (F-17, шаг 7): поля
+        // JSON-файла — ключи формата, без схемы.
+        for (int i = 0; i < 20; ++i)
+            bytes += R"({"ts":"2026-03-05T10:01:00Z","level":"debug","msg":"filler"})" "\n";
         const QString path = writeFile(dir, QStringLiteral("escaped-%1.jsonl").arg(label), bytes);
-        PatternDefinition def;
-        KeyedDefinition keyed;
-        keyed.format = KeyedDefinition::Format::JsonObject;
-        def.keyed = keyed;
-        const QString schema = LogPattern::serializeDefinition(def);
-        Document doc = build(b, {path}, schema);
-        CHECK(doc.errors.isEmpty() && doc.model->rowCount() == 3, label + ": JSON loads");
+        Document doc = build(b, {path}, QString());
+        CHECK(doc.errors.isEmpty() && doc.model->rowCount() == 23, label + ": JSON loads");
         FilterRuleSet cyr = fieldRule(QStringLiteral("Message"), QStringLiteral("файл"));
         cyr.bindFields(doc.layout.columns);
         doc.model->setFilterRules(cyr);
@@ -569,7 +568,7 @@ void testPrefilterEscapes(Backend b, const QDir& dir)
                                           FilterRule::Action::Exclude);
         exclude.bindFields(doc.layout.columns);
         doc.model->setFilterRules(exclude);
-        CHECK(settle(*doc.model, 0) && doc.model->rowCount() == 2, label + ": \\u value excluded");
+        CHECK(settle(*doc.model, 0) && doc.model->rowCount() == 22, label + ": \\u value excluded");
     }
     // Шаблон с quoted: «\"» раскодируется.
     {
@@ -603,7 +602,7 @@ void testTemplateDefinition()
     CHECK(!FieldLayout::isTemplateDefinition(buildSchema()), "block schema is not a template");
     FieldLayout layout;
     const FileSchemaPtr s = layout.schemaFor(def);
-    CHECK(s && s->isValid() && !s->pattern.isValid(), "template schema: extractor yes, loader pattern no");
+    CHECK(s && s->isValid() && s->definition == def, "template schema: extractor and its definition");
     const QString line = QStringLiteral("2026-03-05 10:00:00.000 WARN disk is full");
     const LogEntryFields f = s->extractFields(line);
     CHECK(f.value(1, line) == QStringLiteral("WARN") && f.value(2, line) == QStringLiteral("disk is full"),

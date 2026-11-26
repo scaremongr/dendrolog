@@ -243,11 +243,6 @@ QString displayLabelForBlock(const PatternBlock& block)
 
 QString definitionSummary(const PatternDefinition& definition)
 {
-    if (definition.keyed) {
-        const QString format = definition.keyed->format == KeyedDefinition::Format::Logfmt
-            ? QStringLiteral("logfmt") : QStringLiteral("JSON");
-        return format + QStringLiteral(": ") + definition.keyed->columnNames().join(QStringLiteral(" "));
-    }
     if (definition.blocks.isEmpty())
         return QObject::tr("No blocks");
 
@@ -270,24 +265,6 @@ QString definitionSummary(const PatternDefinition& definition)
     return parts.join(QStringLiteral(" "));
 }
 
-// Ключи и колонки ключевой схемы в полях редактора — через запятую.
-QStringList splitKeys(const QString& text)
-{
-    QStringList keys;
-    for (const QString& part : text.split(QLatin1Char(','))) {
-        const QString key = part.trimmed();
-        if (!key.isEmpty())
-            keys.append(key);
-    }
-    return keys;
-}
-
-QString joinKeys(const QStringList& keys)
-{
-    return keys.join(QStringLiteral(", "));
-}
-
-const char* kFormatBlocks = "blocks";
 
 // Runs the compiled pattern against the sample lines in a worker thread and
 // waits at most timeoutMs. Returns false when matching did not finish in
@@ -351,7 +328,6 @@ ConversionPatternDialog::ConversionPatternDialog(const PatternList& patterns,
     m_cardsLayout->setSpacing(3);
     m_cardsLayout->addStretch(1);
     ui->blocksScroll->setWidget(cardsHost);
-    buildKeyedEditor();
 
     // Live preview
     ui->sampleEdit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -662,18 +638,7 @@ void ConversionPatternDialog::updateSchemaSummary(int row)
     const QString summary = ok ? definitionSummary(definition) : tr("Invalid schema");
     ui->schemaTable->item(row, SchemaColSummary)->setText(summary);
 
-    if (ok && definition.keyed) {
-        const KeyedDefinition& k = *definition.keyed;
-        const QStringList tooltipLines = {
-            tr("Format: %1").arg(k.format == KeyedDefinition::Format::Logfmt
-                                     ? QStringLiteral("logfmt") : QStringLiteral("JSON")),
-            tr("Time keys: %1").arg(joinKeys(k.timeKeys)),
-            tr("Level keys: %1").arg(joinKeys(k.levelKeys)),
-            tr("Message keys: %1").arg(joinKeys(k.messageKeys)),
-            tr("Columns: %1").arg(k.extraColumns.isEmpty() ? tr("none") : joinKeys(k.extraColumns)),
-        };
-        ui->schemaTable->item(row, SchemaColSummary)->setToolTip(tooltipLines.join(QLatin1Char('\n')));
-    } else if (ok) {
+    if (ok) {
         QStringList tooltipLines;
         if (!definition.linePrefix.isEmpty())
             tooltipLines.append(tr("Constant text: %1").arg(definition.linePrefix));
@@ -751,12 +716,10 @@ void ConversionPatternDialog::loadSchemaRow(int row)
         ui->descriptionEdit->setText(schemaRow(row).description());
         ui->descriptionEdit->setCursorPosition(0);
         rebuildCards(definition);
-        setKeyedEditor(definition.keyed);
     } else {
         ui->nameEdit->clear();
         ui->descriptionEdit->clear();
         rebuildCards(PatternDefinition());
-        setKeyedEditor(std::nullopt);
     }
     m_syncing = false;
     m_dirty = false;
@@ -870,14 +833,12 @@ PatternDefinition ConversionPatternDialog::currentDefinitionFromEditor() const
         }
         definition.blocks.push_back(block);
     }
-    definition.keyed = keyedFromEditor();
     return definition;
 }
 
 void ConversionPatternDialog::replaceCurrentBlocks(const PatternDefinition& definition)
 {
     rebuildCards(definition);
-    setKeyedEditor(definition.keyed, true);
     setDirty();
     updateValidationLabel();
     schedulePreviewUpdate();
@@ -1063,21 +1024,11 @@ void ConversionPatternDialog::onAutoDetect()
         return;
     }
 
-    // Строки JSON / logfmt в большинстве — ключевая схема (F-4); цепочка
-    // блоков остаётся в редакторе — вернуться к ней можно форматом Blocks.
-    PatternDefinition keyed;
-    if (PatternHeuristics::suggestKeyedSchema(previewLines(), &keyed)) {
-        setKeyedEditor(keyed.keyed);
-        setDirty();
-        schedulePreviewUpdate();
-        return;
-    }
-    // Иначе — цепочка блоков по первой ОБЫЧНОЙ строке: строка JSON в
-    // меньшинстве не должна дать ключевую схему (suggestSchema на ней
-    // предложил бы её).
+    // Цепочка блоков по первой ОБЫЧНОЙ строке: строки JSON / logfmt читает
+    // формат строк файла (F-17, шаг 7), а не схема.
     for (const QString& line : previewLines()) {
         if (!line.trimmed().isEmpty()
-                && PatternHeuristics::detectLineFormat(line) == PatternHeuristics::LineFormat::Blocks) {
+                && PatternHeuristics::detectLineFormat(line) == PatternHeuristics::LineShape::Blocks) {
             sample = line;
             break;
         }
@@ -1535,10 +1486,6 @@ void ConversionPatternDialog::updateButtonStates()
     ui->applyBtn->setEnabled(hasSchema && m_dirty);
     ui->revertBtn->setEnabled(hasSchema && m_dirty);
     ui->addBlockBtn->setEnabled(hasSchema);
-    if (m_keyedHost)
-        m_keyedHost->setEnabled(hasSchema);
-    if (m_formatCombo)
-        m_formatCombo->setEnabled(hasSchema);
     ui->autoDetectBtn->setEnabled(hasSchema);
     ui->presetBtn->setEnabled(hasSchema);
     ui->grokBtn->setEnabled(hasSchema);
@@ -1743,239 +1690,6 @@ void ConversionPatternDialog::onBlocksEdited()
     setDirty();
     updateValidationLabel();
     schedulePreviewUpdate();
-}
-
-// ---------------------------------------------------------------- //
-// Keyed schema (F-4): JSON / logfmt
-// ---------------------------------------------------------------- //
-
-void ConversionPatternDialog::buildKeyedEditor()
-{
-    // Format row above the chain.
-    auto* formatRow = new QHBoxLayout();
-    auto* formatLabel = new QLabel(tr("Format:"), this);
-    m_formatCombo = new QComboBox(this);
-    m_formatCombo->setObjectName(QStringLiteral("formatCombo"));
-    m_formatCombo->addItem(tr("Blocks"), QString::fromLatin1(kFormatBlocks));
-    m_formatCombo->addItem(tr("JSON"), KeyedDefinition::formatName(KeyedDefinition::Format::JsonObject));
-    m_formatCombo->addItem(tr("logfmt"), KeyedDefinition::formatName(KeyedDefinition::Format::Logfmt));
-    m_formatCombo->setToolTip(
-        tr("Blocks: a chain of positional blocks (regular expressions).\n"
-           "JSON: one JSON object per line (JSON Lines).\n"
-           "logfmt: key=value pairs.\n"
-           "JSON and logfmt take the fields by key name, in any order."));
-    formatLabel->setBuddy(m_formatCombo);
-    formatRow->addWidget(formatLabel);
-    formatRow->addWidget(m_formatCombo);
-    formatRow->addStretch(1);
-
-    // Keyed card in place of the chain (invariant 9: CardFrame).
-    m_keyedHost = new QWidget(this);
-    m_keyedHost->setObjectName(QStringLiteral("keyedHost"));
-    auto* hostLayout = new QVBoxLayout(m_keyedHost);
-    hostLayout->setContentsMargins(0, 0, 0, 0);
-    m_keyedCard = new CardFrame(m_keyedHost);
-    m_keyedCard->setObjectName(QStringLiteral("keyedCard"));
-    m_keyedCard->setAccentColor(accentColorForIndex(0));
-    hostLayout->addWidget(m_keyedCard);
-    hostLayout->addStretch(1);
-
-    auto* form = new QFormLayout();
-    auto makeEdit = [this](const char* name, const QString& tip) {
-        auto* edit = new QLineEdit(m_keyedCard);
-        edit->setObjectName(QString::fromLatin1(name));
-        edit->setToolTip(tip);
-        connect(edit, &QLineEdit::textEdited, this, &ConversionPatternDialog::onKeyedEdited);
-        return edit;
-    };
-    const QString candidates = tr("Comma-separated keys; the first one found in a line wins.\n"
-                                  "\"log.level\" also matches the nested {\"log\":{\"level\":…}}.");
-    m_timeKeysEdit = makeEdit("timeKeysEdit", candidates);
-    m_levelKeysEdit = makeEdit("levelKeysEdit", candidates);
-    m_messageKeysEdit = makeEdit("messageKeysEdit", candidates);
-    m_columnsEdit = makeEdit("columnsEdit",
-        tr("Other keys shown as columns after Timestamp, Level and Message, comma-separated."));
-    form->addRow(tr("Time keys:"), m_timeKeysEdit);
-    form->addRow(tr("Level keys:"), m_levelKeysEdit);
-    form->addRow(tr("Message keys:"), m_messageKeysEdit);
-
-    auto* columnsRow = new QHBoxLayout();
-    columnsRow->addWidget(m_columnsEdit, 1);
-    m_addSampleKeysBtn = new QPushButton(tr("Add keys from sample"), m_keyedCard);
-    m_addSampleKeysBtn->setObjectName(QStringLiteral("addSampleKeysBtn"));
-    m_addSampleKeysBtn->setToolTip(
-        tr("Append the keys of the preview lines that are not columns or role keys yet."));
-    connect(m_addSampleKeysBtn, &QPushButton::clicked, this, &ConversionPatternDialog::onAddSampleKeys);
-    columnsRow->addWidget(m_addSampleKeysBtn);
-    form->addRow(tr("Columns:"), columnsRow);
-
-    m_epochUnitCombo = new QComboBox(m_keyedCard);
-    m_epochUnitCombo->setObjectName(QStringLiteral("epochUnitCombo"));
-    m_epochUnitCombo->setToolTip(tr("A number in the time key is an epoch. Auto picks the unit by "
-                                    "size: below 1e11 seconds, 1e14 milliseconds, 1e17 microseconds, "
-                                    "else nanoseconds."));
-    using Unit = KeyedDefinition::EpochUnit;
-    const std::pair<Unit, QString> units[] = {
-        {Unit::Auto, tr("Auto (by size)")}, {Unit::Seconds, tr("Seconds")},
-        {Unit::Millis, tr("Milliseconds")}, {Unit::Micros, tr("Microseconds")},
-        {Unit::Nanos, tr("Nanoseconds")},
-    };
-    for (const auto& u : units)
-        m_epochUnitCombo->addItem(u.second, KeyedDefinition::epochUnitName(u.first));
-    form->addRow(tr("Epoch number:"), m_epochUnitCombo);
-
-    m_numericLevelsCombo = new QComboBox(m_keyedCard);
-    m_numericLevelsCombo->setObjectName(QStringLiteral("numericLevelsCombo"));
-    m_numericLevelsCombo->setToolTip(tr("A number in the level key. Auto: 0–7 syslog, 10 and above "
-                                        "pino / Bunyan (10 trace … 60 fatal). Python: 10 debug … "
-                                        "50 critical."));
-    using Levels = KeyedDefinition::NumericLevels;
-    const std::pair<Levels, QString> scales[] = {
-        {Levels::Auto, tr("Auto (syslog 0–7, pino 10–60)")}, {Levels::Syslog, tr("Syslog (0–7)")},
-        {Levels::Python, tr("Python (10–50)")},
-    };
-    for (const auto& l : scales)
-        m_numericLevelsCombo->addItem(l.second, KeyedDefinition::numericLevelsName(l.first));
-    form->addRow(tr("Numeric levels:"), m_numericLevelsCombo);
-
-    m_keyedLegend = new QLabel(m_keyedCard);
-    m_keyedLegend->setObjectName(QStringLiteral("keyedLegend"));
-    m_keyedLegend->setWordWrap(true);
-    m_keyedLegend->setTextFormat(Qt::RichText);
-    form->addRow(tr("Preview colours:"), m_keyedLegend);
-
-    m_keyedCard->rowsLayout()->addLayout(form);
-
-    const int at = ui->editorLayout->indexOf(ui->blocksScroll);
-    ui->editorLayout->insertLayout(at, formatRow);
-    ui->editorLayout->insertWidget(at + 2, m_keyedHost, 1);
-
-    connect(m_formatCombo, &QComboBox::currentIndexChanged, this, &ConversionPatternDialog::onFormatChanged);
-    connect(m_epochUnitCombo, &QComboBox::currentIndexChanged, this, &ConversionPatternDialog::onKeyedEdited);
-    connect(m_numericLevelsCombo, &QComboBox::currentIndexChanged, this, &ConversionPatternDialog::onKeyedEdited);
-
-    setKeyedEditor(std::nullopt);
-}
-
-void ConversionPatternDialog::setKeyedEditor(const std::optional<KeyedDefinition>& keyed,
-                                             bool keepFields)
-{
-    const bool wasSyncing = m_syncing;
-    m_syncing = true;
-    const KeyedDefinition k = keyed.value_or(KeyedDefinition());
-    const QString format = keyed ? KeyedDefinition::formatName(k.format) : QString::fromLatin1(kFormatBlocks);
-    m_formatCombo->setCurrentIndex(qMax(0, m_formatCombo->findData(format)));
-    // Режим Blocks: поля карточки — умолчания у загруженной схемы, а после
-    // пресета, Grok или перестановки блоков — прежние (вернуться к JSON без
-    // потерь, как к блокам).
-    if (keyed || !keepFields) {
-        // Ключ с запятой или пробелом по краям через запятую не записать:
-        // нетронутое поле отдаёт список как был (keyedFromEditor).
-        const std::pair<QLineEdit*, const QStringList*> lists[] = {
-            {m_timeKeysEdit, &k.timeKeys}, {m_levelKeysEdit, &k.levelKeys},
-            {m_messageKeysEdit, &k.messageKeys}, {m_columnsEdit, &k.extraColumns},
-        };
-        for (const auto& [edit, list] : lists) {
-            edit->setText(joinKeys(*list));
-            edit->setProperty("loadedText", edit->text());
-            edit->setProperty("loadedKeys", *list);
-        }
-        m_epochUnitCombo->setCurrentIndex(
-            qMax(0, m_epochUnitCombo->findData(KeyedDefinition::epochUnitName(k.epochUnit))));
-        m_numericLevelsCombo->setCurrentIndex(
-            qMax(0, m_numericLevelsCombo->findData(KeyedDefinition::numericLevelsName(k.numericLevels))));
-        for (QLineEdit* edit : {m_timeKeysEdit, m_levelKeysEdit, m_messageKeysEdit, m_columnsEdit})
-            edit->setCursorPosition(0);
-    }
-    m_syncing = wasSyncing;
-    updateFormatMode();
-    updateKeyedLegend();
-}
-
-bool ConversionPatternDialog::isKeyedMode() const
-{
-    return m_formatCombo
-        && m_formatCombo->currentData().toString() != QLatin1String(kFormatBlocks);
-}
-
-std::optional<KeyedDefinition> ConversionPatternDialog::keyedFromEditor() const
-{
-    if (!isKeyedMode())
-        return std::nullopt;
-    KeyedDefinition k;
-    KeyedDefinition::formatFromName(m_formatCombo->currentData().toString(), &k.format);
-    const auto keys = [](const QLineEdit* edit) {
-        return edit->text() == edit->property("loadedText").toString()
-            ? edit->property("loadedKeys").toStringList()
-            : splitKeys(edit->text());
-    };
-    k.timeKeys = keys(m_timeKeysEdit);
-    k.levelKeys = keys(m_levelKeysEdit);
-    k.messageKeys = keys(m_messageKeysEdit);
-    k.extraColumns = keys(m_columnsEdit);
-    KeyedDefinition::epochUnitFromName(m_epochUnitCombo->currentData().toString(), &k.epochUnit);
-    KeyedDefinition::numericLevelsFromName(m_numericLevelsCombo->currentData().toString(),
-                                           &k.numericLevels);
-    return k;
-}
-
-void ConversionPatternDialog::updateFormatMode()
-{
-    const bool keyed = isKeyedMode();
-    ui->blocksScroll->setVisible(!keyed);
-    ui->addBlockBtn->setVisible(!keyed);
-    m_keyedHost->setVisible(keyed);
-}
-
-void ConversionPatternDialog::updateKeyedLegend()
-{
-    const std::optional<KeyedDefinition> keyed = keyedFromEditor();
-    if (!keyed) {
-        m_keyedLegend->clear();
-        return;
-    }
-    QStringList parts;
-    const QStringList names = keyed->columnNames();
-    for (int i = 0; i < names.size(); ++i) {
-        const QColor c = highlightColorForIndex(i);
-        parts << QStringLiteral("<span style=\"background-color: rgba(%1,%2,%3,%4)\">&nbsp;%5&nbsp;</span>")
-                     .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alphaF())
-                     .arg(names[i].toHtmlEscaped());
-    }
-    m_keyedLegend->setText(parts.join(QLatin1Char(' ')));
-}
-
-void ConversionPatternDialog::onFormatChanged()
-{
-    if (m_syncing)
-        return;
-    updateFormatMode();
-    updateKeyedLegend();
-    setDirty();
-    schedulePreviewUpdate();
-}
-
-void ConversionPatternDialog::onKeyedEdited()
-{
-    if (m_syncing)
-        return;
-    updateKeyedLegend();
-    setDirty();
-    schedulePreviewUpdate();
-}
-
-void ConversionPatternDialog::onAddSampleKeys()
-{
-    const std::optional<KeyedDefinition> keyed = keyedFromEditor();
-    if (!keyed || ui->schemaTable->currentRow() < 0)
-        return;
-    const QStringList keys = PatternHeuristics::keyedSampleKeys(previewLines(), *keyed);
-    if (keys.isEmpty()) {
-        ui->previewStatusLabel->setText(tr("No new keys in the preview lines."));
-        return;
-    }
-    m_columnsEdit->setText(joinKeys(keyed->extraColumns + keys));
-    onKeyedEdited();
 }
 
 // ---------------------------------------------------------------- //

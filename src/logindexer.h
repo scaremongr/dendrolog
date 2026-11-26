@@ -4,8 +4,7 @@
 #include "lineclassifier.h"
 #include "lineindex.h"
 #include "logfile.h"
-#include "fieldlayout.h"
-#include "logpattern.h"
+#include "lineformat.h"
 #include "textencoding.h"
 #include <QObject>
 #include <QThreadPool>
@@ -41,7 +40,10 @@
 //     оборвана концом файла) — файл остаётся «не решённым», решит дозапись;
 //   • индекс от декодера не зависит (классификатор смотрит только на ASCII —
 //     tests/textencoding, testClassifierIsAsciiOnly); декодер влияет только
-//     на текст, который видит схема полей при решении primary/continuation.
+//     на текст строки (ключи JSON / logfmt формата строк — тоже ASCII);
+//   • формат строк файла (F-17, шаг 7, lineformat.h) решается в начале
+//     прохода (LineFormatDetector::advance) и сообщается lineFormatDecided
+//     раньше первой порции; схему полей индексатор не знает.
 //
 // Дозапись (startIndexingFrom) наследует контекст логической записи из
 // самого индекса: continuation-строки после границы дозаписи присоединяются
@@ -66,14 +68,13 @@ public slots:
     // Полная индексация с нуля; index должен быть свежесозданным (пустым).
     // encoding — кодировка файла на старте (обычно «не решена»; выбор
     // пользователя переживает перечитывание переписанного файла).
-    // schema (F-5) — схема файла на этот проход (параметр, не член объекта);
-    // нужна ТОЛЬКО для решения primary/continuation и (ключевая, F-4) метки
-    // и уровня: спаны полей в индексе не сохраняются — их извлекает стор по
-    // требованию. nullptr — без схемы (извлечение полей выключено).
+    // lineFormat — формат строк файла на этот проход (F-17, шаг 7): «не
+    // решён» — решается по началу файла до первой строки (сигнал
+    // lineFormatDecided раньше первой порции). Схемы полей индексатор не знает.
     void startIndexing(const LogFilePtr& logFile,
                        const std::shared_ptr<LineIndex>& index,
                        FileEncoding encoding = FileEncoding(),
-                       FileSchemaPtr schema = {});
+                       LineFormat lineFormat = {});
     // Дозапись хвоста с index->endOffset(). reindexProvisionalTail — сначала
     // переиндексировать последнюю строку, если она была без '\n'
     // (truncateFrom + чтение с её начала); store обязан согласованно убрать
@@ -84,7 +85,7 @@ public slots:
                            const std::shared_ptr<LineIndex>& index,
                            bool reindexProvisionalTail,
                            FileEncoding encoding = FileEncoding(),
-                           FileSchemaPtr schema = {});
+                           LineFormat lineFormat = {});
 
 signals:
     void indexingStarted(const LogFilePtr& logFile);
@@ -100,10 +101,12 @@ signals:
     // прежних порций — ASCII, их текст не меняется (IndexedLogStore::
     // adoptDetectedEncoding, без reset).
     void encodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
+    // Формат строк решён в начале прохода (как у LogParser::lineFormatDecided).
+    void lineFormatDecided(const LogFilePtr& logFile, const LineFormat& format, bool afterLines);
 
 private:
     void doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index,
-                 const FileSchema* schema,
+                 LineFormat lineFormat,
                  bool initial, bool reindexProvisionalTail,
                  FileEncoding encoding, TextEncoding fallback);
 

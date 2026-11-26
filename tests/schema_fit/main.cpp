@@ -322,16 +322,13 @@ const QMap<QPair<QString, QString>, SchemaFit::Verdict>& knownOverlaps()
     // Syslog RFC 3164 и Syslog ISO — одна и та же цепочка блоков (метку
     // любой формы читает блок Timestamp): подходят друг другу. Их Host /
     // Program / PID разбирают и строку nginx error («[error] 1234#1234:»),
-    // но там выигрывает nginx error (rank — своя первая). JSON Lines: метка
-    // внутри объекта — якорь, найденный где угодно, — три строки из пяти
-    // «разобраны» целиком; не подходит, но «сомнительно».
+    // но там выигрывает nginx error (rank — своя первая). JSON Lines и logfmt
+    // — формат строк файла, а не схема (F-17, шаг 7): в корпусе их нет.
     static const QMap<QPair<QString, QString>, SchemaFit::Verdict> overlaps = {
         {{QStringLiteral("syslog-iso.json"), QStringLiteral("syslog-rfc3164.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-rfc3164.json"), QStringLiteral("syslog-iso.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-rfc3164.json"), QStringLiteral("nginx-error.json")}, SchemaFit::Verdict::Fits},
         {{QStringLiteral("syslog-iso.json"), QStringLiteral("nginx-error.json")}, SchemaFit::Verdict::Fits},
-        {{QStringLiteral("syslog-rfc3164.json"), QStringLiteral("json-lines.json")}, SchemaFit::Verdict::Doubtful},
-        {{QStringLiteral("syslog-iso.json"), QStringLiteral("json-lines.json")}, SchemaFit::Verdict::Doubtful},
     };
     return overlaps;
 }
@@ -448,15 +445,12 @@ void testExplain()
           QStringLiteral("explain: строка без метки — ожидалась метка (after %1, expect %2)")
               .arg(none.afterBlock).arg(int(none.expect)));
 
-    // Ключевая схема: строка не запись.
-    PatternDefinition keyedDef;
-    keyedDef.keyed = KeyedDefinition();
-    keyedDef.blocks = {patternBlock(K::Remainder, QStringLiteral("Message"))};
-    const LogPattern keyed(LogPattern::serializeDefinition(keyedDef));
-    check(keyed.isKeyed(), QStringLiteral("ключевая схема по умолчанию валидна"));
+    // Ключевой извлекатель (колонки формата строк JSON, F-17, шаг 7):
+    // строка не запись.
     const QString plain = QStringLiteral("plain text line");
-    const SchemaFit::Reason rec = SchemaFit::explain(keyed.definition(), plain, keyed.matchLine(plain));
-    check(rec.expect == E::Record && rec.found == plain, QStringLiteral("explain: ключевая — Record"));
+    const MatchReport rec = KeyedExtractor(KeyedDefinition()).explain(plain);
+    check(rec.expect == MatchReport::Expect::Record && plain.startsWith(rec.found),
+          QStringLiteral("explain: ключевой — Record"));
 }
 
 // ---------------------------------------------------------------------------

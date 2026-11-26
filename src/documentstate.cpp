@@ -310,6 +310,8 @@ QJsonObject TabSource::toJson() const
                         ? QJsonValue(schemaToJson(schema->schemaName, schema->schema))
                         : QJsonValue(QJsonValue::Null));
     }
+    if (lineFormat)
+        json.insert(QStringLiteral("lineFormat"), lineFormat->toJson());
     return json;
 }
 
@@ -338,6 +340,14 @@ std::optional<TabSource> TabSource::fromJson(const QJsonObject& json, QString* e
         if (!schemaFromJson(schema, &f.schemaName, &f.schema, error))
             return std::nullopt;
         s.schema = f;
+    }
+    // Выбор формата строк (F-17, шаг 7).
+    const QJsonValue format = json.value(QLatin1String("lineFormat"));
+    if (!format.isUndefined()) {
+        LineFormat f;
+        if (!format.isObject() || !LineFormat::fromJson(format.toObject(), &f))
+            return fail(error, QStringLiteral("bad lineFormat"));
+        s.lineFormat = f;
     }
     return s;
 }

@@ -118,6 +118,8 @@ set(DENDROLOG_CORE_SOURCES
     src/timegaps.cpp
     src/lineclassifier.h
     src/lineclassifier.cpp
+    src/lineformat.h
+    src/lineformat.cpp
     src/lineindex.h
     src/lineindex.cpp
     src/logindexer.h
@@ -194,6 +196,8 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/filelegend.cpp
     src/encodingindicator.h
     src/encodingindicator.cpp
+    src/lineformatindicator.h
+    src/lineformatindicator.cpp
     src/commandoutputdialog.h
     src/commandoutputdialog.cpp
     src/commandstatusbar.h

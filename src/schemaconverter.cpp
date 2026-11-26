@@ -241,11 +241,6 @@ namespace SchemaConverter {
 Result fromBlocks(const PatternDefinition& definition)
 {
     Result result;
-    if (definition.keyed) {
-        result.error = QStringLiteral("A JSON / logfmt schema is not a line template: its keys are read "
-                                      "by the line format of the file.");
-        return result;
-    }
     QString why;
     if (!LogPattern::validateDefinition(definition, &why)) {
         result.error = why;

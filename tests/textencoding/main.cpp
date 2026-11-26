@@ -1054,8 +1054,8 @@ static void testClassifierIsAsciiOnly()
                   QString("%1: timestamp differs between decodings: %2").arg(enc.name, tpl));
             CHECK(hasA == hasB && lvA == lvB,
                   QString("%1: level differs between decodings: %2").arg(enc.name, tpl));
-            CHECK(LineClassifier::isPrimaryLine(false, tsA, leadA, hasA)
-                  == LineClassifier::isPrimaryLine(false, tsB, leadB, hasB),
+            CHECK(LineClassifier::isPrimaryLine(tsA, leadA, hasA)
+                  == LineClassifier::isPrimaryLine(tsB, leadB, hasB),
                   QString("%1: primary flag differs: %2").arg(enc.name, tpl));
             ++compared;
         }
