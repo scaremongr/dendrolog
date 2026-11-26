@@ -7,6 +7,34 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **JSON Lines and logfmt are a line format, not a schema.** The format of a
+  file's lines is detected when it is opened, like its encoding: a JSON Lines
+  or logfmt log opens with time, level and message taken from its keys and its
+  keys as fields — no schema to pick, whatever schema the tab has. The status
+  bar shows the format next to the encoding ("JSON Lines (auto)"); click it to
+  choose Plain text, JSON Lines, logfmt or your own keys (**Keys…**) — the
+  choice rereads the file, keeps the current line in place and is remembered
+  with the file, in sessions and by `Ctrl+Shift+T`. The *Directory Scanner*
+  counts JSON and logfmt files the same way. A file with fewer than 20 lines
+  is read as plain text until it grows (then it is read again once).
+- **Logs without timestamps split at the level word.** In a plain log almost
+  without timestamps where most lines start with a level word
+  (`WARNING:root:…`, `[INFO] …`), such a line starts a record, so a Python
+  traceback stays with its entry — without a schema. A line like
+  `ERROR: detail` in the middle of an entry of a log with timestamps still
+  does not break it.
+- **A field schema no longer changes how a file is read.** Record boundaries,
+  timestamps and levels come from the line format only; picking or changing a
+  schema never rereads a file. A schema that recognised record starts no
+  timestamp or level word could find (a rare custom format) no longer does.
+
+### Removed
+- The built-in **JSON Lines** and **logfmt** schemas and the **Format** mode
+  of the schema editor. An untouched built-in copy is removed on upgrade; one
+  you edited stays and reads the whole line as `Message`; a tab, session or
+  file memory saved with such a schema opens without a schema (the file reads
+  its keys by its line format).
+
 - **Slow field schemas no longer slow down the log.** The fields of a line
   template with a `/regular expression/` are computed in the background: lines
   show in full at once and switch to the selected columns as soon as their

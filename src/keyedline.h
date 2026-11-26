@@ -8,14 +8,14 @@
 #include <QVector>
 
 // ============================================================================
-// Ключевая схема (F-4, docs/design/F-4.md): строка лога — JSON-объект
-// (JSON Lines) или пары logfmt, поля берутся по ИМЕНАМ ключей, а не по
-// позициям, как у регексной схемы.
+// Ключи JSON Lines и logfmt (F-4, docs/design/F-4.md; с F-17, шаг 7 — формат
+// строк файла, lineformat.h, а не схема): строка лога — JSON-объект или пары
+// logfmt, поля берутся по ИМЕНАМ ключей, а не по позициям.
 //
-// KeyedDefinition — ключевая часть определения схемы (PatternDefinition::
-// keyed, logpattern.h); LogPattern с ней разбирает строки этим модулем, а
-// не регексным каскадом. Колонки: Timestamp, Level, Message, затем
-// extraColumns по именам ключей.
+// KeyedDefinition — ключи ролей, колонки, единица эпохи, шкала уровней
+// формата (LineFormat::keys); загрузчик классифицирует строку по ним
+// (LineClassifier::classifyLine), поля — KeyedExtractor. Колонки: Timestamp,
+// Level, Message, затем extraColumns по именам ключей.
 //
 // KeyedLine — разбор строки без аллокаций и без регекса: PairReader
 // отдаёт пары верхнего уровня (диапазон ключа, диапазон значения, вид
@@ -160,7 +160,7 @@ struct Hit {
 
 using Hits = QVarLengthArray<Hit, 8>;
 
-// Колонки ключевой схемы, разобранные один раз (LogPattern::setPattern):
+// Колонки ключей, разобранные один раз (LineFormatReader, KeyedExtractor):
 // у каждой — ключи-кандидаты по приоритету, ключ с точкой — ещё и путь.
 class Lookup {
 public:

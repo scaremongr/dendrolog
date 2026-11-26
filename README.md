@@ -43,12 +43,15 @@
 - **Field schemas** — split entries into structured fields (timestamp, level,
   thread, message…); ready-made schemas for Logback / Log4j, Spring Boot,
   nginx / Apache, syslog / journalctl, Serilog and Python logging, auto-detect
-  from a sample line or import a **Grok** expression. **JSON Lines** and
-  **logfmt** logs take time, level and message from keys (epoch numbers and
-  pino levels included) with decoded values; build your own key-based schema
-  in the editor or let auto-detect propose it. Each tab has its own schema,
-  and in a merged tab each file can have its own (**Applies to**) — an app
-  log and an access log, or a log and a JSON Lines file, side by side.
+  from a sample line or import a **Grok** expression. Each tab has its own
+  schema, and in a merged tab each file can have its own (**Applies to**) —
+  an app log and an access log side by side.
+- **JSON Lines and logfmt without setup** — the line format of a file is
+  detected like its encoding: JSON Lines and logfmt logs open with time, level
+  and message taken from keys (epoch numbers and pino levels included) and the
+  keys as fields with decoded values; plain logs without timestamps
+  (`WARNING:root:…`) start a record at the level word. The status bar shows
+  the format and lets you pick another one or your own keys.
 - **Find a Schema** — variants for the lines of a tab with the share of lines
   each parses: your best schemas, a template inferred from the lines (offline)
   and, if you turn it on, a suggestion by **AI (Claude, your API key)** —
