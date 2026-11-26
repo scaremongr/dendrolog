@@ -51,8 +51,13 @@ All notable changes to DendroLog are documented here. The format follows
   the numeric level scale, previewed live on the sample lines; **Suggest
   schema** proposes a key-based schema for JSON or logfmt lines. Schema files
   stay at format version 3 (older versions read such a schema as a single
-  `Message` column and keep its key part when saving it). For now the keys
-  are applied when a file is read: pick the schema before opening the file.
+  `Message` column and keep its key part when saving it). Picking a
+  key-based schema on a tab that is already open (or leaving one, or turning
+  **Filter blocks** on or off with it) rereads the tab's files: the order,
+  moments, levels and records become what opening the file with that schema
+  gives, while the current line keeps its place on screen and bookmarks and
+  navigation history find their lines again. Entry Details lists every
+  top-level key of the line under **Keys**, not only the schema's columns.
   Indexing a large JSON Lines or logfmt file with the schema costs about the
   same as without it (within 10 %): a line is read only up to its time and
   level keys. A bare logfmt timestamp (`ts=2026-11-18T10:00:00Z`) is read

@@ -1,6 +1,6 @@
 {
     "name": "logfmt",
-    "description": "key=value pairs (logrus, Go slog, Grafana Loki, Prometheus): time, level and message are taken from keys; quoted values are shown decoded.",
+    "description": "key=value pairs (logrus, Go slog, Grafana Loki, Prometheus): time, level and message are taken from keys; quoted values are shown decoded; the other keys of a line are listed in Entry Details.",
     "version": 3,
     "type": "dynamic-block-schema",
     "linePrefix": "",

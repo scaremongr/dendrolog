@@ -328,11 +328,13 @@ EntryDetailsPanel::EntryDetailsPanel(QWidget* parent)
 
 void EntryDetailsPanel::showEntry(const std::shared_ptr<LogEntry>& line,
                                   const QVector<std::shared_ptr<LogEntry>>& logicalLines,
-                                  const QStringList& fieldNames)
+                                  const QStringList& fieldNames,
+                                  const FileSchemaPtr& schema)
 {
     m_line = line;
     m_logicalLines = logicalLines;
     m_fieldNames = fieldNames;
+    m_schema = schema;
     scheduleRebuild();
 }
 
@@ -341,6 +343,7 @@ void EntryDetailsPanel::clearEntry()
     m_line.reset();
     m_logicalLines.clear();
     m_fieldNames.clear();
+    m_schema.reset();
     scheduleRebuild();
 }
 
@@ -465,7 +468,7 @@ void EntryDetailsPanel::rebuildNow()
             return -1;
         };
         static const QStringList kOrder = {
-            QStringLiteral("sec-header"), QStringLiteral("sec-fields"),
+            QStringLiteral("sec-header"), QStringLiteral("sec-fields"), QStringLiteral("sec-keys"),
             QStringLiteral("sec-message"), QStringLiteral("sec-json0"),
             QStringLiteral("sec-json1"), QStringLiteral("sec-json2"),
         };
@@ -524,6 +527,15 @@ const LogEntry* EntryDetailsPanel::fieldsSource() const
     return nullptr;
 }
 
+QVector<std::pair<QString, QString>> EntryDetailsPanel::keyPairs() const
+{
+    if (!m_schema || !m_schema->pattern.isKeyed() || !m_line || m_line->isPlainText())
+        return {};
+    const LogEntry* src = fieldsSource();
+    return src ? m_schema->pattern.keyValuePairs(src->message())
+               : QVector<std::pair<QString, QString>>();
+}
+
 QString EntryDetailsPanel::joinedMessage() const
 {
     QStringList parts;
@@ -570,6 +582,11 @@ void EntryDetailsPanel::onAnchorClicked(const QUrl& url)
                             + src->fields().value(i, src->message());
             text = rows.join(QLatin1Char('\n'));
         }
+    } else if (what == QLatin1String("keys")) {
+        QStringList rows;
+        for (const auto& [key, value] : keyPairs())
+            rows << key + QLatin1Char('\t') + value;
+        text = rows.join(QLatin1Char('\n'));
     } else if (what.startsWith(QLatin1String("json"))) {
         const int idx = what.mid(4).toInt();
         if (idx >= 0 && idx < m_jsonBlocks.size())
@@ -697,6 +714,28 @@ QString EntryDetailsPanel::buildHtml()
             html += QLatin1String("</table>");
         } else {
             html += mutedDiv(tr("The line does not match the extraction schema."));
+        }
+    }
+
+    // ---- Ключи строки (ключевая схема, F-4) ---------------------------------
+    // Все ключи верхнего уровня, не только колонки: значения раскодированы,
+    // вложенный объект — его JSON-текст. Разбор — только для этой записи.
+    if (showFields) {
+        const QVector<std::pair<QString, QString>> pairs = keyPairs();
+        if (!pairs.isEmpty()) {
+            html += sectionHeader(tr("Keys (%1)").arg(pairs.size()), QStringLiteral("keys"),
+                                  QStringLiteral("keys"));
+            html += QLatin1String("<table cellspacing=\"0\" cellpadding=\"2\">");
+            for (const auto& [key, raw] : pairs) {
+                QString value = raw;
+                if (value.size() > kMaxFieldValueChars)
+                    value = value.left(kMaxFieldValueChars) + QStringLiteral("…");
+                html += QStringLiteral("<tr><td style=\"color:%1;\">%2&nbsp;&nbsp;</td>"
+                                       "<td style=\"%3\">%4</td></tr>")
+                            .arg(muted.name(), key.toHtmlEscaped(), monoStyle,
+                                 value.toHtmlEscaped());
+            }
+            html += QLatin1String("</table>");
         }
     }
 
