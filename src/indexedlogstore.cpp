@@ -1334,7 +1334,7 @@ public:
             return done(index.timeRangeMs(minMs, maxMs));
 
         // Фильтр — проход по видимым строкам (только метаданные индекса).
-        qint64 lo = std::numeric_limits<qint64>::max();
+        qint64 lo = (std::numeric_limits<qint64>::max)();
         qint64 hi = kNoTimestampMs;
         quint32 prevLogical = 0;
         bool havePrev = false;

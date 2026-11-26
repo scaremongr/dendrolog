@@ -57,7 +57,7 @@ public:
         qint64 ms[kTsBlockEntries];          // kNoTimestampMs — метки нет
         // Минимум и максимум меток блока (S-13); без меток — maxMs ==
         // kNoTimestampMs. Пишет и читает только аппендер.
-        qint64 minMs = std::numeric_limits<qint64>::max();
+        qint64 minMs = (std::numeric_limits<qint64>::max)();
         qint64 maxMs = kNoTimestampMs;
     };
 
@@ -125,14 +125,14 @@ private:
     qint64  m_lineCount = 0;      // опубликовано строк
     quint32 m_logicalCount = 0;   // опубликовано логических записей
     qint64  m_endOffset = 0;      // конец опубликованных байт
-    qint64  m_minMs = std::numeric_limits<qint64>::max(); // опубликованные мин./макс. меток
+    qint64  m_minMs = (std::numeric_limits<qint64>::max)(); // опубликованные мин./макс. меток
     qint64  m_maxMs = kNoTimestampMs;
 
     // Состояние аппендера (только поток индексатора; читатели не трогают).
     qint64  m_pendingLines = 0;   // всего строк с учётом неопубликованных
     quint32 m_pendingLogical = 0;
     qint64  m_nextOffset = 0;     // смещение начала следующей строки
-    qint64  m_pendingMinMs = std::numeric_limits<qint64>::max();
+    qint64  m_pendingMinMs = (std::numeric_limits<qint64>::max)();
     qint64  m_pendingMaxMs = kNoTimestampMs;
 };
 
@@ -162,7 +162,7 @@ private:
     QVector<std::shared_ptr<LineIndex::TsBlock>> m_tsBlocks;
     qint64  m_lineCount = 0;
     quint32 m_logicalCount = 0;
-    qint64  m_minMs = std::numeric_limits<qint64>::max();
+    qint64  m_minMs = (std::numeric_limits<qint64>::max)();
     qint64  m_maxMs = kNoTimestampMs;
 };
 
