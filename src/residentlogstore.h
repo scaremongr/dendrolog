@@ -53,7 +53,7 @@ public:
     void applyFilter() override;
     void cancelPendingFilter(bool wait) override;
     void reapplyFilterIfStale() override;
-    bool isFiltering() const override { return m_filterJobActive; }
+    bool isFiltering() const override { return m_filterJobActive || m_batchJobs > 0; }
 
     // Живая поисковая база: строки source [first, last] стали видимыми —
     // слить их и проверить запросом только их (как батч mergeEntries).
@@ -126,6 +126,15 @@ private:
     bool m_filteredListStale = false;
     std::shared_ptr<std::atomic_bool> m_filterJobCancel;
     QFuture<QVector<std::shared_ptr<LogEntry>>> m_filterJobFuture;
+    // Фоновый фильтр дописанной порции (F-17, шаг 6: правила по полю при
+    // схеме с Background-извлекателем на GUI-потоке не решаются): только
+    // строки порции, итог — вставками. Отменяются вместе с полным джобом
+    // (поколение, cancel-флаг).
+    void startBatchFilterJob(const QVector<std::shared_ptr<LogEntry>>& sortedBatch);
+    void insertPassing(const QVector<std::shared_ptr<LogEntry>>& passing);
+    int m_batchJobs = 0;
+    std::shared_ptr<std::atomic_bool> m_batchJobCancel;
+    QVector<QFuture<QVector<std::shared_ptr<LogEntry>>>> m_batchJobFutures;
     // Живучесть store для колбэков watcher'ов: при смене бэкенда (store
     // умирает раньше модели) отложенный finished не должен трогать память.
     std::shared_ptr<int> m_aliveGuard = std::make_shared<int>(0);

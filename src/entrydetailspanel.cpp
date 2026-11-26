@@ -5,6 +5,7 @@
 #include <QTimer>
 #include "cardframe.h"
 #include "logentry.h"
+#include "logmodel.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
@@ -337,7 +338,79 @@ void EntryDetailsPanel::showEntry(const std::shared_ptr<LogEntry>& line,
     m_fieldNames = fieldNames;
     m_schema = schema;
     m_recordFields = recordFields;
+    m_fieldsPending = false;
+    watchFields(nullptr);
     scheduleRebuild();
+}
+
+void EntryDetailsPanel::showEntry(const std::shared_ptr<LogEntry>& line,
+                                  const QVector<std::shared_ptr<LogEntry>>& logicalLines,
+                                  const QStringList& fieldNames, const FileSchemaPtr& schema,
+                                  LogModel* model)
+{
+    m_line = line;
+    m_logicalLines = logicalLines;
+    m_fieldNames = fieldNames;
+    m_schema = schema;
+    m_recordFields = LogEntryFields();
+    m_fieldsPending = false;
+    watchFields(model);
+    onFieldsReady();
+    scheduleRebuild();
+}
+
+void EntryDetailsPanel::watchFields(LogModel* model)
+{
+    for (const QMetaObject::Connection& c : std::as_const(m_fieldsConnections))
+        disconnect(c);
+    m_fieldsConnections.clear();
+    m_model = model;
+    if (!model)
+        return;
+    // Поля пришли — или их больше не придёт (смена схемы, сброс строк):
+    // запросить заново. Очередью — после того, как источник доделал сброс.
+    const auto requery = [this]() {
+        if (m_fieldsPending)
+            onFieldsReady();
+    };
+    FieldSource* source = &model->fieldSource();
+    m_fieldsConnections << connect(source, &FieldSource::fieldsReady, this, requery,
+                                   Qt::QueuedConnection);
+    m_fieldsConnections << connect(source, &FieldSource::schemasChanged, this, requery,
+                                   Qt::QueuedConnection);
+    m_fieldsConnections << connect(source, &FieldSource::backgroundDropped, this, requery,
+                                   Qt::QueuedConnection);
+}
+
+void EntryDetailsPanel::onFieldsReady()
+{
+    // Поля первой строки записи заново (из кэша источника — без разбора).
+    const bool wasPending = m_fieldsPending;
+    m_recordFields = LogEntryFields();
+    m_fieldsPending = false;
+    if (m_model && !m_logicalLines.isEmpty() && m_logicalLines.first()) {
+        FieldLookup lookup = m_model->fieldLookupOf(*m_logicalLines.first());
+        m_fieldsPending = lookup.state == FieldLookup::State::Pending;
+        if (lookup.isReady())
+            m_recordFields = std::move(lookup.fields);
+    }
+    if (wasPending && !m_fieldsPending)
+        scheduleRebuild();
+}
+
+QString EntryDetailsPanel::fieldsSummary() const
+{
+    if (m_fieldsPending)
+        return tr("Computing fields…");
+    const LogEntry* src = fieldsSource();
+    if (!src)
+        return QString();
+    QStringList lines;
+    const int count = int(qMin(m_fieldNames.size(), qsizetype(m_recordFields.size())));
+    for (int i = 0; i < count; ++i)
+        if (m_recordFields.has(i))
+            lines << m_fieldNames.at(i) + QStringLiteral(": ") + m_recordFields.value(i, src->message());
+    return lines.join(QLatin1Char('\n'));
 }
 
 void EntryDetailsPanel::setTimeDelta(const TimeDelta::RowDelta& delta)
@@ -373,6 +446,8 @@ void EntryDetailsPanel::clearEntry()
     m_fieldNames.clear();
     m_schema.reset();
     m_recordFields = LogEntryFields();
+    m_fieldsPending = false;
+    watchFields(nullptr);
     scheduleRebuild();
 }
 
@@ -714,7 +789,10 @@ QString EntryDetailsPanel::buildHtml()
         const LogEntry* src = fieldsSource();
         html += sectionHeader(tr("Fields"), QStringLiteral("fields"),
                               src ? QStringLiteral("fields") : QString());
-        if (src) {
+        if (m_fieldsPending) {
+            // Background-извлекатель (F-17, шаг 6): поля придут из фона.
+            html += mutedDiv(tr("Computing fields…"));
+        } else if (src) {
             html += QLatin1String("<table cellspacing=\"0\" cellpadding=\"2\">");
             const int count = int(qMin(m_fieldNames.size(),
                                        qsizetype(m_recordFields.size())));

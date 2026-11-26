@@ -2,6 +2,8 @@
 #define ENTRYDETAILSPANEL_H
 
 #include <QJsonDocument>
+#include <QMetaObject>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include "fieldlayout.h"
@@ -11,6 +13,7 @@
 #include <memory>
 
 class LogEntry;
+class LogModel;
 class QShowEvent;
 class QTextBrowser;
 class QToolButton;
@@ -64,7 +67,19 @@ public:
                    const QStringList& fieldNames,
                    const FileSchemaPtr& schema = FileSchemaPtr(),
                    const LogEntryFields& recordFields = LogEntryFields());
+    // То же, поля — из модели (LogModel::fieldLookupOf первой строки записи,
+    // F-17, шаг 6): у Background-извлекателя поля могут ещё считаться в фоне
+    // — секция Fields пишет «Computing fields…» и перестраивается, когда
+    // они пришли (FieldSource::fieldsReady).
+    void showEntry(const std::shared_ptr<LogEntry>& line,
+                   const QVector<std::shared_ptr<LogEntry>>& logicalLines,
+                   const QStringList& fieldNames, const FileSchemaPtr& schema,
+                   LogModel* model);
     void clearEntry();
+    // Поля записи ещё считаются в фоне (тестам).
+    bool fieldsPending() const { return m_fieldsPending; }
+    // Текст секции Fields простым текстом: «имя: значение» построчно (тестам).
+    QString fieldsSummary() const;
     // Дельта времени строки (F-8): от предыдущей строки и от «нулевой» —
     // строкой под заголовком. Окно ставит её после showEntry и при смене
     // «нулевой».
@@ -114,6 +129,12 @@ private:
     QStringList m_fieldNames;
     FileSchemaPtr m_schema;
     LogEntryFields m_recordFields;   // поля первой строки записи
+    // Поля записи считаются в фоне (F-17, шаг 6): ждём fieldsReady модели.
+    bool m_fieldsPending = false;
+    QPointer<LogModel> m_model;
+    QVector<QMetaObject::Connection> m_fieldsConnections;
+    void watchFields(LogModel* model);
+    void onFieldsReady();
     TimeDelta::RowDelta m_delta;
     // Ключи строки ключевой схемы (LogPattern::keyValuePairs) — для одной
     // записи; пусто — схема не ключевая или строка не распознана.

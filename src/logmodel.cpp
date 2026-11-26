@@ -8,6 +8,8 @@
 
 #include <QDebug>
 
+#include <algorithm>
+
 // ============================================================================
 // LogModel — тонкий фасад: роли/сигналы/настройки здесь, данные и фильтрация —
 // в LogStore (см. logstore.h). Поведение резидентного пути идентично
@@ -25,6 +27,7 @@ LogModel::LogModel(QObject* parent)
     m_locator = new RecordLocator(*this);
     m_bookmarks = new BookmarkStore(*this);
     m_fieldSource = new FieldSource(this);
+    connect(m_fieldSource, &FieldSource::fieldsReady, this, &LogModel::onFieldsReady);
     // Метки и число строк файлов (U-23) — на события модели, O(числа файлов).
     // Подписка раньше любого view: на rowsInserted view уже видит набор.
     connect(this, &QAbstractItemModel::rowsInserted, this, &LogModel::refreshFileSet);
@@ -798,12 +801,57 @@ void LogModel::setFileSchema(const QString& filePath, FileSchemaPtr schema)
     setFileSchemas(schemas);
 }
 
+FieldLookup LogModel::fieldLookupOf(const LogEntry& entry) const
+{
+    RecordKey key;
+    key.file = entry.sourceFile();
+    key.line = entry.originalLineNumber();
+    key.logicalEntryId = entry.logicalEntryId();
+    if (entry.timestamp().isValid())
+        key.timestampMs = entry.timestamp().toMSecsSinceEpoch();
+    return m_fieldSource->fieldsFor(key, entry.message());
+}
+
 LogEntryFields LogModel::fieldsOf(const LogEntry& entry) const
 {
-    const FieldLookup lookup = m_fieldSource->fieldsFor(entry.sourceFile().get(),
-                                                         entry.originalLineNumber(),
-                                                         entry.message());
-    return lookup.isReady() ? lookup.fields : LogEntryFields();
+    FieldLookup lookup = fieldLookupOf(entry);
+    return lookup.isReady() ? std::move(lookup.fields) : LogEntryFields();
+}
+
+bool LogModel::fieldRulesInBackground() const
+{
+    return m_fieldSource->hasBackgroundSchema() && m_filterRules.needsFields();
+}
+
+void LogModel::onFieldsReady(const QVector<RecordKey>& keys)
+{
+    // Ключ → строка (O(log N)); строки, ушедшие из видимых, пропускаются.
+    // Сортированные строки — слитыми диапазонами: соседние (разрыв до
+    // kGap) — в один. Строки приходят с экрана и двух соседних, поэтому
+    // обычно диапазон один и короткий (у view — точечная инвалидация).
+    QVector<int> rows;
+    rows.reserve(keys.size());
+    for (const RecordKey& key : keys) {
+        const int row = m_store->rowForKey(key);
+        if (row >= 0)
+            rows.append(row);
+    }
+    if (rows.isEmpty())
+        return;
+    std::sort(rows.begin(), rows.end());
+    constexpr int kGap = 64;
+    const QList<int> roles{ Qt::DisplayRole, int(AnsiStyleRole), int(FieldsReadyRole) };
+    int first = rows.first();
+    int last = first;
+    for (int i = 1; i <= rows.size(); ++i) {
+        if (i < rows.size() && rows[i] - last <= kGap) {
+            last = rows[i];
+            continue;
+        }
+        emit dataChanged(index(first, 0), index(last, 0), roles);
+        if (i < rows.size())
+            first = last = rows[i];
+    }
 }
 
 // ---------------------------------------------------------------------------

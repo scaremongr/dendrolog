@@ -166,6 +166,10 @@ void SearchResultsController::onSourceDataChanged(int first, int last, const QLi
             requestFullSearch();
         return;
     }
+    // Поля строк источника пришли из фона (F-17, шаг 6): выдача считает
+    // свои поля сама, показ полей не менялся.
+    if (roles.contains(int(LogModel::FieldsReadyRole)))
+        return;
     if (roles.contains(Qt::DisplayRole))
         mirrorFieldDisplay();
     // Остальные роли (IsNewRole, маркеры, плашки файлов) выдачу не меняют.

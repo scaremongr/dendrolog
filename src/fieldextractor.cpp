@@ -69,14 +69,10 @@ LegacyPatternExtractor::LegacyPatternExtractor(std::shared_ptr<const LogPattern>
     : m_pattern(pattern ? std::move(pattern) : std::make_shared<const LogPattern>())
     , m_fields(m_pattern->fieldNames())
 {
-    const PatternDefinition& def = m_pattern->definition();
-    if (!def.keyed) {
-        for (const PatternBlock& b : def.blocks) {
-            if (b.matchKind == PatternBlock::MatchKind::CustomRegex
-                || (b.separatorIsRegex && !b.separator.isEmpty()))
-                m_cost = Cost::Background;
-        }
-    }
+    // Cost — Inline всегда (F-17, шаг 6): регексы блочной схемы приложение
+    // гоняло на GUI-потоке всегда, встроенные схемы (access, logback, nginx)
+    // ими полны, и «сначала сырые строки» у них было бы регрессом. Блочная
+    // модель уходит на шаге 9; Background — у шаблона с /регексом/.
 }
 
 LegacyPatternExtractor::LegacyPatternExtractor(const LogPattern& pattern)

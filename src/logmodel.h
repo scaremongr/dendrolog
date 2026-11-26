@@ -159,7 +159,12 @@ public:
         // AnsiStyles (F-3): спаны цвета ANSI в координатах DisplayRole.
         // Невалидно — у строки нет кодов или показан не сырой текст строки
         // (выбранные колонки полей): позиции бы не совпали.
-        AnsiStyleRole
+        AnsiStyleRole,
+        // Не данные, а метка в списке ролей dataChanged (F-17, шаг 6): поля
+        // строк пришли из фона (FieldSource::fieldsReady). Вместе с ней —
+        // DisplayRole и AnsiStyleRole; view обновляет строки, держа на месте
+        // выбранную (или верхнюю) строку — LogListView::onFieldsArrived.
+        FieldsReadyRole
     };
 
     // Закладки вкладки (R-2). Живут вместе с моделью: переживают фильтр,
@@ -208,8 +213,17 @@ public:
     // Источник полей вкладки (F-17, шаг 3).
     FieldSource& fieldSource() const { return *m_fieldSource; }
     // Поля строки для показа (GUI-поток, через кэш FieldSource); пусто —
-    // у файла нет схемы или строка не принята.
+    // у файла нет схемы, строка не принята или поля ещё считаются в фоне
+    // (Background-извлекатель, шаг 6: показ — сырой текст, по готовности —
+    // dataChanged с FieldsReadyRole).
     LogEntryFields fieldsOf(const LogEntry& entry) const;
+    // То же с состоянием (Pending — считаются в фоне): Entry Details.
+    FieldLookup fieldLookupOf(const LogEntry& entry) const;
+    // Правила фильтра по полю есть, а у схемы вкладки Background-извлекатель
+    // (F-17, шаг 6): фильтр — только в воркере, на GUI-потоке поля не
+    // считаются (синхронный резидентный путь и точечные проверки уходят в
+    // фоновый джоб).
+    bool fieldRulesInBackground() const;
     // -------------------------------------------------------------------------
 
     void setLogLevelFilter(const QSet<LogLevel>& levels);
@@ -380,6 +394,8 @@ private:
     void ensureFileColor(const QString& filePath);
     void resetFileColors();
     void refreshFileSet();
+    // Поля строк пришли из фона: строки → слитые диапазоны dataChanged.
+    void onFieldsReady(const QVector<RecordKey>& keys);
     // Отбрасывает индексы вне диапазона схемы и дубликаты, сохраняя порядок.
     QVector<int> sanitizeFieldIndexes(const QVector<int>& indexes) const;
     // Уведомляет view о смене отображаемого текста всех строк.

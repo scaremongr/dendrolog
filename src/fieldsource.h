@@ -39,12 +39,19 @@ struct LogFile;
 //     ответы правил по полю; поле разбирается один раз на запись и только
 //     если правило до него дошло (FilterRuleSet::matchesLine).
 //
-// Класс цены извлекателя (FieldExtractor::Cost). Путь Background (поля во
-// view в фоне, «ещё не готово» и сигнал fieldsReady) — шаг 6 F-17; до него
-// fieldsFor считает любой извлекатель сразу, как прежде считал индексный
-// бэкенд по требованию, и отдаёт FieldLookup::State::Ready. Место для шага 6
-// — состояние Pending и сигнал fieldsReady: потребители уже разбирают
-// FieldLookup, а не голые поля.
+// Класс цены извлекателя (FieldExtractor::Cost; шаг 6 F-17). Inline —
+// fieldsFor считает сразу (и кладёт в кэш). Background (шаблон с /регексом/,
+// будущий «строку разбирает модель») на GUI-потоке НЕ вызывается никогда:
+// fieldsFor отдаёт Pending (показ — сырой текст строки) и ставит строку в
+// очередь фонового расчёта. Очередь — «последние запрошенные первыми» с
+// отсевом: запрошенные давно (прокрученные мимо) выбрасываются, когда
+// очередь длиннее kQueueLines; текст строки задание получает значением.
+// Одно задание на источник (вкладку) за раз, пачками до kBatchLines строк, в
+// общем пуле с пониженным приоритетом потоков (backgroundPool); результат —
+// QFutureWatcher на GUI-потоке, устаревшее поколение (смена схемы, сброс
+// строк) отбрасывается. Готовые строки копятся и уходят одним сигналом
+// fieldsReady не чаще раза в kReadyIntervalMs; модель превращает его в
+// слитый dataChanged (роль FieldsReadyRole), view держит якорь.
 //
 // Счётчики (вызовы extract показа и сканеров, попадания в кэш) —
 // для тестов бюджета: «смена схемы — ни прохода», «фильтр по полю — вызовов
@@ -68,6 +75,8 @@ struct FieldSourceCounters {
     std::atomic<qint64> guiExtracts{0};
     std::atomic<qint64> scanExtracts{0};
     std::atomic<qint64> cacheHits{0};
+    // Фоновый путь (шаг 6): вызовы extract в задании и на каком потоке.
+    std::atomic<qint64> backgroundExtracts{0};
 };
 
 class FieldScanner {
@@ -192,54 +201,89 @@ private:
     QVarLengthArray<qint8, 8> m_ruleState;
 };
 
+class QThreadPool;
+template <typename T> class QFutureWatcher;
+class QTimer;
+
 class FieldSource : public QObject {
     Q_OBJECT
 public:
     explicit FieldSource(QObject* parent = nullptr);
+    ~FieldSource() override;
 
-    // Смена схем файлов вкладки: поколение++, кэш пуст. O(1), строки не
-    // трогаются. Тот же набор — ничего.
+    // Смена схем файлов вкладки: поколение++, кэш и очередь пусты, расчёт в
+    // полёте отброшен. O(1), строки не трогаются. Тот же набор — ничего.
     void setSchemas(const FileSchemaSet& schemas);
     const FileSchemaSet& schemas() const { return m_schemas; }
     quint64 generation() const { return m_generation; }
 
+    // Есть ли у вкладки схема с Background-извлекателем: фильтр по полю
+    // с ней — всегда фоновый (LogModel::fieldRulesInBackground).
+    bool hasBackgroundSchema() const { return m_hasBackground; }
+
     // GUI-поток: поля строки key (файл и номер строки) с текстом text для
-    // показа. Шаг 3: любой извлекатель считает сразу (Ready); шаг 6 вернёт
-    // Pending для Background и сообщит fieldsReady.
+    // показа. Inline — считает сразу (Ready / None); Background — из кэша
+    // либо Pending и строка в очереди фонового расчёта, по готовности —
+    // fieldsReady.
     FieldLookup fieldsFor(const RecordKey& key, QStringView text);
-    FieldLookup fieldsFor(const LogFile* file, qint64 line, QStringView text);
 
     // Снимок схем для воркера.
     FieldScanner scanner() const { return FieldScanner(m_schemas, m_counters); }
 
-    // Строки файла сброшены (перечитывание, удаление) — кэш строк пуст.
-    // Ключ кэша — указатель файла и номер строки, текст сверяется при
-    // попадании; сброс всего кэша (событие редкое) проще, чем выборочный.
+    // Строки файла сброшены (перечитывание, удаление) — кэш и очередь пусты,
+    // расчёт в полёте отброшен. Ключ кэша — указатель файла и номер строки,
+    // текст сверяется при попадании; сброс всего (событие редкое) проще,
+    // чем выборочный.
     void fileReset(const QString& filePath);
     void allReset();
+
+    // Фоновая работа ещё идёт: очередь, задание или готовые строки, ещё не
+    // объявленные fieldsReady. Тестам и LogListView::hasPendingLayout.
+    bool hasPendingWork() const;
 
     struct Stats {
         qint64 guiExtracts = 0;     ///< вызовов extract для показа (fieldsFor, GUI-поток)
         qint64 scanExtracts = 0;    ///< вызовов extract сканером (FieldScanner): фильтр,
                                     ///< экспорт, поиск — в воркере или синхронным
                                     ///< фильтром на GUI-потоке
-        
         qint64 cacheHits = 0;       ///< fieldsFor ответил из кэша
+        // Фоновый путь (шаг 6):
+        qint64 backgroundExtracts = 0; ///< вызовов extract в фоновом задании
+        qint64 queued = 0;          ///< строк поставлено в очередь
+        qint64 dropped = 0;         ///< выброшено из очереди отсевом (прокручены мимо)
+        qint64 batches = 0;         ///< запущено фоновых заданий
+        qint64 discarded = 0;       ///< заданий, чей итог отброшен поколением
+        qint64 readySignals = 0;    ///< испущено fieldsReady
     };
     Stats stats() const;
     void resetStats();
     int cachedLines() const { return int(m_recent.size() + m_old.size()); }
+    int queuedLines() const { return int(m_queue.size()); }
 
     // Предел кэша: строк в каждом из двух поколений (LRU приближённо: на
     // переполнении «свежие» становятся «старыми», старые выбрасываются).
     static constexpr int kCacheLines = 4096;
+    // Очередь фонового расчёта: экран и два вокруг (до ~256 строк на экран);
+    // длиннее — выбрасываются запрошенные раньше всех.
+    static constexpr int kQueueLines = 768;
+    // Строк в одном фоновом задании (сеть выгодно звать пачкой).
+    static constexpr int kBatchLines = 64;
+    // Готовые строки объявляются не чаще раза в столько мс.
+    static constexpr int kReadyIntervalMs = 30;
+
+    // Общий пул фоновых заданий полей: потоки пониженного приоритета.
+    static QThreadPool* backgroundPool();
 
 signals:
-    // Поля строк, посчитанные в фоне, готовы (шаг 6; модель превращает их в
-    // dataChanged). В шаге 3 не испускается.
+    // Поля строк, посчитанные в фоне, готовы (модель превращает их в
+    // слитый dataChanged). Не чаще раза в kReadyIntervalMs.
     void fieldsReady(const QVector<RecordKey>& keys);
     // Схемы сменились (setSchemas): видимое — перерисовать.
     void schemasChanged();
+    // Фоновая работа отброшена сбросом строк (allReset / fileReset): ждущие
+    // строк (Entry Details) запрашивают их заново — fieldsReady за
+    // отброшенное не придёт.
+    void backgroundDropped();
 
 private:
     struct CacheKey {
@@ -255,12 +299,51 @@ private:
         QString text;          // сверка: тот же указатель файла мог достаться другому файлу
         FieldLookup lookup;
     };
+    // Строка в очереди фонового расчёта.
+    struct QueueItem {
+        RecordKey key;
+        QString text;
+        FileSchemaPtr schema;
+        quint64 stamp = 0;     // когда запрошена последний раз (больше — свежее)
+    };
+    // Пачка задания: вход и итог (итог короче входа — задание отменили).
+    struct BatchLine {
+        QString text;
+        FileSchemaPtr schema;
+    };
+    struct BatchResult {
+        QVector<FieldLookup> lookups;
+    };
+
+    void insertCache(const CacheKey& key, const QString& text, const FieldLookup& lookup);
+    void enqueue(const CacheKey& key, const RecordKey& recordKey, QStringView text,
+                 const FileSchemaPtr& schema);
+    void pruneQueue();
+    void startBatch();
+    void finishBatch();
+    void flushReady();
+    void dropBackground();   // поколение сменилось: очередь, задание, готовые — прочь
 
     FileSchemaSet m_schemas;
+    bool m_hasBackground = false;
     quint64 m_generation = 0;
     std::shared_ptr<FieldSourceCounters> m_counters;
     QHash<CacheKey, CacheItem> m_recent;
     QHash<CacheKey, CacheItem> m_old;
+
+    // Фоновый путь.
+    QHash<CacheKey, QueueItem> m_queue;
+    quint64 m_requestClock = 0;
+    bool m_startPosted = false;
+    // Задание в полёте: его строки (ключ, текст) и поколение.
+    QVector<QueueItem> m_inFlight;
+    QHash<CacheKey, int> m_inFlightIndex;
+    quint64 m_inFlightGeneration = 0;
+    QFutureWatcher<BatchResult>* m_watcher = nullptr;
+    std::shared_ptr<std::atomic_bool> m_cancel;
+    QVector<RecordKey> m_readyKeys;
+    QTimer* m_readyTimer = nullptr;
+    qint64 m_queued = 0, m_dropped = 0, m_batches = 0, m_discarded = 0, m_readySignals = 0;
 };
 
 #endif // FIELDSOURCE_H

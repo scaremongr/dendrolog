@@ -7,6 +7,13 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Slow field schemas no longer slow down the log.** The fields of a line
+  template with a `/regular expression/` are computed in the background: lines
+  show in full at once and switch to the selected columns as soon as their
+  fields are ready, scrolling and selecting never wait, and *Entry Details*
+  says "Computing fields…" meanwhile. A field filter with such a schema always
+  runs in the background, on small logs too. The selected line stays where it
+  is on screen when the fields arrive.
 - **Field filters decide for the whole record.** A text-filter or search rule
   bound to a *Log Fields* column now takes the field from the first line of
   the record, and the record's other lines follow it: `Thread contains main`

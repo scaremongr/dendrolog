@@ -18,18 +18,37 @@
 //   • кэш fieldsFor переживает вставки и фильтр, сбрасывается сменой схемы и
 //     сбросом файла; повторная отрисовка — ни одного extract.
 //   • схема-шаблон (версия 4) — FieldLayout строит её извлекатель.
+//
+// Фоновые поля (F-17, шаг 6) — подставной блокирующий извлекатель
+// (tests/common/blockingextractor.h, Cost::Background):
+//   • 0 вызовов extract на GUI-потоке — показ, Entry Details, фильтр;
+//   • строки показаны сырыми и обновляются после разблокировки (view,
+//     Entry Details — «Computing fields…», затем поля);
+//   • прокрутка отсеивает очередь (запрошенные давно не считаются);
+//   • смена схемы, сброс строк файла и полный сброс посреди расчёта
+//     отбрасывают его итог;
+//   • фильтр по полю с таким извлекателем — всегда фоновый, итог равен
+//     синхронному (Inline-шаблон), в том числе с дозаписью;
+//   • самое долгое событие GUI-потока ≤ 50 мс при прокрутке, фильтре и
+//     выборе строки, пока извлекатель заблокирован (замер событий, как
+//     scrollbar_marks --bench, а не таймер ожидания).
 // ============================================================================
 
+#include "blockingextractor.h"
+#include "entrydetailspanel.h"
 #include "fieldlayout.h"
 #include "fieldsource.h"
+#include "LogListView.h"
 #include "filterruleset.h"
 #include "indexedlogstore.h"
 #include "linetemplate.h"
 #include "logmodel.h"
 #include "logpattern.h"
 #include "testdocuments.h"
+#include "viewidle.h"
 
-#include <QCoreApplication>
+#include <QApplication>
+#include <QScrollBar>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -46,6 +65,44 @@ namespace {
 
 int g_failures = 0;
 int g_checks = 0;
+
+// Самое долгое событие GUI-потока (как в scrollbar_marks).
+class TimingApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* receiver, QEvent* event) override
+    {
+        if (!timing)
+            return QApplication::notify(receiver, event);
+        QElapsedTimer t;
+        t.start();
+        const bool result = QApplication::notify(receiver, event);
+        const qint64 ms = t.elapsed();
+        if (ms > maxMs) {
+            maxMs = ms;
+            maxWhat = QString::fromLatin1(receiver->metaObject()->className())
+                + QLatin1Char('/') + QString::number(int(event->type()));
+        }
+        return result;
+    }
+    bool timing = false;
+    qint64 maxMs = 0;
+    QString maxWhat;
+};
+
+#if !defined(NDEBUG)
+constexpr bool kSanitized = true;   // отладочная сборка: время не меряем строго
+#elif defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr bool kSanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+constexpr bool kSanitized = true;
+#else
+constexpr bool kSanitized = false;
+#endif
+#else
+constexpr bool kSanitized = false;
+#endif
 
 void check(bool ok, const QString& what)
 {
@@ -113,13 +170,14 @@ FilterRuleSet fieldRule(const QString& field, const QString& text,
 }
 
 // Строки модели: ключ «файл:строка» → текст.
-QMap<QString, QString> rowsOf(const LogModel& m)
+QMap<QString, QString> rowsOf(const LogModel& m, bool byName = false)
 {
     QMap<QString, QString> out;
     for (int r = 0; r < m.rowCount(); ++r) {
         const auto e = m.entryAt(r);
         if (e)
-            out.insert(QStringLiteral("%1:%2").arg(e->sourceFile()->filePath).arg(e->originalLineNumber(), 6, 10, QLatin1Char('0')),
+            out.insert(QStringLiteral("%1:%2").arg(byName ? QString() : e->sourceFile()->filePath)
+                           .arg(e->originalLineNumber(), 6, 10, QLatin1Char('0')),
                        e->message());
     }
     return out;
@@ -556,6 +614,395 @@ void testTemplateDefinition()
           "extract up to a column");
 }
 
+// ---------------------------------------------------------------------------
+// Фоновые поля (F-17, шаг 6)
+// ---------------------------------------------------------------------------
+
+// Документ без схемы загрузчика + схема вкладки с подставным извлекателем
+// (шлагбаум gate) и тот же шаблон без шлагбаума (Inline) — эталон показа.
+struct SlowDoc {
+    Document doc;
+    std::shared_ptr<Gate> gate = std::make_shared<Gate>();
+    FileSchemaPtr slow;
+    FileSchemaPtr fast;
+    QVector<int> shown;   // показанные колонки: Level, Message
+};
+
+SlowDoc slowDoc(Backend b, const QString& path, bool showFields = true)
+{
+    SlowDoc d;
+    d.doc = build(b, {path}, QString());
+    d.slow = blockingSchema(d.doc.layout, d.gate);
+    d.fast = d.doc.layout.schemaFor(LineTemplateSchema::definition(fixtureTemplate()));
+    LogModel& m = *d.doc.model;
+    m.setAvailableFields(d.doc.layout.columns);
+    d.shown = { int(d.doc.layout.columns.indexOf(QStringLiteral("Level"))),
+                int(d.doc.layout.columns.indexOf(QStringLiteral("Message"))) };
+    if (showFields)
+        m.setFieldDisplaySelection(true, d.shown);
+    FileSchemaSet set;
+    set.fallback = d.slow;
+    m.setFileSchemas(set);
+    return d;
+}
+
+// Что view обязан показать у строки row, когда поля пришли.
+QString expectedText(const SlowDoc& d, int row)
+{
+    const auto e = d.doc.model->entryAt(row);
+    if (!e)
+        return QString();
+    return LogModel::formatDisplayText(e->message(), d.fast->extractFields(e->message()), true,
+                                       d.shown, d.fast.get());
+}
+
+std::unique_ptr<LogListView> showView(LogModel& m)
+{
+    auto view = std::make_unique<LogListView>();
+    view->resize(900, 400);
+    view->setModel(&m);
+    view->show();
+    view->viewport()->repaint();
+    return view;
+}
+
+// Задание стоит у закрытого шлагбаума.
+bool jobBlocked(const SlowDoc& d)
+{
+    return waitFor([&] { return d.gate->waiting.load() >= 1; }, 20000);
+}
+
+int firstShownRow(const LogListView& view)
+{
+    return view.indexAt(QPoint(view.viewport()->width() / 2, 2)).row();
+}
+
+void testBackgroundDisplay(Backend b, const QDir& dir)
+{
+    const QString label = name(b) + QStringLiteral(" / background display");
+    const QString path = writeFile(dir, QStringLiteral("bg-display-%1.log").arg(name(b)),
+                                   makeLogBytes(3000, 7, "\n", fixtureBaseTime(), false, true, true));
+    SlowDoc d = slowDoc(b, path, /*showFields=*/false);
+    LogModel& m = *d.doc.model;
+    CHECK(m.fieldSource().hasBackgroundSchema(), label + ": the schema is Background");
+    d.gate->close();
+    int arrived = 0;
+    QObject::connect(&m, &QAbstractItemModel::dataChanged,
+                     [&](const QModelIndex&, const QModelIndex&, const QList<int>& roles) {
+                         if (roles.contains(int(LogModel::FieldsReadyRole)))
+                             ++arrived;
+                     });
+    m.setFieldDisplaySelection(true, d.shown);
+    auto view = showView(m);
+    CHECK(jobBlocked(d), label + ": the background job started and waits at the gate");
+
+    // Экран — сырые строки, пока поля не пришли.
+    const int top = qMax(0, firstShownRow(*view));
+    int differing = 0;
+    for (int r = top; r < top + 10 && r < m.rowCount(); ++r) {
+        const QString raw = m.entryAt(r)->message();
+        CHECK(m.data(m.index(r), Qt::DisplayRole).toString() == raw,
+              QStringLiteral("%1: row %2 shown raw while the fields are pending").arg(label).arg(r));
+        if (expectedText(d, r) != raw)
+            ++differing;
+    }
+    CHECK(differing > 0, label + ": the fields change the shown text (test is meaningful)");
+
+    // Entry Details: «Computing fields…», затем поля.
+    EntryDetailsPanel panel;
+    const auto entry = m.entryAt(top + 3);
+    const QVector<std::shared_ptr<LogEntry>> lines = m.logicalRecordLines(entry);
+    panel.showEntry(entry, lines, m.availableFields(), d.slow, &m);
+    CHECK(panel.fieldsPending(), label + ": Entry Details waits for the fields");
+    CHECK(panel.fieldsSummary() == QStringLiteral("Computing fields…"),
+          label + ": Entry Details says the fields are being computed");
+    CHECK(d.gate->guiCalls.load() == 0 && m.fieldSource().stats().guiExtracts == 0,
+          label + ": no extract on the GUI thread while pending");
+
+    d.gate->release();
+    CHECK(waitFor([&] { return !m.fieldSource().hasPendingWork() && !panel.fieldsPending(); }),
+          label + ": the fields arrive after the gate opens");
+    CHECK(idleViews(), label + ": views settle");
+    CHECK(arrived >= 1, QStringLiteral("%1: merged dataChanged with FieldsReadyRole (%2)").arg(label).arg(arrived));
+    for (int r = top; r < top + 10 && r < m.rowCount(); ++r)
+        CHECK(m.data(m.index(r), Qt::DisplayRole).toString() == expectedText(d, r),
+              QStringLiteral("%1: row %2 shows its fields after they arrived ('%3')")
+                  .arg(label).arg(r).arg(m.data(m.index(r), Qt::DisplayRole).toString()));
+    // Смена схемы, пока Entry Details ждёт: панель не остаётся в ожидании.
+    {
+        d.gate->close();
+        FileSchemaSet slowAgain;
+        slowAgain.fallback = blockingSchema(d.doc.layout, d.gate);
+        m.setFileSchemas(slowAgain);
+        const auto other = m.entryAt(top + 7);
+        panel.showEntry(other, m.logicalRecordLines(other), m.availableFields(), slowAgain.fallback, &m);
+        CHECK(panel.fieldsPending(), label + ": Entry Details waits again");
+        FileSchemaSet fastSet;
+        fastSet.fallback = d.fast;
+        m.setFileSchemas(fastSet);
+        CHECK(waitFor([&] { return !panel.fieldsPending(); }, 10000),
+              label + ": a schema switch while waiting ends the wait (Inline fields now)");
+        d.gate->release();
+        CHECK(waitFor([&] { return !m.fieldSource().hasPendingWork(); }), label + ": the old job ends");
+        panel.showEntry(entry, lines, m.availableFields(), d.fast, &m);
+    }
+    const QString head = lines.isEmpty() ? QString() : lines.first()->message();
+    const LogEntryFields headFields = d.fast->extractFields(head);
+    CHECK(!headFields.isEmpty()
+              && panel.fieldsSummary().contains(QStringLiteral("Level: ") + headFields.value(2, head)),
+          QStringLiteral("%1: Entry Details shows the fields ('%2')").arg(label, panel.fieldsSummary()));
+    // (Inline-схема выше законно считала на GUI-потоке — свидетель шлагбаум.)
+    CHECK(d.gate->guiCalls.load() == 0,
+          QStringLiteral("%1: 0 extract calls on the GUI thread (%2)").arg(label).arg(d.gate->guiCalls.load()));
+    CHECK(m.fieldSource().stats().backgroundExtracts > 0, label + ": extracted in the background");
+}
+
+void testScrollPrunesQueue(Backend b, const QDir& dir)
+{
+    const QString label = name(b) + QStringLiteral(" / scroll prunes the queue");
+    const QString path = writeFile(dir, QStringLiteral("bg-scroll-%1.log").arg(name(b)),
+                                   makeLogBytes(30000, 8, "\n", fixtureBaseTime(), false, true, true));
+    SlowDoc d = slowDoc(b, path);
+    LogModel& m = *d.doc.model;
+    d.gate->close();
+    auto view = showView(m);
+    CHECK(jobBlocked(d), label + ": the first job waits at the gate");
+    QScrollBar* bar = view->verticalScrollBar();
+    const int steps = 120;
+    for (int i = 1; i <= steps; ++i) {
+        bar->setValue(int(qint64(bar->maximum()) * i / steps));
+        view->viewport()->repaint();
+        QCoreApplication::processEvents();
+    }
+    const FieldSource::Stats mid = m.fieldSource().stats();
+    CHECK(mid.dropped > 0, QStringLiteral("%1: lines scrolled past are dropped (%2 of %3 queued)")
+                               .arg(label).arg(mid.dropped).arg(mid.queued));
+    CHECK(m.fieldSource().queuedLines() <= FieldSource::kQueueLines,
+          QStringLiteral("%1: the queue stays bounded (%2)").arg(label).arg(m.fieldSource().queuedLines()));
+    d.gate->release();
+    CHECK(waitFor([&] { return !m.fieldSource().hasPendingWork(); }), label + ": the queue drains");
+    CHECK(idleViews(), label + ": views settle");
+    const FieldSource::Stats end = m.fieldSource().stats();
+    CHECK(end.backgroundExtracts < end.queued,
+          QStringLiteral("%1: not every requested line was computed (%2 of %3)")
+              .arg(label).arg(end.backgroundExtracts).arg(end.queued));
+    const int top = qMax(0, firstShownRow(*view));
+    for (int r = top; r < top + 5 && r < m.rowCount(); ++r)
+        CHECK(m.data(m.index(r), Qt::DisplayRole).toString() == expectedText(d, r),
+              QStringLiteral("%1: the final screen shows fields (row %2)").arg(label).arg(r));
+    CHECK(d.gate->guiCalls.load() == 0, label + ": 0 extract calls on the GUI thread");
+}
+
+void testDiscardMidJob(Backend b, const QDir& dir)
+{
+    const QString label = name(b) + QStringLiteral(" / discard mid-job");
+    const QString path = writeFile(dir, QStringLiteral("bg-discard-%1.log").arg(name(b)),
+                                   makeLogBytes(2000, 9, "\n", fixtureBaseTime(), false, true, true));
+    SlowDoc d = slowDoc(b, path);
+    LogModel& m = *d.doc.model;
+    FieldSource& source = m.fieldSource();
+    int readySignals = 0;
+    QObject::connect(&source, &FieldSource::fieldsReady, [&] { ++readySignals; });
+
+    // 1. Смена схемы посреди расчёта: итог отброшен, показ — новой схемы.
+    d.gate->close();
+    auto view = showView(m);
+    CHECK(jobBlocked(d), label + ": job waits (schema switch)");
+    FileSchemaSet fastSet;
+    fastSet.fallback = d.fast;
+    m.setFileSchemas(fastSet);
+    d.gate->release();
+    CHECK(waitFor([&] { return !source.hasPendingWork(); }), label + ": the old job ends");
+    CHECK(source.stats().discarded >= 1 && readySignals == 0,
+          QStringLiteral("%1: schema switch discards the job (%2 discarded, %3 signals)")
+              .arg(label).arg(source.stats().discarded).arg(readySignals));
+    CHECK(m.data(m.index(4), Qt::DisplayRole).toString() == expectedText(d, 4),
+          label + ": the new (Inline) schema's fields shown");
+    CHECK(idleViews(), label + ": views settle");
+
+    // 2. Сброс строк файла посреди расчёта.
+    FileSchemaSet slowSet;
+    slowSet.fallback = d.slow;
+    d.gate->close();
+    source.resetStats();
+    m.setFileSchemas(slowSet);
+    view->viewport()->repaint();
+    CHECK(jobBlocked(d), label + ": job waits (file reset)");
+    m.invalidateFileRows(path);
+    d.gate->release();
+    // Вкладка за сбросом строк перечитывает файл — view запрашивает строки
+    // заново; здесь строки те же, перерисовку видимого просим явно.
+    CHECK(waitFor([&] { return source.stats().discarded >= 1 && !source.hasPendingWork(); }),
+          QStringLiteral("%1: file reset discards the job (%2)").arg(label).arg(source.stats().discarded));
+    CHECK(readySignals == 0, label + ": nothing announced from a discarded job");
+    // Строки снова в очереди по запросу показа и приходят.
+    m.refreshDisplay();
+    view->viewport()->repaint();
+    CHECK(waitFor([&] { return !source.hasPendingWork(); }) && idleViews(), label + ": recomputed");
+    const int top = qMax(0, firstShownRow(*view));
+    CHECK(readySignals >= 1 && m.data(m.index(top), Qt::DisplayRole).toString() == expectedText(d, top),
+          label + ": fields arrive after the reset");
+
+    // 3. Полный сброс модели посреди расчёта.
+    d.gate->close();
+    source.resetStats();
+    m.invalidateFileRows(path);
+    m.refreshDisplay();
+    view->viewport()->repaint();
+    CHECK(jobBlocked(d), label + ": job waits (model reset)");
+    const int signalsBefore = readySignals;
+    m.clear();
+    d.gate->release();
+    CHECK(waitFor([&] { return !source.hasPendingWork(); }), label + ": job ends after clear");
+    CHECK(source.stats().discarded >= 1 && readySignals == signalsBefore,
+          label + ": model reset discards the job");
+    CHECK(d.gate->guiCalls.load() == 0, label + ": 0 extract calls on the GUI thread");
+}
+
+void testBackgroundFilter(Backend b, const QDir& dir)
+{
+    const QString label = name(b) + QStringLiteral(" / background field filter");
+    const RecordLog log = recordLog(400, 21);
+    // Два одинаковых файла: дозапись пишет в файл документа.
+    const QString path = writeFile(dir, QStringLiteral("bg-filter-%1.log").arg(name(b)), log.bytes);
+    const QString refPath = writeFile(dir, QStringLiteral("bg-filter-ref-%1.log").arg(name(b)), log.bytes);
+    // Эталон — тот же шаблон Inline (синхронный путь), проверяемый — Background.
+    SlowDoc ref = slowDoc(b, refPath, false);
+    FileSchemaSet fastSet;
+    fastSet.fallback = ref.fast;
+    ref.doc.model->setFileSchemas(fastSet);
+    SlowDoc d = slowDoc(b, path, false);
+    LogModel& m = *d.doc.model;
+
+    const QVector<FilterRuleSet> rules = {
+        fieldRule(QStringLiteral("Thread"), QStringLiteral("worker-1")),
+        fieldRule(QStringLiteral("Thread"), QStringLiteral("main"), FilterRule::Action::Exclude),
+        fieldRule(QStringLiteral("Level"), QStringLiteral("ERR.R"), FilterRule::Action::Include, true),
+    };
+    int n = 0;
+    for (const FilterRuleSet& raw : rules) {
+        ++n;
+        FilterRuleSet bound = raw;
+        bound.bindFields(d.doc.layout.columns);
+        ref.doc.model->setFilterRules(bound);
+        CHECK(settle(*ref.doc.model, 0), label + ": reference settles");
+        m.setFilterRules(bound);
+        CHECK(m.isFiltering(), QStringLiteral("%1: rule %2 — the filter is a background job").arg(label).arg(n));
+        CHECK(settle(m, 0), label + ": settles");
+        CHECK(rowsOf(m, true) == rowsOf(*ref.doc.model, true) && m.rowCount() > 0,
+              QStringLiteral("%1: rule %2 — same rows as the synchronous filter (%3 vs %4)")
+                  .arg(label).arg(n).arg(m.rowCount()).arg(ref.doc.model->rowCount()));
+    }
+    // Дозапись под правилом по полю: запись, дописанная частями.
+    const QByteArray tail =
+        QStringLiteral("2026-03-05 12:00:00.000 [worker-1] ERROR - late request\n"
+                       "    at Late.call [main] line 1\n").toUtf8();
+    FilterRuleSet bound = rules.first();
+    bound.bindFields(d.doc.layout.columns);
+    ref.doc.model->setFilterRules(bound);
+    m.setFilterRules(bound);
+    CHECK(settle(*ref.doc.model, 0) && settle(m, 0), label + ": rule applied");
+    int resets = 0, inserts = 0;
+    const auto resetConn = QObject::connect(&m, &QAbstractItemModel::modelReset, [&] { ++resets; });
+    const auto insertConn = QObject::connect(&m, &QAbstractItemModel::rowsInserted, [&] { ++inserts; });
+    const qint64 callsBefore = d.gate->calls.load();
+    CHECK(appendTail(b, ref.doc, tail, QString()) && appendTail(b, d.doc, tail, QString()),
+          label + ": append");
+    QObject::disconnect(resetConn);
+    QObject::disconnect(insertConn);
+    // Дописанная порция — фоновым фильтром только её строк, вставками: ни
+    // reset, ни прохода по всему файлу на каждую дозапись.
+    CHECK(resets == 0 && inserts >= 1,
+          QStringLiteral("%1: the appended record is inserted, not reset (%2 resets, %3 inserts)")
+              .arg(label).arg(resets).arg(inserts));
+    CHECK(d.gate->calls.load() - callsBefore <= 4,
+          QStringLiteral("%1: the append parses only its own lines (%2 extract calls)")
+              .arg(label).arg(d.gate->calls.load() - callsBefore));
+    CHECK(settle(m, 0) && settle(*ref.doc.model, 0), label + ": settles after the append");
+    if (rowsOf(m, true) != rowsOf(*ref.doc.model, true)) {
+        const auto a = rowsOf(m, true), r = rowsOf(*ref.doc.model, true);
+        for (auto it = a.cbegin(); it != a.cend(); ++it)
+            if (!r.contains(it.key()))
+                std::fprintf(stderr, "  only background: %s %s\n", qPrintable(it.key()), qPrintable(it.value()));
+        for (auto it = r.cbegin(); it != r.cend(); ++it)
+            if (!a.contains(it.key()))
+                std::fprintf(stderr, "  only reference: %s %s\n", qPrintable(it.key()), qPrintable(it.value()));
+    }
+    CHECK(rowsOf(m, true) == rowsOf(*ref.doc.model, true),
+          QStringLiteral("%1: same rows after the append (%2 vs %3)")
+              .arg(label).arg(m.rowCount()).arg(ref.doc.model->rowCount()));
+    CHECK(d.gate->guiCalls.load() == 0 && d.gate->calls.load() > 0,
+          QStringLiteral("%1: field filter — 0 extract calls on the GUI thread (%2 of %3)")
+              .arg(label).arg(d.gate->guiCalls.load()).arg(d.gate->calls.load()));
+}
+
+void testGuiEventBudget(TimingApplication& app, Backend b, const QDir& dir)
+{
+    const QString label = name(b) + QStringLiteral(" / GUI events while the extractor is blocked");
+    const QString path = writeFile(dir, QStringLiteral("bg-budget-%1.log").arg(name(b)),
+                                   makeLogBytes(40000, 10, "\n", fixtureBaseTime(), false, true, true));
+    SlowDoc d = slowDoc(b, path);
+    LogModel& m = *d.doc.model;
+    d.gate->close();
+    auto view = showView(m);
+    CHECK(jobBlocked(d), label + ": the job waits at the gate");
+    EntryDetailsPanel panel;
+    panel.resize(400, 400);
+    panel.show();
+
+    app.maxMs = 0;
+    app.maxWhat.clear();
+    app.timing = true;
+    QRandomGenerator rng(17);
+    QScrollBar* bar = view->verticalScrollBar();
+    // Прокрутка.
+    for (int i = 0; i < 150; ++i) {
+        bar->setValue(int(rng.bounded(qMax(1, bar->maximum()))));
+        view->viewport()->repaint();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    // Выбор строки (и Entry Details за ней).
+    for (int i = 0; i < 30; ++i) {
+        const int row = int(rng.bounded(quint32(m.rowCount())));
+        view->goToRow(row);
+        const auto entry = m.entryAt(row);
+        panel.showEntry(entry, m.logicalRecordLines(entry), m.availableFields(), d.slow, &m);
+        view->viewport()->repaint();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    // Фильтр: уровни и правило по полю (джоб встанет у шлагбаума в воркере).
+    m.setLogLevelFilter({ LogLevel::Error, LogLevel::Warn });
+    waitFor([&] { return !m.isFiltering(); }, 20000);
+    FilterRuleSet rule = fieldRule(QStringLiteral("Level"), QStringLiteral("ERROR"));
+    rule.bindFields(d.doc.layout.columns);
+    m.setFilterRules(rule);
+    for (int i = 0; i < 20; ++i) {
+        bar->setValue(int(rng.bounded(qMax(1, bar->maximum()))));
+        view->viewport()->repaint();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    CHECK(m.isFiltering(), label + ": the field filter waits in the background, not on the GUI thread");
+    m.setFilterRules(FilterRuleSet());
+    m.setLogLevelFilter({});
+    for (int i = 0; i < 20; ++i) {
+        bar->setValue(int(rng.bounded(qMax(1, bar->maximum()))));
+        view->viewport()->repaint();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    app.timing = false;
+    std::printf("%s: longest GUI event %lld ms (%s); queued %lld, dropped %lld\n", qPrintable(label),
+                (long long)app.maxMs, qPrintable(app.maxWhat), (long long)m.fieldSource().stats().queued,
+                (long long)m.fieldSource().stats().dropped);
+    CHECK(kSanitized || app.maxMs <= 50,
+          QStringLiteral("%1: the longest GUI event %2 ms (%3) ≤ 50 ms")
+              .arg(label).arg(app.maxMs).arg(app.maxWhat));
+    CHECK(d.gate->guiCalls.load() == 0, label + ": 0 extract calls on the GUI thread");
+    d.gate->release();
+    CHECK(waitFor([&] { return !m.fieldSource().hasPendingWork() && !m.isFiltering(); }),
+          label + ": everything finishes after the gate opens");
+    CHECK(idleViews(), label + ": views settle");
+}
+
 // Режим замера: field_source --bench <файл> [схема]
 // Загрузка обоими путями (время, RSS процесса после загрузки резидентной
 // вкладки), затем на каждом бэкенде — текстовый фильтр против фильтра по
@@ -624,7 +1071,7 @@ int runBench(const QString& path, QString schema)
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
-    QCoreApplication app(argc, argv);
+    TimingApplication app(argc, argv);
     if (argc >= 3 && qstrcmp(argv[1], "--bench") == 0)
         return runBench(QString::fromLocal8Bit(argv[2]),
                         argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
@@ -642,6 +1089,11 @@ int main(int argc, char** argv)
         testRecordRule(b, dir);
         testMissingColumnAndDisplay(b, dir);
         testPrefilterEscapes(b, dir);
+        testBackgroundDisplay(b, dir);
+        testScrollPrunesQueue(b, dir);
+        testDiscardMidJob(b, dir);
+        testBackgroundFilter(b, dir);
+        testGuiEventBudget(app, b, dir);
     }
 
     std::printf("field_source: %d checks, %d failures\n", g_checks, g_failures);

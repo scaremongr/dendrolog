@@ -3389,14 +3389,13 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
     {
         if (currentEntry) {
             const QVector<std::shared_ptr<LogEntry>> lines = model->logicalRecordLines(currentEntry);
-            // Поля записи — первой её строки (F-17, шаг 3), через FieldSource.
-            const LogEntryFields recordFields = (!lines.isEmpty() && lines.first())
-                ? model->fieldsOf(*lines.first()) : LogEntryFields();
+            // Поля записи — первой её строки (F-17, шаги 3 и 6): панель берёт
+            // их у модели сама и ждёт, если они считаются в фоне.
             m_detailsPanel->showEntry(currentEntry, lines, model->availableFields(),
                                       currentEntry->sourceFile()
                                           ? model->fileSchemaFor(currentEntry->sourceFile()->filePath)
                                           : FileSchemaPtr(),
-                                      recordFields);
+                                      model);
         }
         else
             m_detailsPanel->clearEntry();

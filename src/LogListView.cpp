@@ -127,7 +127,22 @@ LogListView::LogListView(QWidget *parent)
         else
             rebuildPrefixSums();
         updateScrollbar();
-        if (atBottom)
+        // Поля пришли из фона (onFieldsArrived): вид — к якорю, если позицию
+        // с тех пор никто не ставил.
+        const FieldsAnchor fields = std::exchange(m_fieldsAnchor, FieldsAnchor{});
+        bool anchored = false;
+        if (fields.active && !fields.keepBottom && fields.epoch == m_positionEpoch
+            && fields.key.isValid()) {
+            auto* logModel = qobject_cast<LogModel*>(model());
+            const int row = logModel ? logModel->rowForKey(fields.key) : -1;
+            if (row >= 0) {
+                refineHeightsAbove(row);
+                updateScrollbar();
+                bar->setValue(targetScrollValueForRowOffset(row, fields.offset));
+                anchored = true;
+            }
+        }
+        if (!anchored && (atBottom || (fields.active && fields.keepBottom)))
             bar->setValue(bar->maximum());
         // Resize, перенос строк, зум шрифта: на экран могли попасть новые
         // строки (или низ) без смены значения скроллбара.
@@ -474,6 +489,12 @@ void LogListView::setModel(QAbstractItemModel *model) {
         // устаревший текст из кэша даже после того, как модель уже прислала dataChanged.
         m_modelConnections << connect(model, &QAbstractItemModel::dataChanged, this,
             [this](const QModelIndex& topLeft, const QModelIndex& bottomRight, const QList<int>& roles) {
+                // Поля строк пришли из фона (F-17, шаг 6): строки на месте,
+                // меняются текст и высоты — вид держит якорь.
+                if (roles.contains(int(LogModel::FieldsReadyRole))) {
+                    onFieldsArrived(topLeft.row(), bottomRight.row());
+                    return;
+                }
                 // Роли, не влияющие на текст и раскладку (IsNewRole — маркер в
                 // желобке, RowMarkerColorRole — фон), рисуются напрямую из
                 // модели на каждый кадр: кэши валидны, достаточно перерисовать.
@@ -3560,12 +3581,109 @@ void LogListView::goToNewLines()
     markNewLinesSeen();
 }
 
-bool LogListView::hasPendingLayout() const
+bool LogListView::hasPendingGeometry() const
 {
     return m_resizeDebounceTimer->isActive() || m_heightUpdateTimer->isActive()
         || (m_leftColumnsTimer && m_leftColumnsTimer->isActive());
 }
 
+bool LogListView::hasPendingLayout() const
+{
+    if (hasPendingGeometry())
+        return true;
+    // Поля строк считаются в фоне (F-17, шаг 6): их приход меняет текст и
+    // высоты строк — тоже отложенная работа, способная сдвинуть вид.
+    const auto* logModel = qobject_cast<const LogModel*>(model());
+    return logModel && logModel->fieldSource().hasPendingWork();
+}
+
+// Поля строк first..last пришли из фона (F-17, шаг 6; dataChanged с
+// LogModel::FieldsReadyRole). Строки те же, меняются их текст (выбранные
+// колонки вместо сырой строки) и, с переносом, высоты. Инвариант 10: вид не
+// двигается — выбранная пользователем строка, если она на экране, остаётся
+// на своём месте экрана, иначе — верхняя видимая строка; вид у самого низа
+// там и остаётся (как у отложенного пересчёта высот). Короткий диапазон при
+// актуальных высотах — сразу; иначе (высоты уже требовали пересчёта,
+// диапазон больше 500 строк) — отложенным пересчётом m_heightUpdateTimer,
+// после которого вид возвращается к якорю (m_fieldsAnchor): O(N) на каждый
+// приход полей на GUI-потоке недопустим.
+void LogListView::onFieldsArrived(int first, int last)
+{
+    const int rows = model() ? model()->rowCount() : 0;
+    if (rows <= 0 || first > last || first >= rows) {
+        viewport()->update();
+        return;
+    }
+    first = qMax(0, first);
+    last = qMin(last, rows - 1);
+
+    QScrollBar* bar = verticalScrollBar();
+    const bool atBottom = bar->maximum() > 0 && bar->value() == bar->maximum();
+    int anchorRow = -1;
+    int anchorOffset = 0;
+    const int selected = userSelectedRow();
+    if (selected >= 0 && captureVisibleRowOffset(selected, anchorOffset)) {
+        anchorRow = selected;
+    } else {
+        const qint64 scrollY = scrollContentY();
+        qint64 rowTop = 0;
+        if (getRowAtContentY(scrollY, anchorRow, rowTop))
+            anchorOffset = int(rowTop - scrollY);
+        else
+            anchorRow = -1;
+    }
+
+    const bool heightsWereClean = !m_heightsDirty;
+    const int count = last - first + 1;
+    const bool small = count <= 500;
+    if (small) {
+        for (int row = first; row <= last; ++row)
+            invalidateRowState(row, /*preserveTextLengths=*/false);
+    } else {
+        invalidateRowState(-1, /*preserveTextLengths=*/false);
+    }
+
+    if (m_uniformHeights) {
+        // Высоты одинаковы — смена текста их не меняет, вид на месте сам.
+        if (heightsWereClean && small)
+            m_heightsDirty = false;
+        else
+            m_heightUpdateTimer->start(0);
+        viewport()->update();
+        return;
+    }
+
+    if (heightsWereClean && small && m_rowHeights.size() == rows) {
+        for (int row = first; row <= last; ++row) {
+            const int newHeight = getRowState(row).height;
+            if (m_rowHeights[row] != newHeight) {
+                m_rowHeights[row] = newHeight;
+                markPrefixDirtyFrom(row);
+            }
+        }
+        m_heightsDirty = false;
+        rebuildPrefixSums();
+        updateScrollbar();
+        if (atBottom)
+            bar->setValue(bar->maximum());
+        else if (anchorRow >= 0 && anchorRow < rows)
+            bar->setValue(targetScrollValueForRowOffset(anchorRow, anchorOffset));
+        viewport()->update();
+        return;
+    }
+
+    // Отложенно: пересчёт высот — таймером, вид — к якорю после него.
+    auto* logModel = qobject_cast<LogModel*>(model());
+    m_fieldsAnchor = FieldsAnchor{};
+    m_fieldsAnchor.active = true;
+    m_fieldsAnchor.keepBottom = atBottom;
+    if (logModel && anchorRow >= 0)
+        m_fieldsAnchor.key = logModel->keyAt(anchorRow);
+    m_fieldsAnchor.offset = anchorOffset;
+    m_fieldsAnchor.epoch = m_positionEpoch;
+    m_heightUpdateTimer->start(0);
+    viewport()->update();
+}
 void LogListView::wheelEvent(QWheelEvent *event)
 {
     // Ctrl+колесо — размер шрифта, как в браузерах и редакторах (а не

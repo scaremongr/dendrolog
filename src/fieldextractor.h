@@ -33,8 +33,10 @@ struct PatternDefinition;
 //     значение с экранированием (JSON, «quoted») — с битом escaped; читать
 //     через LogEntryFields::value.
 //   • Cost::Inline — можно звать на GUI-потоке (доли микросекунды на
-//     строку, без аллокаций); Cost::Background — только в воркере (шаг 6:
-//     view показывает строку сырой и обновляется по готовности).
+//     строку, без аллокаций); Cost::Background — только в воркере: показ
+//     (FieldSource, шаг 6) считает его в фоне, view показывает строку
+//     сырой и обновляется по готовности; фильтр по полю с ним — всегда
+//     фоновый. Инвариант: Background на GUI-потоке не вызывается.
 //
 // Пользователи сейчас: SchemaFit (мера соответствия), тесты. Шаг 3
 // (FieldSource) переводит на него загрузку, view, фильтр и экспорт.
@@ -147,9 +149,9 @@ private:
 // ----------------------------------------------------------------------------
 // Прежняя блочная схема (LogPattern: каскад регексов, или ключевая) за тем
 // же интерфейсом — до шага 9 F-17, где блочная модель удаляется. Cost —
-// Background, если в схеме есть пользовательский регекс (регексный блок или
-// разделитель), иначе Inline. Full — полный регекс, Partial — префиксный
-// или re-sync вариант каскада.
+// Inline (шаг 6: регексы блочных схем всегда шли на GUI-потоке, у встроенных
+// их много; Background — у шаблона с /регексом/). Full — полный регекс,
+// Partial — префиксный или re-sync вариант каскада.
 // ----------------------------------------------------------------------------
 class LegacyPatternExtractor : public FieldExtractor {
 public:
@@ -161,7 +163,7 @@ public:
     bool isValid() const override;
 
     QStringList fields() const override { return m_fields; }
-    Cost cost() const override { return m_cost; }
+    Cost cost() const override { return Cost::Inline; }
     int tailField() const override;
     bool isKeyed() const override;
     Outcome extract(QStringView line, LogEntryFields* out, int upTo = -1,
@@ -179,7 +181,6 @@ public:
 private:
     std::shared_ptr<const LogPattern> m_pattern;
     QStringList m_fields;
-    Cost m_cost = Cost::Inline;
 };
 
 #endif // FIELDEXTRACTOR_H

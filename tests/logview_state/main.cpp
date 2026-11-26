@@ -37,10 +37,17 @@
 // LogViewWidget::applyState): позиция ставится, когда RecordLocator найдёт
 // строку, — и НЕ ставится, если пользователь до того выбрал строку или
 // прокрутил вид сам (инвариант 10); без его действий — ставится.
+//
+// Поля пришли позже (F-17, шаг 6): у схемы Background-извлекатель
+// (подставной, tests/common/blockingextractor.h) — строки сначала сырые,
+// поля приходят из фона слитым dataChanged; текущая строка, её место на
+// экране и вьюпорт — на месте (триггер таблицы и отдельный сценарий с
+// переносом строк, где высоты строк меняются).
 // ============================================================================
 
 #include "LogListView.h"
 #include "appsettings.h"
+#include "blockingextractor.h"
 #include "bookmarkstore.h"
 #include "fulllogcontroller.h"
 #include "indexedlogstore.h"
@@ -330,6 +337,39 @@ struct Trigger {
     bool multiStep = false;
 };
 
+// Фоновые поля (F-17, шаг 6): шлагбаум подставного извлекателя и схемы
+// документа, которые триггер подменяет и возвращает.
+static std::shared_ptr<Gate> g_fieldsGate = std::make_shared<Gate>();
+static FileSchemaSet g_savedSchemas;
+
+static QVector<int> shownFieldColumns(const Backend& b)
+{
+    return { int(b.doc.layout.columns.indexOf(QStringLiteral("Level"))),
+             int(b.doc.layout.columns.indexOf(QStringLiteral("Message"))) };
+}
+
+// Показ полей Level + Message схемой с подставным извлекателем при закрытом
+// шлагбауме: видимые строки запрошены, задание стоит, строки — сырые.
+static bool showSlowFields(Backend& b, LogListView& view)
+{
+    LogModel& m = *b.doc.model;
+    g_savedSchemas = m.fileSchemas();
+    g_fieldsGate->close();
+    FileSchemaSet set;
+    set.fallback = blockingSchema(b.doc.layout, g_fieldsGate);
+    m.setFileSchemas(set);
+    m.setFieldDisplaySelection(true, shownFieldColumns(b));
+    view.viewport()->repaint();
+    return waitFor([&] { return g_fieldsGate->waiting.load() >= 1; }, 20000);
+}
+
+static void restoreSchemas(Backend& b)
+{
+    g_fieldsGate->release();
+    b.doc.model->setFieldDisplaySelection(false, {});
+    b.doc.model->setFileSchemas(g_savedSchemas);
+}
+
 static QVector<Trigger> triggers()
 {
     const auto clearLevels = [](Backend& b) { b.doc.model->setLogLevelFilter({}); };
@@ -411,6 +451,22 @@ static QVector<Trigger> triggers()
                       b.doc.model->setFilterRules(singleRule(FilterRule::Action::Exclude, e.text));
                   },
                   clearRules });
+
+    {
+        Trigger t{ QStringLiteral("поля: пришли из фона позже (Background-извлекатель)"),
+                   [](Backend& b, const EntryInfo& e) {
+                       CHECK(b.view && showSlowFields(b, *b.view),
+                             QStringLiteral("фоновое задание полей встало у шлагбаума"));
+                       LogModel& m = *b.doc.model;
+                       const int row = m.rowForEntry(e.key.logicalEntryId, e.key.sourceFile);
+                       CHECK(row >= 0 && m.data(m.index(row), Qt::DisplayRole).toString() == m.messageAt(row),
+                             QStringLiteral("строка записи показана сырой, пока поля считаются"));
+                       g_fieldsGate->release();
+                   },
+                   [](Backend& b) { restoreSchemas(b); } };
+        t.rowPlaceUnchanged = true;
+        list.append(t);
+    }
 
     {
         Trigger t{ QStringLiteral("маркеры строк"),
@@ -720,6 +776,86 @@ static void runViewportScenario(Backend& b, const Trigger& t, double position)
 }
 
 // I1, I2: второй файл вливается в документ, строки встают в середину.
+// Поля пришли позже с переносом строк (F-17, шаг 6): высоты строк над
+// выбранной меняются, а сама она — на своём месте экрана; без выбора — на
+// месте верхняя строка вида.
+static void runFieldsLaterScenario(Backend& b, bool wrap, double position, bool select)
+{
+    setContext(QStringLiteral("%1 / поля пришли позже%2 / %3 / позиция %4%")
+                   .arg(b.name, wrap ? QStringLiteral(", перенос строк") : QString(),
+                        select ? QStringLiteral("выбрана строка") : QStringLiteral("без выбора"))
+                   .arg(int(position * 100)));
+    LogModel& model = *b.doc.model;
+    clearFilters(model);
+    const auto view = makeView(model);
+    const ScenarioView scenarioView(b, view.get());
+    if (wrap) {
+        view->resize(320, kViewHeight);
+        view->setWordWrap(true);
+        idle();
+    }
+    // Начало документа уже с полями (шлагбаум открыт) — затем шлагбаум
+    // закрыт, и вид уходит туда, где поля ещё не считались.
+    g_savedSchemas = model.fileSchemas();
+    FileSchemaSet set;
+    set.fallback = blockingSchema(b.doc.layout, g_fieldsGate);
+    model.setFileSchemas(set);
+    model.setFieldDisplaySelection(true, shownFieldColumns(b));
+    idle();
+    g_fieldsGate->close();
+    const int start = pickRow(model, position);
+    CHECK(start >= 0, QStringLiteral("предусловие: нет подходящей строки"));
+    if (start < 0) {
+        restoreSchemas(b);
+        return;
+    }
+    if (select)
+        view->setCurrentIndex(model.index(start, 0));
+    else
+        activateWindowFocus(*view);
+    view->scrollTo(model.index(start, 0), QAbstractItemView::PositionAtCenter);
+    view->viewport()->repaint();
+    CHECK(waitFor([&] { return g_fieldsGate->waiting.load() >= 1 && !view->hasPendingGeometry(); }, 20000),
+          QStringLiteral("предусловие: задание полей стоит у шлагбаума, геометрия в покое"));
+    const int anchor = select ? start : topVisibleRow(*view);
+    const EntryInfo e = infoAt(model, anchor);
+    const RecordKey anchorKey = model.keyAt(anchor);
+    const int placeBefore = rowRect(*view, anchor).top();
+    const bool atBottom = view->verticalScrollBar()->value() == view->verticalScrollBar()->maximum();
+    // Строки на экране, чей показ поля меняют (у продолжений записи полей нет).
+    QVector<int> changing;
+    for (int r = topVisibleRow(*view); r >= 0 && r < model.rowCount() && rowIntersectsViewport(*view, r); ++r)
+        if (model.data(model.index(r), Qt::DisplayRole).toString() == model.messageAt(r))
+            changing.append(r);
+    CHECK(!changing.isEmpty(), QStringLiteral("предусловие: строки на экране показаны сырыми %1").arg(viewState(*view)));
+
+    g_fieldsGate->release();
+    idle();
+    CHECK(model.rowForKey(anchorKey) == anchor,
+          QStringLiteral("строки не сдвинулись (%1 → %2)").arg(anchor).arg(model.rowForKey(anchorKey)));
+    int shownFields = 0;
+    for (const int r : std::as_const(changing))
+        if (model.data(model.index(r), Qt::DisplayRole).toString() != model.messageAt(r))
+            ++shownFields;
+    CHECK(shownFields > 0, QStringLiteral("поля пришли и показаны %1").arg(viewState(*view)));
+    if (select) {
+        checkEntryPreserved(*view, model, e, QStringLiteral("поля пришли"));
+        CHECK(currentRow(*view) == start, QStringLiteral("текущая строка та же %1").arg(viewState(*view)));
+    }
+    if (!atBottom) {
+        CHECK(rowRect(*view, anchor).top() == placeBefore,
+              QStringLiteral("строка %1 на своём месте экрана (верх %2 → %3) %4")
+                  .arg(anchor).arg(placeBefore).arg(rowRect(*view, anchor).top()).arg(viewState(*view)));
+    } else {
+        // Вид у самого низа там и остаётся (как отложенный пересчёт высот) —
+        // и с выбранной строкой: иначе дозапись не прилипла бы к хвосту.
+        CHECK(view->verticalScrollBar()->value() == view->verticalScrollBar()->maximum(),
+              QStringLiteral("вид у самого низа остался у низа %1").arg(viewState(*view)));
+    }
+    restoreSchemas(b);
+    settleChecked(model);
+}
+
 static void runAddFileScenario(Backend& b, LogListView& view, const QString& secondFile)
 {
     setContext(QStringLiteral("%1 / в документ добавлен второй файл").arg(b.name));
@@ -1426,6 +1562,8 @@ int main(int argc, char** argv)
             runViewportScenario(b, t, 0.5);
         }
 
+        for (const bool select : { true, false })
+            runFieldsLaterScenario(b, /*wrap=*/false, 0.6, select);
         runAddFileScenario(b, *view, second);
         for (const double position : kPositions)
             runFullLogChecks(b, position);
@@ -1451,6 +1589,14 @@ int main(int argc, char** argv)
         // держать текущую строку на экране, а последняя строка — достижима.
         checkGeometry(b.name + QStringLiteral(", перенос строк"), *view);
         checkKeyboard(b.name + QStringLiteral(", перенос строк"), *view);
+    }
+    // Поля пришли позже с переносом строк: у резидентного высоты строк
+    // меняются; у индексного перенос выключен (hugeRowMode) — тот же
+    // сценарий как проверка, что включение переноса ничего не ломает.
+    for (auto& backend : backends) {
+        for (const double position : kPositions)
+            for (const bool select : { true, false })
+                runFieldsLaterScenario(*backend, /*wrap=*/true, position, select);
     }
 
     runRestoreVsUser(smallLog, schema, false);

@@ -186,6 +186,27 @@ void IndexedLogStore::syncEncodingsFrom(const IndexedLogStore& source)
 void IndexedLogStore::reevaluateVisibleRef(RowRef ref)
 {
     // Точечная переоценка одной изменившейся строки текущим фильтром.
+    // Правила по полю с Background-извлекателем (F-17, шаг 6) на GUI-потоке
+    // не решаются: строка уходит из видимых и встаёт в очередь диапазонного
+    // джоба одной строкой (он вставит её, если она проходит) — без полного
+    // прохода на каждую перечитанную предварительную строку хвоста.
+    if (m_model.fieldRulesInBackground()) {
+        const auto at = std::lower_bound(m_visibleRefs.begin(), m_visibleRefs.end(), ref,
+                                         [this](RowRef a, RowRef b) { return rowLess(a, b); });
+        if (at != m_visibleRefs.end() && *at == ref) {
+            const int row = int(at - m_visibleRefs.begin());
+            m_model.beginRemoveRows(QModelIndex(), row, row);
+            m_visibleRefs.erase(at);
+            m_model.endRemoveRows();
+            emit m_model.modelFiltered(visibleCount());
+        }
+        PendingRange range;
+        range.refs = { ref };
+        m_pendingRanges.append(std::move(range));
+        if (!m_filterJobActive)
+            startNextPendingRange();
+        return;
+    }
     const auto it = std::lower_bound(m_visibleRefs.begin(), m_visibleRefs.end(), ref,
                                      [this](RowRef a, RowRef b) { return rowLess(a, b); });
     const bool wasVisible = (it != m_visibleRefs.end() && *it == ref);

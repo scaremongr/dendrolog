@@ -423,9 +423,12 @@ public:
     // включается. Повторный вызов листает дальше, пока новое не кончится.
     void goToNewLines();
     // Ждёт ли view отложенный пересчёт геометрии (дебаунс resize, уточнение
-    // высот). Тестам: позицию прокрутки проверять, когда его нет, а не по
-    // таймеру.
+    // высот, поля строк, которые ещё считаются в фоне — F-17, шаг 6).
+    // Тестам: позицию прокрутки проверять, когда его нет, а не по таймеру.
     bool hasPendingLayout() const;
+    // Только своя отложенная геометрия (без фоновых полей модели): тесту,
+    // который держит извлекатель заблокированным.
+    bool hasPendingGeometry() const;
 
     // Действия контекстного меню над выделенным (однострочным) текстом.
     // Сам view их не исполняет: правила фильтров, маркеры и быстрый поиск
@@ -682,6 +685,8 @@ private:
     int targetScrollValueForRow(int row, ScrollHint hint) const;      // → значение скроллбара
     int targetScrollValueForRowOffset(int row, int viewportOffset) const; // → значение скроллбара
     bool captureVisibleRowOffset(int row, int& viewportOffset) const;
+    // Поля строк пришли из фона (F-17, шаг 6): вид держит якорь.
+    void onFieldsArrived(int first, int last);
 
     // ========== Отображение скроллбар ↔ координаты контента ==========
     // Пока контент помещается в int, масштаб равен 1 и значение скроллбара —
@@ -873,6 +878,16 @@ private:
     // пользователя, setViewAnchor, ожидающем якоре. Отложенное восстановление
     // reset-а (singleShot) сравнивает его и уступает более позднему.
     quint64 m_positionEpoch = 0;
+    // Поля пришли из фона при неготовых высотах (F-17, шаг 6): куда вернуть
+    // вид после отложенного пересчёта (m_heightUpdateTimer).
+    struct FieldsAnchor {
+        bool active = false;
+        bool keepBottom = false;
+        RecordKey key;
+        int offset = 0;
+        quint64 epoch = 0;
+    };
+    FieldsAnchor m_fieldsAnchor;
     void noteUserAction();
     // Строка становится выбором пользователя: текущая, выделенная и якорь
     // восстановления (goToRow, setViewAnchor).

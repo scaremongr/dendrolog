@@ -74,6 +74,20 @@ void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>
                            m_allEntries.end(), logEntryPtrLess);
     }
 
+    // Правила по полю с Background-извлекателем (F-17, шаг 6): поля на
+    // GUI-потоке не считаются — новые строки появятся по итогу фонового
+    // джоба по всему набору.
+    if (m_model.fieldRulesInBackground()) {
+        if (m_filterJobActive) {
+            // Полный джоб в полёте не видит порции — заново по всему набору.
+            cancelPendingFilter(false);
+            startFilterJob();
+        } else {
+            startBatchFilterJob(sortedBatch);
+        }
+        return;
+    }
+
     // Видимый список: прошедшие фильтр вставляются с уведомлениями view —
     // без reset, выделение и позиция скролла сохраняются.
     QVector<std::shared_ptr<LogEntry>> passing;
@@ -86,19 +100,7 @@ void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>
             passing.append(e);
     }
 
-    if (!passing.isEmpty()) {
-        if (m_filteredEntries.isEmpty()
-            || !logEntryPtrLess(passing.first(), m_filteredEntries.last())) {
-            const int first = int(m_filteredEntries.size());
-            m_model.beginInsertRows(QModelIndex(), first,
-                                    first + int(passing.size()) - 1);
-            m_filteredEntries.append(passing);
-            m_model.endInsertRows();
-        } else {
-            insertFilteredSorted(passing);
-        }
-        emit m_model.modelFiltered(int(m_filteredEntries.size()));
-    }
+    insertPassing(passing);
 
 
     // Фоновая перефильтрация (если шла) работала со снапшотом без этого
@@ -107,6 +109,90 @@ void ResidentLogStore::mergeSortedBatch(const QVector<std::shared_ptr<LogEntry>>
         cancelPendingFilter(false);
         startFilterJob();
     }
+}
+
+void ResidentLogStore::insertPassing(const QVector<std::shared_ptr<LogEntry>>& passing)
+{
+    if (passing.isEmpty())
+        return;
+    if (m_filteredEntries.isEmpty()
+        || !logEntryPtrLess(passing.first(), m_filteredEntries.last())) {
+        const int first = int(m_filteredEntries.size());
+        m_model.beginInsertRows(QModelIndex(), first, first + int(passing.size()) - 1);
+        m_filteredEntries.append(passing);
+        m_model.endInsertRows();
+    } else {
+        insertFilteredSorted(passing);
+    }
+    emit m_model.modelFiltered(int(m_filteredEntries.size()));
+}
+
+static bool entryPassesFilters(const std::shared_ptr<LogEntry>& entry,
+                               const QSet<const LogFile*>& hiddenFiles,
+                               const QSet<LogLevel>& levels,
+                               const QDateTime& startTime,
+                               const QDateTime& endTime,
+                               const FilterRuleSet& rules,
+                               FieldRecordCursor* record);
+
+void ResidentLogStore::startBatchFilterJob(const QVector<std::shared_ptr<LogEntry>>& sortedBatch)
+{
+    using FilterResult = QVector<std::shared_ptr<LogEntry>>;
+    if (!m_batchJobCancel)
+        m_batchJobCancel = std::make_shared<std::atomic_bool>(false);
+    const std::shared_ptr<std::atomic_bool> cancel = m_batchJobCancel;
+    const QSet<LogLevel> levels = m_model.logLevelFilter();
+    const QDateTime startTime = m_model.startTimeFilter();
+    const QDateTime endTime = m_model.endTimeFilter();
+    const FilterRuleSet rules = m_model.filterRules();
+    const QSet<const LogFile*> hidden = hiddenFilePtrs();
+    const FieldScanner scanner = m_model.fieldSource().scanner();
+
+    ++m_batchJobs;
+    QFuture<FilterResult> future = QtConcurrent::run(
+        [sortedBatch, hidden, levels, startTime, endTime, rules, scanner, cancel]() -> FilterResult {
+            FieldRecordCursor record(&scanner);
+            FieldRecordCursor* const fields = rules.needsFields() ? &record : nullptr;
+            FilterResult passing;
+            for (qsizetype i = 0; i < sortedBatch.size(); ++i) {
+                if ((i & 0x3FF) == 0 && cancel->load(std::memory_order_relaxed))
+                    return FilterResult();
+                if (entryPassesFilters(sortedBatch[i], hidden, levels, startTime, endTime, rules, fields))
+                    passing.append(sortedBatch[i]);
+            }
+            return passing;
+        });
+    m_batchJobFutures.erase(std::remove_if(m_batchJobFutures.begin(), m_batchJobFutures.end(),
+                                           [](const QFuture<FilterResult>& f) { return f.isFinished(); }),
+                            m_batchJobFutures.end());
+    m_batchJobFutures.append(future);
+
+    auto* watcher = new QFutureWatcher<FilterResult>(&m_model);
+    const int generation = m_filterGeneration;
+    std::weak_ptr<int> alive = m_aliveGuard;
+    QObject::connect(watcher, &QFutureWatcher<FilterResult>::finished, &m_model,
+            [this, watcher, generation, alive]() {
+                watcher->deleteLater();
+                if (alive.expired())
+                    return;
+                --m_batchJobs;
+                if (generation != m_filterGeneration)
+                    return; // отменён: видимый список догонит полный джоб
+                // Строка порции могла уйти из данных, пока джоб шёл
+                // (перечитанная предварительная строка хвоста — removeEntry).
+                FilterResult passing;
+                for (const auto& entry : watcher->result()) {
+                    const auto it = std::lower_bound(m_allEntries.cbegin(), m_allEntries.cend(),
+                                                     entry, logEntryPtrLess);
+                    if (it != m_allEntries.cend() && it->get() == entry.get())
+                        passing.append(entry);
+                }
+                if (!passing.isEmpty())
+                    insertPassing(passing);   // modelFiltered — там
+                else if (m_batchJobs == 0 && !m_filterJobActive)
+                    emit m_model.modelFiltered(int(m_filteredEntries.size()));
+            });
+    watcher->setFuture(future);
 }
 
 void ResidentLogStore::insertFilteredSorted(const QVector<std::shared_ptr<LogEntry>>& passing)
@@ -764,6 +850,25 @@ bool ResidentLogStore::passesFilters(const std::shared_ptr<LogEntry>& entry,
 
 void ResidentLogStore::rebuildFilteredEntries()
 {
+    if (m_model.fieldRulesInBackground()) {
+        // F-17, шаг 6: правила по полю с Background-извлекателем на GUI-потоке
+        // не решаются. Видимыми остаются прежние видимые строки, которые ещё
+        // есть в данных (порядок — m_allEntries), остальное решит фоновый
+        // джоб; его итог заменит список (вызывающий обрамляет reset).
+        QSet<const LogEntry*> shown;
+        shown.reserve(m_filteredEntries.size());
+        for (const auto& entry : std::as_const(m_filteredEntries))
+            shown.insert(entry.get());
+        QVector<std::shared_ptr<LogEntry>> kept;
+        kept.reserve(m_filteredEntries.size());
+        for (const auto& entry : std::as_const(m_allEntries))
+            if (shown.contains(entry.get()))
+                kept.push_back(entry);
+        m_filteredEntries = std::move(kept);
+        cancelPendingFilter(false);
+        startFilterJob();
+        return;
+    }
     m_filteredEntries.clear();
     m_filteredEntries.reserve(m_allEntries.size());
 
@@ -783,7 +888,9 @@ void ResidentLogStore::applyFilter()
 
     // Небольшие данные фильтруем синхронно: мгновенно и без промежуточного
     // состояния. Большие — в пуле потоков, чтобы не замораживать GUI.
-    if (m_allEntries.size() < kAsyncFilterThreshold) {
+    // С Background-извлекателем и правилами по полю — всегда фоновый (F-17,
+    // шаг 6: такой извлекатель на GUI-потоке не зовётся).
+    if (m_allEntries.size() < kAsyncFilterThreshold && !m_model.fieldRulesInBackground()) {
         m_model.beginResetModel();
         rebuildFilteredEntries();
         m_model.endResetModel();
@@ -866,13 +973,21 @@ void ResidentLogStore::cancelPendingFilter(bool wait)
     ++m_filterGeneration;
     // Джоб в полёте означает, что видимый список ещё не догнал настройки —
     // после отмены это надо будет довести (reapplyFilterIfStale / applyFilter).
-    if (m_filterJobActive)
+    if (m_filterJobActive || m_batchJobs > 0)
         m_filteredListStale = true;
     m_filterJobActive = false;
     if (m_filterJobCancel) {
         m_filterJobCancel->store(true);
         m_filterJobCancel.reset();
     }
-    if (wait)
+    if (m_batchJobCancel) {
+        m_batchJobCancel->store(true);
+        m_batchJobCancel.reset();
+    }
+    if (wait) {
         m_filterJobFuture.waitForFinished();
+        for (QFuture<QVector<std::shared_ptr<LogEntry>>>& f : m_batchJobFutures)
+            f.waitForFinished();
+        m_batchJobFutures.clear();
+    }
 }
