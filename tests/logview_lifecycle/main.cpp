@@ -2287,6 +2287,184 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
           name + " keyed: the completed object has its key moment and level");
 }
 
+// F-4, PR 3: смена схемы на открытой вкладке, при которой меняется ключевая
+// часть (было или стало keyed, флаг извлечения у ключевой схемы), перечитывает
+// файлы вкладки: моменты, уровни и границы записей — из ключей (обратно —
+// эвристика), и вкладка равна открытой сразу с этой схемой. Текущая строка,
+// выделение и её место на экране, закладка и история переходов переживают
+// перечитывание (RecordLocator). Регексная → регексная файл не перечитывает.
+struct SchemaRow {
+    QString text;
+    qint64 ms;
+    LogLevel level;
+    int line;
+    qint64 record;
+    bool operator==(const SchemaRow& o) const
+    {
+        return text == o.text && ms == o.ms && level == o.level && line == o.line
+            && record == o.record;
+    }
+};
+
+static QVector<SchemaRow> schemaRows(const LogModel& model)
+{
+    QVector<SchemaRow> out;
+    for (int row = 0; row < model.rowCount(); ++row) {
+        const QDateTime ts = model.visibleTimestampAt(row);
+        const auto entry = model.entryAt(row);
+        out.append({model.messageAt(row), ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs,
+                    model.visibleLevelAt(row), entry ? entry->originalLineNumber() : -1,
+                    entry ? qint64(entry->logicalEntryId()) : -1});
+    }
+    return out;
+}
+
+static FieldSettings schemaSettings(const QString& schema, bool extraction = true)
+{
+    FieldSettings settings;
+    settings.schema = schema;
+    settings.extraction = extraction;
+    return settings;
+}
+
+static QVector<SchemaRow> freshRows(const QString& path, const FieldSettings& settings,
+                                    const QString& what)
+{
+    LogViewWidget fresh;
+    fresh.setFieldSettings(settings);
+    fresh.addLogFile(path);
+    CHECK(settled(fresh), what + ": the fresh tab loads");
+    return schemaRows(*fresh.model());
+}
+
+static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const QString& regexSchema)
+{
+    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
+    PatternDefinition plainDef;
+    plainDef.blocks = {testdocs::patternBlock(PatternBlock::MatchKind::Remainder,
+                                              QStringLiteral("Message"))};
+    const QString plain = LogPattern::serializeDefinition(plainDef);
+    const keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 160);
+    const QString path = testdocs::writeFile(dir, name + "-switch.jsonl", fx.bytes);
+
+    LogViewWidget tab;
+    tab.resize(900, 400);
+    tab.addLogFile(path);
+    tab.show();
+    CHECK(settled(tab), name + " schema switch: initial load");
+    CHECK(testdocs::idleViews(), "views settle");
+    LogModel& model = *tab.model();
+    LogListView& view = *tab.view();
+    CHECK(schemaRows(model) == freshRows(path, FieldSettings(), name + " no schema"),
+          name + " schema switch: opened without a schema");
+
+    // Закладка, два перехода (история) и текущая строка посреди экрана.
+    // Восемь форм — 16 строк (keyedfixtures.h).
+    const qint64 markedLine = 33;   // запись 16: ISO
+    const qint64 fromLine = 4;      // запись 3: эпоха в нс, путь log.level
+    const qint64 currentLine = 51;  // запись 26: эпоха в мс, pino 50
+    CHECK(tab.bookmarks().add(rowOfLine(model, markedLine)) >= 0, name + ": bookmark added");
+    view.goToRow(rowOfLine(model, fromLine));
+    view.goToRow(rowOfLine(model, currentLine));
+    CHECK(testdocs::idleViews(), "views settle");
+
+    bool regexToRegex = false; // смена между регексными схемами
+    const auto switchTo = [&](const FieldSettings& settings, const QString& what, bool reread) {
+        const QModelIndex before = view.currentIndex();
+        const qint64 line = before.isValid() ? model.keyAt(before.row()).line : -1;
+        const int top = view.visualRect(before).top();
+        const QVector<SchemaRow> was = schemaRows(model);
+        tab.setFieldSettings(settings);
+        CHECK(tab.isLoading() == reread,
+              what + (reread ? ": the file is reread" : ": the file is not reread"));
+        CHECK(settled(tab), what + ": settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        if (!regexToRegex) {
+            CHECK(schemaRows(model) == freshRows(path, settings, what),
+                  what + ": rows, moments, levels and records equal a tab opened with the schema");
+        } else {
+            // Регексная → регексная: только поля; моменты и границы — прежние.
+            CHECK(schemaRows(model) == was, what + ": rows, moments and records unchanged");
+        }
+        const QModelIndex cur = view.currentIndex();
+        CHECK(cur.isValid() && model.keyAt(cur.row()).line == line,
+              what + QStringLiteral(": the current line is kept (%1 → %2)")
+                         .arg(line).arg(cur.isValid() ? model.keyAt(cur.row()).line : -1));
+        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
+              what + ": the current row stays selected");
+        CHECK(cur.isValid() && view.visualRect(cur).top() == top,
+              what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
+                         .arg(top).arg(view.visualRect(cur).top()));
+        const QVector<int> marked = tab.bookmarks().visibleRows();
+        CHECK(marked.size() == 1 && model.keyAt(marked.value(0)).line == markedLine,
+              what + ": the bookmark is on its line");
+    };
+
+    switchTo(schemaSettings(keyed), name + " none → keyed", true);
+    {
+        // Порядок и уровни из ключей: эпоха числом больше не в конце.
+        const int row = rowOfLine(model, 1 + fx.lineRecord.indexOf(2));
+        CHECK(row >= 0 && model.visibleLevelAt(row) == LogLevel::Error
+                  && model.visibleTimestampAt(row).toMSecsSinceEpoch() == fx.records[2].ms,
+              name + " keyed: the epoch record has its key moment and level");
+    }
+    // Извлечение выключено — ключевая схема не действует: эвристика.
+    switchTo(schemaSettings(keyed, false), name + " keyed, extraction off", true);
+    switchTo(schemaSettings(keyed), name + " keyed, extraction on", true);
+    switchTo(schemaSettings(regexSchema), name + " keyed → regex", true);
+    regexToRegex = true;
+    switchTo(schemaSettings(plain), name + " regex → regex", false);
+    regexToRegex = false;
+    switchTo(schemaSettings(keyed), name + " regex → keyed", true);
+    // Только колонки ключевой схемы (не ключи ролей) — перечитывать нечего.
+    {
+        PatternDefinition def;
+        KeyedDefinition k;
+        k.format = KeyedDefinition::Format::JsonObject;
+        k.extraColumns = {QStringLiteral("Thread"), QStringLiteral("ctx")};
+        def.keyed = k;
+        switchTo(schemaSettings(LogPattern::serializeDefinition(def)), name + " keyed columns", false);
+    }
+    // Две смены подряд, вторая — посреди перечитывания первой: строка та же.
+    {
+        const QModelIndex cur = view.currentIndex();
+        const qint64 line = cur.isValid() ? model.keyAt(cur.row()).line : -1;
+        tab.setFieldSettings(schemaSettings(keyed, false));
+        tab.setFieldSettings(schemaSettings(keyed));
+        CHECK(settled(tab), name + " two changes: settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        CHECK(schemaRows(model) == freshRows(path, schemaSettings(keyed), name + " two changes"),
+              name + " two changes: equals the tab opened with the last schema");
+        const QModelIndex now = view.currentIndex();
+        CHECK(now.isValid() && model.keyAt(now.row()).line == line,
+              name + QStringLiteral(" two changes: the current line is kept (%1 → %2)")
+                         .arg(line).arg(now.isValid() ? model.keyAt(now.row()).line : -1));
+    }
+    switchTo(FieldSettings(), name + " keyed → none", true);
+
+    // История переходов пережила перечитывания: назад — к строке, откуда ушли.
+    CHECK(tab.navigateHistory(false), name + ": history goes back");
+    CHECK(settled(tab), name + ": history settles");
+    const QModelIndex back = view.currentIndex();
+    CHECK(back.isValid() && model.keyAt(back.row()).line == fromLine,
+          name + QStringLiteral(": history back lands on the line it left (%1)")
+                     .arg(back.isValid() ? model.keyAt(back.row()).line : -1));
+
+    // Смена посреди первой загрузки: проход со старой схемой доходит и файл
+    // перечитывается новой.
+    {
+        const keyedfx::Fixture big = keyedfx::make(KeyedDefinition::Format::JsonObject, 6000);
+        const QString bigPath = testdocs::writeFile(dir, name + "-switch-big.jsonl", big.bytes);
+        LogViewWidget early;
+        early.addLogFile(bigPath);
+        early.setFieldSettings(schemaSettings(keyed));
+        CHECK(settled(early), name + " switch during load: settles");
+        CHECK(schemaRows(*early.model()) == freshRows(bigPath, schemaSettings(keyed),
+                                                      name + " switch during load"),
+              name + " switch during load: equals the tab opened with the schema");
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2302,6 +2480,7 @@ int main(int argc, char** argv)
     // Резидентная вкладка (порог по умолчанию — сотни МБ) и индексная (порог 0).
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
     checkKeyedTail(dir, QStringLiteral("resident"));
+    checkKeyedSchemaSwitch(dir, QStringLiteral("resident"), schema);
     checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("resident merged"), schema, HeadScenario::Merged);
     checkHeadRewrite(dir, QStringLiteral("crossed threshold"), schema, HeadScenario::CrossedThreshold);
@@ -2328,6 +2507,7 @@ int main(int argc, char** argv)
     checkGrowingSingleByte(dir, QStringLiteral("indexed"), schema);
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkKeyedTail(dir, QStringLiteral("indexed"));
+    checkKeyedSchemaSwitch(dir, QStringLiteral("indexed"), schema);
     checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("indexed merged"), schema, HeadScenario::Merged);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);

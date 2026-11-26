@@ -226,6 +226,9 @@ public:
     // ставит схему и флаг парсерам и стору и запоминает выбор колонок; поля
     // уже загруженных записей переизвлекает, показ колонок ставит и правила
     // перепривязывает FieldSchemaController::applyToView (инвариант 4).
+    // Смена того, что схема решает при ЧТЕНИИ (F-4, PR 3: ключевая часть —
+    // момент, уровень и граница записи из ключей), перечитывает файлы вкладки
+    // сама (rereadForSchema): регексная → регексная — только поля.
     FieldSettings fieldSettings() const;
     void setFieldSettings(const FieldSettings& settings);
     // Показ колонок включён: «Filter blocks» и у схемы есть колонки.
@@ -451,7 +454,10 @@ private:
     // буфер, затем LogModel::replaceEntriesForFile (один reset, якорь view
     // переживает — в отличие от startFullReload, где строки сначала
     // удаляются). Загрузка файла в полёте на всё время разбора.
-    void startReencode(const LogFilePtr& logFile);
+    // rekey — ключи строк файла меняются (смена схемы, F-4 PR 3: моменты,
+    // id записей): закладки, история и позиция ищут строки заново через
+    // RecordLocator.
+    void startReencode(const LogFilePtr& logFile, bool rekey = false);
     void finishReencode(const LogFilePtr& logFile);
     void handleReencodeFailed(const LogFilePtr& logFile);
     LogParser* m_reencodeParser = nullptr; // ленивый
@@ -538,6 +544,36 @@ private:
     // заново. Используется, когда файл переписан, обрезан или удалён и создан
     // заново. Состояние файла обнуляется и помечается «загрузка в полёте».
     void startFullReload(const LogFilePtr& logFile);
+
+    // ---- Перечитывание по смене схемы (F-4, PR 3) ----------------------------
+    // Что из схемы вкладки действует при чтении файла: ключевая часть без
+    // колонок, пока извлечение включено; пусто — эвристика (регексная схема
+    // при смене только переизвлекает поля, как прежде).
+    QString readingSignature() const;
+    // setParserPattern без проверки подписи (её делает вызывающий setter).
+    void applyParserPattern(const QString& pattern);
+    // Подпись сменилась: позиция снимается, файлы перечитываются (в полёте —
+    // по окончании прохода, schemaRereadPending).
+    void rereadAfterSchemaChange();
+    // Один файл: резидентный — startReencode(rekey), индексный — полная
+    // переиндексация (startFullReload).
+    void rereadForSchema(const LogFilePtr& logFile);
+    // Проход по файлу закончился: отложенное перечитывание (кодировка,
+    // схема). true — запущено.
+    bool startPendingReread(const LogFilePtr& logFile);
+    // Позиция на время перечитывания: строка (источник + RecordId) и её место
+    // на экране; запрос к локатору — после сброса строк её файла
+    // (requestRereadPosition), дальше — путь m_pendingPosition.
+    struct RereadPosition {
+        QString sourceKey; // RecordLocator::sourceKey файла строки
+        SourceIdentity source;
+        RecordId record;
+        int offset = 0;
+        bool selected = false;
+        quint64 userActions = 0;
+    };
+    std::optional<RereadPosition> m_rereadPosition;
+    void requestRereadPosition(const LogFilePtr& logFile);
     // Загрузка файла закончилась — закладки его строк сверяются (fullLoad —
     // файл прочитан с нуля).
     void bookmarksFileLoaded(const LogFilePtr& logFile, bool fullLoad);
@@ -599,6 +635,11 @@ private:
         // Пользователь сменил кодировку, пока файл читался: перечитать его,
         // как только загрузка закончится.
         bool   reparsePending = false;
+        // Схему сменили, пока файл читался (F-4, PR 3): перечитать по
+        // окончании прохода; у резидентного — с перепривязкой ключей.
+        bool   schemaRereadPending = false;
+        // Идущий startReencode меняет ключи строк (смена схемы).
+        bool   reencodeRekey = false;
         // Две последние строки файла: контекст дочитывания (продолжение в
         // начале дозаписи принадлежит последней записи) и предварительная
         // строка, которую надо убрать перед перечитыванием.

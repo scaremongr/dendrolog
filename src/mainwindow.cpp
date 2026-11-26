@@ -3306,7 +3306,10 @@ void MainWindow::updateLineInfoLabel(int currentRow, int totalRows)
         if (currentEntry)
             m_detailsPanel->showEntry(currentEntry,
                                       model->logicalRecordLines(currentEntry),
-                                      model->availableFields());
+                                      model->availableFields(),
+                                      currentEntry->sourceFile()
+                                          ? model->fileSchemaFor(currentEntry->sourceFile()->filePath)
+                                          : FileSchemaPtr());
         else
             m_detailsPanel->clearEntry();
     }

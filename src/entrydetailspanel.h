@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QSet>
 #include <QStringList>
+#include "fieldlayout.h"
 #include <QVector>
 #include <QWidget>
 #include <memory>
@@ -51,10 +52,13 @@ public:
     explicit EntryDetailsPanel(QWidget* parent = nullptr);
 
     // line — выбранная строка; logicalLines — все строки её логической записи
-    // в порядке файла (содержат саму line); fieldNames — схема полей модели.
+    // в порядке файла (содержат саму line); fieldNames — схема полей модели;
+    // schema — схема файла строки (LogModel::fileSchemaFor): у ключевой
+    // (F-4) под колонками — все ключи верхнего уровня строки.
     void showEntry(const std::shared_ptr<LogEntry>& line,
                    const QVector<std::shared_ptr<LogEntry>>& logicalLines,
-                   const QStringList& fieldNames);
+                   const QStringList& fieldNames,
+                   const FileSchemaPtr& schema = FileSchemaPtr());
     void clearEntry();
 
 protected:
@@ -97,6 +101,10 @@ private:
     std::shared_ptr<LogEntry> m_line;
     QVector<std::shared_ptr<LogEntry>> m_logicalLines;
     QStringList m_fieldNames;
+    FileSchemaPtr m_schema;
+    // Ключи строки ключевой схемы (LogPattern::keyValuePairs) — для одной
+    // записи; пусто — схема не ключевая или строка не распознана.
+    QVector<std::pair<QString, QString>> keyPairs() const;
     QVector<QJsonDocument> m_jsonBlocks; // найденные при последнем buildHtml
     QSet<QString> m_collapsedFields;     // свёрнутые поля секции Fields (по имени)
     bool m_dirty = false;

@@ -275,6 +275,14 @@ LogViewWidget::~LogViewWidget()
 
 void LogViewWidget::setParserPattern(const QString& pattern)
 {
+    const QString before = readingSignature();
+    applyParserPattern(pattern);
+    if (readingSignature() != before)
+        rereadAfterSchemaChange();
+}
+
+void LogViewWidget::applyParserPattern(const QString& pattern)
+{
     if (pattern != parserPattern())
         m_schemaName.clear(); // имя каталога описывало прежнюю схему
     m_pattern.setPattern(pattern);
@@ -317,8 +325,11 @@ FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
 
 void LogViewWidget::setExtractionEnabled(bool enabled)
 {
+    const QString before = readingSignature();
     m_extractionFlag = enabled;
     applyExtraction(enabled && !parserFieldNames().isEmpty());
+    if (readingSignature() != before)
+        rereadAfterSchemaChange();
 }
 
 FieldSettings LogViewWidget::fieldSettings() const
@@ -333,14 +344,154 @@ FieldSettings LogViewWidget::fieldSettings() const
 
 void LogViewWidget::setFieldSettings(const FieldSettings& settings)
 {
+    const QString before = readingSignature();
     m_extractionFlag = settings.extraction;
     if (settings.schema != parserPattern())
-        setParserPattern(settings.schema); // ставит и извлечение по новому флагу
+        applyParserPattern(settings.schema); // ставит и извлечение по новому флагу
     m_schemaName = settings.schema.isEmpty() ? QString() : settings.schemaName;
     m_visibleFields = settings.visibleFields;
     const bool effective = settings.extraction && !parserFieldNames().isEmpty();
     if (effective != m_extractionEnabled)
         applyExtraction(effective);
+    if (readingSignature() != before)
+        rereadAfterSchemaChange();
+}
+
+// =============================================================================
+// Перечитывание по смене схемы (F-4, PR 3)
+// =============================================================================
+
+QString LogViewWidget::readingSignature() const
+{
+    // Ключевая схема действует при чтении, только пока извлечение включено
+    // (LineClassifier::classifyLine у парсера и индексатора). Колонки сверх
+    // ролей момент, уровень и границу записи не меняют.
+    const KeyedDefinition* keyed = m_extractionEnabled ? m_pattern.keyed() : nullptr;
+    if (!keyed)
+        return QString();
+    PatternDefinition def;
+    def.keyed = *keyed;
+    def.keyed->extraColumns.clear();
+    return LogPattern::serializeDefinition(def);
+}
+
+void LogViewWidget::rereadAfterSchemaChange()
+{
+    // Позиция: строка и её место на экране; follow-tail — вид у хвоста.
+    // Восстановленная позиция, которая ещё ждёт строку (applyState), ищется
+    // заново после сброса строк: ключ, найденный в старых строках, пропадёт.
+    m_rereadPosition.reset();
+    const auto rereadsSource = [this](const QString& sourceKey) {
+        for (const LogFilePtr& f : std::as_const(m_loadedFiles)) {
+            if (!f || RecordLocator::sourceKey(*f) != sourceKey)
+                continue;
+            const FileReloadState st = m_fileReloadStates.value(f->filePath);
+            return !st.unsupported && (st.loadInFlight || st.initialLoadDone);
+        }
+        return false;
+    };
+    if (isPositionPending()) {
+        // Файл позиции ещё не читался (распаковка, загрузка сорвалась) —
+        // запрос остаётся своим: его первая загрузка уже с новой схемой.
+        if (m_pendingPosition.record.isValid()
+            && rereadsSource(RecordLocator::sourceKey(m_pendingPosition.source))) {
+            m_rereadPosition = RereadPosition{ RecordLocator::sourceKey(m_pendingPosition.source),
+                                               m_pendingPosition.source,
+                                               m_pendingPosition.record, m_pendingPosition.offset,
+                                               m_pendingPosition.selected,
+                                               m_pendingPosition.userActions };
+            if (m_pendingPosition.token)
+                m_model->recordLocator().cancel(m_pendingPosition.token);
+            m_pendingPosition = {};
+        }
+    } else if (!m_view->followTail()) {
+        const LogListView::ViewAnchor anchor = m_view->viewAnchor();
+        const RecordKey key = anchor.isValid() ? m_model->keyAt(anchor.row) : RecordKey();
+        if (key.isValid()) {
+            RecordLocator& locator = m_model->recordLocator();
+            if (const auto source = locator.sourceFor(key.file)) {
+                m_rereadPosition = RereadPosition{ RecordLocator::sourceKey(*key.file), *source,
+                                                   locator.idFor(key, m_model->messageAt(anchor.row)),
+                                                   anchor.offset, anchor.selected,
+                                                   m_view->userActionCount() };
+            }
+        }
+    }
+    for (const LogFilePtr& logFile : std::as_const(m_loadedFiles)) {
+        if (!logFile)
+            continue;
+        const auto it = m_fileReloadStates.find(logFile->filePath);
+        if (it == m_fileReloadStates.end() || it->unsupported)
+            continue;
+        if (it->loadInFlight) {
+            // Проход идёт со старой схемой (её дал passSchema на старте).
+            it->schemaRereadPending = true;
+            continue;
+        }
+        // Не прочитан (распаковка, файл пропал, загрузка сорвалась) — его
+        // следующая загрузка возьмёт новую схему сама.
+        if (it->initialLoadDone)
+            rereadForSchema(logFile);
+    }
+    updateLoadingState();
+}
+
+void LogViewWidget::rereadForSchema(const LogFilePtr& logFile)
+{
+    if (m_model->isIndexedBackend()) {
+        // Индекс не хранит, какая схема решила границы, — файл индексируется
+        // заново (как переписанный, Q-19): строки сброшены, закладки и
+        // история найдут свои строки через RecordLocator, позиция — тоже.
+        startFullReload(logFile);
+        requestRereadPosition(logFile);
+        return;
+    }
+    startReencode(logFile, /*rekey=*/true);
+}
+
+bool LogViewWidget::startPendingReread(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return false;
+    FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    const bool schema = std::exchange(st.schemaRereadPending, false);
+    const bool encoding = std::exchange(st.reparsePending, false);
+    if (!schema && !encoding)
+        return false;
+    if (m_model->isIndexedBackend()) {
+        // Кодировку индексной вкладки перечитывает стор (без переиндексации).
+        if (!schema)
+            return false;
+        rereadForSchema(logFile);
+        return true;
+    }
+    // Резидентный: один разбор и для кодировки, и для схемы.
+    startReencode(logFile, schema);
+    return true;
+}
+
+void LogViewWidget::requestRereadPosition(const LogFilePtr& logFile)
+{
+    // Строки файла уже сброшены (локатор ждёт их нового поколения): запрос
+    // не найдёт прежнюю строку в старых данных.
+    if (!m_rereadPosition || !logFile
+        || m_rereadPosition->sourceKey != RecordLocator::sourceKey(*logFile))
+        return;
+    // Схему сменили ещё раз посреди этого прохода: строку ищет следующий
+    // проход — ключи этого через миг снова сменятся.
+    if (m_fileReloadStates.value(logFile->filePath).schemaRereadPending)
+        return;
+    const RereadPosition pos = *std::exchange(m_rereadPosition, std::nullopt);
+    if (m_pendingPosition.token)
+        m_model->recordLocator().cancel(m_pendingPosition.token);
+    m_pendingPosition = {};
+    m_pendingPosition.token = m_model->recordLocator().request(pos.source, pos.record);
+    m_pendingPosition.source = pos.source;
+    m_pendingPosition.record = pos.record;
+    m_pendingPosition.requests = 1;
+    m_pendingPosition.offset = pos.offset;
+    m_pendingPosition.selected = pos.selected;
+    m_pendingPosition.userActions = pos.userActions;
 }
 
 QVector<int> LogViewWidget::visibleFieldIndexes() const
@@ -507,7 +658,7 @@ void LogViewWidget::refreshTextFragments(const QString& filePath)
         m_previewRefreshFiles.insert(filePath);
 }
 
-void LogViewWidget::startReencode(const LogFilePtr& logFile)
+void LogViewWidget::startReencode(const LogFilePtr& logFile, bool rekey)
 {
     if (!m_reencodeParser) {
         m_reencodeParser = new LogParser(this);
@@ -526,6 +677,7 @@ void LogViewWidget::startReencode(const LogFilePtr& logFile)
     }
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st.loadInFlight = true;
+    st.reencodeRekey = rekey;
     m_reencodeBuffers[logFile->filePath].clear();
     m_reencodeParser->setFallbackEncoding(m_fallbackEncoding);
     m_reencodeParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
@@ -543,6 +695,10 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
     if (m_model->isIndexedBackend() || !m_loadedFiles.contains(logFile))
         return;
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    const bool rekey = std::exchange(st.reencodeRekey, false);
+    // Порция локатору — в порядке файла (до сортировки по времени).
+    const QVector<std::shared_ptr<LogEntry>> fileOrder = rekey
+        ? entries : QVector<std::shared_ptr<LogEntry>>();
     std::sort(entries.begin(), entries.end(), logEntryPtrLess);
     st.nextLogicalEntryId = 0;
     st.lastEntry.reset();
@@ -551,8 +707,23 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
         if (e)
             st.nextLogicalEntryId = qMax(st.nextLogicalEntryId, e->logicalEntryId() + 1);
     rememberLastLines(st, entries);
+    if (rekey) {
+        // Смена схемы (F-4, PR 3): моменты и id записей другие — ключи
+        // строк файла сброшены; закладки, история и позиция найдут строки по
+        // номеру и отпечатку в порции ниже.
+        m_model->invalidateFileRows(logFile->filePath);
+        requestRereadPosition(logFile);
+    }
     m_model->replaceEntriesForFile(logFile->filePath, entries);
+    if (rekey)
+        m_model->recordLocator().residentBatch(fileOrder);
     locatorFileLoaded(logFile);
+    if (rekey) {
+        bookmarksFileLoaded(logFile, true);
+        // Моменты и диапазон времени другие — окно обновляет поля Time
+        // Filter и статистику, как после индексного перечитывания.
+        emit fileParsingFinished(logFile, int(entries.size()));
+    }
     // Текст строк файла другой при тех же ключах — фрагменты закладок и
     // истории переходов, иначе сверка после следующей загрузки их потеряет.
     refreshTextFragments(logFile->filePath);
@@ -567,10 +738,7 @@ void LogViewWidget::finishReencode(const LogFilePtr& logFile)
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
-    if (st.reparsePending) {
-        st.reparsePending = false;
-        startReencode(logFile);
-    }
+    startPendingReread(logFile);
 }
 
 void LogViewWidget::handleReencodeFailed(const LogFilePtr& logFile)
@@ -582,6 +750,11 @@ void LogViewWidget::handleReencodeFailed(const LogFilePtr& logFile)
     // кодировкой), авто-обновление продолжит с прежнего якоря.
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st.loadInFlight = false;
+    // Перечитывание по смене схемы не состоялось — повторить по концу
+    // следующего прохода по файлу (дозаписи), иначе строки остались бы
+    // разобранными прежней схемой.
+    if (std::exchange(st.reencodeRekey, false))
+        st.schemaRereadPending = true;
     updateLoadingState();
 }
 
@@ -1526,6 +1699,8 @@ void LogViewWidget::handleIndexingFinished(qint64 newLines, const LogFilePtr& lo
                                  int(qMin<qint64>(newLines, INT_MAX)));
     else
         emit reloadFinished(int(qMin<qint64>(newLines, INT_MAX)));
+    // Схему сменили посреди прохода — переиндексировать новой.
+    startPendingReread(logFile);
     emit totalRowCountChanged(m_model->rowCount());
     const QModelIndex cur = m_view->currentIndex();
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
@@ -1539,6 +1714,8 @@ void LogViewWidget::handleIndexingFailed(const LogFilePtr& logFile)
         FileReloadState& st = m_fileReloadStates[logFile->filePath];
         st.loadInFlight = false;
         st.initialLoadDone = false;
+        // Следующая загрузка — с нуля и уже текущей схемой.
+        st.schemaRereadPending = false;
         st.failedStamp = DiskStamp::of(logFile->filePath);
         updateLoadingState();
     }
@@ -1633,11 +1810,8 @@ void LogViewWidget::handleParsingFinished(int totalEntries, const LogFilePtr& pa
         locatorFileLoaded(parsedLogFile);
         updateLoadingState();
         bookmarksFileLoaded(parsedLogFile, true);
-        if (st.reparsePending) {
-            // Кодировку сменили посреди загрузки — перечитываем выбранной.
-            st.reparsePending = false;
-            startReencode(parsedLogFile);
-        }
+        // Кодировку или схему сменили посреди загрузки — перечитываем.
+        startPendingReread(parsedLogFile);
     }
 
     emit fileParsingFinished(parsedLogFile, totalEntries);
@@ -1901,10 +2075,7 @@ void LogViewWidget::handleIncrementalParsingFinished(int newEntries, const LogFi
         locatorFileLoaded(logFile);
         updateLoadingState();
         bookmarksFileLoaded(logFile, false);
-        if (st.reparsePending) {
-            st.reparsePending = false;
-            startReencode(logFile);
-        }
+        startPendingReread(logFile);
     }
     emit totalRowCountChanged(m_model->rowCount());
     QModelIndex cur = m_view->currentIndex();
