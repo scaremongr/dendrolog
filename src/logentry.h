@@ -7,6 +7,8 @@
 #include <limits>
 #include "logfile.h"
 #include "logfield.h"
+#include "ansiescape.h"
+#include <memory>
 
 enum class LogLevel {
     Unknown,
@@ -79,6 +81,16 @@ public:
         m_hasFields.store(!m_fields.isEmpty(), std::memory_order_relaxed);
     }
 
+    // Стиль ANSI строки (F-3): спаны SGR в координатах message(); nullptr —
+    // в строке не было кодов с видимым стилем (у большинства строк). Ставит
+    // только парсер до публикации записи; дальше не меняется.
+    const AnsiStyles* ansiStyles() const { return m_ansi.get(); }
+    void setAnsiStyles(AnsiStyles styles)
+    {
+        m_ansi = styles.isEmpty() ? nullptr
+                                  : std::make_unique<const AnsiStyles>(std::move(styles));
+    }
+
     // Строка «свободного текста»: парсер не извлёк ни таймстампа, ни уровня,
     // ни структурных полей. У continuation-строк настоящей записи таймстамп и
     // уровень унаследованы от её первой строки, поэтому true возможен только
@@ -141,6 +153,7 @@ private:
     QString m_message;
     LogFilePtr m_sourceFile;
     LogEntryFields m_fields;
+    std::unique_ptr<const AnsiStyles> m_ansi;
 };
 
 

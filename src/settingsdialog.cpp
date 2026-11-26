@@ -428,6 +428,7 @@ void SettingsDialog::loadFromSettings()
 
     // --- Appearance tab: default word wrap ---
     ui->wordWrapCheckBox->setChecked(s.wordWrap());
+    ui->ansiColorsCheckBox->setChecked(s.ansiColors());
 
     // --- General tab: reload ---
     ui->autoReloadCheckBox->setChecked(s.autoReload());
@@ -488,6 +489,7 @@ void SettingsDialog::applyToSettings()
 
     // ---- Appearance tab: default word wrap -------------------------------- //
     s.setWordWrap(ui->wordWrapCheckBox->isChecked());
+    s.setAnsiColors(ui->ansiColorsCheckBox->isChecked());
 
     // ---- General tab: reload --------------------------------------------- //
     s.setAutoReload(ui->autoReloadCheckBox->isChecked());

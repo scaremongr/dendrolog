@@ -279,6 +279,13 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
 - **Directory Scanner** searches file contents in the same encoding a tab would use: by the byte-order mark (UTF-8, UTF-16, UTF-32), otherwise by the same detection rule with the same fallback encoding. A query that finds a line in a tab finds the file in the scanner. Changing the fallback encoding re-checks only the files that depend on it.
 - **Limits.** UTF-16 and UTF-32 are recognised by the byte-order mark only and are read whole in the regular mode: a large such file is not indexed, its encoding cannot be changed, and it does not open in a tab with other files — open it in a tab of its own. A block of garbage at the start of a file (hundreds of non-ASCII bytes that do not look like text) can give a wrong final decision — correct it by choosing by hand.
 
+## Colored logs (ANSI escape codes)
+
+- **Codes are hidden.** Programs with a colored console (`docker logs`, `kubectl logs`, a command tab, Spring Boot, Serilog console, pino-pretty, npm) write escape codes like `ESC[31m` into the text. DendroLog removes them when it reads a line — in every tab and in the Directory Scanner — so search, Find All, Text Filters, Row Highlighters, field schemas, Entry Details, copying and **Save View As** see the plain text: `ERROR foo` finds a line where only `ERROR` is red, and a colored level word or a timestamp behind a color code counts as usual. The file itself is not changed.
+- **Colors are shown.** The colors of the codes (16 and 256 colors, 24-bit, bold, italic, underline, dim, inverse) are drawn in the log, in shades that stay readable in the light and the dark theme; a color nearly invisible on its background falls back to the text color. The usual coloring of numbers, strings and paths fills the parts the program left uncolored. Each line starts uncolored: a color set on one line does not carry over to the next.
+- **Off** — **View → ANSI Colors** or **Settings → Appearance → Show ANSI colors**. The codes stay hidden either way.
+- Colors are shown for the line text, not for the selected field columns of a schema. Bookmarks and positions on lines with escape codes, saved by DendroLog 0.6, are reported as not found.
+
 ## Directory Scanner
 
 - The folder button picks a directory and scans it for files with the configured extensions; the tree shows entry counts, the time span, W/E/F counters and size. Subdirectories are listed on demand.

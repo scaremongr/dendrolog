@@ -1,4 +1,6 @@
 #include "apptheme.h"
+
+#include <cmath>
 #include "cardframe.h"
 #include <QSettings>
 #include <iterator>
@@ -153,4 +155,66 @@ QColor AppTheme::fileColor(int ordinal, const QPalette& palette)
     const QColor base = kFileColors[((ordinal % n) + n) % n];
     const bool dark = palette.color(QPalette::Base).lightness() < 128;
     return dark ? base.lighter(125) : base;
+}
+
+namespace {
+// Светлая тема (фон белый): цвета темнее терминальных, «белые» — серые.
+const QColor kAnsiLight[16] = {
+    QColor(0x00, 0x00, 0x00), QColor(0xc5, 0x0f, 0x1f), QColor(0x10, 0x7c, 0x10),
+    QColor(0x94, 0x7a, 0x00), QColor(0x00, 0x37, 0xda), QColor(0x88, 0x17, 0x98),
+    QColor(0x0e, 0x7c, 0x8a), QColor(0x76, 0x76, 0x76),
+    QColor(0x55, 0x55, 0x55), QColor(0xe7, 0x48, 0x56), QColor(0x13, 0xa1, 0x0e),
+    QColor(0xb5, 0x8f, 0x00), QColor(0x3b, 0x78, 0xff), QColor(0xb4, 0x00, 0x9e),
+    QColor(0x0f, 0x9a, 0xaa), QColor(0x9a, 0x9a, 0x9a),
+};
+// Тёмная тема (фон тёмный): «чёрные» — серые.
+const QColor kAnsiDark[16] = {
+    QColor(0x6e, 0x6e, 0x6e), QColor(0xf1, 0x4c, 0x4c), QColor(0x23, 0xd1, 0x8b),
+    QColor(0xe5, 0xe5, 0x10), QColor(0x3b, 0x8e, 0xea), QColor(0xd6, 0x70, 0xd6),
+    QColor(0x29, 0xb8, 0xdb), QColor(0xcc, 0xcc, 0xcc),
+    QColor(0x8a, 0x8a, 0x8a), QColor(0xff, 0x6b, 0x6b), QColor(0x5a, 0xf7, 0x8e),
+    QColor(0xf5, 0xf5, 0x43), QColor(0x6c, 0xb6, 0xff), QColor(0xf0, 0x8a, 0xf0),
+    QColor(0x5f, 0xe0, 0xf0), QColor(0xf2, 0xf2, 0xf2),
+};
+
+double relativeLuminance(const QColor& c)
+{
+    const auto lin = [](double v) {
+        return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * lin(c.redF()) + 0.7152 * lin(c.greenF()) + 0.0722 * lin(c.blueF());
+}
+} // namespace
+
+QColor AppTheme::ansiColor(int index, const QPalette& palette)
+{
+    index = qBound(0, index, 255);
+    if (index < 16) {
+        const bool dark = palette.color(QPalette::Base).lightness() < 128;
+        return dark ? kAnsiDark[index] : kAnsiLight[index];
+    }
+    if (index < 232) {
+        const int n = index - 16;
+        const auto level = [](int v) { return v == 0 ? 0 : 55 + v * 40; };
+        return QColor(level(n / 36), level((n / 6) % 6), level(n % 6));
+    }
+    const int gray = 8 + (index - 232) * 10;
+    return QColor(gray, gray, gray);
+}
+
+QColor AppTheme::ansiReadableText(const QColor& fg, const QColor& bg, const QPalette& palette)
+{
+    const auto contrast = [](const QColor& x, const QColor& y) {
+        const double a = relativeLuminance(x);
+        const double b = relativeLuminance(y);
+        return (qMax(a, b) + 0.05) / (qMin(a, b) + 0.05);
+    };
+    if (fg.isValid() && contrast(fg, bg) >= 1.6)
+        return fg;
+    // Цвет текста палитры, если читается на этом фоне; иначе чёрный или
+    // белый — что контрастнее (фон ANSI бывает любым: ESC[40m в светлой теме).
+    const QColor text = palette.color(QPalette::Text);
+    if (contrast(text, bg) >= 3.0)
+        return text;
+    return relativeLuminance(bg) > 0.18 ? QColor(Qt::black) : QColor(Qt::white);
 }

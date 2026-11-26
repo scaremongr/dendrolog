@@ -89,6 +89,9 @@
   detected per file; the status bar shows the encoding and changes it with a
   click (no re-indexing, you keep your place); `--encoding` on the command line.
   The Directory Scanner searches file contents in the same encodings.
+- **Colored logs** — ANSI escape codes from `docker logs`, `kubectl logs` or
+  any colored console are hidden from the text (search, filters and export see
+  plain text) and drawn as colors, readable in both themes; can be turned off.
 - **Smart text handling** — syntax highlighting, token-aware double-click
   selection, open URLs/paths from the log, per-line word wrap.
 - **Save View As** — export exactly what you see (filters + field selection) as text, CSV or JSON Lines.

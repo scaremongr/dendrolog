@@ -158,6 +158,8 @@ set(DENDROLOG_CORE_SOURCES
     src/openrouting.cpp
     src/textencoding.h
     src/textencoding.cpp
+    src/ansiescape.h
+    src/ansiescape.cpp
     src/filecontentsearch.h
     src/filecontentsearch.cpp
     src/userregex.h

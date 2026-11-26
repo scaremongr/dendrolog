@@ -386,6 +386,15 @@ int ResidentLogStore::rawTextLengthAt(int visibleRow) const
     return int(m_filteredEntries.at(visibleRow)->message().length());
 }
 
+AnsiStyles ResidentLogStore::ansiStylesAt(int visibleRow) const
+{
+    if (visibleRow < 0 || visibleRow >= m_filteredEntries.size()
+        || !m_filteredEntries.at(visibleRow))
+        return {};
+    const AnsiStyles* styles = m_filteredEntries.at(visibleRow)->ansiStyles();
+    return styles ? *styles : AnsiStyles();
+}
+
 bool ResidentLogStore::isNewAt(int visibleRow) const
 {
     if (visibleRow < 0 || visibleRow >= m_filteredEntries.size())

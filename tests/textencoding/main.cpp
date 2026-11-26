@@ -256,14 +256,23 @@ static void testTables()
         }
         CHECK(mismatches == 0, QString("%1: %2 of 128 bytes differ from the standard").arg(enc.name).arg(mismatches));
 
-        // Все 256 байтов одной строкой: ASCII — как есть, старшие — по таблице.
+        // Все байты одной строкой: ASCII — как есть, старшие — по таблице.
+        // Кроме ESC (0x1B): декодер снимает ANSI-последовательности (F-3,
+        // tests/ansi_escape), одиночный ESC — тоже.
         QByteArray all;
-        for (int b = 0; b < 256; ++b)
+        QVector<int> order;
+        for (int b = 0; b < 256; ++b) {
+            if (b == 0x1B)
+                continue;
             all.append(char(b));
+            order.append(b);
+        }
         const QString text = decoder.decode(all);
-        bool same = text.size() == 256;
-        for (int b = 0; same && b < 256; ++b)
-            same = text[b].unicode() == (b < 0x80 ? char16_t(b) : enc.table[b - 0x80]);
+        bool same = text.size() == order.size();
+        for (int i = 0; same && i < order.size(); ++i) {
+            const int b = order[i];
+            same = text[i].unicode() == (b < 0x80 ? char16_t(b) : enc.table[b - 0x80]);
+        }
         CHECK(same, QString("%1: decode of all 256 bytes").arg(enc.name));
 
         // remapLatin1 — тот же результат из Latin-1-строки.

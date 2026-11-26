@@ -265,6 +265,12 @@ public:
     // выключена ([View] lineNumbers). Номера не выделяются и не копируются.
     void setLineNumbersVisible(bool visible);
     bool lineNumbersVisible() const { return m_lineNumbersVisible; }
+
+    // ---- Цвета ANSI (F-3) ---------------------------------------------------
+    // Раскраска по стилю ANSI строки (LogModel::AnsiStyleRole) поверх
+    // токенов; общая настройка [View] ansiColors. Коды сняты в любом случае.
+    void setAnsiColorsEnabled(bool enabled);
+    bool ansiColorsEnabled() const { return m_ansiColors; }
     int lineNumberWidth() const { return m_lineNumberWidth; }
     QString lineNumberText(int row) const;
     QRect lineNumberRect(int row) const;   // экранный, с прилипанием; пусто — колонки нет
@@ -557,6 +563,7 @@ private:
     int fileLabelTextWidth(int chars) const;
     static constexpr int kLineNumberPadX = 4;
     bool m_lineNumbersVisible = false;
+    bool m_ansiColors = true;
     int m_lineNumberWidth = 0;
     int m_leftColumnRelayouts = 0;
     int fileColumnLeft() const { return kLeftMarginWidth + m_lineNumberWidth; }

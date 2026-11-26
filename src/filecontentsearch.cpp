@@ -187,19 +187,32 @@ bool searchWide(Reader& reader, QByteArrayView first, TextEncoding encoding,
 {
     QStringDecoder decoder(*TextEncodings::toQt(encoding));
     const qsizetype overlap = query.isRegex() ? 0 : query.text().size() - 1;
+    // Коды ANSI (F-3) — как у вкладки: последовательность не переходит через
+    // '\n', поэтому снятие по куску из целых строк = снятие по строке.
+    const auto matches = [&query](QStringView lines) {
+        if (!AnsiEscape::hasEscape(lines))
+            return query.matchesLines(lines);
+        QString stripped = lines.toString();
+        AnsiEscape::stripInPlace(stripped);
+        return query.matchesLines(stripped);
+    };
     QString pending;
     QByteArrayView block = first;
     while (!block.isEmpty()) {
         pending += decoder.decode(block);
         const qsizetype nl = pending.lastIndexOf(u'\n');
         if (nl >= 0) {
-            if (query.matchesLines(QStringView(pending).first(nl + 1)))
+            if (matches(QStringView(pending).first(nl + 1)))
                 return true;
             pending.remove(0, nl + 1);
         } else if (pending.size() > options.maxLineBytes) {
-            if (query.matchesLines(pending))
+            // Без разрыва ANSI-последовательности на краю куска (F-3).
+            const qsizetype cut = AnsiEscape::completeEnd(QStringView(pending));
+            if (matches(QStringView(pending).first(cut)))
                 return true;
-            pending = pending.right(overlap);
+            const qsizetype keep = AnsiEscape::completeEnd(
+                QStringView(pending).first(std::max<qsizetype>(0, cut - overlap)));
+            pending.remove(0, keep);
         }
         if (reader.cancelled()) {
             cancelled = true;
@@ -207,7 +220,7 @@ bool searchWide(Reader& reader, QByteArrayView first, TextEncoding encoding,
         }
         block = reader.next();
     }
-    return !pending.isEmpty() && query.matchesLines(pending);
+    return !pending.isEmpty() && matches(pending);
 }
 
 // UTF-8 и однобайтные: сырые байты, решение — EncodingDetector::advance.
@@ -291,13 +304,18 @@ private:
     {
         if (m_pending.size() <= m_options.maxLineBytes)
             return Step::Continue;
-        const qsizetype flushEnd = completeCharsEnd(m_pending);
-        if (const Step s = process(QByteArrayView(m_pending).first(flushEnd), m_pendingOffset);
+        // Кусок не кончается и следующий не начинается посреди
+        // ANSI-последовательности (F-3): иначе её хвост стал бы текстом.
+        const QByteArrayView pending(m_pending);
+        const qsizetype charsEnd = completeCharsEnd(m_pending);
+        const qsizetype flushEnd = AnsiEscape::completeEnd(pending.first(charsEnd));
+        if (const Step s = process(pending.first(flushEnd), m_pendingOffset);
             s != Step::Continue)
             return s;
         // search() держит предел строки больше перекрытия: кусок сдвигается.
         const qsizetype overlap = m_query.isRegex() ? 0 : 3 * (m_query.text().size() - 1);
-        const qsizetype drop = alignToCharStart(m_pending, std::max<qsizetype>(0, flushEnd - overlap));
+        qsizetype drop = alignToCharStart(m_pending, std::max<qsizetype>(0, flushEnd - overlap));
+        drop = AnsiEscape::completeEnd(pending.first(drop));
         m_pending.remove(0, drop);
         m_pendingOffset += drop;
         return Step::Continue;

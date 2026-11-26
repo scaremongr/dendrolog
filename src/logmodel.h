@@ -154,7 +154,11 @@ public:
         // Цвет фона строки от недеструктивного row-маркера (Row Highlighters).
         RowMarkerColorRole,
         // bool: на строке стоит закладка (BookmarkStore::isBookmarkedRow, O(1)).
-        BookmarkRole
+        BookmarkRole,
+        // AnsiStyles (F-3): спаны цвета ANSI в координатах DisplayRole.
+        // Невалидно — у строки нет кодов или показан не сырой текст строки
+        // (выбранные колонки полей): позиции бы не совпали.
+        AnsiStyleRole
     };
 
     // Закладки вкладки (R-2). Живут вместе с моделью: переживают фильтр,

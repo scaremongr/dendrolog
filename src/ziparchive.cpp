@@ -34,7 +34,8 @@ QString decodeName(const QByteArray& raw, bool utf8Flag)
     const QString text = utf8.decode(raw);
     if (!utf8.hasError())
         return text;
-    return TextDecoder(TextEncoding::Ibm866).decode(QByteArrayView(raw));
+    // Имя — не строка лога: без снятия ANSI-последовательностей (F-3).
+    return TextDecoder(TextEncoding::Ibm866).decodeExact(raw.constData(), raw.size());
 }
 
 bool isUnixSymlink(const mz_zip_archive_file_stat& st)

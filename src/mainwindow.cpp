@@ -621,6 +621,32 @@ MainWindow::MainWindow(QWidget *parent)
         m_shortcutActions.insert(QStringLiteral("lineNumbers"), numbers);
     }
 
+    // Цвета ANSI (F-3): View → ANSI Colors, общая настройка рядом с номерами
+    // строк; коды сняты в любом случае.
+    {
+        QAction* ansi = new QAction(tr("ANSI Colors"), this);
+        ansi->setObjectName(QStringLiteral("ansiColorsAction"));
+        ansi->setCheckable(true);
+        ansi->setChecked(AppSettings::instance().ansiColors());
+        connect(ansi, &QAction::toggled, this, [](bool on) {
+            if (AppSettings::instance().ansiColors() == on)
+                return;
+            AppSettings::instance().setAnsiColors(on);
+            AppSettings::instance().save();
+        });
+        connect(&AppSettings::instance(), &AppSettings::settingsChanged, ansi, [ansi]() {
+            ansi->setChecked(AppSettings::instance().ansiColors());
+        });
+        const QList<QAction*> viewActions = ui->menuView->actions();
+        const int numbersAt = viewActions.indexOf(m_shortcutActions.value(QStringLiteral("lineNumbers")));
+        QAction* after = numbersAt >= 0 && numbersAt + 1 < viewActions.size()
+            ? viewActions[numbersAt + 1] : nullptr;
+        if (after)
+            ui->menuView->insertAction(after, ansi);
+        else
+            ui->menuView->addAction(ansi);
+    }
+
     // Go to Line / Time (Ctrl+G): в меню View, перед группой режимов вида.
     m_goToAction = new QAction(tr("Go to Line / Time…"), this);
     connect(m_goToAction, &QAction::triggered, this, &MainWindow::showGoToDialog);

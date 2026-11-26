@@ -62,6 +62,7 @@ LogListView::LogListView(QWidget *parent)
     m_fileLabelMode = AppSettings::instance().fileLabelMode();
     m_fileColumnChars = AppSettings::instance().fileColumnChars();
     m_lineNumbersVisible = AppSettings::instance().lineNumbers();
+    m_ansiColors = AppSettings::instance().ansiColors();
     // Движение мыши без кнопок — только курсор над границей колонки файла.
     viewport()->setMouseTracking(true);
     connect(&AppSettings::instance(), &AppSettings::settingsChanged, this, [this]() {
@@ -69,6 +70,7 @@ LogListView::LogListView(QWidget *parent)
         if (!m_columnDrag)
             setFileColumnChars(AppSettings::instance().fileColumnChars());
         setLineNumbersVisible(AppSettings::instance().lineNumbers());
+        setAnsiColorsEnabled(AppSettings::instance().ansiColors());
     });
     
     // Отметки на полосе прокрутки (R-6): расчёт по модели и оверлей поверх
@@ -1021,6 +1023,16 @@ void LogListView::setLineNumbersVisible(bool visible)
         return;
     m_lineNumbersVisible = visible;
     updateFileColumn();
+}
+
+void LogListView::setAnsiColorsEnabled(bool enabled)
+{
+    if (m_ansiColors == enabled)
+        return;
+    m_ansiColors = enabled;
+    // Цвет запечён в растры строк и кэш разбора — сбросить, геометрия та же.
+    clearRowPixmaps();
+    viewport()->update();
 }
 
 int LogListView::lineNumberDigits() const
@@ -2168,6 +2180,13 @@ void LogListView::drawLogLine(QPainter& painter, const QRect& rect, const QStrin
     }
     if (!haveCached) {
         tokens = SyntaxHighlighter::tokenize(text);
+        // Стиль ANSI строки (F-3) главнее токенов: они остаются в промежутках.
+        if (m_ansiColors && model() && state.row >= 0) {
+            const QVariant ansi =
+                model()->data(model()->index(state.row, 0), LogModel::AnsiStyleRole);
+            if (ansi.isValid())
+                tokens = SyntaxHighlighter::withAnsi(ansi.value<AnsiStyles>(), tokens, palette());
+        }
         if (!m_textHighlighter.isEmpty())
             matchSpans = m_textHighlighter.computeSpans(text);
         if (useParseCache) {
@@ -3983,7 +4002,34 @@ void LogListView::drawTextWithHighlights(QPainter& painter, int x, int y, const 
             }
             QStringView tokenView = text.sliced(tokenStartInFragment, tokenEndInFragment - tokenStartInFragment);
             painter.setPen(!override && token.color.isValid() ? token.color : defaultColor);
-            painter.drawText(tx, y, m_tabExpander.expand(tokenView, startCol));
+            if (token.fontAttrs) {
+                // Начертание ANSI (F-3). Сегмент рисуется одним drawText от
+                // своей колонки, поэтому жирный и курсив — только если их
+                // шаг глифа равен обычному (иначе текст разъехался бы с сеткой
+                // колонок, выделением и попаданием мыши): тогда — обычным.
+                const QFont saved = painter.font();
+                QFont styled = saved;
+                const auto sameAdvance = [&saved](const QFont& f) {
+                    return qFuzzyCompare(QFontMetricsF(f).horizontalAdvance(QLatin1Char('M')),
+                                         QFontMetricsF(saved).horizontalAdvance(QLatin1Char('M')));
+                };
+                if (token.fontAttrs & AnsiSpan::Bold) {
+                    styled.setBold(true);
+                    if (!sameAdvance(styled))
+                        styled.setBold(false);
+                }
+                if (token.fontAttrs & AnsiSpan::Italic) {
+                    styled.setItalic(true);
+                    if (!sameAdvance(styled))
+                        styled.setItalic(false);
+                }
+                styled.setUnderline(token.fontAttrs & AnsiSpan::Underline);
+                painter.setFont(styled);
+                painter.drawText(tx, y, m_tabExpander.expand(tokenView, startCol));
+                painter.setFont(saved);
+            } else {
+                painter.drawText(tx, y, m_tabExpander.expand(tokenView, startCol));
+            }
         }
 
         last = tokenEndInFragment;

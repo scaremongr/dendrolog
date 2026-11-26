@@ -684,6 +684,77 @@ int main(int argc, char** argv)
         checkFlags(QStringLiteral("cyrillic resident merged UTF-8 + Windows-1251"), *mergedResident.model);
     }
 
+    // --- Поиск через границу цвета ANSI (F-3) ---------------------------------
+    // Коды сняты на обоих бэкендах до поиска: «ERROR foo» находит
+    // `\x1b[31mERROR\x1b[0m foo` синхронно, сканом снапшота и правилом Find
+    // All, а текст самих кодов не находится.
+    {
+        QByteArray colored;
+        QVector<int> expected; // строки файла с «ERROR foo»
+        for (int i = 0; i < 400; ++i) {
+            const QByteArray stamp = "\x1b[2m2026-03-05 10:" + QByteArray::number(i / 60).rightJustified(2, '0')
+                                   + ':' + QByteArray::number(i % 60).rightJustified(2, '0') + ".000\x1b[0m [w] ";
+            if (i % 97 == 11) {
+                colored += stamp + "\x1b[31mERROR\x1b[0m foo \x1b]8;;http://x/\x1b\\link\x1b]8;;\x1b\\ " + QByteArray::number(i) + '\n';
+                expected.append(i);
+            } else if (i % 89 == 7) {
+                colored += stamp + "\x1b[31mERROR\x1b[0m\x1b[1m bar\x1b[0m " + QByteArray::number(i) + '\n';
+            } else {
+                colored += stamp + "\x1b[32mINFO\x1b[0m ordinary " + QByteArray::number(i) + '\n';
+            }
+        }
+        const QString c1 = testdocs::writeFile(dir, "ansi-a.log", colored);
+        auto resident = testdocs::buildResident({c1}, schema);
+        auto indexed = testdocs::buildIndexed({c1}, schema);
+        const auto query = [](const char* text, bool word, bool regex) {
+            TextQuery q;
+            q.text = QString::fromUtf8(text);
+            q.wholeWord = word;
+            q.regex = regex;
+            return q;
+        };
+        for (LogModel* model : {resident.model.get(), indexed.model.get()}) {
+            const QString name = model->isIndexedBackend() ? QStringLiteral("ANSI indexed")
+                                                           : QStringLiteral("ANSI resident");
+            const LogScanSnapshot snapshot = model->scanSnapshot(true);
+            for (const TextQuery& q : {query("ERROR foo", false, false), query("error foo", true, false),
+                                       query("ERROR\\s+foo\\s+link", false, true),
+                                       query("] ERROR foo link", false, false)}) {
+                QVector<int> found;
+                int row = -1;
+                for (;;) {
+                    const QModelIndex next = model->findOccurrence(q, row, true, false);
+                    if (!next.isValid())
+                        break;
+                    found.append(next.row());
+                    CHECK(QuickSearch::scan(snapshot, q, true, row, false) == next.row(),
+                          name + ": scan = sync for " + q.text);
+                    row = next.row();
+                }
+                QVector<int> want;
+                for (const int i : expected)
+                    want.append(i); // одно-файловая вкладка, метки по порядку: строка = номер
+                CHECK(found == want, name + ": '" + q.text + QStringLiteral("' found %1 of %2")
+                                                     .arg(found.size()).arg(want.size()));
+                FilterRuleSet rules;
+                FilterRule rule;
+                rule.text = q.patternText();
+                rule.isRegex = q.needsRegex();
+                rules.rules.append(rule);
+                rules.bindFields({}, false);
+                int ruleHits = 0;
+                for (int r = 0; r < model->rowCount(); ++r)
+                    ruleHits += rules.matchesLine(model->messageAt(r), LogEntryFields());
+                CHECK(ruleHits == want.size(), name + ": Find All rule for " + q.text);
+            }
+            for (const char* code : {"[31m", "\x1b", "8;;http", "38;5"}) {
+                const TextQuery q = query(code, false, false);
+                CHECK(!model->findOccurrence(q, -1, true, true).isValid(),
+                      name + ": escape text is not found: " + QString::fromUtf8(code));
+            }
+        }
+    }
+
     // --- Пересчёт номера через вставки ---------------------------------------
     {
         using I = QuickSearch::Insertion;

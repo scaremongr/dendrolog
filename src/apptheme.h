@@ -144,6 +144,15 @@ public:
     // как полоса на фоне лога, и как подложка метки с текстом badgeFg; на
     // тёмной теме палитра светлее. Тема — по яркости Base палитры.
     static QColor fileColor(int ordinal, const QPalette& palette);
+
+    // Палитра ANSI (F-3): index 0–255. 0–15 — свои для светлой и тёмной темы
+    // (белый в светлой и чёрный в тёмной — читаемые серые), 16–231 — кубик
+    // 6×6×6 xterm, 232–255 — серые xterm.
+    static QColor ansiColor(int index, const QPalette& palette);
+    // Цвет текста ANSI, читаемый на фоне bg: почти неотличимый от фона
+    // (контраст ниже 1,6) или невалидный (цвет по умолчанию) заменяется цветом
+    // текста палитры, а если и он не читается на bg — чёрным или белым.
+    static QColor ansiReadableText(const QColor& fg, const QColor& bg, const QPalette& palette);
     static int fileColorCount();
 
     // Persistence — called from AppSettings::load() / save().

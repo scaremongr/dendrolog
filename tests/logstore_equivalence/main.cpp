@@ -2673,6 +2673,197 @@ static void testMixedSchemas(const QDir& dir)
     }
 }
 
+// ---------------------------------------------------------------------------
+// ANSI-последовательности (F-3): цветной лог против своего бесцветного
+// близнеца. Строки с кодами снимаются на обоих бэкендах одинаково: текст без
+// кодов, моменты (метка за кодом — ведущая), уровни (слово уровня в цвете) и
+// записи — как у близнеца; все конфигурации фильтров (правила по тексту видят
+// текст без кодов); хвост, оборванный посреди последовательности.
+// ---------------------------------------------------------------------------
+
+static const char* const kLevelColors[] = {"\x1b[2m", "\x1b[36m", "\x1b[32m", "\x1b[1;33m",
+                                           "\x1b[31m", "\x1b[1;37;41m"};
+
+// Раскраска строки лога makeLogBytes: метка, поток и уровень — в своих цветах,
+// продолжения — серым, иногда заголовок окна (OSC), стирание до конца строки и
+// сброс без параметров.
+static QByteArray colorizeLine(const QByteArray& line, int n)
+{
+    if (line.isEmpty())
+        return n % 3 == 0 ? QByteArray("\x1b[0m") : line;
+    if (line.startsWith("    at "))
+        return "\x1b[90m" + line + "\x1b[39m";
+    const int tsEnd = line.indexOf(" [");
+    const int thEnd = line.indexOf("] ", tsEnd);
+    if (tsEnd < 0 || thEnd < 0)
+        return "\x1b[1m" + line + "\x1b[22m";
+    const int lvEnd = line.indexOf(' ', thEnd + 2);
+    const QByteArray ts = line.left(tsEnd);
+    const QByteArray thread = line.mid(tsEnd + 2, thEnd - tsEnd - 2);
+    const QByteArray level = line.mid(thEnd + 2, lvEnd - thEnd - 2);
+    const QByteArray rest = line.mid(lvEnd);
+    QByteArray out;
+    if (n % 7 == 0)
+        out += "\x1b]0;app - " + QByteArray::number(n) + "\x07";
+    out += (n % 2 ? "\x1b[38;5;244m" : "\x1b[38;2;120;120;120m") + ts + "\x1b[0m";
+    out += " [\x1b[38;5;208m" + thread + "\x1b[m] ";
+    out += QByteArray(kLevelColors[n % 6]) + level + "\x1b[0m" + rest;
+    if (n % 5 == 0)
+        out += "\x1b[K";
+    return out;
+}
+
+static QByteArray colorizeLog(const QByteArray& plain)
+{
+    QByteArray out;
+    const QList<QByteArray> lines = plain.split('\n');
+    for (int i = 0; i < lines.size(); ++i) {
+        QByteArray line = lines[i];
+        const bool cr = line.endsWith('\r');
+        if (cr)
+            line.chop(1);
+        out += colorizeLine(line, i);
+        if (cr)
+            out += '\r';
+        if (i + 1 < lines.size())
+            out += '\n';
+    }
+    return out;
+}
+
+// Видимые строки вкладки — те же, что у близнеца: текст без кодов, момент,
+// уровень, запись.
+static void checkSameAsTwin(const QString& what, const LogModel& colored, const LogModel& twin)
+{
+    g_context = what;
+    g_contextFailures = 0;
+    CHECK_EQ(colored.rowCount(), twin.rowCount(), QStringLiteral("число строк"));
+    const int rows = qMin(colored.rowCount(), twin.rowCount());
+    for (int row = 0; row < rows; ++row) {
+        const QString text = colored.messageAt(row);
+        CHECK(!text.contains(QChar(0x1b)), QStringLiteral("строка %1: ESC в тексте").arg(row));
+        CHECK_EQ(text, twin.messageAt(row), QStringLiteral("строка %1: текст").arg(row));
+        CHECK_EQ(colored.visibleTimestampAt(row), twin.visibleTimestampAt(row),
+                 QStringLiteral("строка %1: момент").arg(row));
+        CHECK_EQ(colored.visibleLevelAt(row), twin.visibleLevelAt(row),
+                 QStringLiteral("строка %1: уровень").arg(row));
+        CHECK_EQ(colored.keyForRow(row).logicalEntryId, twin.keyForRow(row).logicalEntryId,
+                 QStringLiteral("строка %1: запись").arg(row));
+    }
+}
+
+static void testAnsiSequences(const QDir& dir, const QString& schema, const QStringList& fieldNames)
+{
+    const QDateTime base = fixtureBaseTime();
+    // Одно-файловая индексная вкладка не сортирует (testSingleFileOrdering):
+    // первый файл монотонный и без преамбулы, второй — с ней.
+    const QByteArray plainA = makeLogBytes(300, 41u, "\n", base, false, true, true);
+    const QByteArray plainB = makeLogBytes(220, 42u, "\r\n", base.addSecs(60), true, false, false);
+    dir.mkpath(QStringLiteral("ansi"));
+    dir.mkpath(QStringLiteral("ansi-twin"));
+    const QDir colorDir(dir.filePath(QStringLiteral("ansi")));
+    const QDir twinDir(dir.filePath(QStringLiteral("ansi-twin")));
+    const QString colorA = writeFile(colorDir, QStringLiteral("app.log"), colorizeLog(plainA));
+    const QString colorB = writeFile(colorDir, QStringLiteral("web.log"), colorizeLog(plainB));
+    const QString twinA = writeFile(twinDir, QStringLiteral("app.log"), plainA);
+    const QString twinB = writeFile(twinDir, QStringLiteral("web.log"), plainB);
+
+    runFixture(QStringLiteral("ANSI, один файл"), {colorA}, schema, fieldNames);
+    for (const IndexedLoad mode : {IndexedLoad::Sequential, IndexedLoad::Concurrent})
+        runFixture(QStringLiteral("ANSI, два файла, ") + describe(mode), {colorA, colorB}, schema,
+                   fieldNames, mode);
+
+    // Против близнеца: те же строки (файлы — под одними именами в разных
+    // каталогах, слияние по времени и имени совпадает).
+    for (const QStringList& paths : {QStringList{colorA}, QStringList{colorA, colorB}}) {
+        const QStringList twins = paths.size() == 1 ? QStringList{twinA} : QStringList{twinA, twinB};
+        const QString tag = QStringLiteral("ANSI против близнеца, %1 файл(а)").arg(paths.size());
+        Document res = loadResident(paths, schema);
+        Document idx = loadIndexed(paths, schema);
+        Document resTwin = loadResident(twins, schema);
+        Document idxTwin = loadIndexed(twins, schema);
+        checkSameAsTwin(tag + QStringLiteral(" / резидентный"), *res.model, *resTwin.model);
+        checkSameAsTwin(tag + QStringLiteral(" / индексный"), *idx.model, *idxTwin.model);
+        // Отпечатки строк (R-1) — как у близнеца и равны между бэкендами.
+        g_context = tag + QStringLiteral(" / отпечатки");
+        for (int row = 0; row < res.model->rowCount() && row < idx.model->rowCount(); ++row) {
+            const quint64 r = RecordFingerprint::ofLineText(res.model->messageAt(row));
+            CHECK(r == RecordFingerprint::ofLineText(resTwin.model->messageAt(row))
+                      && r == RecordFingerprint::ofLineText(idx.model->messageAt(row)),
+                  QStringLiteral("строка %1").arg(row));
+        }
+        // Стиль ANSI есть у раскрашенных строк на обоих бэкендах, и он один.
+        g_context = tag + QStringLiteral(" / стиль");
+        int styled = 0;
+        for (int row = 0; row < res.model->rowCount() && row < idx.model->rowCount(); ++row) {
+            const QVariant rv = res.model->data(res.model->index(row), LogModel::AnsiStyleRole);
+            const QVariant iv = idx.model->data(idx.model->index(row), LogModel::AnsiStyleRole);
+            CHECK(rv.isValid() == iv.isValid()
+                      && rv.value<AnsiStyles>() == iv.value<AnsiStyles>(),
+                  QStringLiteral("строка %1: стиль бэкендов различается").arg(row));
+            styled += rv.isValid() ? 1 : 0;
+        }
+        CHECK(styled > res.model->rowCount() / 2,
+              QStringLiteral("раскрашенных строк %1 из %2").arg(styled).arg(res.model->rowCount()));
+    }
+
+    // Хвост, оборванный посреди последовательности: индексная — двумя
+    // порциями (первая без '\n', кончается внутри CSI), резидентная — разом;
+    // обе = вкладка, открытая сразу на всех байтах.
+    {
+        const QByteArray head = colorizeLog(makeLogBytes(80, 43u, "\n", base, false, true, true));
+        const QByteArray tailA = "\x1b[38;5;244m" + base.addSecs(3600).toString(
+                                     QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")).toUtf8()
+                               + "\x1b[0m [main] \x1b[3";
+        const QByteArray tailB = "1mERROR\x1b[0m - tail \x1b]0;t\x07" "done\n"
+                                 "\x1b[90m    at com.example.Tail.call(Tail.java:1)\x1b[0m\n"
+                                 "\x1b[32m" + base.addSecs(3601).toString(
+                                     QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")).toUtf8()
+                               + "\x1b[0m [main] \x1b[32mINFO\x1b[0m - last\n";
+        dir.mkpath(QStringLiteral("ansi-tail-res"));
+        dir.mkpath(QStringLiteral("ansi-tail-idx"));
+        dir.mkpath(QStringLiteral("ansi-tail-whole"));
+        const QString resPath = writeFile(QDir(dir.filePath(QStringLiteral("ansi-tail-res"))),
+                                          QStringLiteral("tail.log"), head);
+        const QString idxPath = writeFile(QDir(dir.filePath(QStringLiteral("ansi-tail-idx"))),
+                                          QStringLiteral("tail.log"), head);
+        const QString wholePath = writeFile(QDir(dir.filePath(QStringLiteral("ansi-tail-whole"))),
+                                            QStringLiteral("tail.log"), head + tailA + tailB);
+        Document res = loadResident({resPath}, schema);
+        Document idx = loadIndexed({idxPath}, schema);
+        g_context = QStringLiteral("ANSI, хвост посреди последовательности");
+        g_contextFailures = 0;
+        CHECK(appendIndexedTail(idx, 0, tailA, schema),
+              QStringLiteral("индексная дозапись (оборвана внутри CSI)"));
+        settleChecked(*idx.model);
+        const QString provisional = idx.model->messageAt(idx.model->rowCount() - 1);
+        CHECK(!provisional.contains(QChar(0x1b)) && provisional.endsWith(QStringLiteral("[main] ")),
+              QStringLiteral("предварительная строка: %1").arg(describe(provisional)));
+        CHECK(appendIndexedTail(idx, 0, tailB, schema), QStringLiteral("индексная дозапись"));
+        CHECK(appendResidentTail(res, 0, tailA + tailB, schema), QStringLiteral("резидентная дозапись"));
+        settleChecked(*res.model);
+        settleChecked(*idx.model);
+        Document whole = loadIndexed({wholePath}, schema);
+        Document wholeRes = loadResident({wholePath}, schema);
+        g_fileNameOnly = true;
+        FilterConfig none;
+        none.name = QStringLiteral("без фильтров");
+        applyChecked(*res.model, none, fieldNames);
+        applyChecked(*idx.model, none, fieldNames);
+        // Пометка «новых» у перечитанной предварительной строки у бэкендов
+        // своя (не про ANSI) — сверяется содержимое строк.
+        checkSameAsTwin(QStringLiteral("ANSI, хвост / резидентный против индексного"), *res.model, *idx.model);
+        checkSameAsTwin(QStringLiteral("ANSI, хвост / индексный против целого"), *idx.model, *whole.model);
+        checkSameAsTwin(QStringLiteral("ANSI, хвост / резидентный против целого"), *res.model, *wholeRes.model);
+        g_fileNameOnly = false;
+        const int last = idx.model->rowCount() - 3;
+        g_context = QStringLiteral("ANSI, хвост / строка, дописанная частями");
+        CHECK_EQ(idx.model->visibleLevelAt(last), LogLevel::Error, QStringLiteral("уровень"));
+        CHECK(idx.model->messageAt(last).endsWith(QStringLiteral("ERROR - tail done")),
+              QStringLiteral("текст: %1").arg(describe(idx.model->messageAt(last))));
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -2754,6 +2945,7 @@ int main(int argc, char** argv)
 
     if (qEnvironmentVariableIsSet("EQ_ONLY_KEYED")) { testKeyedSchemas(dir); return g_failures ? 1 : 0; }
     if (qEnvironmentVariableIsSet("EQ_ONLY_MIXED")) { testMixedSchemas(dir); return g_failures ? 1 : 0; }
+    if (qEnvironmentVariableIsSet("EQ_ONLY_ANSI")) { testAnsiSequences(dir, schema, fieldNames); return g_failures ? 1 : 0; }
     if (qEnvironmentVariableIsSet("EQ_ONLY_PROV")) { testProvisionalEncodings(dir, schema, fieldNames); return g_failures ? 1 : 0; }
     runFixture(QStringLiteral("один файл (LF)"), { fileA }, schema, fieldNames);
     runFixture(QStringLiteral("один файл (CRLF, без \\n в конце)"), { fileB }, schema, fieldNames);
@@ -2791,6 +2983,7 @@ int main(int argc, char** argv)
     testProvisionalEncodings(dir, schema, fieldNames);
     testKeyedSchemas(dir);
     testMixedSchemas(dir);
+    testAnsiSequences(dir, schema, fieldNames);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

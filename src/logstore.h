@@ -65,6 +65,10 @@ public:
     // Длина сырого текста; у индексного бэкенда — оценка по байтовой длине
     // (view уточняет высоты лениво при отрисовке).
     virtual int rawTextLengthAt(int visibleRow) const = 0;
+    // Стиль ANSI строки (F-3) в координатах messageAt; пусто — кодов нет.
+    // Только для отрисовки видимых строк: резидентный — из записи, индексный —
+    // разбор сырых байтов строки по требованию.
+    virtual AnsiStyles ansiStylesAt(int visibleRow) const = 0;
     // Строка из последнего tail-батча (зелёный маркер гаттера, IsNewRole).
     virtual bool isNewAt(int visibleRow) const = 0;
 

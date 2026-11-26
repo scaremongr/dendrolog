@@ -138,10 +138,13 @@ bool TextChunkCache::readRange(int fileId, qint64 offset, qint64 length,
     return out.size() == length;
 }
 
-QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) const
+template <class F>
+bool TextChunkCache::withLineBytes(int fileId, qint64 offset, quint32 byteLength, F&& f) const
 {
-    if (byteLength == 0)
-        return QString();
+    if (byteLength == 0) {
+        f("", 0);
+        return true;
+    }
 
     const qint64 firstChunk = offset / kChunkBytes;
     const qint64 lastChunk = (offset + byteLength - 1) / kChunkBytes;
@@ -150,9 +153,9 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
         const qint64 local = offset - firstChunk * kChunkBytes;
         const QByteArray* bytes = chunkCovering(fileId, firstChunk, local + byteLength);
         if (!bytes || local + byteLength > bytes->size())
-            return QString();
-        return m_files[size_t(fileId)].decoder.decode(bytes->constData() + local,
-                                                      qsizetype(byteLength));
+            return false;
+        f(bytes->constData() + local, qsizetype(byteLength));
+        return true;
     }
 
     if (lastChunk == firstChunk + 1) {
@@ -162,24 +165,54 @@ QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) 
         // продолжается за его концом.
         const QByteArray* first = chunkCovering(fileId, firstChunk, kChunkBytes);
         if (!first || first->size() < kChunkBytes)
-            return QString();
+            return false;
         const qint64 local = offset - firstChunk * kChunkBytes;
         QByteArray assembled;
         assembled.reserve(int(byteLength));
         assembled.append(first->constData() + local, int(first->size() - local));
         const QByteArray* second = chunkCovering(fileId, lastChunk, byteLength - assembled.size());
         if (!second)
-            return QString();
+            return false;
         const qint64 remain = byteLength - assembled.size();
         if (remain > second->size())
-            return QString();
+            return false;
         assembled.append(second->constData(), int(remain));
-        return m_files[size_t(fileId)].decoder.decode(assembled);
+        f(assembled.constData(), assembled.size());
+        return true;
     }
 
     // Гигантская строка (> 2 чанков) — мимо кэша, напрямую с диска.
     QByteArray raw;
     if (!readRange(fileId, offset, byteLength, raw))
-        return QString();
-    return m_files[size_t(fileId)].decoder.decode(raw);
+        return false;
+    f(raw.constData(), raw.size());
+    return true;
+}
+
+QString TextChunkCache::lineText(int fileId, qint64 offset, quint32 byteLength) const
+{
+    QString text;
+    if (fileId < 0 || fileId >= int(m_files.size()))
+        return text;
+    const TextDecoder decoder = m_files[size_t(fileId)].decoder;
+    withLineBytes(fileId, offset, byteLength, [&](const char* data, qsizetype len) {
+        if (len > 0)
+            text = decoder.decode(data, len);
+    });
+    return text;
+}
+
+AnsiStyles TextChunkCache::lineAnsiStyles(int fileId, qint64 offset, quint32 byteLength) const
+{
+    AnsiStyles styles;
+    // Строка длиннее чанка читалась бы мимо кэша второй раз ради цвета
+    // (первый — lineText): такие строки — без цвета (F-3).
+    if (fileId < 0 || fileId >= int(m_files.size()) || byteLength == 0
+        || byteLength > quint32(kChunkBytes))
+        return styles;
+    const TextDecoder decoder = m_files[size_t(fileId)].decoder;
+    withLineBytes(fileId, offset, byteLength, [&](const char* data, qsizetype len) {
+        styles = AnsiEscape::styles(QByteArrayView(data, len), decoder);
+    });
+    return styles;
 }

@@ -20,6 +20,7 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "apptheme.h"
 #include "commandspooler.h"
 #include "commandstatusbar.h"
 #include "bookmarkstore.h"
@@ -2116,6 +2117,95 @@ void scenarioLineWrap(MainWindow& win, const QDir& dir, bool indexed)
     check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("long-line tab closes"));
 }
 
+// Цвета ANSI (F-3): коды не видны в тексте и не мешают уровню; цвет фона
+// ANSI в отрисовке вкладки — по настройке: View → ANSI Colors и Settings
+// выключают и включают его на открытой вкладке.
+static int ansiBgPixels(LogListView* view)
+{
+    const QColor red = AppTheme::ansiColor(1, view->palette());
+    const QImage image = view->viewport()->grab().toImage();
+    int count = 0;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            count += QColor(image.pixel(x, y)).rgb() == red.rgb();
+    return count;
+}
+
+void scenarioAnsiColors(MainWindow& win, const QDir& dir)
+{
+    section(QStringLiteral("ANSI colors"));
+    AppSettings::instance().setAnsiColors(true); // свип меню мог выключить
+    QByteArray bytes;
+    for (int i = 0; i < 6; ++i)
+        bytes += "\x1b[2m2026-03-05 10:00:1" + QByteArray::number(i) + ".000\x1b[0m [w] "
+               + (i == 2 ? QByteArray("\x1b[41;97mERROR\x1b[0m ") : QByteArray("\x1b[32mINFO\x1b[0m "))
+               + "line " + QByteArray::number(i) + " \x1b]0;title\x07" "end\n";
+    const QString path = testdocs::writeFile(dir, QStringLiteral("ansi-colors.log"), bytes);
+    const int before = tabs(win)->count();
+    win.openCommandLine(OpenRouting::parseCommandLine({path}));
+    check(waitFor([&]() { return tabIndexForFile(win, path) >= 0; }), QStringLiteral("colored log opens"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, path));
+    LogViewWidget* tab = currentTab(win);
+    check(waitLoaded(tab, 6), QStringLiteral("colored log loads"));
+    LogModel* model = tab->model();
+    check(model->messageAt(2) == QStringLiteral("2026-03-05 10:00:12.000 [w] ERROR line 2 end")
+              && model->visibleLevelAt(2) == LogLevel::Error,
+          QStringLiteral("escape codes are not in the text, the colored level word counts"));
+    LogListView* view = tab->view();
+    view->goToRow(0);
+    const auto settle = [&]() {
+        for (LogListView* v : win.findChildren<LogListView*>())
+            waitFor([v]() { return !v->hasPendingLayout(); }, 5000);
+        QCoreApplication::processEvents();
+    };
+    settle();
+    QAction* ansi = win.findChild<QAction*>(QStringLiteral("ansiColorsAction"));
+    check(ansi && menuAction(win, QStringLiteral("ANSI Colors")) == ansi && ansi->isChecked(),
+          QStringLiteral("View → ANSI Colors exists and is on by default"));
+    check(view->ansiColorsEnabled() && ansiBgPixels(view) > 0,
+          QStringLiteral("the ANSI background is drawn (%1 px)").arg(ansiBgPixels(view)));
+    if (ansi) {
+        ansi->trigger();
+        settle();
+        bool all = true;
+        for (LogListView* v : win.findChildren<LogListView*>())
+            all = all && !v->ansiColorsEnabled();
+        check(!AppSettings::instance().ansiColors() && all && ansiBgPixels(view) == 0,
+              QStringLiteral("View → ANSI Colors turns the colors off in every view"));
+        check(model->messageAt(2).startsWith(QStringLiteral("2026-03-05")),
+              QStringLiteral("codes stay hidden with the colors off"));
+        ansi->trigger();
+        settle();
+        check(AppSettings::instance().ansiColors() && ansiBgPixels(view) > 0,
+              QStringLiteral("and on again"));
+    }
+    // Settings → Appearance: тот же выключатель.
+    for (const bool on : {false, true}) {
+        bool shown = false;
+        g_driver->expect([&](QWidget* w) {
+            shown = true;
+            auto* box = w->findChild<QCheckBox*>(QStringLiteral("ansiColorsCheckBox"));
+            auto* buttons = w->findChild<QDialogButtonBox*>();
+            if (box && buttons && buttons->button(QDialogButtonBox::Ok)) {
+                box->setChecked(on);
+                buttons->button(QDialogButtonBox::Ok)->click();
+            } else {
+                DialogDriver::close(w);
+            }
+        });
+        pressCommand(win, QStringLiteral("settings"));
+        check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 5000),
+              QStringLiteral("Settings opens for ANSI colors"));
+        settle();
+        check(AppSettings::instance().ansiColors() == on && view->ansiColorsEnabled() == on
+                  && (ansiBgPixels(view) > 0) == on && (!ansi || ansi->isChecked() == on),
+              QStringLiteral("Settings → Show ANSI colors %1").arg(on ? "on" : "off"));
+    }
+    if (QAction* close = command(win, QStringLiteral("closeTab")))
+        close->trigger();
+    check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("colored tab closes"));
+}
+
 // View → File Labels (U-23): режим меток — на всех вкладках и в выдаче Search.
 void scenarioFileLabels(MainWindow& win)
 {
@@ -3993,6 +4083,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioSession(win, fx);
         scenarioDocks(win);
         scenarioLineWrap(win, dir, indexed);
+        scenarioAnsiColors(win, dir);
         scenarioFileLabels(win);
         scenarioAutoReload(win, dir);
         scenarioTar(win, fx); // после сценариев, которым нужен alpha в Recent Files

@@ -22,6 +22,21 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **ANSI escape codes are hidden, their colors shown.** Logs written by
+  programs with a colored console — `docker logs`, `kubectl logs`, the output
+  of a command tab, Spring Boot, Serilog console, pino-pretty, npm — no longer
+  show `\x1b[31m`-style garbage. The codes are removed when a line is read,
+  on both storage paths and in the Directory Scanner, so quick search, Find
+  All, Text Filters, highlighters, field schemas, Entry Details, copying and
+  **Save View As** all see the plain text: `ERROR foo` finds a line where
+  `ERROR` is red, and a colored level word or a timestamp behind a color code
+  is recognized. The file on disk is not changed. The colors themselves
+  (16 and 256 colors, 24-bit, bold, italic, underline, dim, inverse) are
+  drawn in the log view, readable in the light and the dark theme; the
+  ordinary token coloring fills the uncolored parts. **View → ANSI Colors**
+  and **Settings → Appearance → Show ANSI colors** turn the colors off (the
+  codes stay hidden). Bookmarks and saved positions on lines that contain
+  escape codes, saved by an earlier version, are reported as not found.
 - **A field schema per file in a merged tab.** A tab with several files gets
   an **Applies to** line under the schema list of *Log Fields*: **All files**
   or one of the tab's files. Pick a file and the schema list shows and changes

@@ -774,6 +774,17 @@ int IndexedLogStore::rawTextLengthAt(int visibleRow) const
     return int(f.index->lineByteLength(refLine(ref)));
 }
 
+AnsiStyles IndexedLogStore::ansiStylesAt(int visibleRow) const
+{
+    if (visibleRow < 0 || visibleRow >= visibleCount())
+        return {};
+    const RowRef ref = rowToRef(visibleRow);
+    const IndexedFile& f = m_files[refFile(ref)];
+    const qint64 line = refLine(ref);
+    return m_textCache.lineAnsiStyles(f.cacheFileId, f.index->lineStartOffset(line),
+                                      f.index->lineByteLength(line));
+}
+
 bool IndexedLogStore::isNewAt(int visibleRow) const
 {
     if (m_newRefs.isEmpty() || visibleRow < 0 || visibleRow >= visibleCount())

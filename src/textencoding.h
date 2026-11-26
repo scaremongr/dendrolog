@@ -1,6 +1,8 @@
 #ifndef TEXTENCODING_H
 #define TEXTENCODING_H
 
+#include "ansiescape.h"
+
 #include <QByteArrayView>
 #include <QList>
 #include <QString>
@@ -35,7 +37,9 @@
 //     MultiByteToWideChar: декодер тотален, байт не теряется и не становится
 //     U+FFFD.
 //   • decode() для UTF-8 — ровно QString::fromUtf8, как до модуля: текст
-//     UTF-8-файлов не меняется ни на символ.
+//     UTF-8-файлов не меняется ни на символ. Исключение одно (F-3):
+//     decode() снимает ANSI-последовательности (ansiescape.h) — это текст
+//     строки лога; ровно байты → текст — decodeExact().
 // ============================================================================
 
 enum class TextEncoding : quint8 {
@@ -108,11 +112,22 @@ public:
 
     // Байты строки (без EOL) → текст. Ветка UTF-8 — в заголовке: это горячий
     // путь индексатора и сканов, вызов на строку не должен стоить лишнего.
+    // ANSI-последовательности (F-3) снимаются из байтов ДО декодирования —
+    // одна точка для всех читателей текста; строка без ESC проверяется
+    // memchr и не копируется.
     QString decode(const char* data, qsizetype len) const
+    {
+        if (Q_UNLIKELY(AnsiEscape::hasEscape(data, len)))
+            return decodeStripped(data, len);
+        return decodeExact(data, len);
+    }
+    QString decode(QByteArrayView bytes) const { return decode(bytes.data(), bytes.size()); }
+    // Ровно байты → текст, без снятия последовательностей: для того, что не
+    // строка лога (имена членов архива).
+    QString decodeExact(const char* data, qsizetype len) const
     {
         return m_table ? decodeSingleByte(data, len) : QString::fromUtf8(data, len);
     }
-    QString decode(QByteArrayView bytes) const { return decode(bytes.data(), bytes.size()); }
 
     // Строка, прочитанная как Latin-1 (байт = символ U+0000–U+00FF, так её
     // отдаёт QTextStream с кодировкой Latin1), → текст однобайтной кодировки
@@ -128,6 +143,7 @@ public:
     friend bool operator!=(const TextDecoder& a, const TextDecoder& b) { return !(a == b); }
 
 private:
+    QString decodeStripped(const char* data, qsizetype len) const;
     QString decodeSingleByte(const char* data, qsizetype len) const;
 
     // Таблица байтов 0x80–0xFF; nullptr — UTF-8.

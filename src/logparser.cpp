@@ -2,6 +2,7 @@
 #include "patternheuristics.h"
 #include "bytelinereader.h"
 #include "gzipdevice.h"
+#include "ansiescape.h"
 #include <QFile>
 #include <QStringDecoder>
 #include <QTextStream>
@@ -265,6 +266,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     qint64 bytesLastStart = -1;
     bool bytesLastNewline = true;
     QString line;
+    AnsiStyles lineAnsi;
     for (;;) {
         if (m_abort.load(std::memory_order_relaxed))
             return; // Parser is shutting down — drop the rest.
@@ -280,8 +282,16 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             const QByteArrayView raw = bytes->line();
             bytesLastStart = bytes->lineStart();
             bytesLastNewline = bytes->endsWithNewline();
+            // Стиль ANSI (F-3) — только у строки с ESC; текст декодер (и
+            // ASCII-ветка) отдаёт уже без кодов.
+            const bool escaped = AnsiEscape::hasEscape(raw);
             if (EncodingDetector::firstHighByte(raw.data(), raw.size()) < 0) {
-                line = QString::fromLatin1(raw.data(), raw.size());
+                if (Q_UNLIKELY(escaped)) {
+                    const QByteArray stripped = AnsiEscape::strip(raw);
+                    line = QString::fromLatin1(stripped.data(), stripped.size());
+                } else {
+                    line = QString::fromLatin1(raw.data(), raw.size());
+                }
             } else {
                 // Не-ASCII строка, пока автоматике есть что решать, — порция
                 // для EncodingDetector::advance (правило индексатора; первая
@@ -305,11 +315,15 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
                 }
                 line = fileEncoding.decoder.decode(raw);
             }
+            if (Q_UNLIKELY(escaped))
+                lineAnsi = AnsiEscape::styles(raw, fileEncoding.decoder);
         } else {
             QTextStream& in = *stream;
             if (in.atEnd())
                 break;
             line = in.readLine();
+            lineAnsi = AnsiEscape::styles(QStringView(line));
+            AnsiEscape::stripInPlace(line);
             // Исключение одно: файл из одного BOM. readLine съедает BOM и
             // отдаёт пустую строку, которой в файле нет.
             if (line.isEmpty() && in.atEnd() && startOffset == 0 && totalParsedEntries == 0
@@ -355,6 +369,9 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
                 currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
         }
+        if (!lineAnsi.isEmpty())
+            currentEntry->setAnsiStyles(std::move(lineAnsi));
+        lineAnsi = AnsiStyles();
         batchEntries.push_back(currentEntry);
         totalParsedEntries++;
 
@@ -519,6 +536,8 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
         QString line = decoder.decode(bytes);
         if (line.endsWith(u'\r'))
             line.chop(1);
+        // Коды ANSI (F-3) — как у вкладки: классификатор видит текст без них.
+        AnsiEscape::stripInPlace(line);
         // То же правило, что у загрузки вкладки (LineClassifier::classifyLine):
         // ключевая схема с извлечением полей — метка, уровень и граница из
         // ключей. Регексная схема здесь не участвует (её цена — регекс на

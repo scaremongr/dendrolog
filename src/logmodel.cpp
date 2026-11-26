@@ -273,6 +273,18 @@ QVariant LogModel::data(const QModelIndex& index, int role) const
     }
     case BookmarkRole:
         return m_bookmarks->isBookmarkedRow(index.row());
+    case AnsiStyleRole: {
+        AnsiStyles styles = m_store->ansiStylesAt(index.row());
+        if (styles.isEmpty())
+            return QVariant();
+        // Показан не сырой текст строки (колонки полей) — позиции не те.
+        if (m_fieldFilterEnabled) {
+            const auto entry = m_store->entryAt(index.row());
+            if (!entry || formatDisplayMessage(*entry) != entry->message())
+                return QVariant();
+        }
+        return QVariant::fromValue(std::move(styles));
+    }
     default:
         return QVariant();
     }

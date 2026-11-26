@@ -1,4 +1,5 @@
 #include "recordid.h"
+#include "ansiescape.h"
 #include "tararchive.h"
 
 #include "gzipdevice.h"
@@ -115,13 +116,25 @@ std::optional<quint64> RecordFingerprint::ofFileRegion(QFile& file, qint64 from,
     return ofBytes(bytes);
 }
 
+// Последовательности ANSI (F-3) в отпечаток не входят ни в тексте, ни в
+// байтах: текст строки их не содержит (декодер снимает), а сырые байты
+// индексного пути — содержат. Без ESC — без копии.
 quint64 RecordFingerprint::ofLineText(QStringView text)
 {
+    if (Q_UNLIKELY(AnsiEscape::hasEscape(text))) {
+        QString stripped = text.toString();
+        AnsiEscape::stripInPlace(stripped);
+        return skeletonFingerprint(stripped.utf16(), stripped.size());
+    }
     return skeletonFingerprint(text.utf16(), text.size());
 }
 
 quint64 RecordFingerprint::ofLineBytes(QByteArrayView bytes)
 {
+    if (Q_UNLIKELY(AnsiEscape::hasEscape(bytes))) {
+        const QByteArray stripped = AnsiEscape::strip(bytes);
+        return skeletonFingerprint(stripped.data(), stripped.size());
+    }
     return skeletonFingerprint(bytes.data(), bytes.size());
 }
 

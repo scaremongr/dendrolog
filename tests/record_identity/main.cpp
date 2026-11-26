@@ -900,8 +900,36 @@ static void testLineFingerprints(const QDir& dir, const QString& schema)
         "2026-03-05 10:00:01.000 [w] WARN - Ångström ß œ\n"
         "    plain continuation\n"), TextEncoding::Windows1252);
 
+    // Цветной лог (F-3): коды ANSI в отпечаток не входят — бэкенды равны и
+    // равны сырым байтам; строка = та же строка без кодов.
+    QByteArray ansiLog;
+    for (const QByteArray& line : utf8Log.chopped(1).split('\n')) {
+        if (line.isEmpty()) {
+            ansiLog += "\x1b[0m\n";
+            continue;
+        }
+        ansiLog += "\x1b[2m" + line.left(10) + "\x1b[0m\x1b]0;t\x07" + line.mid(10, 14)
+                 + "\x1b[31;1m" + line.mid(24) + "\x1b[m\x1b[K\n";
+    }
+    ansiLog += "\x1b[33mcut inside a sequence \x1b[3";
+    const QByteArray ansiCp1251 = encodeText(QStringLiteral(
+        "\x1b[32m2026-03-05 10:00:00.000\x1b[0m [w] \x1b[31mERROR\x1b[0m - Ошибка \x1b[1mдиска\x1b[0m\n"
+        "\x1b[90m    продолжение\x1b[0m\n"), TextEncoding::Windows1251);
+    {
+        const QString plain = writeFile(dir, "ansi-twin.log", utf8Log + "cut inside a sequence ");
+        const QString colored = writeFile(dir, "ansi-check.log", ansiLog);
+        Document a = buildIndexed({ colored }, schema);
+        Document b = buildResident({ plain }, schema);
+        const auto pa = fingerprints(linesOf(*a.model));
+        const auto pb = fingerprints(linesOf(*b.model));
+        CHECK(pa.values() == pb.values() && !pa.isEmpty(),
+              "ANSI: отпечатки цветного лога = отпечатки того же лога без кодов");
+    }
+
     struct Source { QString name; QByteArray bytes; };
     const QList<Source> sources = {
+        { "ansi.log", ansiLog },
+        { "ansi-cp1251.log", ansiCp1251 },
         { "utf8.log", utf8Log },
         { "crlf.log", crlfLog },
         { "cp1251.log", encodeText(cyr, TextEncoding::Windows1251) },

@@ -114,6 +114,11 @@ public:
     // Номера строк в логе (U-23), [View] lineNumbers, по умолчанию выключены.
     bool lineNumbers() const { return m_lineNumbers; }
     void setLineNumbers(bool visible);
+    // Цвета ANSI в строках лога (F-3), [View] ansiColors, по умолчанию
+    // включены. Выключено — коды всё равно сняты, строка раскрашивается как
+    // обычная.
+    bool ansiColors() const { return m_ansiColors; }
+    void setAnsiColors(bool enabled);
 
     // ---- Theme ---------------------------------------------------------- //
 
@@ -249,6 +254,7 @@ private:
     FileLabelMode m_fileLabelMode { FileLabelMode::Name };
     int m_fileColumnChars { 0 };
     bool        m_lineNumbers     { false };
+    bool        m_ansiColors      { true };
     ThemeMode   m_themeMode       { ThemeMode::System };
     bool        m_autoReload      { false };
     int         m_autoReloadIntervalSecs { 2 };

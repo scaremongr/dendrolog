@@ -32,6 +32,7 @@ public:
     LogLevel visibleLevelAt(int row) const override;
     QString messageAt(int visibleRow) const override;
     int rawTextLengthAt(int visibleRow) const override;
+    AnsiStyles ansiStylesAt(int visibleRow) const override;
     bool isNewAt(int visibleRow) const override;
     int firstVisibleRowAtOrAfter(const QDateTime& t) const override;
     QPair<QDateTime, QDateTime> fullTimeRange() const override;

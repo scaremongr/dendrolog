@@ -1906,6 +1906,76 @@ static void testTarArchive()
     QThreadPool::globalInstance()->waitForDone();
 }
 
+// F-3: цветной лог (коды ANSI перед меткой, вокруг слова уровня, OSC,
+// оборванная последовательность в конце строки) — счётчики сканера и фильтр
+// по содержимому совпадают с вкладкой, запрос через границу цвета находится,
+// текст кода — нет. UTF-8, cp1251, UTF-16 LE (только резидентная вкладка).
+static void testAnsiColors(const QString& dir)
+{
+    const QString text = QString::fromUtf8(
+        "\x1b[2m2026-03-01 10:00:00\x1b[0m \x1b[32mINFO\x1b[0m  start\n"
+        "\x1b[38;5;244m2026-03-01 10:00:01\x1b[0m \x1b[31mERROR\x1b[0m foo failed\n"
+        "\x1b[90m    at com.example.Main.run(Main.java:42)\x1b[0m\n"
+        "\x1b]0;title\x07" "2026-03-01 10:00:02 \x1b[1;33mWARN\x1b[22m  Кэш \x1b[1mпрогрет\x1b[0m\n"
+        "\x1b[1;37;41m2026-03-01 10:00:03 FATAL\x1b[0m giving up \x1b[3");
+    const QString path = dir + "/colored.log";
+    const QList<ContentProbe> probes = {
+        {u"ERROR foo"_s, false, true, 1},
+        {u"Кэш прогрет"_s, false, false, 1},
+        {u"WARN  Кэш"_s, false, true, 1},
+        {u"[31m"_s, false, false, 0},
+        {u"38;5"_s, false, false, 0},
+        {u"title"_s, false, false, 0},
+        {u"giving up $"_s, true, false, 1},
+        {u"^2026-03-01 10:00:0[0-3]"_s, true, false, 1},
+        {u"^\\s+at com"_s, true, false, 1},
+    };
+    for (const QString& kind : {u"UTF-8"_s, u"Windows-1251"_s}) {
+        writeFile(path, encodeFixture(text, kind));
+        const QString what = u"ANSI "_s + kind;
+        checkAgainstTab(path, qPrintable(what));
+        LogParser parser;
+        const LogParser::FileStats stats = parser.analyzeFileForStats(path).stats;
+        CHECK(stats.totalEntries == 4 && stats.errorCount == 1 && stats.warnCount == 1
+                  && stats.fatalCount == 1,
+              qPrintable(what + u": four records, colored level words count"_s));
+        CHECK(stats.firstEntryTimestamp == QDateTime(QDate(2026, 3, 1), QTime(10, 0)),
+              qPrintable(what + u": From — the stamp behind the code"_s));
+        checkFileAgainstTab(path, probes, what, true, {FileContentSearch::kReadBlockBytes, 64, 7});
+    }
+    // Длинная строка, которую сканер режет на куски (maxLineBytes): кусок
+    // не кончается посреди последовательности, и её хвост («1m») не
+    // становится текстом следующего куска.
+    {
+        QByteArray longLine = "2026-03-01 10:00:00 INFO ";
+        for (int i = 0; i < 400; ++i)
+            longLine += "\x1b[3" + QByteArray::number(i % 8) + "mword" + QByteArray::number(i) + "\x1b[0m ";
+        longLine += "\x1b[31mERROR\x1b[0m foo\n";
+        for (const QString& kind : {u"UTF-8"_s, u"UTF-16LE"_s}) {
+            writeFile(path, encodeFixture(QString::fromUtf8(longLine), kind));
+            for (const qsizetype maxLine : {qsizetype(97), qsizetype(256), qsizetype(1000)}) {
+                const auto run = [&](const ContentProbe& probe) {
+                    FileContentSearch::Options options;
+                    options.fallback = testdocs::kTestFallbackEncoding;
+                    options.maxLineBytes = maxLine;
+                    options.blockBytes = 64;
+                    const ContentQuery query(probe.text, probe.regex, Qt::CaseSensitive);
+                    return FileContentSearch::search(path, query, options).matched;
+                };
+                const QString what = u"ANSI long line %1, chunks of %2"_s.arg(kind).arg(maxLine);
+                CHECK(!run({u"\\dm"_s, true}), qPrintable(what + u": no '<digit>m' left from a cut sequence"_s));
+                CHECK(!run({u"[3"_s, false}), qPrintable(what + u": no '[3' left from a cut sequence"_s));
+                CHECK(run({u"word399 ERROR foo"_s, false}), qPrintable(what + u": text across colors is found"_s));
+            }
+        }
+    }
+
+    writeFile(path, encodeFixture(text, u"UTF-16LE"_s));
+    checkAgainstTab(path, "ANSI UTF-16LE", /*indexedToo*/ false);
+    checkFileAgainstTab(path, probes, u"ANSI UTF-16LE"_s, false, {FileContentSearch::kReadBlockBytes, 64});
+    QFile::remove(path);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1939,6 +2009,7 @@ int main(int argc, char** argv)
     testGzipCancel();
     testZipArchive();
     testTarArchive();
+    testAnsiColors(rootPath);
 
     // Три записи, из них одна ERROR и одна WARN.
     const QByteArray alpha =

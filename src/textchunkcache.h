@@ -43,6 +43,10 @@ public:
     // Текст строки [offset, offset+byteLength) файла fileId, декодированный
     // декодером файла. Пустая строка при ошибке чтения.
     QString lineText(int fileId, qint64 offset, quint32 byteLength) const;
+    // Стиль ANSI строки (F-3): спаны SGR в координатах lineText(); пусто —
+    // в строке нет ESC (проверка memchr по байтам чанка, без копии) или
+    // строка длиннее чанка (её байты читались бы с диска второй раз).
+    AnsiStyles lineAnsiStyles(int fileId, qint64 offset, quint32 byteLength) const;
 
     // Сбросить кэшированные чанки одного файла (файл заменён/переписан).
     void invalidateFile(int fileId);
@@ -63,6 +67,10 @@ private:
     // покрывающий neededBytes, перечитывается: файл мог вырасти.
     const QByteArray* chunkCovering(int fileId, qint64 chunkIndex, qint64 neededBytes) const;
     bool readRange(int fileId, qint64 offset, qint64 length, QByteArray& out) const;
+    // Байты строки: f(data, len) прямо из чанка либо из собранной копии;
+    // false — не прочитались.
+    template <class F>
+    bool withLineBytes(int fileId, qint64 offset, quint32 byteLength, F&& f) const;
     void evictIfNeeded() const;
 
     std::vector<FileSlot> m_files;

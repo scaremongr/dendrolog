@@ -1,5 +1,7 @@
 #include "textencoding.h"
 
+#include <QVarLengthArray>
+
 #include <QFile>
 #include <QLocale>
 #include <QSysInfo>
@@ -237,6 +239,13 @@ TextDecoder::TextDecoder(TextEncoding encoding)
     , m_encoding(m_table ? encoding : TextEncoding::Utf8)
 {
     Q_ASSERT(TextEncodings::isDecodable(encoding));
+}
+
+QString TextDecoder::decodeStripped(const char* data, qsizetype len) const
+{
+    QVarLengthArray<char, 1024> buf(len);
+    const qsizetype stripped = AnsiEscape::stripBytes(data, len, buf.data());
+    return decodeExact(buf.constData(), stripped);
 }
 
 QString TextDecoder::decodeSingleByte(const char* data, qsizetype len) const

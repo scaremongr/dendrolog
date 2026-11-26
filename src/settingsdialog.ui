@@ -297,6 +297,16 @@
         </widget>
        </item>
        <item>
+        <widget class="QCheckBox" name="ansiColorsCheckBox">
+         <property name="text">
+          <string>Show ANSI colors in log lines</string>
+         </property>
+         <property name="toolTip">
+          <string>Colors written by console programs (docker logs, kubectl logs, command output). Escape codes are hidden either way; also toggled from the View menu.</string>
+         </property>
+        </widget>
+       </item>
+       <item>
         <spacer name="fontSpacer">
          <property name="orientation">
           <enum>Qt::Vertical</enum>

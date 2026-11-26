@@ -683,6 +683,47 @@ static void checkOpenPanels(const QDir& dir)
         AppSettings::instance().setThemeMode(ThemeMode::System);
     }
 
+    // Цвета ANSI (F-3): палитра 16 цветов своя у каждой темы
+    // (AppTheme::ansiColor); вид, переживший смену темы, — как созданный в
+    // новой, фон ANSI — цветом палитры текущей темы, а не прежней.
+    {
+        QByteArray bytes;
+        for (int i = 0; i < 5; ++i)
+            bytes += "\x1b[2m2026-03-05 10:02:1" + QByteArray::number(i) + ".000\x1b[0m [w] "
+                   + "\x1b[41m ERROR \x1b[0m \x1b[30mblack\x1b[0m \x1b[97mbright white\x1b[0m "
+                   + "\x1b[38;5;208morange\x1b[0m \x1b[1;4mbold\x1b[0m " + QByteArray::number(i) + '\n';
+        const QString path = testdocs::writeFile(dir, QStringLiteral("ansi-colors.log"), bytes);
+        auto doc = std::make_shared<testdocs::Document>(testdocs::buildResident({path}, testdocs::buildSchema()));
+        const auto makeView = [doc]() -> std::unique_ptr<QWidget> {
+            auto view = std::make_unique<LogListView>();
+            view->setModel(doc->model.get());
+            return view;
+        };
+        checkRepaintsOnThemeChange("Log view, ANSI colors", makeView);
+        for (const ThemeMode mode : {ThemeMode::Light, ThemeMode::Dark}) {
+            AppSettings::instance().setThemeMode(mode);
+            testdocs::pump(20);
+            std::unique_ptr<QWidget> w = shown(makeView);
+            auto* view = static_cast<LogListView*>(w.get());
+            testdocs::waitFor([&] { return !view->hasPendingLayout(); }, 5000);
+            const QImage image = grabOf(*view->viewport());
+            const QPalette pal = view->viewport()->palette();
+            QPalette other = pal;
+            other.setColor(QPalette::Base, pal.color(QPalette::Base).lightness() < 128 ? Qt::white : Qt::black);
+            int mine = 0, foreign = 0;
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x) {
+                    const QColor c = image.pixelColor(x, y);
+                    mine += c == AppTheme::ansiColor(1, pal);
+                    foreign += c == AppTheme::ansiColor(1, other);
+                }
+            const char* name = mode == ThemeMode::Dark ? "dark" : "light";
+            CHECK(mine > 50, QStringLiteral("%1: ANSI background in this theme's palette (%2 px)").arg(name).arg(mine));
+            CHECK(foreign == 0, QStringLiteral("%1: no ANSI background of the other theme (%2 px)").arg(name).arg(foreign));
+        }
+        AppSettings::instance().setThemeMode(ThemeMode::System);
+    }
+
     // Метки файлов слитой вкладки (U-23): полоса и метка — AppTheme::fileColor
     // из палитры; вид и легенда после смены темы — как созданные в новой.
     {

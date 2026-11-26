@@ -1,0 +1,1 @@
+dendrolog_add_test(ansi_escape LIBRARIES dendrolog_widgets TIMEOUT 120)

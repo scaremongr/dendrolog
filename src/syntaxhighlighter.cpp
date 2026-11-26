@@ -1,4 +1,7 @@
 #include "syntaxhighlighter.h"
+#include <limits>
+#include <QPalette>
+#include "ansiescape.h"
 #include "apptheme.h"
 #include "logentry.h"
 #include "texttoken.h"
@@ -419,3 +422,89 @@ QList<HighlightToken> tokenize(const QString& text)
 }
 
 } // namespace SyntaxHighlighter
+
+// ---------------------------------------------------------------------------
+// Цвет ANSI (F-3)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+QColor resolveAnsi(quint32 color, const QPalette& palette)
+{
+    if (AnsiColor::isIndexed(color))
+        return AppTheme::ansiColor(AnsiColor::index(color), palette);
+    if (AnsiColor::isRgb(color))
+        return QColor(int((color >> 16) & 0xFF), int((color >> 8) & 0xFF), int(color & 0xFF));
+    return QColor();
+}
+
+QColor mix(const QColor& a, const QColor& b, double t)
+{
+    return QColor::fromRgbF(float(a.redF() * (1 - t) + b.redF() * t),
+                            float(a.greenF() * (1 - t) + b.greenF() * t),
+                            float(a.blueF() * (1 - t) + b.blueF() * t));
+}
+
+HighlightToken ansiToken(const AnsiSpan& span, const QPalette& palette)
+{
+    const QColor base = palette.color(QPalette::Base);
+    const QColor text = palette.color(QPalette::Text);
+    QColor fg = resolveAnsi(span.fg, palette);
+    QColor bg = resolveAnsi(span.bg, palette);
+    if (span.attrs & AnsiSpan::Inverse) {
+        const QColor newFg = bg.isValid() ? bg : base;
+        const QColor newBg = fg.isValid() ? fg : text;
+        fg = newFg;
+        bg = newBg;
+    }
+    const QColor effectiveBg = bg.isValid() ? bg : base;
+    // Только фон ANSI без своего цвета текста: текст палитры на нём может не
+    // читаться (ESC[40m в светлой теме) — проверяется так же.
+    if (fg.isValid() || bg.isValid())
+        fg = AppTheme::ansiReadableText(fg, effectiveBg, palette);
+    if (span.attrs & AnsiSpan::Dim)
+        fg = mix(fg.isValid() ? fg : text, effectiveBg, 0.4);
+
+    HighlightToken token;
+    token.start = span.start;
+    token.end = span.start + span.length;
+    token.color = fg;
+    token.bgColor = bg;
+    token.fontAttrs = quint8(span.attrs & (AnsiSpan::Bold | AnsiSpan::Italic | AnsiSpan::Underline));
+    return token;
+}
+
+} // namespace
+
+QList<HighlightToken> SyntaxHighlighter::withAnsi(const QVector<AnsiSpan>& ansi,
+                                                  const QList<HighlightToken>& syntax,
+                                                  const QPalette& palette)
+{
+    if (ansi.isEmpty())
+        return syntax;
+    QList<HighlightToken> out;
+    out.reserve(ansi.size() * 2 + syntax.size());
+    qsizetype si = 0;
+    int cursor = 0; // всё левее уже выдано
+    const auto emitSyntaxUntil = [&](int limit) {
+        // Токены syntax в [cursor, limit), обрезанные по краям.
+        while (si < syntax.size() && syntax[si].end <= cursor)
+            ++si;
+        for (qsizetype k = si; k < syntax.size() && syntax[k].start < limit; ++k) {
+            HighlightToken t = syntax[k];
+            t.start = qMax(t.start, cursor);
+            t.end = qMin(t.end, limit);
+            if (t.end > t.start)
+                out.append(t);
+        }
+    };
+    for (const AnsiSpan& span : ansi) {
+        if (span.length <= 0 || span.start < cursor)
+            continue;
+        emitSyntaxUntil(span.start);
+        out.append(ansiToken(span, palette));
+        cursor = span.start + span.length;
+    }
+    emitSyntaxUntil((std::numeric_limits<int>::max)());
+    return out;
+}
