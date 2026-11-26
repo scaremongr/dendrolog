@@ -2,6 +2,7 @@
 #define LOGPARSER_H
 
 #include "logentry.h"
+#include "fieldlayout.h"
 #include "logpattern.h"
 #include "lineclassifier.h"
 #include "textencoding.h"
@@ -76,23 +77,18 @@ public:
     // cancelled (может быть nullptr) проверяется между кусками по 1 МБ и
     // внутри распаковки; прерванный разбор — parseSuccess = false.
     static constexpr qsizetype kMaxStatsLineBytes = 4 * 1024 * 1024;
+    // keyedSchema — ключевая схема (F-4), если у вкладки включено извлечение
+    // полей: метка, уровень и граница записи из ключей, как у загрузки.
+    // Сканер каталога схему не задаёт (nullptr — эвристика).
     StatsScan analyzeFileForStats(const QString& filePath, const StatsResume& from,
-                                  const std::atomic<bool>* cancelled = nullptr) const;
+                                  const std::atomic<bool>* cancelled = nullptr,
+                                  const LogPattern* keyedSchema = nullptr) const;
     StatsScan analyzeFileForStats(const QString& filePath) const
     {
         return analyzeFileForStats(filePath, StatsResume());
     }
     // Счётчики головы [0, X) плюс хвоста, прочитанного с X.
     static FileStats mergeStats(const FileStats& head, const FileStats& tail);
-
-    // Optional: configure a dynamic block schema so that the parser extracts
-    // structured fields into LogEntry::fields for every primary line.
-    // The string may be either the new serialized schema format or a legacy
-    // log4cxx/log4j conversion pattern, which will be migrated on read.
-    // Passing an empty string clears structured extraction.
-    void setPattern(const QString& schemaString);
-    void setExtractionEnabled(bool enabled) { m_extractionEnabled = enabled; }
-    const LogPattern& pattern() const noexcept { return m_pattern; }
 
     // Where an incremental parse continues from: the file's last record (a
     // continuation line at the start of the new bytes belongs to it) and the
@@ -115,7 +111,13 @@ public slots:
     // Полный разбор файла. encoding — состояние кодировки файла на старте
     // (F-1): по умолчанию «не решено»; выбор пользователя (Source::User)
     // переживает перечитывание и автоматикой не меняется.
-    void startParsing(const LogFilePtr& logFile, FileEncoding encoding = {});
+    // schema (F-5) — схема, которой читается файл в этом проходе, с таблицей
+    // «поле схемы → колонка вкладки»: поля записей — сразу в колонках
+    // вкладки. nullptr — без схемы (извлечение полей выключено). Схема
+    // берётся на старте прохода и живёт с ним: смена схемы вкладки не
+    // трогает проход в полёте.
+    void startParsing(const LogFilePtr& logFile, FileEncoding encoding = {},
+                      FileSchemaPtr schema = {});
     // Incremental parse: read only bytes starting at startOffset (a line
     // boundary), continuing the numbering and the current record of context.
     // streamEncoding — то, что сообщил tailState: у дозаписи нет BOM, поэтому
@@ -126,7 +128,7 @@ public slots:
     void startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                           const ResumeContext& context,
                           TextEncoding streamEncoding = TextEncoding::Utf8,
-                          FileEncoding encoding = {});
+                          FileEncoding encoding = {}, FileSchemaPtr schema = {});
 
 signals:
     void parsingStarted(const LogFilePtr& logFile);
@@ -152,23 +154,19 @@ signals:
     void parsingProgress(int progressPercentage, const LogFilePtr& logFile);
 
 private:
-    // The worker methods receive an immutable snapshot of the schema and the
-    // extraction flag taken on the GUI thread at launch time. They never read
-    // the mutable m_pattern / m_extractionEnabled members, so reconfiguring
-    // the parser (setPattern) while a parse is in flight is race-free.
-    // The one parse loop for both the initial load (initial: progress and
+    // The worker methods receive the pass's immutable schema (F-5: a parameter
+    // of the pass, not a member), so changing the tab's schema while a parse
+    // is in flight is race-free. The one parse loop for both the initial load (initial: progress and
     // parsingStarted/Failed) and an incremental read.
     void parseFrom(const LogFilePtr& logFile, qint64 startOffset,
-                   const ResumeContext& context, const LogPattern& pattern,
-                   bool extraction, bool initial,
+                   const ResumeContext& context, const FileSchema* schema,
+                   bool initial,
                    TextEncoding streamEncoding, FileEncoding encoding,
                    TextEncoding fallback);
 
     // Распознавание таймстампа/уровня и правило primary-строки; const-методы,
     // безопасно читается воркерами пула (см. LineClassifier).
     const LineClassifier m_classifier;
-    LogPattern m_pattern; // Optional block schema for structured field extraction
-    bool m_extractionEnabled = false; // Only extract fields when filter is active
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback();
 
     // Parse tasks run on this private pool, joined in the destructor so a

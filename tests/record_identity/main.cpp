@@ -1078,7 +1078,7 @@ static void testLocatorRoundTrip(const QDir& dir, const QString& schema)
                         listen(*d.model, out, &context);
                         // Фильтр — у бэкенда, в который придут строки.
                         if (!restoreResident)
-                            d.model->convertToIndexedBackend()->setFieldPattern(schema, true);
+                            d.model->convertToIndexedBackend();
                         if (filtered)
                             d.model->setLogLevelFilter({ LogLevel::Error, LogLevel::Fatal });
                         for (const SavedLine& s : lines) {

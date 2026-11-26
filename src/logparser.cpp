@@ -30,39 +30,31 @@ LogParser::~LogParser()
     m_pool.waitForDone();
 }
 
-void LogParser::startParsing(const LogFilePtr& logFile, FileEncoding encoding)
+void LogParser::startParsing(const LogFilePtr& logFile, FileEncoding encoding,
+                             FileSchemaPtr schema)
 {
-    // Snapshot the schema + flag on the GUI thread so the worker never reads
-    // the mutable members (which setPattern may rebuild concurrently). The
-    // task runs on our own pool, which the destructor joins.
-    const LogPattern patternSnapshot = m_pattern;
-    const bool extraction = m_extractionEnabled;
+    // The schema is the pass's own immutable value (the lambda keeps it
+    // alive). The task runs on our own pool, which the destructor joins.
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, patternSnapshot, extraction,
+    (void)QtConcurrent::run(&m_pool, [this, logFile, schema = std::move(schema),
                                       encoding, fallback]() {
-        this->parseFrom(logFile, 0, ResumeContext(), patternSnapshot, extraction,
+        this->parseFrom(logFile, 0, ResumeContext(), schema.get(),
                         /*initial=*/true, TextEncoding::Utf8, encoding, fallback);
     });
 }
 
 void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                                  const ResumeContext& context,
-                                 TextEncoding streamEncoding, FileEncoding encoding)
+                                 TextEncoding streamEncoding, FileEncoding encoding,
+                                 FileSchemaPtr schema)
 {
-    const LogPattern patternSnapshot = m_pattern;
-    const bool extraction = m_extractionEnabled;
     const TextEncoding fallback = m_fallbackEncoding;
     (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, context,
-                                      patternSnapshot, extraction, streamEncoding,
+                                      schema = std::move(schema), streamEncoding,
                                       encoding, fallback]() {
-        this->parseFrom(logFile, startOffset, context, patternSnapshot, extraction,
+        this->parseFrom(logFile, startOffset, context, schema.get(),
                         /*initial=*/false, streamEncoding, encoding, fallback);
     });
-}
-
-void LogParser::setPattern(const QString& schemaString)
-{
-    m_pattern.setPattern(schemaString);
 }
 
 namespace {
@@ -131,8 +123,8 @@ bool isOnlyByteOrderMark(const QString& path)
 } // namespace
 
 void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
-                          const ResumeContext& context, const LogPattern& pattern,
-                          bool extraction, bool initial,
+                          const ResumeContext& context, const FileSchema* schema,
+                          bool initial,
                           TextEncoding streamEncoding, FileEncoding fileEncoding,
                           TextEncoding fallback)
 {
@@ -238,8 +230,12 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // дозапись после Нового года получает новый год (LineClassifier).
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Ключевая схема (F-4) действует, как любая схема, только с извлечением полей.
-    const LogPattern* const keyedSchema = (extraction && pattern.isKeyed()) ? &pattern : nullptr;
+    // Схема прохода (F-5): nullptr — извлечение полей выключено. Ключевая
+    // (F-4) решает метку, уровень и границу записи; поля любой схемы — сразу
+    // в колонках вкладки (FileSchema::toLayout).
+    const bool extraction = schema && schema->isValid();
+    const LogPattern* const keyedSchema =
+        (extraction && schema->pattern.isKeyed()) ? &schema->pattern : nullptr;
     // Дата времени без даты (F-11): дозапись продолжает состояние прошлого
     // прохода (LogFile::clockState), проход с начала файла — с нуля; первая
     // такая строка при пустом состоянии зовёт предпросмотр от начала прохода.
@@ -336,8 +332,10 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         const QDateTime lineTs = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
         const LogLevel lineLevel = cls.hasLevel ? cls.level : LogLevel::Unknown;
         bool schemaMatched = cls.matched;
-        if (!keyedSchema && extraction && pattern.isValid())
-            schemaMatched = !(extractedFields = pattern.extractFields(line)).isEmpty();
+        if (!keyedSchema && extraction)
+            schemaMatched = !(extractedFields = schema->pattern.extractFields(line)).isEmpty();
+        if (extraction)
+            schema->toLayout(extractedFields);
 
         std::shared_ptr<LogEntry> currentEntry;
         if (LineClassifier::isPrimaryLine(schemaMatched, cls.hasTs, cls.leading, cls.hasLevel)) {
@@ -443,7 +441,8 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
 
 LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
                                                     const StatsResume& from,
-                                                    const std::atomic<bool>* cancelled) const
+                                                    const std::atomic<bool>* cancelled,
+                                                    const LogPattern* keyedSchema) const
 {
     StatsScan scan;
     FileStats& stats = scan.stats;
@@ -503,10 +502,9 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
 
     QStringDecoder decoder(encoding, QStringConverter::Flag::Stateless);
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(filePath);
-    // Схема — своя у этого парсера (сканер заводит парсер на скан и схему не
-    // ставит); вызывающий не меняет её во время разбора.
-    const LogPattern* const keyedSchema =
-        (m_extractionEnabled && m_pattern.isKeyed()) ? &m_pattern : nullptr;
+    // Схему задаёт вызывающий (сканер — нет); она живёт до конца разбора.
+    if (keyedSchema && !keyedSchema->isKeyed())
+        keyedSchema = nullptr;
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
     // Время без даты (F-11): предпросмотра нет (`.gz` пришлось бы

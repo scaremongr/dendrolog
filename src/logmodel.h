@@ -2,6 +2,7 @@
 #define LOGMODEL_H
 
 #include "logentry.h"
+#include "fieldlayout.h"
 #include "logscan.h"
 #include "recordid.h"
 #include "filterruleset.h"
@@ -174,6 +175,8 @@ public:
     void invalidateFileRows(const QString& filePath);
 
     // ---- Dynamic field-visibility control -----------------------------------
+    // Колонки вкладки (F-5): раскладка FieldLayout — объединение колонок схем
+    // её файлов; поля записей лежат в этих индексах.
     void setAvailableFields(const QStringList& fieldNames);
     QStringList availableFields() const { return m_availableFieldNames; }
     void setFieldDisplaySelection(bool enabled, const QVector<int>& visibleIndexes);
@@ -181,6 +184,21 @@ public:
     QVector<int> visibleFieldIndexes() const { return m_visibleFieldIndexes; }
     /// Force a display refresh without changing the schema or selection.
     void refreshDisplay();
+
+    // Схемы файлов вкладки (F-5, PR 2): своя у файла или общая; nullptr —
+    // без схемы (извлечение выключено). Модель — единственный владелец во
+    // вкладке: индексный стор берёт схему файла отсюда (извлечение по
+    // требованию, снапшоты, фильтр-воркер, поисковая база — копией), показ —
+    // hasColumn файла (formatDisplayText). Поля резидентных записей уже
+    // разобраны: смена схемы их не трогает (переизвлечение — у контроллера,
+    // инвариант 4), дисплей обновляет refreshDisplay вызывающего.
+    void setFileSchemas(const FileSchemaSet& schemas);
+    void setFileSchema(const QString& filePath, FileSchemaPtr schema);
+    const FileSchemaSet& fileSchemas() const noexcept { return m_fileSchemas; }
+    FileSchemaPtr fileSchemaFor(const QString& filePath) const
+    {
+        return m_fileSchemas.forPath(filePath);
+    }
     // -------------------------------------------------------------------------
 
     void setLogLevelFilter(const QSet<LogLevel>& levels);
@@ -325,8 +343,12 @@ private:
 public:
     // The display text itself, shared with background export so a saved view
     // is exactly what the view shows. fields are spans into message.
+    // schema — схема файла строки (F-5): строка, в схеме которой нет ни одной
+    // выбранной колонки, показывается сырым текстом (слитая вкладка из файлов
+    // с разными схемами). nullptr — правило не действует.
     static QString formatDisplayText(const QString& message, const LogEntryFields& fields,
-                                     bool fieldsShown, const QVector<int>& visibleIndexes);
+                                     bool fieldsShown, const QVector<int>& visibleIndexes,
+                                     const FileSchema* schema = nullptr);
 
 private:
 
@@ -350,6 +372,7 @@ private:
 
     QStringList m_availableFieldNames;
     QVector<int> m_visibleFieldIndexes;
+    FileSchemaSet m_fileSchemas;
     bool m_fieldFilterEnabled = false;
 
     RecordLocator* m_locator = nullptr;   // child QObject

@@ -1,14 +1,13 @@
 #ifndef FIELDREEXTRACTION_H
 #define FIELDREEXTRACTION_H
 
+#include "fieldlayout.h"
 #include "logentry.h"
 
 #include <QFutureWatcher>
 #include <QObject>
 #include <QVector>
 #include <memory>
-
-class LogPattern;
 
 // ============================================================================
 // FieldReextraction — фоновое переизвлечение полей резидентных записей при
@@ -20,6 +19,10 @@ class LogPattern;
 // читают поля без гонки, а отмена оставляет записи в старой схеме целиком
 // (а не наполовину в новой).
 //
+// Схема — на запись (F-5): запись переизвлекается схемой своего файла из
+// schemas (FileSchemaSet вкладки) и получает поля в колонках вкладки; у
+// файла без схемы (nullptr) поля снимаются.
+//
 // Порядок у владельца: finished() → остановить (с ожиданием) фоновые фильтры,
 // которые могут читать поля этих записей → apply() → перефильтровать.
 // Старые спаны (по буферу на запись — миллионы мелких освобождений)
@@ -30,8 +33,7 @@ class FieldReextraction : public QObject {
 
 public:
     FieldReextraction(QVector<std::shared_ptr<LogEntry>> entries,
-                      std::shared_ptr<const LogPattern> pattern,
-                      QObject* parent = nullptr);
+                      FileSchemaSet schemas, QObject* parent = nullptr);
     // Отменяет и дожидается воркеров.
     ~FieldReextraction() override;
 
@@ -54,10 +56,13 @@ signals:
 private:
     struct Job {
         std::shared_ptr<LogEntry> entry;
+        const FileSchema* schema = nullptr; // живёт в m_schemas
         LogEntryFields fields;
     };
     std::shared_ptr<QVector<Job>> m_jobs;
-    std::shared_ptr<const LogPattern> m_pattern;
+    // Держит схемы, на которые смотрят задания (и воркеры — через копию
+    // указателя в лямбде start()).
+    std::shared_ptr<const FileSchemaSet> m_schemas;
     QFutureWatcher<void> m_watcher;
     bool m_started = false;
 };

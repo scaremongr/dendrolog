@@ -81,6 +81,16 @@ static void appendToFile(const QString& path, const QByteArray& bytes)
     f.write(bytes);
 }
 
+// Схема прохода (F-5) из строки схемы: пустая — без схемы. Одна схема на
+// файл — колонки тождественны колонкам схемы.
+static FileSchemaPtr passSchema(const QString& schema)
+{
+    if (schema.isEmpty())
+        return nullptr;
+    FieldLayout layout;
+    return layout.schemaFor(schema);
+}
+
 // Полная индексация файла; блокирует до завершения.
 static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
                                             bool* fallback = nullptr,
@@ -101,11 +111,7 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
     QObject::connect(&indexer, &LogIndexer::needsResidentFallback, &indexer,
                      [&](const LogFilePtr&, const QString&) { fb = true; done = true; },
                      Qt::DirectConnection);
-    if (!schema.isEmpty()) {
-        indexer.setPattern(schema);
-        indexer.setExtractionEnabled(true);
-    }
-    indexer.startIndexing(lf, index);
+    indexer.startIndexing(lf, index, FileEncoding(), passSchema(schema));
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -118,13 +124,14 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
 // Дозапись хвоста; блокирует до завершения.
 static void indexAppend(LogIndexer& indexer, const LogFilePtr& lf,
                         const std::shared_ptr<LineIndex>& index,
-                        bool reindexProvisionalTail)
+                        bool reindexProvisionalTail, const QString& schema = QString())
 {
     std::atomic_bool done{false};
     auto conn = QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
                                  [&](qint64, const LogFilePtr&) { done = true; },
                                  Qt::DirectConnection);
-    indexer.startIndexingFrom(lf, index, reindexProvisionalTail);
+    indexer.startIndexingFrom(lf, index, reindexProvisionalTail, FileEncoding(),
+                              passSchema(schema));
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -149,11 +156,7 @@ static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf,
     QObject::connect(&parser, &LogParser::parsingFailed, &parser,
                      [&](const LogFilePtr&) { done = true; },
                      Qt::DirectConnection);
-    if (!schema.isEmpty()) {
-        parser.setPattern(schema);
-        parser.setExtractionEnabled(true);
-    }
-    parser.startParsing(lf);
+    parser.startParsing(lf, FileEncoding(), passSchema(schema));
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -1986,10 +1989,7 @@ static int runBench(const QString& path, const QString& patternString)
     auto lf = std::make_shared<LogFile>(path);
     auto index = std::make_shared<LineIndex>();
     LogIndexer indexer;
-    if (!patternString.isEmpty()) {
-        indexer.setPattern(patternString);
-        indexer.setExtractionEnabled(true);
-    }
+    const FileSchemaPtr schema = passSchema(patternString);
     std::atomic_bool done{false};
     QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
                      [&](qint64, const LogFilePtr&) { done = true; },
@@ -2002,7 +2002,7 @@ static int runBench(const QString& path, const QString& patternString)
                      Qt::DirectConnection);
     QElapsedTimer t;
     t.start();
-    indexer.startIndexing(lf, index);
+    indexer.startIndexing(lf, index, FileEncoding(), schema);
     // Шаг опроса 1 мс: прогон — доли секунды, шаг 20 мс давал шум ~4 % (S-17).
     while (!done)
         QThread::msleep(1);
@@ -2020,10 +2020,7 @@ static int runBenchResident(const QString& path, const QString& patternString)
 {
     auto lf = std::make_shared<LogFile>(path);
     LogParser parser;
-    if (!patternString.isEmpty()) {
-        parser.setPattern(patternString);
-        parser.setExtractionEnabled(true);
-    }
+    const FileSchemaPtr schema = passSchema(patternString);
     std::atomic_bool done{false};
     std::atomic<qint64> entries{0};
     QObject::connect(&parser, &LogParser::entriesParsed, &parser,
@@ -2037,7 +2034,7 @@ static int runBenchResident(const QString& path, const QString& patternString)
                      [&](const LogFilePtr&) { done = true; }, Qt::DirectConnection);
     QElapsedTimer t;
     t.start();
-    parser.startParsing(lf);
+    parser.startParsing(lf, FileEncoding(), schema);
     while (!done)
         QThread::msleep(5);
     std::fprintf(stderr, "bench-resident: %lld lines, %.3f s\n", (long long)entries.load(),
@@ -2810,13 +2807,11 @@ static void testKeyedLoad(const QDir& dir)
             auto growLf = std::make_shared<LogFile>(growPath);
             const auto grow = indexFile(growLf, nullptr, schema);
             LogIndexer indexer;
-            indexer.setPattern(schema);
-            indexer.setExtractionEnabled(true);
             int done = 0;
             for (const int to : cuts) {
                 appendToFile(growPath, last.mid(done, to - done));
                 done = to;
-                indexAppend(indexer, growLf, grow, grow->lastLineProvisional());
+                indexAppend(indexer, growLf, grow, grow->lastLineProvisional(), schema);
                 const QString wholePath = writeFile(dir, tag + QString("-whole-%1.log").arg(to),
                                                     fx.bytes + last.left(to));
                 auto wholeLf = std::make_shared<LogFile>(wholePath);
@@ -2834,9 +2829,9 @@ static void testKeyedLoad(const QDir& dir)
         // Счётчики сканера: то же правило, что у вкладки с этой схемой.
         {
             LogParser scanner;
-            scanner.setPattern(schema);
-            scanner.setExtractionEnabled(true);
-            const LogParser::FileStats st = scanner.analyzeFileForStats(path).stats;
+            const LogPattern scanSchema(schema);
+            const LogParser::FileStats st =
+                scanner.analyzeFileForStats(path, LogParser::StatsResume(), nullptr, &scanSchema).stats;
             int warn = 0, error = 0, fatal = 0;
             for (const keyedfx::Record& r : fx.records) {
                 warn += r.level == LogLevel::Warn;

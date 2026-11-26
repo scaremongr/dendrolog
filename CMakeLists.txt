@@ -134,6 +134,8 @@ set(DENDROLOG_CORE_SOURCES
     src/viewexport.cpp
     src/searchresultscontroller.h
     src/searchresultscontroller.cpp
+    src/fieldlayout.h
+    src/fieldlayout.cpp
     src/fieldreextraction.h
     src/fieldreextraction.cpp
     src/quicksearch.h

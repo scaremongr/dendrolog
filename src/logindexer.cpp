@@ -26,22 +26,15 @@ LogIndexer::~LogIndexer()
     m_pool.waitForDone();
 }
 
-void LogIndexer::setPattern(const QString& schemaString)
-{
-    m_pattern.setPattern(schemaString);
-}
-
 void LogIndexer::startIndexing(const LogFilePtr& logFile,
                                const std::shared_ptr<LineIndex>& index,
-                               FileEncoding encoding)
+                               FileEncoding encoding, FileSchemaPtr schema)
 {
-    // Снапшот схемы на GUI-потоке — воркер не читает мутируемые члены.
-    const LogPattern patternSnapshot = m_pattern;
-    const bool extraction = m_extractionEnabled;
+    // Схема прохода — неизменяемое значение, лямбда держит её живой.
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, index, patternSnapshot, extraction,
+    (void)QtConcurrent::run(&m_pool, [this, logFile, index, schema = std::move(schema),
                                       encoding, fallback]() {
-        this->doIndex(logFile, index, patternSnapshot, extraction,
+        this->doIndex(logFile, index, schema.get(),
                       /*initial=*/true, /*reindexProvisionalTail=*/false,
                       encoding, fallback);
     });
@@ -50,21 +43,18 @@ void LogIndexer::startIndexing(const LogFilePtr& logFile,
 void LogIndexer::startIndexingFrom(const LogFilePtr& logFile,
                                    const std::shared_ptr<LineIndex>& index,
                                    bool reindexProvisionalTail,
-                                   FileEncoding encoding)
+                                   FileEncoding encoding, FileSchemaPtr schema)
 {
-    const LogPattern patternSnapshot = m_pattern;
-    const bool extraction = m_extractionEnabled;
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, index, patternSnapshot,
-                                      extraction, reindexProvisionalTail, encoding,
-                                      fallback]() {
-        this->doIndex(logFile, index, patternSnapshot, extraction,
+    (void)QtConcurrent::run(&m_pool, [this, logFile, index, schema = std::move(schema),
+                                      reindexProvisionalTail, encoding, fallback]() {
+        this->doIndex(logFile, index, schema.get(),
                       /*initial=*/false, reindexProvisionalTail, encoding, fallback);
     });
 }
 
 void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index,
-                         const LogPattern& pattern, bool extraction,
+                         const FileSchema* schema,
                          bool initial, bool reindexProvisionalTail,
                          FileEncoding encoding, TextEncoding fallback)
 {
@@ -175,8 +165,10 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // как у LogParser: дозапись после Нового года получает новый год.
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Ключевая схема (F-4) — как у LogParser: только с извлечением полей.
-    const LogPattern* const keyedSchema = (extraction && pattern.isKeyed()) ? &pattern : nullptr;
+    // Схема прохода (F-5) — как у LogParser: nullptr — без извлечения полей.
+    const bool extraction = schema && schema->isValid();
+    const LogPattern* const pattern = extraction ? &schema->pattern : nullptr;
+    const LogPattern* const keyedSchema = (pattern && pattern->isKeyed()) ? pattern : nullptr;
     // Дата времени без даты (F-11) — как у LogParser: дозапись продолжает
     // состояние прошлого прохода, предпросмотр — от начала этого прохода.
     ClockDates clock;
@@ -227,8 +219,8 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
             LineClassifier::isPrimaryLine(false, cls.hasTs, cls.leading, cls.hasLevel);
         const bool schemaMatched = keyedSchema
             ? cls.matched
-            : (!primaryWithoutSchema && extraction && pattern.isValid())
-                ? !pattern.extractFields(text).isEmpty()
+            : (!primaryWithoutSchema && pattern)
+                ? !pattern->extractFields(text).isEmpty()
                 : false;
 
         LineIndex::LineRecord rec;
