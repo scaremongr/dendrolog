@@ -127,7 +127,7 @@ public:
     /// этим итогом всё равно придёт (отложенно, из цикла событий).
     bool send(const QByteArray& body, AiConsent& consent);
     void cancel();
-    bool isRunning() const { return m_reply != nullptr || m_retryPending; }
+    bool isRunning() const;
 
     /// Сколько раз открывались соединения (для теста «ни одного соединения»).
     int connectionAttempts() const { return m_totalAttempts; }

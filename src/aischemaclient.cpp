@@ -128,6 +128,11 @@ bool AiSchemaClient::send(const QByteArray& body, AiConsent& consent)
     return true;
 }
 
+bool AiSchemaClient::isRunning() const
+{
+    return !m_reply.isNull() || m_retryPending;
+}
+
 void AiSchemaClient::cancel()
 {
     if (m_retryPending) {
