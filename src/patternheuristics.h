@@ -81,8 +81,8 @@ QString levelDetectPattern();
 
 // Builds a draft schema from a single real log line.
 // Never fails: worst case is a single Remainder("Message") block.
-// A JSON-object or logfmt line (detectLineFormat) gets a keyed schema
-// (suggestKeyedSchema on that one line).
+// JSON и logfmt — формат строк файла (lineformat.h, F-17, шаг 7), а не
+// схема: строка такого вида получает обычный черновик блоков.
 PatternDefinition suggestSchema(const QString& sampleLine);
 
 // ---- Ключевая схема по образцам (F-4, PR 4) --------------------- //
@@ -95,15 +95,15 @@ PatternDefinition suggestSchema(const QString& sampleLine);
 //   • иначе Blocks (отступ, пустая строка, обычный лог).
 // Только ASCII-структура строки; ключи ролей не требуются — формат строки,
 // а не «распознана ли схемой» (это KeyedLine::Lookup::scan).
-enum class LineFormat { Blocks, Json, Logfmt };
-LineFormat detectLineFormat(QStringView line);
+enum class LineShape { Blocks, Json, Logfmt };
+LineShape detectLineFormat(QStringView line);
 
-// Ключевая схема по образцам: формат — у большинства непустых строк
-// (иначе false, *definition не тронут); ключи ролей — умолчания плюс ключи
-// образцов, совпавшие с ключом роли без учёта регистра («LogLevel» .NET);
-// колонки — ключи, встреченные больше чем в половине строк этого формата
-// (keyedSampleKeys). Блоки — запасной «Message».
-bool suggestKeyedSchema(const QStringList& sampleLines, PatternDefinition* definition);
+// Ключи формата строк по образцам (LineFormatDetector, F-17, шаг 7): формат —
+// у большинства непустых строк (иначе false, *definition не тронут); ключи
+// ролей — умолчания плюс ключи образцов, совпавшие с ключом роли без учёта
+// регистра («LogLevel» .NET); колонки — ключи, встреченные больше чем в
+// половине строк этого формата (keyedSampleKeys).
+bool suggestKeyedDefinition(const QStringList& sampleLines, KeyedDefinition* definition);
 
 // Ключи верхнего уровня строк образца в формате definition по порядку
 // первой встречи, кроме ключей ролей, колонок definition и имён, которые

@@ -1,4 +1,5 @@
 #include "logparser.h"
+#include "lineformat.h"
 #include "patternheuristics.h"
 #include "bytelinereader.h"
 #include "gzipdevice.h"
@@ -32,14 +33,13 @@ LogParser::~LogParser()
 }
 
 void LogParser::startParsing(const LogFilePtr& logFile, FileEncoding encoding,
-                             FileSchemaPtr schema)
+                             LineFormat format)
 {
-    // The schema is the pass's own immutable value (the lambda keeps it
-    // alive). The task runs on our own pool, which the destructor joins.
+    // The line format is the pass's own value. The task runs on our own
+    // pool, which the destructor joins.
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, schema = std::move(schema),
-                                      encoding, fallback]() {
-        this->parseFrom(logFile, 0, ResumeContext(), schema.get(),
+    (void)QtConcurrent::run(&m_pool, [this, logFile, format, encoding, fallback]() {
+        this->parseFrom(logFile, 0, ResumeContext(), format,
                         /*initial=*/true, TextEncoding::Utf8, encoding, fallback);
     });
 }
@@ -47,13 +47,12 @@ void LogParser::startParsing(const LogFilePtr& logFile, FileEncoding encoding,
 void LogParser::startParsingFrom(const LogFilePtr& logFile, qint64 startOffset,
                                  const ResumeContext& context,
                                  TextEncoding streamEncoding, FileEncoding encoding,
-                                 FileSchemaPtr schema)
+                                 LineFormat format)
 {
     const TextEncoding fallback = m_fallbackEncoding;
     (void)QtConcurrent::run(&m_pool, [this, logFile, startOffset, context,
-                                      schema = std::move(schema), streamEncoding,
-                                      encoding, fallback]() {
-        this->parseFrom(logFile, startOffset, context, schema.get(),
+                                      format, streamEncoding, encoding, fallback]() {
+        this->parseFrom(logFile, startOffset, context, format,
                         /*initial=*/false, streamEncoding, encoding, fallback);
     });
 }
@@ -124,7 +123,7 @@ bool isOnlyByteOrderMark(const QString& path)
 } // namespace
 
 void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
-                          const ResumeContext& context, const FileSchema* schema,
+                          const ResumeContext& context, LineFormat lineFormat,
                           bool initial,
                           TextEncoding streamEncoding, FileEncoding fileEncoding,
                           TextEncoding fallback)
@@ -232,13 +231,12 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
     // дозапись после Нового года получает новый год (LineClassifier).
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Схема прохода (F-5): nullptr — без схемы. Ключевая (F-4) решает метку,
-    // уровень и границу записи, регексная — только границу. Полей записи не
-    // хранят (F-17, шаг 3): поля — функция текста и схемы (FieldSource).
-    const LogPattern* const passPattern =
-        (schema && schema->pattern.isValid()) ? &schema->pattern : nullptr;
-    const LogPattern* const keyedSchema =
-        (passPattern && passPattern->isKeyed()) ? passPattern : nullptr;
+    // Формат строк (F-17, шаг 7): «не решён» — решается по началу файла ДО
+    // первой классифицированной строки, тем же правилом, что у индексатора
+    // (LineFormatDetector::advance), и сообщается раньше первой порции.
+    if (LineFormatDetector::advance(lineFormat, logFile->filePath, &m_abort))
+        emit lineFormatDecided(logFile, lineFormat, /*afterLines=*/!initial);
+    const LineFormatReader formatReader(lineFormat);
     // Дата времени без даты (F-11): дозапись продолжает состояние прошлого
     // прохода (LogFile::clockState), проход с начала файла — с нуля; первая
     // такая строка при пустом состоянии зовёт предпросмотр от начала прохода.
@@ -338,30 +336,20 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
         fileLineNumber++;
 
         // Метка, уровень и граница записи — LineClassifier::classifyLine, то же
-        // правило, что у индексатора: ключевая схема (F-4) берёт их из ключей
-        // и сразу отдаёт поля, без неё — эвристика по строке. Регексная схема
-        // решает только «первичная ли» (и даёт поля).
+        // правило, что у индексатора: формат строк файла (F-17, шаг 7).
         clockBeforeLine = clock.state;
-        const KeyedClassification cls =
-            m_classifier.classifyLine(keyedSchema, line, yearRef, &clock);
+        const LineClassification cls =
+            m_classifier.classifyLine(&formatReader, line, yearRef, &clock);
         const QDateTime lineTs = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
         const LogLevel lineLevel = cls.hasLevel ? cls.level : LogLevel::Unknown;
-        // Регексная схема решает только «первичная ли» — и только там, где
-        // без неё строка первичной не была бы (как у индексатора): строке с
-        // ведущей меткой разбор схемой не нужен.
-        bool schemaMatched = cls.matched;
-        if (!keyedSchema && passPattern
-            && !LineClassifier::isPrimaryLine(false, cls.hasTs, cls.leading, cls.hasLevel))
-            schemaMatched = !passPattern->extractFields(line).isEmpty();
-
         std::shared_ptr<LogEntry> currentEntry;
-        if (LineClassifier::isPrimaryLine(schemaMatched, cls.hasTs, cls.leading, cls.hasLevel)) {
+        if (cls.primary) {
             currentLogicalEntryId = logicalEntryIdCounter++;
             currentLogicalEntryTimestamp = lineTs;
             currentLogicalEntryLevel = lineLevel;
             currentEntry = std::make_shared<LogEntry>(currentLogicalEntryId, fileLineNumber,
                 currentLogicalEntryTimestamp, currentLogicalEntryLevel, line, logFile);
-            currentEntry->setSchemaMatched(schemaMatched);
+            currentEntry->setFormatMatched(cls.matched);
             currentHead = currentEntry;
         } else if (currentLogicalEntryId < 0 || !currentHead) {
             // Ни одной записи ещё нет — строка становится собственной записью
@@ -470,7 +458,7 @@ void LogParser::parseFrom(const LogFilePtr& logFile, qint64 startOffset,
 LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
                                                     const StatsResume& from,
                                                     const std::atomic<bool>* cancelled,
-                                                    const LogPattern* keyedSchema) const
+                                                    const LineFormat* lineFormat) const
 {
     StatsScan scan;
     FileStats& stats = scan.stats;
@@ -530,9 +518,10 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
 
     QStringDecoder decoder(encoding, QStringConverter::Flag::Stateless);
     const LineClassifier::YearReference yearRef = LineClassifier::yearReferenceForFile(filePath);
-    // Схему задаёт вызывающий (сканер — нет); она живёт до конца разбора.
-    if (keyedSchema && !keyedSchema->isKeyed())
-        keyedSchema = nullptr;
+    // Формат строк (F-17, шаг 7): задан вызывающим или решается по началу
+    // файла тем же детектором, что у вкладки (сканер каталога).
+    const LineFormatReader formatReader(
+        lineFormat ? *lineFormat : LineFormatDetector::detectInFile(filePath, cancelled));
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
     // Время без даты (F-11): предпросмотра нет (`.gz` пришлось бы
@@ -549,15 +538,12 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
             line.chop(1);
         // Коды ANSI (F-3) — как у вкладки: классификатор видит текст без них.
         AnsiEscape::stripInPlace(line);
-        // То же правило, что у загрузки вкладки (LineClassifier::classifyLine):
-        // ключевая схема с извлечением полей — метка, уровень и граница из
-        // ключей. Регексная схема здесь не участвует (её цена — регекс на
-        // каждую строку); сканер каталога схему не задаёт вовсе — счётчики
-        // по эвристике, как у вкладки без схемы.
-        const KeyedClassification cls = m_classifier.classifyLine(keyedSchema, line, yearRef, &clock);
+        // То же правило, что у загрузки вкладки (LineClassifier::classifyLine
+        // с форматом строк файла).
+        const LineClassification cls = m_classifier.classifyLine(&formatReader, line, yearRef, &clock);
         const QDateTime ts = cls.hasTs ? QDateTime::fromMSecsSinceEpoch(cls.tsMs) : QDateTime();
         const LogLevel level = cls.hasLevel ? cls.level : LogLevel::Unknown;
-        if (LineClassifier::isPrimaryLine(cls.matched, cls.hasTs, cls.leading, cls.hasLevel)) {
+        if (cls.primary) {
             recordLevel = level;
             if (!stats.firstEntryTimestamp.isValid()) {
                 stats.firstEntryTimestamp = ts;

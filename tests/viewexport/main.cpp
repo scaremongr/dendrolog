@@ -537,8 +537,10 @@ static void testTableExport(const QDir& dir)
     // Ключевая схема JSON Lines: значения с \", \\, \n и \u-кириллицей.
     const auto fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 64);
     const QString keyedPath = testdocs::writeFile(dir, "table-keyed.jsonl", fx.bytes);
+    // Схемы нет (F-17, шаг 7): JSON — формат строк файла, колонки — его ключи.
     const QString keyedSchema = keyedfx::schema(KeyedDefinition::Format::JsonObject);
-    const QStringList keyedFields = LogPattern(keyedSchema).fieldNames();
+    const QStringList keyedFields =
+        keyedfx::expectedFormat(KeyedDefinition::Format::JsonObject).keys.columnNames();
     QVector<int> firstLine(fx.records.size(), -1);
     for (int line = 0; line < fx.lineRecord.size(); ++line) {
         const int rec = fx.lineRecord.at(line);

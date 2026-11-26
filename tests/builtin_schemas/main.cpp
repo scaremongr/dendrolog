@@ -13,11 +13,16 @@
 //   5. Метки времени форматов распознаёт LineClassifier (F-10), а схемы,
 //      исправленные ради этого после Q-5 (q5/ — их прежние версии),
 //      доезжают до пользователя, который их не трогал.
+//   6. Снятые с поставки «JSON Lines» и «logfmt» (F-17, шаг 7: формат
+//      строк файла, f17/ — их последние версии): нетронутые удаляются и не
+//      воскресают, изменённые и свои — целы; образцы этих форматов читаются
+//      без схемы (форматом строк) — моменты, уровни, границы и поля из ключей.
 //
 // Каталог схем в исходниках передаётся define DENDROLOG_PATTERNS_SOURCE_DIR.
 
 #include "builtinschemas.h"
 #include "lineclassifier.h"
+#include "lineformat.h"
 #include "logpattern.h"
 #include "patternheuristics.h"
 #include "builtinsamples.h"
@@ -171,52 +176,105 @@ bool expectsTime(const SchemaCase& sc, const Sample& s)
     return sc.file != QStringLiteral("python-basicconfig.json");   // времени нет вовсе
 }
 
-bool isKeyedCase(const SchemaCase& sc)
+// Формат строки образцов встроенных схем — «блоки» (PatternHeuristics::
+// detectLineFormat): JSON и logfmt — не схемы, а форматы строк (F-17, шаг 7).
+void testLineShape(const SchemaCase& sc)
 {
-    return LogPattern(schemaOf(sc.file)).isKeyed();
-}
-
-// Ключевая схема (F-4): момент и «распознана» — из ключей
-// (LineClassifier::classifyKeyed), заданный момент каждой записи; строки
-// продолжений схема не распознаёт. Формат строки по образцу
-// (PatternHeuristics::detectLineFormat) — формат схемы, у регексных
-// схем — «блоки».
-void testKeyedClassification(const SchemaCase& sc)
-{
-    const LogPattern pattern(schemaOf(sc.file));
-    const bool keyed = pattern.isKeyed();
-    PatternHeuristics::LineFormat expected = PatternHeuristics::LineFormat::Blocks;
-    if (keyed)
-        expected = pattern.keyed()->format == KeyedDefinition::Format::Logfmt
-            ? PatternHeuristics::LineFormat::Logfmt : PatternHeuristics::LineFormat::Json;
-    const LineClassifier classifier;
     for (const Sample& s : sc.samples) {
         if (s.continuation)
             continue;
-        check(PatternHeuristics::detectLineFormat(s.line) == expected,
+        check(PatternHeuristics::detectLineFormat(s.line) == PatternHeuristics::LineShape::Blocks,
               QStringLiteral("%1: формат строки по образцу: %2").arg(sc.file, s.line));
-        if (!keyed)
+    }
+}
+
+// Образцы, повторённые до kMinLines непустых строк: малый файл формат
+// строк не решает (F-17, шаг 7), а записи без меток (basicConfig) начинает
+// только решённое правило «ведущий уровень».
+int sampleRepeats(const SchemaCase& sc)
+{
+    return int((LineFormatDetector::kMinLines + sc.samples.size() - 1) / sc.samples.size());
+}
+
+QByteArray sampleBytes(const SchemaCase& sc)
+{
+    QByteArray bytes;
+    for (int k = 0; k < sampleRepeats(sc); ++k)
+        for (const Sample& s : sc.samples)
+            bytes += s.line.toUtf8() + '\n';
+    return bytes;
+}
+
+// Форматы строк JSON Lines и logfmt (F-17, шаг 7; прежние встроенные
+// ключевые схемы F-4): классификатор с форматом по умолчанию — момент и
+// уровень из ключей, «распознана» — у записей, не у продолжений; детектор на
+// файле образцов решает этот формат; оба бэкенда без схемы — границы,
+// моменты и поля ролей (колонки формата) как заданы.
+void testFormatCase(const SchemaCase& sc, const QDir& tmp)
+{
+    const bool json = sc.file == QLatin1String("json");
+    const LineFormat format = LineFormat::structured(json ? LineFormat::Kind::Json : LineFormat::Kind::Logfmt);
+    const LineFormatReader reader(format);
+    const LineClassifier classifier;
+    for (const Sample& s : sc.samples) {
+        const LineClassification k = classifier.classifyLine(&reader, s.line, {}, nullptr);
+        if (s.continuation) {
+            check(!k.matched, QStringLiteral("%1: продолжение не распознано: %2").arg(sc.file, s.line));
             continue;
-        const KeyedClassification k = classifier.classifyKeyed(pattern, s.line);
+        }
+        check(PatternHeuristics::detectLineFormat(s.line)
+                  == (json ? PatternHeuristics::LineShape::Json : PatternHeuristics::LineShape::Logfmt),
+              QStringLiteral("%1: формат строки по образцу: %2").arg(sc.file, s.line));
         check(k.matched && k.hasTs && k.tsMs == s.ms,
               QStringLiteral("%1: момент из ключа %2, ожидалось %3: %4")
                   .arg(sc.file).arg(k.tsMs).arg(s.ms).arg(s.line));
         check(k.hasLevel, QStringLiteral("%1: уровень из ключа: %2").arg(sc.file, s.line));
     }
-    if (!keyed)
-        return;
-    for (const Sample& s : sc.samples)
-        if (s.continuation)
-            check(!classifier.classifyKeyed(pattern, s.line).matched,
-                  QStringLiteral("%1: продолжение не распознано: %2").arg(sc.file, s.line));
-    check(pattern.fieldNames().mid(0, 3) == QStringList({"Timestamp", "Level", "Message"}),
-          QStringLiteral("%1: колонки ролей").arg(sc.file));
+
+    const QString path = testdocs::writeFile(tmp, sc.file + QStringLiteral(".format.log"), sampleBytes(sc));
+    const LineFormat detected = LineFormatDetector::detectInFile(path);
+    check(detected.kind == format.kind && detected.origin == LineFormat::Origin::Auto,
+          QStringLiteral("%1: детектор решает формат «%2»").arg(sc.file, detected.displayName()));
+    testdocs::Document resident = testdocs::buildResident({path}, QString());
+    testdocs::Document indexed = testdocs::buildIndexed({path}, QString());
+    check(resident.errors.isEmpty() && indexed.errors.isEmpty(),
+          QStringLiteral("%1: загрузка без схемы без ошибок").arg(sc.file));
+    for (testdocs::Document* doc : {&resident, &indexed}) {
+        const QString which = doc == &resident ? QStringLiteral("резидентный") : QStringLiteral("индексный");
+        const int n = doc->model->rowCount();
+        QMap<int, std::shared_ptr<LogEntry>> byLine;
+        for (int r = 0; r < n; ++r)
+            if (const auto e = doc->model->entryAt(r))
+                byLine.insert(e->originalLineNumber(), e);
+        check(byLine.size() == sc.samples.size() * sampleRepeats(sc),
+              QStringLiteral("%1 (%2): число строк").arg(sc.file, which));
+        const QStringList columns = doc->layout.columns;
+        int line = 0, prevRecord = -1;
+        for (auto it = byLine.cbegin(); it != byLine.cend(); ++it, ++line) {
+            const Sample& s = sc.samples[line % sc.samples.size()];
+            const bool starts = it.value()->logicalEntryId() != prevRecord;
+            prevRecord = it.value()->logicalEntryId();
+            check(starts == !s.continuation,
+                  QStringLiteral("%1 (%2): начало записи на строке %3").arg(sc.file, which).arg(line + 1));
+            if (s.continuation)
+                continue;
+            check(it.value()->timestamp().toMSecsSinceEpoch() == s.ms,
+                  QStringLiteral("%1 (%2): момент строки %3").arg(sc.file, which).arg(line + 1));
+            const LogEntryFields f = doc->model->fieldsOf(*it.value());
+            for (auto want = s.fields.cbegin(); want != s.fields.cend(); ++want) {
+                const int c = int(columns.indexOf(want.key()));
+                check(c >= 0 && f.value(c, it.value()->message()) == want.value(),
+                      QStringLiteral("%1 (%2): поле %3 строки %4: «%5», ожидалось «%6»")
+                          .arg(sc.file, which, want.key()).arg(line + 1)
+                          .arg(c >= 0 ? f.value(c, it.value()->message()) : QStringLiteral("(нет колонки)"),
+                               want.value()));
+            }
+        }
+    }
 }
 
 void testClassifierTime(const SchemaCase& sc)
 {
-    if (isKeyedCase(sc))
-        return;   // время — из ключа: testKeyedClassification
     const LineClassifier classifier;
     for (const Sample& s : sc.samples) {
         if (s.continuation)
@@ -264,10 +322,8 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
     const QString schema = schemaOf(sc.file);
     const LogPattern pattern(schema);
 
-    QByteArray bytes;
-    for (const Sample& s : sc.samples)
-        bytes += s.line.toUtf8() + '\n';
-    const QString path = testdocs::writeFile(tmp, sc.file + QStringLiteral(".log"), bytes);
+    const QString path = testdocs::writeFile(tmp, sc.file + QStringLiteral(".log"), sampleBytes(sc));
+    const int total = int(sc.samples.size()) * sampleRepeats(sc);
     check(!path.isEmpty(), QStringLiteral("%1: файл образцов записан").arg(sc.file));
 
     testdocs::Document resident = testdocs::buildResident({path}, schema);
@@ -278,16 +334,16 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
 
     const QMap<int, RowInfo> res = rowsByLine(resident, pattern);
     const QMap<int, RowInfo> idx = rowsByLine(indexed, pattern);
-    check(res.size() == sc.samples.size() && idx.size() == sc.samples.size(),
+    check(res.size() == total && idx.size() == total,
           QStringLiteral("%1: строк %2 / %3, ожидалось %4")
-              .arg(sc.file).arg(res.size()).arg(idx.size()).arg(sc.samples.size()));
-    if (res.size() != sc.samples.size() || idx.size() != sc.samples.size())
+              .arg(sc.file).arg(res.size()).arg(idx.size()).arg(total));
+    if (res.size() != total || idx.size() != total)
         return;
 
     const QList<int> lines = res.keys();
     check(lines == idx.keys(), QStringLiteral("%1: одни и те же номера строк").arg(sc.file));
     for (int i = 0; i < lines.size(); ++i) {
-        const Sample& s = sc.samples[i];
+        const Sample& s = sc.samples[i % sc.samples.size()];
         const RowInfo& r = res[lines[i]];
         const RowInfo& x = idx[lines[i]];
         const bool resStarts = i == 0 || r.recordId != res[lines[i - 1]].recordId;
@@ -327,8 +383,6 @@ void testBackends(const SchemaCase& sc, const QDir& tmp)
 // Пустая схема = схема не участвует, как при выключенном Filter blocks.
 void testBackendsWithoutExtraction(const SchemaCase& sc, const QDir& tmp)
 {
-    if (isKeyedCase(sc))
-        return;   // эпоху числом и уровень из ключа без схемы не видно (F-4)
     for (const Sample& s : sc.samples)
         if (!s.continuation && !expectsTime(sc, s))
             return;   // запись без метки отличает только схема (basicConfig)
@@ -610,74 +664,77 @@ void testUpgradeFromQ5()
     }
 }
 
-// Встроенные ключевые схемы (F-4, PR 4) доезжают до пользователя прежнего
-// выпуска: ставятся рядом с его схемами, своя схема с тем же файлом или
-// именем их отклоняет; пересохранение нетронутой не делает её «изменённой».
-void testKeyedArrival()
+// Снятые с поставки «JSON Lines» и «logfmt» (F-17, шаг 7; BuiltinSchemas::
+// kRetired): у пользователя прежнего выпуска нетронутые копии удаляются и
+// больше не воскресают; изменённая пользователем и своя схема с тем же
+// именем файла целы и читаются запасным блоком «Message» (не сломаны).
+void testRetiredSchemas()
 {
-    const QStringList keyedFiles = {QStringLiteral("json-lines.json"), QStringLiteral("logfmt.json")};
-    for (const QString& f : keyedFiles) {
-        const QJsonObject obj = QJsonDocument::fromJson(readAll(QDir(kSourceDir).filePath(f))).object();
-        check(obj.value(QStringLiteral("version")).toInt() == 3 && obj.contains(QStringLiteral("keyed")),
-              QStringLiteral("%1: формат версии 3 с ключевой частью").arg(f));
-        const QJsonArray blocks = obj.value(QStringLiteral("blocks")).toArray();
-        check(blocks.size() == 1
-                  && blocks[0].toObject().value(QStringLiteral("name")).toString() == QLatin1String("Message"),
-              QStringLiteral("%1: запасной блок Message для версий без F-4").arg(f));
-        check(LogPattern(schemaOf(f)).isKeyed(), QStringLiteral("%1: ключевая схема").arg(f));
+    const QStringList retired = {QStringLiteral("json-lines.json"), QStringLiteral("logfmt.json")};
+    const QString f17 = QStringLiteral(DENDROLOG_F17_PATTERNS_DIR);
+    for (const QString& f : retired) {
+        check(!QFile::exists(QDir(kSourceDir).filePath(f)), QStringLiteral("%1 больше не поставляется").arg(f));
+        const LogPattern old(QString::fromUtf8(readAll(QDir(f17).filePath(f))));
+        check(old.isValid() && old.fieldNames() == QStringList{QStringLiteral("Message")},
+              QStringLiteral("%1: прежняя ключевая схема читается запасным блоком Message").arg(f));
+        check(LogPattern::isRetiredKeyedDefinition(QString::fromUtf8(readAll(QDir(f17).filePath(f)))),
+              QStringLiteral("%1: определение узнаётся как снятая ключевая схема").arg(f));
     }
 
     QTemporaryDir tmpDir;
     const QDir tmp(tmpDir.path());
-    // Прежний выпуск — без ключевых схем.
-    const QString old = makeSource(tmp, QStringLiteral("v06"));
-    for (const QString& f : keyedFiles)
-        QFile::remove(QDir(old).filePath(f));
+    // Прежний выпуск — с ключевыми схемами.
+    const QString old = makeSource(tmp, QStringLiteral("v-f4"));
+    for (const QString& f : retired)
+        QFile::copy(QDir(f17).filePath(f), QDir(old).filePath(f));
 
-    const QString target = tmp.filePath(QStringLiteral("arrive/patterns"));
+    // 1. Нетронутые — удаляются.
+    const QString target = tmp.filePath(QStringLiteral("retire/patterns"));
     BuiltinSchemas::InstallReport r = BuiltinSchemas::install(old, target);
-    check(r.errors.isEmpty() && !r.installed.contains(keyedFiles[0]), QStringLiteral("прежний выпуск поставлен"));
+    check(r.errors.isEmpty() && r.installed.contains(retired[0]) && r.installed.contains(retired[1]),
+          QStringLiteral("прежний выпуск ставит ключевые схемы"));
     r = BuiltinSchemas::install(kSourceDir, target);
-    check(r.errors.isEmpty() && r.installed == keyedFiles && r.updated.isEmpty(),
-          QStringLiteral("доезжают обе ключевые схемы: %1").arg(r.installed.join(QLatin1Char(' '))));
-    for (const QString& f : keyedFiles)
-        check(readAll(QDir(target).filePath(f)) == readAll(QDir(kSourceDir).filePath(f)),
-              QStringLiteral("%1 скопирован байт в байт").arg(f));
+    check(r.errors.isEmpty() && r.retired == retired && r.changed(),
+          QStringLiteral("нетронутые сняты: %1").arg(r.retired.join(QLatin1Char(' '))));
+    for (const QString& f : retired)
+        check(!QFile::exists(QDir(target).filePath(f)), QStringLiteral("%1 удалён").arg(f));
     r = BuiltinSchemas::install(kSourceDir, target);
-    check(!r.changed() && r.declined.isEmpty(), QStringLiteral("ключевые: повторный запуск ничего не делает"));
+    check(!r.changed() && r.errors.isEmpty(), QStringLiteral("повторный запуск ничего не делает"));
+    for (const QString& f : retired)
+        check(!QFile::exists(QDir(target).filePath(f)), QStringLiteral("%1 не воскрес").arg(f));
 
-    // Пересохранение каноническим определением (так пишет каталог схем) —
-    // та же схема: следующий выпуск её обновит.
+    // 2. Изменённая пользователем (свой ключ в колонках) и пересохранённая
+    // с другим описанием: первая цела, вторая снята.
+    const QString target2 = tmp.filePath(QStringLiteral("edited/patterns"));
+    BuiltinSchemas::install(old, target2);
     {
-        const QString p = QDir(target).filePath(keyedFiles[0]);
+        const QString p = QDir(target2).filePath(retired[0]);
         QJsonObject obj = QJsonDocument::fromJson(readAll(p)).object();
-        const QJsonObject canonical = QJsonDocument::fromJson(schemaOf(keyedFiles[0]).toUtf8()).object();
-        for (auto it = canonical.begin(); it != canonical.end(); ++it)
-            obj.insert(it.key(), it.value());
-        check(writeAll(p, QJsonDocument(obj).toJson(QJsonDocument::Compact)), QStringLiteral("пересохранение"));
-        const QString v2 = makeSource(tmp, QStringLiteral("v2keyed"));
-        QJsonObject fixedKeyed = obj.value(QStringLiteral("keyed")).toObject();
-        fixedKeyed.insert(QStringLiteral("extraColumns"), QJsonArray({QStringLiteral("logger")}));
-        check(patchSchema(QDir(v2).filePath(keyedFiles[0]), QStringLiteral("keyed"), fixedKeyed),
-              QStringLiteral("исправление ключевой части в новом выпуске"));
-        r = BuiltinSchemas::install(v2, target);
-        check(r.updated == QStringList{keyedFiles[0]},
-              QStringLiteral("пересохранённая нетронутая обновляется: %1").arg(r.updated.join(QLatin1Char(' '))));
+        QJsonObject keyed = obj.value(QStringLiteral("keyed")).toObject();
+        keyed.insert(QStringLiteral("extraColumns"), QJsonArray({QStringLiteral("logger")}));
+        obj.insert(QStringLiteral("keyed"), keyed);
+        check(writeAll(p, QJsonDocument(obj).toJson()), QStringLiteral("правка ключевой части"));
+        const QString q = QDir(target2).filePath(retired[1]);
+        check(patchSchema(q, QStringLiteral("description"), QStringLiteral("my note")),
+              QStringLiteral("правка только описания"));
     }
-
-    // У пользователя уже есть свой logfmt.json и своя схема «JSON Lines».
-    const QString target2 = tmp.filePath(QStringLiteral("own/patterns"));
-    QDir().mkpath(target2);
-    const QByteArray ownLogfmt = "{\"name\": \"My logfmt\", \"blocks\": [{\"name\": \"Message\", \"kind\": \"remainder\"}]}";
-    const QByteArray ownJson = "{\"name\": \"JSON Lines\", \"blocks\": [{\"name\": \"Message\", \"kind\": \"remainder\"}]}";
-    check(writeAll(QDir(target2).filePath(QStringLiteral("logfmt.json")), ownLogfmt), QStringLiteral("свой logfmt.json"));
-    check(writeAll(QDir(target2).filePath(QStringLiteral("my-json.json")), ownJson), QStringLiteral("своя «JSON Lines»"));
-    r = BuiltinSchemas::install(old, target2);
+    const QByteArray edited = readAll(QDir(target2).filePath(retired[0]));
     r = BuiltinSchemas::install(kSourceDir, target2);
-    check(r.declined == keyedFiles,
-          QStringLiteral("свои файл и имя отклоняют ключевые: %1").arg(r.declined.join(QLatin1Char(' '))));
-    check(readAll(QDir(target2).filePath(QStringLiteral("logfmt.json"))) == ownLogfmt, QStringLiteral("свой logfmt.json цел"));
-    check(!QFile::exists(QDir(target2).filePath(QStringLiteral("json-lines.json"))), QStringLiteral("дубль имени не создан"));
+    check(r.retired == QStringList{retired[1]},
+          QStringLiteral("снята только нетронутая: %1").arg(r.retired.join(QLatin1Char(' '))));
+    check(readAll(QDir(target2).filePath(retired[0])) == edited, QStringLiteral("изменённая пользователем цела"));
+    check(LogPattern(QString::fromUtf8(edited)).isValid(), QStringLiteral("изменённая читается (Message)"));
+
+    // 3. Свой файл того же имени (declined) — не трогается.
+    const QString target3 = tmp.filePath(QStringLiteral("own/patterns"));
+    QDir().mkpath(target3);
+    const QByteArray ownLogfmt = "{\"name\": \"My logfmt\", \"blocks\": [{\"name\": \"Message\", \"kind\": \"remainder\"}]}";
+    check(writeAll(QDir(target3).filePath(retired[1]), ownLogfmt), QStringLiteral("свой logfmt.json"));
+    r = BuiltinSchemas::install(old, target3);
+    check(r.declined.contains(retired[1]), QStringLiteral("свой logfmt.json отклоняет ключевую"));
+    r = BuiltinSchemas::install(kSourceDir, target3);
+    check(r.retired == QStringList{retired[0]}, QStringLiteral("снята только поставленная"));
+    check(readAll(QDir(target3).filePath(retired[1])) == ownLogfmt, QStringLiteral("свой logfmt.json цел"));
 }
 
 void testQrc()
@@ -715,11 +772,13 @@ int main(int argc, char** argv)
         testBackends(sc, QDir(tmpDir.path()));
         testBackendsWithoutExtraction(sc, QDir(tmpDir.path()));
         testClassifierTime(sc);
-        testKeyedClassification(sc);
+        testLineShape(sc);
     }
+    for (const SchemaCase& sc : formatCases())
+        testFormatCase(sc, QDir(tmpDir.path()));
     testInstall();
     testUpgradeFromQ5();
-    testKeyedArrival();
+    testRetiredSchemas();
     testAutoDetectTimestamp();
     testQrc();
 

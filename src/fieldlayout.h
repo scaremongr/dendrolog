@@ -38,10 +38,10 @@ struct LogFile;
 // ============================================================================
 
 struct FileSchema {
-    // Схема для ЗАГРУЗКИ (до шага 7 F-17: граница записи по схеме, момент и
-    // уровень из ключей ключевой схемы) и для раздела Keys Entry Details.
-    // У схемы-шаблона (версия 4) — пустая и негодная: загрузка её не видит.
-    LogPattern pattern;
+    // Определение, из которого схема построена (FieldLayout::schemaFor):
+    // блочная схема, шаблон строки версии 4 или колонки формата строк
+    // (LineFormat::fieldDefinition). Загрузка схему не видит (F-17, шаг 7).
+    QString definition;
     // Поля строки (F-17, шаг 3): extractor->extract(текст) — единственный
     // способ их получить; в записях поля не хранятся.
     FieldExtractorPtr extractor;
@@ -89,14 +89,13 @@ struct FieldLayout {
     // Схема файла в этой раскладке; недостающие колонки дописываются в
     // конец. k-е поле схемы с именем N — k-я колонка с именем N (схема с
     // повторяющимся именем не склеивает свои поля в одну колонку).
-    // Определение — блочная или ключевая схема (LogPattern) либо шаблон
-    // строки версии 4 (LineTemplateSchema, F-17): шаблону — TemplateExtractor
-    // и пустой pattern.
+    // Определение — блочная схема (LogPattern), шаблон строки версии 4
+    // (LineTemplateSchema, F-17: TemplateExtractor) либо колонки формата
+    // строк JSON / logfmt (LineFormat::fieldDefinition: KeyedExtractor по
+    // ключам ролей и ключам начала файла, F-17, шаг 7).
     FileSchemaPtr schemaFor(const LogPattern& pattern);
-    FileSchemaPtr schemaFor(const QString& patternString)
-    {
-        return schemaFor(LogPattern(patternString));
-    }
+    FileSchemaPtr schemaFor(const QString& definition);
+    FileSchemaPtr schemaFor(FieldExtractorPtr extractor, const QString& definition);
     // Извлекатель по определению схемы (шаблон версии 4 или LogPattern).
     static FieldExtractorPtr extractorFor(const LogPattern& pattern);
     // Определение — файл шаблона строки версии 4.

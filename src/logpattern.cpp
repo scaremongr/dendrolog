@@ -361,60 +361,15 @@ bool LogPattern::blockCreatesField(const PatternBlock& block)
 
 namespace {
 
-// Блоки ключевой схемы на диске — всегда запасной «Message» на всю строку:
-// их читают версии без F-4.
-QVector<PatternBlock> keyedFallbackBlocks()
-{
-    PatternBlock message;
-    message.name = QStringLiteral("Message");
-    message.matchKind = PatternBlock::MatchKind::Remainder;
-    return {message};
-}
-
-bool stringListFromJson(const QJsonValue& value, QStringList* out)
-{
-    if (!value.isArray())
-        return false;
-    QStringList list;
-    for (const QJsonValue& item : value.toArray()) {
-        if (!item.isString())
-            return false;
-        list.append(item.toString());
-    }
-    *out = list;
-    return true;
-}
-
-// Ключевая часть из JSON. Отсутствующий ключ — умолчание; ключ не того типа
-// или неизвестное имя (формат, единица, шкала) — отказ, как у неизвестного
-// вида блока: чужое определение не читается молча неправильно.
-bool keyedFromJson(const QJsonObject& json, KeyedDefinition* out)
-{
-    KeyedDefinition k;
-    const QJsonValue format = json.value(QStringLiteral("format"));
-    if (!format.isString() || !KeyedDefinition::formatFromName(format.toString(), &k.format))
-        return false;
-    const auto list = [&json](const char* key, QStringList* target) {
-        const QJsonValue v = json.value(QLatin1String(key));
-        return v.isUndefined() || stringListFromJson(v, target);
-    };
-    if (!list("timeKeys", &k.timeKeys) || !list("levelKeys", &k.levelKeys)
-            || !list("messageKeys", &k.messageKeys) || !list("extraColumns", &k.extraColumns))
-        return false;
-    const QJsonValue unit = json.value(QStringLiteral("epochUnit"));
-    if (!unit.isUndefined()
-            && (!unit.isString() || !KeyedDefinition::epochUnitFromName(unit.toString(), &k.epochUnit)))
-        return false;
-    const QJsonValue levels = json.value(QStringLiteral("numericLevels"));
-    if (!levels.isUndefined()
-            && (!levels.isString()
-                || !KeyedDefinition::numericLevelsFromName(levels.toString(), &k.numericLevels)))
-        return false;
-    *out = k;
-    return true;
-}
-
 } // namespace
+
+bool LogPattern::isRetiredKeyedDefinition(const QString& definition)
+{
+    if (!definition.contains(QLatin1String("\"keyed\"")))
+        return false;
+    const QJsonDocument doc = QJsonDocument::fromJson(definition.toUtf8());
+    return doc.isObject() && doc.object().contains(QStringLiteral("keyed"));
+}
 
 QString LogPattern::serializeDefinition(const PatternDefinition& definition)
 {
@@ -424,9 +379,7 @@ QString LogPattern::serializeDefinition(const PatternDefinition& definition)
     root.insert(QStringLiteral("linePrefix"), definition.linePrefix);
 
     QJsonArray blocksJson;
-    const QVector<PatternBlock> blocks =
-        definition.keyed ? keyedFallbackBlocks() : definition.blocks;
-    for (const PatternBlock& block : blocks) {
+    for (const PatternBlock& block : definition.blocks) {
         QJsonObject blockJson;
         blockJson.insert(QStringLiteral("name"), block.name);
         blockJson.insert(QStringLiteral("kind"), matchKindToString(block.matchKind));
@@ -442,21 +395,6 @@ QString LogPattern::serializeDefinition(const PatternDefinition& definition)
     }
     root.insert(QStringLiteral("blocks"), blocksJson);
 
-    if (definition.keyed) {
-        // F-4: ключевая часть рядом с блоками, версия формата остаётся 3 —
-        // 0.6 хранит «keyed» как метаданные и читает запасные блоки.
-        const KeyedDefinition& k = *definition.keyed;
-        QJsonObject keyed;
-        keyed.insert(QStringLiteral("format"), KeyedDefinition::formatName(k.format));
-        keyed.insert(QStringLiteral("timeKeys"), QJsonArray::fromStringList(k.timeKeys));
-        keyed.insert(QStringLiteral("levelKeys"), QJsonArray::fromStringList(k.levelKeys));
-        keyed.insert(QStringLiteral("messageKeys"), QJsonArray::fromStringList(k.messageKeys));
-        keyed.insert(QStringLiteral("extraColumns"), QJsonArray::fromStringList(k.extraColumns));
-        keyed.insert(QStringLiteral("epochUnit"), KeyedDefinition::epochUnitName(k.epochUnit));
-        keyed.insert(QStringLiteral("numericLevels"),
-                     KeyedDefinition::numericLevelsName(k.numericLevels));
-        root.insert(QStringLiteral("keyed"), keyed);
-    }
 
     return QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
@@ -522,16 +460,8 @@ bool LogPattern::deserializeDefinition(const QString& text,
             parsed.blocks.push_back(block);
         }
 
-        const QJsonValue keyedJson = root.value(QStringLiteral("keyed"));
-        if (!keyedJson.isUndefined()) {
-            KeyedDefinition keyed;
-            if (!keyedJson.isObject() || !keyedFromJson(keyedJson.toObject(), &keyed))
-                return false;
-            parsed.keyed = keyed;
-            // Блоки ключевой схемы — запасные для версий без F-4; правка их
-            // там на ключевую схему не влияет.
-            parsed.blocks = keyedFallbackBlocks();
-        }
+        // «keyed» (F-4, до F-17, шаг 7) не читается: схема — свои запасные
+        // блоки («Message»), JSON и logfmt — формат строк файла.
 
         if (strict && !validateDefinition(parsed))
             return false;
@@ -635,26 +565,6 @@ bool LogPattern::validateDefinition(const PatternDefinition& definition,
         return false;
     };
 
-    if (definition.keyed) {
-        // Ключевая схема: блоки — запасные (их пишет serializeDefinition),
-        // проверяются колонки — правила фильтров привязаны к ним по имени.
-        const KeyedDefinition& k = *definition.keyed;
-        // Строку распознаёт только ключ роли: без них схема не узнает ни
-        // одной строки (keyedline.h).
-        if (k.timeKeys.isEmpty() && k.levelKeys.isEmpty() && k.messageKeys.isEmpty())
-            return fail(QObject::tr("Set at least one time, level or message key."));
-        QSet<QString> seen;
-        for (const QString& name : k.columnNames()) {
-            const QString trimmed = name.trimmed();
-            if (trimmed.isEmpty())
-                return fail(QObject::tr("Column key is empty."));
-            if (seen.contains(trimmed.toLower()))
-                return fail(QObject::tr("Column \"%1\" is listed twice.").arg(trimmed));
-            seen.insert(trimmed.toLower());
-        }
-        return true;
-    }
-
     if (definition.blocks.isEmpty())
         return fail(QObject::tr("Schema has no blocks."));
 
@@ -712,19 +622,10 @@ bool LogPattern::setPattern(const QString& pattern)
     m_fieldIndexOfBlock.clear();
     m_fieldCount = 0;
     m_tailFieldBlockIndex = -1;
-    m_keyedLookup = KeyedLine::Lookup();
     m_valid = false;
 
     if (!deserializeDefinition(pattern, &m_definition, true))
         return false;
-
-    if (m_definition.keyed) {
-        // Регексный каскад ключевой схеме не нужен: колонки — по ключам.
-        m_keyedLookup = KeyedLine::Lookup(*m_definition.keyed);
-        m_fieldCount = m_keyedLookup.columnCount();
-        m_valid = true;
-        return true;
-    }
 
     buildExtractRegexes();
     return m_valid;
@@ -732,8 +633,6 @@ bool LogPattern::setPattern(const QString& pattern)
 
 QStringList LogPattern::fieldNames() const
 {
-    if (m_definition.keyed)
-        return m_definition.keyed->columnNames();
     QStringList names;
     names.reserve(m_definition.blocks.size());
     for (const PatternBlock& block : m_definition.blocks) {
@@ -975,23 +874,6 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
     if (!m_valid)
         return result;
 
-    if (m_definition.keyed) {
-        KeyedLine::Hits hits;
-        result.ok = m_keyedLookup.scan(line, &hits);
-        if (!result.ok)
-            return result;
-        for (int c = 0; c < hits.size(); ++c) {
-            if (!hits[c].isValid())
-                continue;
-            BlockSpan span;
-            span.blockIndex = c;
-            span.start = hits[c].start;
-            span.length = hits[c].length;
-            result.spans.append(span);
-        }
-        result.matchedBlockCount = int(result.spans.size());
-        return result;
-    }
 
     auto fillSpans = [&result](const QRegularExpressionMatch& match, int from, int to) {
         result.spans.reserve(result.spans.size() + (to - from));
@@ -1092,54 +974,11 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
     return result;
 }
 
-bool LogPattern::scanKeyed(QStringView line, KeyedLine::Hits* hits, int neededColumns) const
-{
-    if (!isKeyed()) {
-        hits->clear();
-        return false;
-    }
-    return m_keyedLookup.scan(line, hits, neededColumns);
-}
-
-LogEntryFields LogPattern::keyedFields(const KeyedLine::Hits& hits) const
-{
-    LogEntryFields result;
-    if (!isKeyed())
-        return result;
-    result.resize(m_fieldCount);
-    for (int c = 0; c < hits.size() && c < m_fieldCount; ++c)
-        if (hits[c].isValid())
-            result.spans[c].set(hits[c].start, hits[c].length, hits[c].escaped);
-    return result;
-}
-
-QVector<std::pair<QString, QString>> LogPattern::keyValuePairs(QStringView line) const
-{
-    QVector<std::pair<QString, QString>> pairs;
-    if (!isKeyed())
-        return pairs;
-    KeyedLine::PairReader reader(line, m_definition.keyed->format);
-    KeyedLine::Pair p;
-    while (reader.next(&p)) {
-        const QStringView key = line.mid(p.keyStart, p.keyLength);
-        pairs.append({p.keyEscaped ? KeyedLine::unescape(key) : key.toString(),
-                      KeyedLine::valueText(line, p)});
-    }
-    return pairs;
-}
-
 LogEntryFields LogPattern::extractFields(const QString& line) const
 {
     LogEntryFields result;
     if (!m_valid)
         return result;
-
-    if (m_definition.keyed) {
-        KeyedLine::Hits hits;
-        if (!m_keyedLookup.scan(line, &hits))
-            return result;   // не распознана — полей нет, view показывает сырую строку
-        return keyedFields(hits);
-    }
 
     return fieldsFromMatch(line, matchLine(line));
 }
@@ -1148,15 +987,13 @@ int LogPattern::tailFieldIndex() const
 {
     if (!m_valid)
         return -1;
-    if (m_definition.keyed)
-        return KeyedDefinition::kMessageColumn;
     return m_fieldIndexOfBlock.value(m_tailFieldBlockIndex, -1);
 }
 
 LogEntryFields LogPattern::fieldsFromMatch(const QString& line, const LineMatchResult& match) const
 {
     LogEntryFields result;
-    if (!m_valid || m_definition.keyed || !match.ok)
+    if (!m_valid || !match.ok)
         return result;
 
     const QStringView lineView(line);

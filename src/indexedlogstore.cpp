@@ -524,6 +524,19 @@ std::shared_ptr<LineIndex> IndexedLogStore::indexForFile(const QString& filePath
     return nullptr;
 }
 
+LineFormat IndexedLogStore::lineFormat(const LogFilePtr& logFile) const
+{
+    const int fileId = fileIdOf(logFile.get());
+    return fileId >= 0 ? m_files[fileId].lineFormat : LineFormat();
+}
+
+void IndexedLogStore::setLineFormat(const LogFilePtr& logFile, const LineFormat& format)
+{
+    const int fileId = fileIdOf(logFile.get());
+    if (fileId >= 0)
+        m_files[fileId].lineFormat = format;
+}
+
 FileEncoding IndexedLogStore::fileEncoding(const LogFilePtr& logFile) const
 {
     const int fileId = fileIdOf(logFile.get());
@@ -732,7 +745,7 @@ std::shared_ptr<LogEntry> IndexedLogStore::materializeEntry(RowRef ref) const
     // Полей в записи нет (F-17, шаг 3): их даёт FieldSource модели.
     auto entry = std::make_shared<LogEntry>(int(logical), int(line + 1), ts,
                                             index.level(line), text, f.logFile);
-    entry->setSchemaMatched(!index.isPlainTextLine(line)); // isPlainText — как у индекса
+    entry->setFormatMatched(!index.isPlainTextLine(line)); // isPlainText — как у индекса
     return entry;
 }
 

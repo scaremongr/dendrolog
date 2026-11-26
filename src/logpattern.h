@@ -49,10 +49,9 @@ struct PatternBlock {
 struct PatternDefinition {
     QString               linePrefix;
     QVector<PatternBlock> blocks;
-    // Ключевая схема (F-4): строка — JSON-объект или logfmt, поля — по
-    // ключам (keyedline.h). Есть — главнее блоков: blocks тогда только
-    // запасной «Message» для версий без F-4 (их пишет serializeDefinition).
-    std::optional<KeyedDefinition> keyed;
+    // Ключевой части нет (F-17, шаг 7): JSON и logfmt — формат строк файла
+    // (lineformat.h). Схема с прежним ключом «keyed» читается своими
+    // запасными блоками (один «Message» на всю строку), ключ отбрасывается.
 };
 
 /// Span of one block inside a matched line. Includes non-field blocks
@@ -123,46 +122,27 @@ public:
     QStringList              fieldNames() const;
 
     /// Best-effort match: full match first, then the prefix cascade.
-    /// Keyed schema: ok = the line is recognised (keyedline.h), one span per
-    /// found column, blockIndex = COLUMN index (blocks are only a fallback).
     LineMatchResult matchLine(const QString& line) const;
 
     /// Field extraction for the parser; built on matchLine(), so the
-    /// editor preview shows exactly what the parser will do. Keyed schema:
-    /// spans point at the values as in the file; escaped strings carry the
-    /// FieldSpan escaped bit (read via LogEntryFields::value).
+    /// editor preview shows exactly what the parser will do.
     LogEntryFields extractFields(const QString& line) const;
     /// Fields of a line from a result matchLine() already gave for it —
-    /// extractFields without a second match (SchemaFit, F-17). Regex
-    /// schemas only; keyed — empty (use extractFields).
+    /// extractFields without a second match (SchemaFit, F-17).
     LogEntryFields fieldsFromMatch(const QString& line, const LineMatchResult& match) const;
     /// Output field that receives the free text of a line (the last
-    /// free-text field, typically "Message"; keyed — the Message column);
+    /// free-text field, typically "Message");
     /// -1 — none.
     int tailFieldIndex() const;
-
-    // ---- Ключевая схема (F-4) ----
-    bool isKeyed() const noexcept { return m_valid && m_definition.keyed.has_value(); }
-    const KeyedDefinition* keyed() const noexcept
-    {
-        return m_definition.keyed ? &*m_definition.keyed : nullptr;
-    }
-    /// Колонки строки по ключам (hits — по колонке fieldNames()); true —
-    /// строка распознана. Горячий путь: без аллокаций, кроме ключей с
-    /// обратной косой. Не ключевая схема — false. neededColumns — см.
-    /// KeyedLine::Lookup::scan (-1 — все колонки).
-    bool scanKeyed(QStringView line, KeyedLine::Hits* hits, int neededColumns = -1) const;
-    /// Поля распознанной строки по найденным scanKeyed колонкам — то же, что
-    /// extractFields, без второго разбора строки (загрузка, F-4 PR 2).
-    LogEntryFields keyedFields(const KeyedLine::Hits& hits) const;
-    /// Все пары верхнего уровня строки: ключ и значение раскодированы,
-    /// вложенный объект — его текст, null — «null». ТОЛЬКО для одной записи
-    /// (Entry Details, F-9): аллокации на каждую пару.
-    QVector<std::pair<QString, QString>> keyValuePairs(QStringView line) const;
 
     /// True for kinds that are distinctive enough to be searched for
     /// while skipping arbitrary garbage before them.
     static bool isAnchorKind(PatternBlock::MatchKind kind);
+
+    /// Определение ключевой схемы прежних версий (ключ «keyed», F-4): с F-17,
+    /// шаг 7 JSON и logfmt — формат строк файла. Сохранённое состояние и
+    /// умолчание с такой схемой читаются как «без схемы» (FieldSchemaController).
+    static bool isRetiredKeyedDefinition(const QString& definition);
 
     /// True for kinds whose token shape ends the match by itself, so no
     /// separator is required after them (Timestamp, Level, Integer, Hex, IP).
@@ -230,7 +210,6 @@ private:
     /// pre-filter that keeps non-matching lines cheap.
     static int anchorProbeSlot(PatternBlock::MatchKind kind);
 
-    KeyedLine::Lookup        m_keyedLookup;   ///< Ключевая схема: колонки по ключам.
     QString                  m_patternString;
     PatternDefinition        m_definition;
     QRegularExpression       m_fullRegex;

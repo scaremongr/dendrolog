@@ -9,6 +9,8 @@
 #include "filterruleset.h"
 #include "keyedline.h"
 #include "lineclassifier.h"
+#include "lineformat.h"
+#include "fieldextractor.h"
 #include "logmodel.h"
 #include "logpattern.h"
 
@@ -38,19 +40,52 @@ namespace {
 
 constexpr const char* kAbsent = "<absent>";
 
-LogPattern keyedPattern(KeyedDefinition::Format format, const QStringList& extra = {})
+// Ключевая часть — формат строк файла (F-17, шаг 7): колонки — KeyedExtractor
+// по ключам формата, классификация — LineClassifier::classifyLine с
+// LineFormatReader. Прежде это была ключевая схема (LogPattern::keyed).
+struct KeyedSchema {
+    LineFormat format;
+    LineFormatReader reader;
+    KeyedExtractor extractor;
+
+    explicit KeyedSchema(const KeyedDefinition& k)
+        : format(LineFormat::structured(k.format == KeyedDefinition::Format::Logfmt
+                                            ? LineFormat::Kind::Logfmt : LineFormat::Kind::Json, k))
+        , reader(format)
+        , extractor(format.keys)
+    {
+    }
+    QStringList fieldNames() const { return extractor.fields(); }
+    bool recognises(QStringView line) const
+    {
+        return extractor.extract(line, nullptr) != FieldExtractor::Outcome::Rejected;
+    }
+    LogEntryFields extractFields(QStringView line) const
+    {
+        LogEntryFields f;
+        if (extractor.extract(line, &f) == FieldExtractor::Outcome::Rejected)
+            return LogEntryFields();
+        return f;
+    }
+    QVector<std::pair<QString, QString>> keyValuePairs(QStringView line) const
+    {
+        return KeyedLine::keyValuePairs(line, format.keys.format);
+    }
+    bool scanKeyed(QStringView line, KeyedLine::Hits* hits, int needed = -1) const
+    {
+        return reader.lookup.scan(line, hits, needed);
+    }
+};
+
+KeyedSchema keyedPattern(KeyedDefinition::Format format, const QStringList& extra = {})
 {
-    PatternDefinition def;
     KeyedDefinition k;
     k.format = format;
     k.extraColumns = extra;
-    def.keyed = k;
-    LogPattern p(LogPattern::serializeDefinition(def));
-    CHECK(p.isValid() && p.isKeyed(), "keyed schema compiles");
-    return p;
+    return KeyedSchema(k);
 }
 
-QString fieldOf(const LogPattern& p, const QString& line, const QString& column)
+QString fieldOf(const KeyedSchema& p, const QString& line, const QString& column)
 {
     const int idx = p.fieldNames().indexOf(column);
     if (idx < 0)
@@ -66,14 +101,14 @@ struct Case {
     QVector<std::pair<const char*, QString>> fields;
 };
 
-void runCorpus(const char* name, const LogPattern& p, const QVector<Case>& cases)
+void runCorpus(const char* name, const KeyedSchema& p, const QVector<Case>& cases)
 {
     for (const Case& c : cases) {
         const QString line = QString::fromUtf8(c.line);
-        const LineMatchResult m = p.matchLine(line);
-        CHECK(m.ok == c.recognised,
+        const bool ok = p.recognises(line);
+        CHECK(ok == c.recognised,
               QStringLiteral("%1: '%2' recognised=%3, expected %4")
-                  .arg(QLatin1String(name), line).arg(m.ok).arg(c.recognised));
+                  .arg(QLatin1String(name), line).arg(ok).arg(c.recognised));
         const LogEntryFields fields = p.extractFields(line);
         CHECK(c.recognised || fields.isEmpty(),
               QStringLiteral("%1: '%2' unrecognised line has no fields").arg(QLatin1String(name), line));
@@ -90,7 +125,7 @@ const QString A = QString::fromLatin1(kAbsent);
 
 void testJsonCorpus()
 {
-    const LogPattern p = keyedPattern(KeyedDefinition::Format::JsonObject,
+    const KeyedSchema p = keyedPattern(KeyedDefinition::Format::JsonObject,
                                       {QStringLiteral("user"), QStringLiteral("ctx"),
                                        QStringLiteral("tags"), QStringLiteral("ok")});
     CHECK(p.fieldNames() == QStringList({"Timestamp", "Level", "Message", "user", "ctx", "tags", "ok"}),
@@ -170,7 +205,7 @@ void testJsonCorpus()
 
 void testLogfmtCorpus()
 {
-    const LogPattern p = keyedPattern(KeyedDefinition::Format::Logfmt,
+    const KeyedSchema p = keyedPattern(KeyedDefinition::Format::Logfmt,
                                       {QStringLiteral("user"), QStringLiteral("dur")});
     const QVector<Case> cases = {
         {R"(ts=2026-11-18T10:00:00Z level=info msg="Request failed" user=42)", true,
@@ -196,7 +231,7 @@ void testLogfmtCorpus()
 
 void testKeyValuePairs()
 {
-    const LogPattern p = keyedPattern(KeyedDefinition::Format::JsonObject);
+    const KeyedSchema p = keyedPattern(KeyedDefinition::Format::JsonObject);
     const QString line = QString::fromUtf8(
         R"({"ts":1,"msg":"a\tb","n\u0061me":"x","obj":{"k":[1,2]},"nil":null,"ok":false})");
     const auto pairs = p.keyValuePairs(line);
@@ -205,7 +240,7 @@ void testKeyValuePairs()
         {"nil", "null"}, {"ok", "false"},
     };
     CHECK(pairs == expected, "keyValuePairs: all top-level keys, decoded, nested as text");
-    const LogPattern lf = keyedPattern(KeyedDefinition::Format::Logfmt);
+    const KeyedSchema lf = keyedPattern(KeyedDefinition::Format::Logfmt);
     const auto lfPairs = lf.keyValuePairs(QStringLiteral(R"(a=1 b="x \"y\"" flag c=)"));
     const QVector<std::pair<QString, QString>> lfExpected = {{"a", "1"}, {"b", "x \"y\""}, {"c", ""}};
     CHECK(lfPairs == lfExpected, "keyValuePairs: logfmt");
@@ -218,7 +253,7 @@ void testFuzzAgainstQJson()
 {
     QRandomGenerator rng(20261125);
     const QStringList keys = {"msg", "user", "path", "note", "a.b", "x"};
-    LogPattern p = keyedPattern(KeyedDefinition::Format::JsonObject, {"user", "path", "note", "x"});
+    KeyedSchema p = keyedPattern(KeyedDefinition::Format::JsonObject, {"user", "path", "note", "x"});
     const QString alphabet = QStringLiteral("ab \"\\/\n\t\r\x01яё😀{}[],:=");
     int checked = 0;
     for (int iter = 0; iter < 3000; ++iter) {
@@ -271,7 +306,7 @@ void testFuzzAgainstQJson()
             const QString got = fieldOf(p, line, column);
             const QString want = expect.value(key, A);
             // Строка без ключа роли не распознана — тогда полей нет вовсе.
-            const bool recognised = p.matchLine(line).ok;
+            const bool recognised = p.recognises(line);
             const QString wantSeen = recognised ? want : A;
             CHECK(got == wantSeen, QStringLiteral("fuzz: %1 in %2 = '%3', expected '%4'")
                                        .arg(column, line, got, wantSeen));
@@ -295,7 +330,7 @@ void testFuzzAgainstQJson()
 // строке — сырой текст; строка view — раскодированное однострочное.
 void testReaders()
 {
-    const LogPattern p = keyedPattern(KeyedDefinition::Format::JsonObject);
+    const KeyedSchema p = keyedPattern(KeyedDefinition::Format::JsonObject);
     const QString line = QString::fromUtf8(
         R"({"level":"error","msg":"open \"C:\\temp\"\n\u0444\u0430\u0439\u043b"})");
     const LogEntryFields fields = p.extractFields(line);
@@ -307,7 +342,7 @@ void testReaders()
         r.fieldName = field;
         set.rules = {r};
         set.bindFields(p.fieldNames());
-        return testfields::matchesOwnRecord(set, testfields::scannerFor(p), line);
+        return testfields::matchesOwnRecord(set, testfields::scannerFor(p.format.fieldDefinition()), line);
     };
     CHECK(ruleOn("Message", QStringLiteral("\"C:\\temp\"")), "filter by field: decoded quotes and backslash");
     CHECK(ruleOn("Message", QStringLiteral("файл")), "filter by field: \\u Cyrillic found as Cyrillic");
@@ -322,7 +357,7 @@ void testReaders()
         r.fieldName = QStringLiteral("Message");
         set.rules = {r};
         set.bindFields(p.fieldNames());
-        CHECK(testfields::matchesOwnRecord(set, testfields::scannerFor(p), line),
+        CHECK(testfields::matchesOwnRecord(set, testfields::scannerFor(p.format.fieldDefinition()), line),
               "regex filter by field on decoded value");
     }
 
@@ -339,44 +374,43 @@ void testReaders()
 void testClassifyKeyed()
 {
     const LineClassifier classifier;
-    const LogPattern p = keyedPattern(KeyedDefinition::Format::JsonObject);
+    const KeyedSchema p = keyedPattern(KeyedDefinition::Format::JsonObject);
     const qint64 tenUtc =
         QDateTime(QDate(2026, 11, 18), QTime(10, 0), QTimeZone::UTC).toMSecsSinceEpoch();
 
     // pino: эпоха мс и числовой уровень; слово «error» в сообщении — не уровень.
-    KeyedClassification c = classifier.classifyKeyed(
-        p, u"{\"level\":30,\"time\":1700000000123,\"msg\":\"retry after error\"}");
+    LineClassification c = classifier.classifyLine(&p.reader, u"{\"level\":30,\"time\":1700000000123,\"msg\":\"retry after error\"}");
     CHECK(c.matched && c.tsFromKey && c.tsMs == 1700000000123LL && c.levelFromKey
               && c.level == LogLevel::Info && c.isPrimary(),
           "classify: pino epoch ms and numeric level from keys");
-    c = classifier.classifyKeyed(p, u"{\"ts\":\"2026-11-18T10:00:00Z\",\"severity\":\"WARNING\",\"msg\":\"x\"}");
+    c = classifier.classifyLine(&p.reader, u"{\"ts\":\"2026-11-18T10:00:00Z\",\"severity\":\"WARNING\",\"msg\":\"x\"}");
     CHECK(c.matched && c.tsMs == tenUtc && c.level == LogLevel::Warn, "classify: ISO and word from keys");
-    c = classifier.classifyKeyed(p, u"{\"@t\":\"2026-11-18T10:00:00\\u005a\",\"@l\":\"err\",\"@m\":\"x\"}");
+    c = classifier.classifyLine(&p.reader, u"{\"@t\":\"2026-11-18T10:00:00\\u005a\",\"@l\":\"err\",\"@m\":\"x\"}");
     CHECK(c.matched && c.tsFromKey && c.tsMs == tenUtc && c.level == LogLevel::Error,
           "classify: escaped value decoded before reading");
     // Ключа нет или значение не читается — эвристика по строке.
-    c = classifier.classifyKeyed(p, u"{\"msg\":\"at 2026-11-18T10:00:00Z ERROR happened\"}");
+    c = classifier.classifyLine(&p.reader, u"{\"msg\":\"at 2026-11-18T10:00:00Z ERROR happened\"}");
     CHECK(c.matched && !c.tsFromKey && c.hasTs && c.tsMs == tenUtc && !c.levelFromKey
               && c.hasLevel && c.level == LogLevel::Error && c.isPrimary(),
           "classify: no ts/level keys -> heuristics on the line");
-    c = classifier.classifyKeyed(p, u"{\"ts\":\"soon\",\"level\":\"Information\",\"msg\":\"warn x\"}");
+    c = classifier.classifyLine(&p.reader, u"{\"ts\":\"soon\",\"level\":\"Information\",\"msg\":\"warn x\"}");
     CHECK(c.matched && !c.tsFromKey && !c.hasTs && !c.levelFromKey && c.level == LogLevel::Warn,
           "classify: unreadable values -> heuristics");
     // Не распознана — как без схемы: продолжение, если нет ведущей метки.
-    c = classifier.classifyKeyed(p, u"    at com.example.Foo(Foo.java:42)");
+    c = classifier.classifyLine(&p.reader, u"    at com.example.Foo(Foo.java:42)");
     CHECK(!c.matched && !c.hasTs && !c.isPrimary(), "classify: stack frame is a continuation");
-    c = classifier.classifyKeyed(p, u"2026-11-18 10:00:00 plain line");
+    c = classifier.classifyLine(&p.reader, u"2026-11-18 10:00:00 plain line");
     CHECK(!c.matched && c.hasTs && c.leading && c.isPrimary(), "classify: plain leading timestamp line");
     // logfmt: голая метка ISO — текст, а не число (S-17): момент из ключа,
     // а не самая левая метка строки; голое число — эпоха, как раньше.
-    const LogPattern lf = keyedPattern(KeyedDefinition::Format::Logfmt);
-    c = classifier.classifyKeyed(lf, u"start=2026-11-18T09:00:00Z ts=2026-11-18T10:00:00Z level=info msg=x");
+    const KeyedSchema lf = keyedPattern(KeyedDefinition::Format::Logfmt);
+    c = classifier.classifyLine(&lf.reader, u"start=2026-11-18T09:00:00Z ts=2026-11-18T10:00:00Z level=info msg=x");
     CHECK(c.matched && c.tsFromKey && c.tsMs == tenUtc && !c.leading,
           "classify (logfmt): bare ISO value is read from its key");
-    c = classifier.classifyKeyed(lf, u"ts=1700000000123 level=30 msg=x");
+    c = classifier.classifyLine(&lf.reader, u"ts=1700000000123 level=30 msg=x");
     CHECK(c.tsFromKey && c.tsMs == 1700000000123LL && c.levelFromKey && c.level == LogLevel::Info,
           "classify (logfmt): bare epoch and numeric level");
-    c = classifier.classifyKeyed(lf, u"ts=-1.5 level=5xx msg=x");
+    c = classifier.classifyLine(&lf.reader, u"ts=-1.5 level=5xx msg=x");
     CHECK(c.tsFromKey && c.tsMs == -1500LL && !c.levelFromKey,
           "classify (logfmt): bare negative fraction is an epoch, 5xx is not a level");
     // Голое значение — Number только в форме, которую читает epochFromValue.
@@ -389,16 +423,14 @@ void testClassifyKeyed()
     CHECK(kinds == QVector<VK>({VK::Number, VK::Number, VK::Literal, VK::Literal, VK::Literal,
                                 VK::Literal, VK::Literal}),
           "logfmt: bare Number only for [-]digits[.digits]");
-    // Не ключевая схема — только эвристика.
-    LogPattern plain(LogPattern::serializeDefinition(PatternDefinition{
-        QString(), {PatternBlock{QStringLiteral("Message"), PatternBlock::MatchKind::Remainder}}, {}}));
-    c = classifier.classifyKeyed(plain, u"{\"level\":30,\"msg\":\"error\"}");
-    CHECK(!c.matched && c.level == LogLevel::Error, "classify: regex schema -> heuristics only");
+    // Формат Plain — только эвристика.
+    c = classifier.classifyLine(nullptr, u"{\"level\":30,\"msg\":\"error\"}", {}, nullptr);
+    CHECK(!c.matched && c.level == LogLevel::Error, "classify: plain text -> heuristics only");
     // Время без даты (F-11) в нераспознанной строке — через контекст файла.
     ClockDates clock;
-    c = classifier.classifyKeyed(p, u"13:55:40.016 [main] INFO x", {}, &clock);
+    c = classifier.classifyLine(&p.reader, u"13:55:40.016 [main] INFO x", {}, &clock);
     CHECK(!c.matched && c.hasTs && clock.matched, "classify: clock time with file context");
-    c = classifier.classifyKeyed(p, u"{\"ts\":1700000000,\"msg\":\"x\"}", {}, &clock);
+    c = classifier.classifyLine(&p.reader, u"{\"ts\":1700000000,\"msg\":\"x\"}", {}, &clock);
     CHECK(c.tsFromKey && !clock.matched, "classify: key timestamp resets clock.matched");
 }
 
@@ -407,21 +439,21 @@ void testClassifyKeyed()
 // быть тем же, что у полного разбора с полями: заданные случаи (поздний
 // главный ключ, повторный, null, путь, ключ с обратной косой) и случайные
 // строки обоих форматов из пула ключей в случайном порядке.
-bool sameClassification(const KeyedClassification& a, const KeyedClassification& b)
+bool sameClassification(const LineClassification& a, const LineClassification& b)
 {
     return a.matched == b.matched && a.hasTs == b.hasTs && a.tsMs == b.tsMs
         && a.leading == b.leading && a.hasLevel == b.hasLevel && a.level == b.level
         && a.tsFromKey == b.tsFromKey && a.levelFromKey == b.levelFromKey;
 }
 
-void checkEarlyExit(const LineClassifier& classifier, const LogPattern& p, const QString& line,
+void checkEarlyExit(const LineClassifier& classifier, const KeyedSchema& p, const QString& line,
                     const char* what)
 {
     const LineClassifier::YearReference ref =
         LineClassifier::yearReference(QDate(2026, 11, 18));
     LogEntryFields fields;
-    const KeyedClassification full = classifier.classifyLine(&p, line, ref, nullptr, &fields);
-    const KeyedClassification quick = classifier.classifyLine(&p, line, ref, nullptr, nullptr);
+    const LineClassification full = classifier.classifyLine(&p.reader, line, ref, nullptr, &fields);
+    const LineClassification quick = classifier.classifyLine(&p.reader, line, ref, nullptr, nullptr);
     CHECK(sameClassification(full, quick),
           QStringLiteral("early exit (%1): classification without fields = with fields: %2")
               .arg(QLatin1String(what), line));
@@ -439,26 +471,26 @@ void checkEarlyExit(const LineClassifier& classifier, const LogPattern& p, const
 void testEarlyExit()
 {
     const LineClassifier classifier;
-    const LogPattern json = keyedPattern(KeyedDefinition::Format::JsonObject, {QStringLiteral("user")});
-    const LogPattern lf = keyedPattern(KeyedDefinition::Format::Logfmt, {QStringLiteral("user")});
+    const KeyedSchema json = keyedPattern(KeyedDefinition::Format::JsonObject, {QStringLiteral("user")});
+    const KeyedSchema lf = keyedPattern(KeyedDefinition::Format::Logfmt, {QStringLiteral("user")});
     const LineClassifier::YearReference ref =
         LineClassifier::yearReference(QDate(2026, 11, 18));
     const qint64 elevenUtc =
         QDateTime(QDate(2026, 11, 18), QTime(11, 0), QTimeZone::UTC).toMSecsSinceEpoch();
 
     // «time» — второй кандидат: «ts» дальше по строке главнее, разбор идёт до него.
-    KeyedClassification c = classifier.classifyLine(
-        &json, u"{\"time\":\"2026-11-18T10:00:00Z\",\"msg\":\"x\",\"level\":\"info\",\"ts\":\"2026-11-18T11:00:00Z\",\"lvl\":\"error\"}",
+    LineClassification c = classifier.classifyLine(
+        &json.reader, u"{\"time\":\"2026-11-18T10:00:00Z\",\"msg\":\"x\",\"level\":\"info\",\"ts\":\"2026-11-18T11:00:00Z\",\"lvl\":\"error\"}",
         ref, nullptr, nullptr);
     CHECK(c.matched && c.tsFromKey && c.tsMs == elevenUtc && c.level == LogLevel::Info,
           "early exit: a later first-candidate key wins over an earlier second one");
     c = classifier.classifyLine(
-        &lf, u"time=2026-11-18T10:00:00Z lvl=error msg=x level=warn ts=2026-11-18T11:00:00Z",
+        &lf.reader, u"time=2026-11-18T10:00:00Z lvl=error msg=x level=warn ts=2026-11-18T11:00:00Z",
         ref, nullptr, nullptr);
     CHECK(c.matched && c.tsMs == elevenUtc && c.level == LogLevel::Warn,
           "early exit (logfmt): a later first-candidate key wins over an earlier second one");
     // Первый кандидат с null — не найден, разбор идёт дальше.
-    c = classifier.classifyLine(&json, u"{\"ts\":null,\"level\":\"info\",\"time\":\"2026-11-18T11:00:00Z\"}",
+    c = classifier.classifyLine(&json.reader, u"{\"ts\":null,\"level\":\"info\",\"time\":\"2026-11-18T11:00:00Z\"}",
                                 ref, nullptr, nullptr);
     CHECK(c.tsFromKey && c.tsMs == elevenUtc, "early exit: null first candidate does not stop the scan");
 
@@ -517,75 +549,51 @@ void testEarlyExit()
     }
 }
 
+// Формат строк (F-17, шаг 7) вместо ключевой схемы: выбор пользователя
+// сохраняется JSON-ом (TabSource, память файла, сессия) и читается обратно;
+// ключевая схема прежних версий читается своим запасным блоком «Message» и
+// узнаётся как снятая (LogPattern::isRetiredKeyedDefinition).
 void testSerialization()
 {
-    PatternDefinition def;
     KeyedDefinition k;
     k.format = KeyedDefinition::Format::Logfmt;
     k.timeKeys = {"when"};
     k.extraColumns = {"logger", "trace_id"};
     k.epochUnit = KeyedDefinition::EpochUnit::Nanos;
     k.numericLevels = KeyedDefinition::NumericLevels::Python;
-    def.keyed = k;
-    def.blocks = {PatternBlock{QStringLiteral("Whatever"), PatternBlock::MatchKind::Integer}};
-    const QString text = LogPattern::serializeDefinition(def);
+    const LineFormat f = LineFormat::structured(LineFormat::Kind::Logfmt, k, LineFormat::Origin::User);
+    LineFormat back;
+    CHECK(LineFormat::fromJson(f.toJson(), &back) && back == f, "line format round-trips");
+    CHECK(f.readingSignature() != LineFormat::structured(LineFormat::Kind::Logfmt).readingSignature(),
+          "keys change the reading signature");
+    LineFormat noColumns = f;
+    noColumns.keys.extraColumns.clear();
+    CHECK(noColumns.readingSignature() == f.readingSignature(), "columns do not change the reading");
+    KeyedDefinition fromDef;
+    CHECK(LineFormat::keysFromFieldDefinition(f.fieldDefinition(), &fromDef) && fromDef == f.keys,
+          "field definition carries the keys");
+    LineFormat plain = LineFormat::plain(LineFormat::Origin::User);
+    plain.levelStartsRecord = true;
+    CHECK(LineFormat::fromJson(plain.toJson(), &back) && back == plain, "plain with levelStartsRecord round-trips");
+    for (const QJsonObject& bad : {QJsonObject{{"kind", "gelf"}}, QJsonObject{{"kind", "json"}, {"epochUnit", "days"}},
+                                   QJsonObject{{"kind", "json"}, {"timeKeys", "ts"}}, QJsonObject{}}) {
+        LineFormat d;
+        CHECK(!LineFormat::fromJson(bad, &d), QStringLiteral("refused line format: %1")
+                  .arg(QString::fromUtf8(QJsonDocument(bad).toJson(QJsonDocument::Compact))));
+    }
 
-    PatternDefinition back;
-    CHECK(LogPattern::deserializeDefinition(text, &back), "keyed definition reads back");
-    CHECK(back.keyed && *back.keyed == k, "keyed part round-trips");
-    CHECK(back.blocks.size() == 1 && back.blocks[0].name == QLatin1String("Message")
-              && back.blocks[0].matchKind == PatternBlock::MatchKind::Remainder,
-          "keyed schema stores the fallback Message block");
-    CHECK(LogPattern::serializeDefinition(back) == text, "serialization is canonical");
-    const QJsonObject root = QJsonDocument::fromJson(text.toUtf8()).object();
-    CHECK(root.value("version").toInt() == 3, "format version stays 3");
-
-    // Как читает версия без F-4: без «keyed» — регексная схема Message.
-    QJsonObject legacy = root;
-    legacy.remove(QStringLiteral("keyed"));
-    LogPattern old(QString::fromUtf8(QJsonDocument(legacy).toJson()));
-    CHECK(old.isValid() && !old.isKeyed() && old.fieldNames() == QStringList{"Message"},
-          "without keyed: a valid regex schema with one Message column");
+    // Ключевая схема прежних версий (F-4): «keyed» отбрасывается, схема — Message.
+    QJsonObject legacy{{"version", 3}, {"type", "dynamic-block-schema"}, {"linePrefix", ""},
+                       {"blocks", QJsonArray{QJsonObject{{"name", "Message"}, {"kind", "remainder"}}}},
+                       {"keyed", QJsonObject{{"format", "json"}}}};
+    const QString text = QString::fromUtf8(QJsonDocument(legacy).toJson());
+    const LogPattern old(text);
+    CHECK(old.isValid() && old.fieldNames() == QStringList{"Message"},
+          "old keyed schema: a valid schema with one Message column");
+    CHECK(LogPattern::isRetiredKeyedDefinition(text) && !LogPattern::isRetiredKeyedDefinition(LogPattern::serializeDefinition(old.definition())),
+          "old keyed schema is recognised as retired; its re-serialization is not");
     const QString line = QStringLiteral("level=info msg=x");
     CHECK(old.extractFields(line).get(0, line) == line, "fallback Message is the whole line");
-
-    // Ключевая часть главнее блоков, правленных версией без F-4.
-    QJsonObject edited = root;
-    QJsonArray blocks;
-    blocks.append(QJsonObject{{"name", "Edited"}, {"kind", "integer"}});
-    edited.insert(QStringLiteral("blocks"), blocks);
-    LogPattern again(QString::fromUtf8(QJsonDocument(edited).toJson()));
-    CHECK(again.isKeyed() && again.fieldNames() == k.columnNames(), "keyed wins over edited blocks");
-
-    // Минимальная ключевая часть — умолчания; чужое — отказ.
-    QJsonObject minimal = legacy;
-    minimal.insert(QStringLiteral("keyed"), QJsonObject{{"format", "json"}});
-    PatternDefinition md;
-    CHECK(LogPattern::deserializeDefinition(QString::fromUtf8(QJsonDocument(minimal).toJson()), &md)
-              && md.keyed && *md.keyed == KeyedDefinition(),
-          "keyed with only format -> defaults");
-    for (const QJsonValue& bad : {QJsonValue(QJsonObject{{"format", "gelf"}}),
-                                  QJsonValue(QJsonObject{{"format", "json"}, {"epochUnit", "days"}}),
-                                  QJsonValue(QJsonObject{{"format", "json"}, {"timeKeys", "ts"}}),
-                                  QJsonValue(QJsonObject{{"format", "json"}, {"levelKeys", QJsonArray{1}}}),
-                                  QJsonValue(QJsonObject{{"format", "json"}, {"numericLevels", "x"}}),
-                                  QJsonValue(QStringLiteral("json"))}) {
-        QJsonObject o = legacy;
-        o.insert(QStringLiteral("keyed"), bad);
-        PatternDefinition d;
-        CHECK(!LogPattern::deserializeDefinition(QString::fromUtf8(QJsonDocument(o).toJson()), &d, true, false),
-              QStringLiteral("refused keyed: %1")
-                  .arg(QString::fromUtf8(QJsonDocument(QJsonObject{{"k", bad}}).toJson(QJsonDocument::Compact))));
-    }
-    // Колонки — по имени: повтор и пустое имя — невалидная схема.
-    PatternDefinition dup;
-    KeyedDefinition dk;
-    dk.extraColumns = {"Level"};
-    dup.keyed = dk;
-    CHECK(!LogPattern::validateDefinition(dup), "extra column named like a role column is refused");
-    dk.extraColumns = {"  "};
-    dup.keyed = dk;
-    CHECK(!LogPattern::validateDefinition(dup), "empty extra column is refused");
 }
 
 // Цена горячего пути: classifyKeyed + extractFields на JSON-строках против
@@ -618,11 +626,9 @@ Cost measureCost(int count, int rounds)
         textLines << QStringLiteral("%1 [%2] %3 %4 - %5").arg(ts, thread, level, logger, msg);
     }
 
-    PatternDefinition kd;
     KeyedDefinition k;
     k.extraColumns = {"thread", "logger"};
-    kd.keyed = k;
-    const LogPattern keyed(LogPattern::serializeDefinition(kd));
+    const KeyedSchema keyed(k);
 
     PatternDefinition rd;
     rd.blocks = {
@@ -657,13 +663,13 @@ Cost measureCost(int count, int rounds)
     // Ключевая схема: одна классификация (вместо пары детекторов) + поля.
     cost.keyedNs = best([&] {
         for (const QString& line : jsonLines) {
-            const KeyedClassification c = classifier.classifyKeyed(keyed, line, ref);
+            const LineClassification c = classifier.classifyLine(&keyed.reader, line, ref, nullptr);
             sink += c.tsMs + int(c.level) + keyed.extractFields(line).size();
         }
     });
     cost.classifyNs = best([&] {
         for (const QString& line : jsonLines) {
-            const KeyedClassification c = classifier.classifyKeyed(keyed, line, ref);
+            const LineClassification c = classifier.classifyLine(&keyed.reader, line, ref, nullptr);
             sink += c.tsMs + int(c.level);
         }
     });

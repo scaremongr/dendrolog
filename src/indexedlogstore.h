@@ -2,6 +2,7 @@
 #define INDEXEDLOGSTORE_H
 
 #include "lineindex.h"
+#include "lineformat.h"
 #include "fieldlayout.h"
 #include "logpattern.h"
 #include "logstore.h"
@@ -76,6 +77,13 @@ public:
     RecordKey keyForLine(const LogFile* file, qint64 line, qint64* offset = nullptr,
                          quint32* length = nullptr) const;
 
+    // ---- Формат строк файла (F-17, шаг 7) ----------------------------------------
+    // Как у кодировки: решение индексатора (lineFormatDecided) или выбор
+    // пользователя, переход порога и дозапись несут его. Строки и модель не
+    // трогает: смену, меняющую чтение, вкладка проводит переиндексацией.
+    LineFormat lineFormat(const LogFilePtr& logFile) const;
+    void setLineFormat(const LogFilePtr& logFile, const LineFormat& format);
+
     // ---- Кодировка файла (F-1) -------------------------------------------------
     // Текущая кодировка файла и её источник; для неподключённого — «не решено».
     FileEncoding fileEncoding(const LogFilePtr& logFile) const;
@@ -144,6 +152,7 @@ private:
         std::shared_ptr<LineIndex> index;
         int cacheFileId = -1;
         FileEncoding encoding; // decoder — копией во все читатели текста
+        LineFormat lineFormat; // формат строк (F-17, шаг 7)
         qint64 shownLines = 0; // строк файла, показанных модели (U-23, fileLineCounts)
     };
 

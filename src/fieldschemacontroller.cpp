@@ -50,6 +50,10 @@ void FieldSchemaController::load(QSettings& s)
     const int legacyMask = s.value("fieldVisibilityMask", -1).toInt();
 
     m_defaults.schema = s.value("conversionPattern").toString();
+    // Ключевая схема прежних версий (JSON Lines, logfmt) — с F-17, шаг 7
+    // формат строк файла: умолчание — без схемы.
+    if (LogPattern::isRetiredKeyedDefinition(m_defaults.schema))
+        m_defaults.schema.clear();
     // Schemas are loaded from <configDir>/patterns/*.json; the INI keeps only
     // their display order, by name.
     const QStringList order = s.value("schemaOrder").toStringList();
@@ -354,7 +358,11 @@ std::optional<FieldSettings> FieldSchemaController::resolveSaved(const FieldSett
                                                                  bool addMissing, QString* error)
 {
     FieldSettings resolved = saved;
-    if (!saved.hasSchema()) {
+    // Ключевая схема прежних версий (F-4) — с F-17, шаг 7 формат строк файла:
+    // сохранённая с ней вкладка — без схемы (JSON-файл читается своим форматом).
+    if (LogPattern::isRetiredKeyedDefinition(saved.schema))
+        resolved.schema.clear();
+    if (!resolved.hasSchema()) {
         resolved.schemaName.clear();
         return resolved;
     }

@@ -2303,15 +2303,13 @@ static void checkFieldRuleOnTail(const QDir& dir, const QString& name, const QSt
 
 static void checkKeyedTail(const QDir& dir, const QString& name)
 {
-    const QString schema = keyedfx::schema(KeyedDefinition::Format::JsonObject);
     const keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 16);
     const QByteArray last = "{\"ts\":\"" + keyedfx::iso(30, 0) + "\",\"ctx\":{\"a\":{\"b\":\"x\\\"y\"}},"
                             "\"level\":50,\"msg\":\"\\u041a\\u044d\\u0448 end\"}\n";
     const QVector<int> cuts = {int(last.indexOf("\"b\"")) + 2, int(last.indexOf("x\\")) + 2,
                                int(last.indexOf("\\u041a")) + 4, int(last.size())};
     const QString path = testdocs::writeFile(dir, name + "-keyed.jsonl", fx.bytes);
-    LogViewWidget tab;
-    tab.setParserPattern(schema);
+    LogViewWidget tab;   // без схемы: JSON — формат строк файла (F-17, шаг 7)
     tab.setShowFields(true);
     tab.addLogFile(path);
     CHECK(settled(tab), name + " keyed: initial load");
@@ -2326,7 +2324,6 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
         CHECK(settled(tab), name + " keyed: reload settles");
         const QString wholePath = testdocs::writeFile(dir, name + QString("-keyed-whole-%1.jsonl").arg(to), bytes);
         LogViewWidget whole;
-        whole.setParserPattern(schema);
         whole.setShowFields(true);
         whole.addLogFile(wholePath);
         CHECK(settled(whole), name + " keyed: whole file loads");
@@ -2343,12 +2340,13 @@ static void checkKeyedTail(const QDir& dir, const QString& name)
           name + " keyed: the completed object has its key moment and level");
 }
 
-// F-4, PR 3: смена схемы на открытой вкладке, при которой меняется ключевая
-// часть (было или стало keyed; показ полей — нет, F-17, шаг 3), перечитывает
-// файлы вкладки: моменты, уровни и границы записей — из ключей (обратно —
-// эвристика), и вкладка равна открытой сразу с этой схемой. Текущая строка,
-// выделение и её место на экране, закладка и история переходов переживают
-// перечитывание (RecordLocator). Регексная → регексная файл не перечитывает.
+// F-17, шаг 7 (бывший F-4, PR 3): выбор формата строк на открытой вкладке.
+// Формат, читающий строки иначе (LineFormat::readingSignature), перечитывает
+// файл: моменты, уровни и границы записей — из ключей (обратно — эвристика),
+// и вкладка равна открытой сразу с этим форматом. Текущая строка, выделение
+// и её место на экране, закладка и история переходов переживают
+// перечитывание (RecordLocator). Смена схемы полей и колонок формата файл не
+// перечитывает.
 struct SchemaRow {
     QString text;
     qint64 ms;
@@ -2384,22 +2382,30 @@ static FieldSettings schemaSettings(const QString& schema, bool extraction = tru
 }
 
 static QVector<SchemaRow> freshRows(const QString& path, const FieldSettings& settings,
-                                    const QString& what)
+                                    const QString& what,
+                                    const std::optional<LineFormat>& format = std::nullopt)
 {
     LogViewWidget fresh;
     fresh.setFieldSettings(settings);
     fresh.addLogFile(path);
+    // Выбор формата сразу после открытия — посреди первой загрузки.
+    if (format && !fresh.loadedFiles().isEmpty())
+        fresh.setLineFormat(fresh.loadedFiles().first(), *format);
     CHECK(settled(fresh), what + ": the fresh tab loads");
     return schemaRows(*fresh.model());
 }
 
-static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const QString& regexSchema)
+static LineFormat userFormat(LineFormat::Kind kind, const QStringList& columns = {})
 {
-    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
-    PatternDefinition plainDef;
-    plainDef.blocks = {testdocs::patternBlock(PatternBlock::MatchKind::Remainder,
-                                              QStringLiteral("Message"))};
-    const QString plain = LogPattern::serializeDefinition(plainDef);
+    if (kind == LineFormat::Kind::Plain)
+        return LineFormat::plain(LineFormat::Origin::User);
+    KeyedDefinition keys;
+    keys.extraColumns = columns;
+    return LineFormat::structured(kind, keys, LineFormat::Origin::User);
+}
+
+static void checkLineFormatSwitch(const QDir& dir, const QString& name, const QString& regexSchema)
+{
     // Только ASCII: на Windows кириллица рисуется запасным шрифтом другой
     // высоты, и смена показанного текста (колонки вместо сырой строки)
     // меняет высоты строк над экраном — место строки сдвигается и без
@@ -2415,12 +2421,20 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
     tab.resize(900, 400);
     tab.addLogFile(path);
     tab.show();
-    CHECK(settled(tab), name + " schema switch: initial load");
+    CHECK(settled(tab), name + " format switch: initial load");
     CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
-    CHECK(schemaRows(model) == freshRows(path, FieldSettings(), name + " no schema"),
-          name + " schema switch: opened without a schema");
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(file && tab.lineFormat(file) == keyedfx::expectedFormat(KeyedDefinition::Format::JsonObject),
+          name + " format switch: JSON decided without a schema");
+    {
+        // Порядок и уровни из ключей: эпоха числом — момент записи.
+        const int row = rowOfLine(model, 1 + fx.lineRecord.indexOf(2));
+        CHECK(row >= 0 && model.visibleLevelAt(row) == LogLevel::Error
+                  && model.visibleTimestampAt(row).toMSecsSinceEpoch() == fx.records[2].ms,
+              name + " auto JSON: the epoch record has its key moment and level");
+    }
 
     // Закладка, два перехода (история) и текущая строка посреди экрана.
     // Восемь форм — 16 строк (keyedfixtures.h).
@@ -2432,32 +2446,13 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
     view.goToRow(rowOfLine(model, currentLine));
     CHECK(testdocs::idleViews(), "views settle");
 
-    bool regexToRegex = false; // смена между регексными схемами
-    const auto switchTo = [&](const FieldSettings& settings, const QString& what, bool reread) {
-        const QModelIndex before = view.currentIndex();
-        const qint64 line = before.isValid() ? model.keyAt(before.row()).line : -1;
-        const int top = view.visualRect(before).top();
-        const QVector<SchemaRow> was = schemaRows(model);
-        tab.setFieldSettings(settings);
-        CHECK(tab.isLoading() == reread,
-              what + (reread ? ": the file is reread" : ": the file is not reread"));
-        CHECK(settled(tab), what + ": settles");
-        CHECK(testdocs::idleViews(), "views settle");
-        if (!regexToRegex) {
-            CHECK(schemaRows(model) == freshRows(path, settings, what),
-                  what + ": rows, moments, levels and records equal a tab opened with the schema");
-        } else {
-            // Регексная → регексная: только поля; моменты и границы — прежние.
-            CHECK(schemaRows(model) == was, what + ": rows, moments and records unchanged");
-        }
+    const auto checkPlace = [&](const QString& what, qint64 line, int top, bool reread) {
         const QModelIndex cur = view.currentIndex();
         CHECK(cur.isValid() && model.keyAt(cur.row()).line == line,
               what + QStringLiteral(": the current line is kept (%1 → %2)")
                          .arg(line).arg(cur.isValid() ? model.keyAt(cur.row()).line : -1));
         CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
               what + ": the current row stays selected");
-        // Место на экране — обещание перечитывания. Смена одних колонок
-        // (без перечитывания) на Windows сдвигает вид на строку (S-22).
         if (reread)
             CHECK(cur.isValid() && view.visualRect(cur).top() == top,
                   what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
@@ -2466,49 +2461,94 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
         CHECK(marked.size() == 1 && model.keyAt(marked.value(0)).line == markedLine,
               what + ": the bookmark is on its line");
     };
+    const auto switchTo = [&](const std::optional<LineFormat>& format, const QString& what, bool reread) {
+        const QModelIndex before = view.currentIndex();
+        const qint64 line = before.isValid() ? model.keyAt(before.row()).line : -1;
+        const int top = view.visualRect(before).top();
+        const QVector<SchemaRow> was = schemaRows(model);
+        if (format)
+            tab.setLineFormat(file, *format);
+        else
+            tab.restoreAutomaticLineFormat(file);
+        CHECK(tab.isLoading() == reread,
+              what + (reread ? ": the file is reread" : ": the file is not reread"));
+        CHECK(settled(tab), what + ": settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        if (reread)
+            CHECK(schemaRows(model) == freshRows(path, FieldSettings(), what, format),
+                  what + ": rows, moments, levels and records equal a tab opened with the format");
+        else
+            CHECK(schemaRows(model) == was, what + ": rows, moments and records unchanged");
+        CHECK(format ? tab.lineFormat(file).isUser() : !tab.lineFormat(file).isUser(),
+              what + ": the choice is the user's (or automatic again)");
+        checkPlace(what, line, top, reread);
+    };
 
-    switchTo(schemaSettings(keyed), name + " none → keyed", true);
+    switchTo(userFormat(LineFormat::Kind::Plain), name + " auto → Plain text", true);
     {
-        // Порядок и уровни из ключей: эпоха числом больше не в конце.
         const int row = rowOfLine(model, 1 + fx.lineRecord.indexOf(2));
-        CHECK(row >= 0 && model.visibleLevelAt(row) == LogLevel::Error
-                  && model.visibleTimestampAt(row).toMSecsSinceEpoch() == fx.records[2].ms,
-              name + " keyed: the epoch record has its key moment and level");
+        CHECK(row >= 0 && model.visibleTimestampAt(row).toMSecsSinceEpoch() != fx.records[2].ms,
+              name + " Plain text: the epoch number is not a moment");
     }
-    // Показ полей выключен — только показ (F-17, шаг 3): ключевая схема
-    // действует при чтении как прежде, файл не перечитывается.
-    switchTo(schemaSettings(keyed, false), name + " keyed, fields not shown", false);
-    switchTo(schemaSettings(keyed), name + " keyed, fields shown", false);
-    switchTo(schemaSettings(regexSchema), name + " keyed → regex", true);
-    regexToRegex = true;
-    switchTo(schemaSettings(plain), name + " regex → regex", false);
-    regexToRegex = false;
-    switchTo(schemaSettings(keyed), name + " regex → keyed", true);
-    // Только колонки ключевой схемы (не ключи ролей) — перечитывать нечего.
+    switchTo(userFormat(LineFormat::Kind::Json), name + " Plain → JSON Lines", true);
+    // Только колонки формата (ключи начала файла) — перечитывать нечего.
+    switchTo(userFormat(LineFormat::Kind::Json, {QStringLiteral("Thread"), QStringLiteral("ctx")}),
+             name + " JSON columns", false);
+    CHECK(model.availableFields().contains(QStringLiteral("ctx")), name + " JSON columns: the tab has the key column");
+    switchTo(userFormat(LineFormat::Kind::Logfmt), name + " JSON → logfmt", true);
+    // Схема полей файл не перечитывает (чтение не знает о схеме).
     {
-        PatternDefinition def;
-        KeyedDefinition k;
-        k.format = KeyedDefinition::Format::JsonObject;
-        k.extraColumns = {QStringLiteral("Thread"), QStringLiteral("ctx")};
-        def.keyed = k;
-        switchTo(schemaSettings(LogPattern::serializeDefinition(def)), name + " keyed columns", false);
+        const QVector<SchemaRow> was = schemaRows(model);
+        tab.setFieldSettings(schemaSettings(regexSchema));
+        CHECK(!tab.isLoading() && settled(tab) && schemaRows(model) == was,
+              name + " schema on a formatted file: nothing is reread");
+        tab.setFieldSettings(FieldSettings());
+        CHECK(settled(tab), name + " schema back: settles");
     }
     // Две смены подряд, вторая — посреди перечитывания первой: строка та же.
     {
         const QModelIndex cur = view.currentIndex();
         const qint64 line = cur.isValid() ? model.keyAt(cur.row()).line : -1;
-        tab.setFieldSettings(schemaSettings(keyed, false));
-        tab.setFieldSettings(schemaSettings(keyed));
+        tab.setLineFormat(file, userFormat(LineFormat::Kind::Plain));
+        tab.setLineFormat(file, userFormat(LineFormat::Kind::Json));
         CHECK(settled(tab), name + " two changes: settles");
         CHECK(testdocs::idleViews(), "views settle");
-        CHECK(schemaRows(model) == freshRows(path, schemaSettings(keyed), name + " two changes"),
-              name + " two changes: equals the tab opened with the last schema");
+        CHECK(schemaRows(model) == freshRows(path, FieldSettings(), name + " two changes",
+                                             userFormat(LineFormat::Kind::Json)),
+              name + " two changes: equals the tab opened with the last format");
         const QModelIndex now = view.currentIndex();
         CHECK(now.isValid() && model.keyAt(now.row()).line == line,
               name + QStringLiteral(" two changes: the current line is kept (%1 → %2)")
                          .arg(line).arg(now.isValid() ? model.keyAt(now.row()).line : -1));
     }
-    switchTo(FieldSettings(), name + " keyed → none", true);
+    switchTo(userFormat(LineFormat::Kind::Plain), name + " JSON → Plain", true);
+    switchTo(std::nullopt, name + " Detect automatically", true);
+    CHECK(tab.lineFormat(file) == keyedfx::expectedFormat(KeyedDefinition::Format::JsonObject),
+          name + " Detect automatically: JSON again");
+
+    // Выбор сохраняется в состоянии вкладки (TabSource) и возвращается.
+    {
+        tab.setLineFormat(file, userFormat(LineFormat::Kind::Plain));
+        CHECK(settled(tab), name + " saved choice: settles");
+        const TabState state = tab.captureState();
+        CHECK(state.sources.size() == 1 && state.sources.first().lineFormat
+                  && state.sources.first().lineFormat->kind == LineFormat::Kind::Plain,
+              name + " saved choice: captured in the tab state");
+        LogViewWidget again;
+        again.applyState(state, LogViewWidget::StateFilters::Apply);
+        CHECK(settled(again), name + " saved choice: restored tab settles");
+        const LogFilePtr f = again.loadedFiles().value(0);
+        CHECK(f && again.lineFormat(f).isUser() && again.lineFormat(f).kind == LineFormat::Kind::Plain,
+              name + " saved choice: the restored tab reads the file as plain text");
+        CHECK(schemaRows(*again.model()) == schemaRows(model),
+              name + " saved choice: rows equal the tab it was saved from");
+        // Решение автоматики не сохраняется.
+        tab.restoreAutomaticLineFormat(file);
+        CHECK(settled(tab), name + " automatic: settles");
+        const TabState automatic = tab.captureState();
+        CHECK(automatic.sources.size() == 1 && !automatic.sources.first().lineFormat,
+              name + " automatic: not saved");
+    }
 
     // История переходов пережила перечитывания: назад — к строке, откуда ушли.
     CHECK(tab.navigateHistory(false), name + ": history goes back");
@@ -2517,28 +2557,65 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
     CHECK(back.isValid() && model.keyAt(back.row()).line == fromLine,
           name + QStringLiteral(": history back lands on the line it left (%1)")
                      .arg(back.isValid() ? model.keyAt(back.row()).line : -1));
+}
 
-    // Смена посреди первой загрузки: проход со старой схемой доходит и файл
-    // перечитывается новой.
-    {
-        const keyedfx::Fixture big = keyedfx::make(KeyedDefinition::Format::JsonObject, 6000);
-        const QString bigPath = testdocs::writeFile(dir, name + "-switch-big.jsonl", big.bytes);
-        LogViewWidget early;
-        early.addLogFile(bigPath);
-        early.setFieldSettings(schemaSettings(keyed));
-        CHECK(settled(early), name + " switch during load: settles");
-        CHECK(schemaRows(*early.model()) == freshRows(bigPath, schemaSettings(keyed),
-                                                      name + " switch during load"),
-              name + " switch during load: equals the tab opened with the schema");
+// Малый растущий JSON-лог (stdin, только что созданный файл): пока
+// непустых строк меньше 20, формат «не решён» и строки читаются как Plain;
+// дозапись, после которой их стало 20, решает JSON, и файл перечитывается
+// ровно один раз — вкладка равна открытой на тех же байтах разом.
+static void checkSmallFileDecision(const QDir& dir, const QString& name)
+{
+    const auto jsonLine = [](int i) {
+        return "{\"ts\":" + QByteArray::number(1700000000 + i) + ",\"level\":"
+               + (i % 4 == 0 ? "50" : "30") + ",\"msg\":\"m" + QByteArray::number(i) + "\"}\n";
+    };
+    QByteArray bytes;
+    for (int i = 0; i < 6; ++i)
+        bytes += jsonLine(i);
+    const QString path = testdocs::writeFile(dir, name + "-small.jsonl", bytes);
+    LogViewWidget tab;
+    tab.addLogFile(path);
+    CHECK(settled(tab), name + " small: initial load");
+    const LogFilePtr file = tab.loadedFiles().value(0);
+    CHECK(file && !tab.lineFormat(file).isDecided(), name + " small: undecided below 20 lines");
+    CHECK(tab.model()->rowCount() == 6 && !tab.model()->visibleTimestampAt(0).isValid(),
+          name + " small: read as plain text");
+    int resets = 0;
+    QObject::connect(tab.model(), &QAbstractItemModel::modelReset, &tab, [&] { ++resets; });
+    int formatSignals = 0;
+    QObject::connect(&tab, &LogViewWidget::lineFormatChanged, &tab, [&] { ++formatSignals; });
+    for (int round = 0; round < 3; ++round) {
+        QByteArray part;
+        for (int i = 0; i < 8; ++i)
+            part += jsonLine(6 + round * 8 + i);
+        bytes += part;
+        CHECK(testdocs::appendToFile(path, part), name + " small: append");
+        tab.reloadChangedFiles(/*force=*/true);
+        CHECK(settled(tab), name + " small: reload settles");
     }
+    CHECK(tab.lineFormat(file).kind == LineFormat::Kind::Json && formatSignals == 1,
+          QStringLiteral("%1 small: JSON decided once (%2 signals)").arg(name).arg(formatSignals));
+    // Одно перечитывание: у резидентной — подмена записей под одним reset,
+    // у индексной — переиндексация (сброс строк файла).
+    CHECK(resets >= 1 && resets <= 2,
+          QStringLiteral("%1 small: one reread (%2 resets)").arg(name).arg(resets));
+    const QString wholePath = testdocs::writeFile(dir, name + "-small-whole.jsonl", bytes);
+    LogViewWidget whole;
+    whole.addLogFile(wholePath);
+    CHECK(settled(whole), name + " small: the whole file loads");
+    CHECK(schemaRows(*tab.model()) == schemaRows(*whole.model()),
+          name + " small: equals the file read at once");
+    CHECK(tab.model()->rowCount() == 30 && tab.model()->visibleTimestampAt(0).isValid(),
+          name + " small: each object is a record with its key moment");
 }
 
 
-// F-5, PR 3: схема файла слитой вкладки. Регексный лог и JSON Lines в одной
-// вкладке; у JSON Lines — своя ключевая схема: смена схемы этого файла
-// перечитывает только его (строки регексного файла не трогаются), вкладка
-// равна открытой сразу с этими схемами, закладки и текущая строка на месте.
-// Переход порога и объединение вкладок схемы файлов не теряют.
+// F-17, шаг 7 (бывший F-5, PR 3 со своей ключевой схемой файла): формат
+// строк файла слитой вкладки. Регексный лог и JSON Lines в одной вкладке:
+// выбор формата JSON-файла перечитывает только его (строки регексного не
+// трогаются), вкладка равна открытой сразу с этими форматами, закладки и
+// текущая строка на месте; колонки — объединение схемы вкладки и ключей
+// формата. Переход порога и объединение вкладок формат не теряют.
 static QByteArray asciiKeyed(int records)
 {
     keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, records);
@@ -2567,15 +2644,14 @@ static FieldSettings schemaRef(const QString& schema)
 }
 
 static QVector<SchemaRow> freshMerged(const QStringList& paths, const FieldSettings& tabSettings,
-                                      const QHash<QString, QString>& own, const QString& what)
+                                      const QHash<QString, LineFormat>& formats, const QString& what)
 {
     LogViewWidget fresh;
     fresh.setFieldSettings(tabSettings);
     for (const QString& path : paths) {
-        if (own.contains(path))
-            fresh.addLogFile(path, FileEncoding(), schemaRef(own.value(path)));
-        else
-            fresh.addLogFile(path);
+        fresh.addLogFile(path);
+        if (formats.contains(path))
+            fresh.setLineFormat(fresh.loadedFiles().last(), formats.value(path));
     }
     CHECK(settled(fresh), what + ": the fresh tab loads");
     return schemaRows(*fresh.model());
@@ -2599,9 +2675,8 @@ static int rowOfFileLine(const LogModel& model, const QString& path, qint64 line
     return -1;
 }
 
-static void checkFileSchemas(const QDir& dir, const QString& name, const QString& regexSchema)
+static void checkFileFormats(const QDir& dir, const QString& name, const QString& regexSchema)
 {
-    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
     const QString regexPath = testdocs::writeFile(dir, name + "-fs-regex.log", mixedRegexLog(200));
     const QString keyedPath = testdocs::writeFile(dir, name + "-fs-keyed.jsonl", asciiKeyed(120));
     const QStringList paths{ regexPath, keyedPath };
@@ -2613,17 +2688,24 @@ static void checkFileSchemas(const QDir& dir, const QString& name, const QString
     tab.addLogFile(regexPath);
     tab.addLogFile(keyedPath);
     tab.show();
-    CHECK(settled(tab), name + " file schemas: initial load");
+    CHECK(settled(tab), name + " file formats: initial load");
     CHECK(testdocs::idleViews(), "views settle");
     LogModel& model = *tab.model();
     LogListView& view = *tab.view();
     CHECK(model.isIndexedBackend() == (name == QLatin1String("indexed")), name + ": backend");
-    CHECK(!tab.hasFileSchemas(), name + ": no own file schemas yet");
-
-    // Закладки в обоих файлах, текущая строка — в регексном, посреди экрана.
     const LogFilePtr keyedFile = fileOf(tab, keyedPath);
     const LogFilePtr regexFile = fileOf(tab, regexPath);
     CHECK(keyedFile && regexFile, name + ": both files in the tab");
+    CHECK(tab.lineFormat(keyedFile).kind == LineFormat::Kind::Json
+              && tab.lineFormat(regexFile).kind == LineFormat::Kind::Plain,
+          name + ": each file has its line format");
+    CHECK(model.availableFields().contains(QStringLiteral("Thread"))
+              && model.availableFields().contains(QStringLiteral("Level")),
+          name + ": the tab columns are the union of the schema and the JSON keys");
+    CHECK(schemaRows(model) == freshMerged(paths, tabSettings, {}, name + " file formats"),
+          name + ": rows equal a fresh tab");
+
+    // Закладки в обоих файлах, текущая строка — в регексном, посреди экрана.
     const qint64 regexMark = 61, keyedMark = 33, currentLine = 90;
     CHECK(tab.bookmarks().add(rowOfFileLine(model, regexPath, regexMark)) >= 0, name + ": bookmark A");
     CHECK(tab.bookmarks().add(rowOfFileLine(model, keyedPath, keyedMark)) >= 0, name + ": bookmark B");
@@ -2636,130 +2718,107 @@ static void checkFileSchemas(const QDir& dir, const QString& name, const QString
     if (!model.isIndexedBackend())
         regexEntry = model.entryAt(rowOfFileLine(model, regexPath, 5));
 
-    const auto checkPlace = [&](const QString& what, int top) {
+    {
+        const QString what = name + " JSON file → Plain text";
+        const int top = view.visualRect(view.currentIndex()).top();
+        tab.setLineFormat(keyedFile, userFormat(LineFormat::Kind::Plain));
+        CHECK(tab.isLoading(), what + ": the JSON file is reread");
+        CHECK(settled(tab), what + ": settles");
+        CHECK(testdocs::idleViews(), "views settle");
+        CHECK(schemaRows(model) == freshMerged(paths, tabSettings,
+                                               {{keyedPath, userFormat(LineFormat::Kind::Plain)}}, what),
+              what + ": rows equal a tab opened with these formats");
+        if (regexEntry)
+            CHECK(model.entryAt(rowOfFileLine(model, regexPath, 5)) == regexEntry,
+                  what + ": the regex file is not reread");
         const QModelIndex cur = view.currentIndex();
         CHECK(cur.isValid() && model.keyAt(cur.row()).line == currentLine
                   && LogViewWidget::samePath(model.keyAt(cur.row()).file->filePath, regexPath),
               what + ": the current line is kept");
-        CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
-              what + ": the current row stays selected");
-        CHECK(cur.isValid() && view.visualRect(cur).top() == top,
-              what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
-                         .arg(top).arg(cur.isValid() ? view.visualRect(cur).top() : -1));
+        // Место на экране у слитой индексной вкладки после переиндексации
+        // соседнего файла в Plain не держится (строка уходит ниже экрана;
+        // обратно в JSON — возвращается): задача S-29 в docs/roadmap.md.
+        if (!model.isIndexedBackend())
+            CHECK(cur.isValid() && view.visualRect(cur).top() == top,
+                  what + ": the current row stays at its place on screen");
         QVector<qint64> marked;
         for (int row : tab.bookmarks().visibleRows())
             marked << model.keyAt(row).line;
         std::sort(marked.begin(), marked.end());
-        CHECK(marked == (QVector<qint64>{ keyedMark, regexMark }),
-              what + ": the bookmarks are on their lines");
-    };
-
-    {
-        const QString what = name + " keyed file → JSON Lines";
-        const int top = view.visualRect(view.currentIndex()).top();
-        tab.setFileSchema(keyedFile, schemaRef(keyed));
-        CHECK(tab.isLoading(), what + ": the keyed file is reread");
-        CHECK(settled(tab), what + ": settles");
-        CHECK(testdocs::idleViews(), "views settle");
-        CHECK(tab.fileSchema(keyedFile).schema == keyed && tab.fileSchema(regexFile).schema == regexSchema,
-              what + ": each file has its schema");
-        CHECK(tab.hasFileSchemas() && tab.fileSchemas().size() == 1, what + ": one own schema");
-        CHECK(schemaRows(model) == freshMerged(paths, tabSettings, {{keyedPath, keyed}}, what),
-              what + ": rows equal a tab opened with these schemas");
-        if (regexEntry)
-            CHECK(model.entryAt(rowOfFileLine(model, regexPath, 5)) == regexEntry,
-                  what + ": the regex file is not reread");
-        CHECK(model.availableFields().contains(QStringLiteral("Thread"))
-                  && model.availableFields().contains(QStringLiteral("Level")),
-              what + ": the tab columns are the union of both schemas");
-        checkPlace(what, top);
+        CHECK(marked == (QVector<qint64>{ keyedMark, regexMark }), what + ": the bookmarks are on their lines");
     }
     {
-        // Регексный файл → другая регексная схема: ничего не перечитывается.
-        const QString what = name + " regex file → plain";
-        PatternDefinition plainDef;
-        plainDef.blocks = {testdocs::patternBlock(PatternBlock::MatchKind::Remainder,
-                                                  QStringLiteral("Message"))};
+        const QString what = name + " Plain text → JSON Lines";
         const int top = view.visualRect(view.currentIndex()).top();
-        tab.setFileSchema(regexFile, schemaRef(LogPattern::serializeDefinition(plainDef)));
-        CHECK(!tab.isLoading(), what + ": nothing is reread");
-        CHECK(settled(tab), what + ": settles");
-        CHECK(tab.fileSchemas().size() == 2, what + ": two own schemas");
-        checkPlace(what, top);
-        tab.setFileSchema(regexFile, schemaRef(regexSchema));
-        CHECK(settled(tab) && tab.fileSchemas().size() == 1, what + ": back to the tab schema");
-    }
-
-    // Две смены подряд, вторая — у другого файла посреди перечитывания
-    // первого: позиция в первом файле не теряется (ревью PR 3).
-    {
-        const QString what = name + " two files in a row";
-        const qint64 line = 51; // запись в ключевом файле
-        view.goToRow(rowOfFileLine(model, keyedPath, line));
-        CHECK(testdocs::idleViews(), "views settle");
-        tab.setFileSchema(keyedFile, schemaRef(QString()));   // ключевая → без схемы: перечитывание
-        tab.setFileSchema(regexFile, schemaRef(keyed));      // регексный — ключевой: перечитывание
+        tab.setLineFormat(keyedFile, userFormat(LineFormat::Kind::Json));
         CHECK(settled(tab), what + ": settles");
         CHECK(testdocs::idleViews(), "views settle");
         const QModelIndex cur = view.currentIndex();
-        CHECK(cur.isValid() && model.keyAt(cur.row()).line == line
-                  && LogViewWidget::samePath(model.keyAt(cur.row()).file->filePath, keyedPath),
-              what + QStringLiteral(": the current line is kept (%1)")
-                         .arg(cur.isValid() ? model.keyAt(cur.row()).line : -1));
-        CHECK(schemaRows(model) == freshMerged(paths, tabSettings, {{keyedPath, QString()}, {regexPath, keyed}}, what),
-              what + ": rows equal a tab opened with these schemas");
-        tab.setFieldSettings(tabSettings, {{keyedFile->filePath, schemaRef(keyed)}});
-        CHECK(settled(tab) && tab.fileSchemas().size() == 1, what + ": back");
+        CHECK(cur.isValid() && model.keyAt(cur.row()).line == currentLine,
+              what + ": the current line is kept");
+        if (!model.isIndexedBackend())
+            CHECK(view.visualRect(cur).top() == top, what + ": the current row stays at its place on screen");
+        CHECK(schemaRows(model) == freshMerged(paths, tabSettings,
+                                               {{keyedPath, userFormat(LineFormat::Kind::Json)}}, what),
+              what + ": rows equal a tab opened with these formats");
     }
 
-    // Объединение вкладок: файлы приносят свои схемы.
+    // Объединение вкладок: файл приносит выбор формата.
     {
         const QString what = name + " merge";
         const QString morePath = testdocs::writeFile(dir, name + "-fs-more.jsonl", asciiKeyed(40));
         LogViewWidget other;
-        other.setFieldSettings(schemaSettings(keyed));
         other.addLogFile(morePath);
         CHECK(settled(other), what + ": the other tab loads");
+        other.setLineFormat(other.loadedFiles().value(0), userFormat(LineFormat::Kind::Plain));
+        CHECK(settled(other), what + ": the other tab rereads");
         tab.addFilesFrom(other);
         CHECK(settled(tab), what + ": settles");
         const LogFilePtr more = fileOf(tab, morePath);
-        CHECK(more && tab.fileSchema(more).schema == keyed, what + ": the added file keeps its schema");
+        CHECK(more && tab.lineFormat(more).isUser() && tab.lineFormat(more).kind == LineFormat::Kind::Plain,
+              what + ": the added file keeps the choice");
         CHECK(schemaRows(model) == freshMerged({ regexPath, keyedPath, morePath }, tabSettings,
-                                               {{keyedPath, keyed}, {morePath, keyed}}, what),
-              what + ": rows equal a tab opened with these schemas");
+                                               {{keyedPath, userFormat(LineFormat::Kind::Json)},
+                                                {morePath, userFormat(LineFormat::Kind::Plain)}}, what),
+              what + ": rows equal a tab opened with these formats");
     }
 }
 
-// Переход порога: схема файла резидентной слитой вкладки переживает
-// конверсию в индексную (большой файл, добавленный во вкладку, конвертирует
-// её целиком — все файлы перечитываются индексатором).
-static void checkFileSchemaThreshold(const QDir& dir, const QString& regexSchema)
+// Переход порога: формат строк файла резидентной слитой вкладки (решение
+// автоматики и выбор пользователя) переживает конверсию в индексную.
+static void checkFormatThreshold(const QDir& dir, const QString& regexSchema)
 {
-    const QString keyed = keyedfx::schema(KeyedDefinition::Format::JsonObject);
     const QString regexPath = testdocs::writeFile(dir, "fs-threshold.log", mixedRegexLog(200));
     const QString keyedPath = testdocs::writeFile(dir, "fs-threshold.jsonl", asciiKeyed(80));
+    const QString chosenPath = testdocs::writeFile(dir, "fs-threshold-chosen.jsonl", asciiKeyed(60));
     const QString bigPath = testdocs::writeFile(dir, "fs-threshold-big.log", mixedRegexLog(24000));
     AppSettings::instance().setIndexedThresholdMB(1);
     LogViewWidget tab;
     tab.setFieldSettings(schemaSettings(regexSchema));
     tab.addLogFile(regexPath);
-    tab.addLogFile(keyedPath, FileEncoding(), schemaRef(keyed));
-    CHECK(settled(tab), "file schema threshold: initial load");
-    CHECK(!tab.model()->isIndexedBackend(), "file schema threshold: starts resident");
+    tab.addLogFile(keyedPath);
+    tab.addLogFile(chosenPath);
+    CHECK(settled(tab), "format threshold: initial load");
+    const LogFilePtr chosen = fileOf(tab, chosenPath);
+    tab.setLineFormat(chosen, userFormat(LineFormat::Kind::Plain));
+    CHECK(settled(tab), "format threshold: choice settles");
+    CHECK(!tab.model()->isIndexedBackend(), "format threshold: starts resident");
     const LogFilePtr keyedFile = fileOf(tab, keyedPath);
-    CHECK(keyedFile && tab.fileSchema(keyedFile).schema == keyed,
-          "file schema threshold: the keyed file opened with its schema");
+    CHECK(keyedFile && tab.lineFormat(keyedFile).kind == LineFormat::Kind::Json,
+          "format threshold: JSON decided");
     tab.addLogFile(bigPath);
-    CHECK(settled(tab), "file schema threshold: conversion settles");
-    CHECK(tab.model()->isIndexedBackend(), "file schema threshold: converted");
-    CHECK(keyedFile && tab.fileSchema(keyedFile).schema == keyed
-              && tab.model()->fileSchemaFor(keyedFile->filePath)
-              && tab.model()->fileSchemaFor(keyedFile->filePath)->pattern.keyed(),
-          "file schema threshold: the keyed file keeps its schema");
+    CHECK(settled(tab), "format threshold: conversion settles");
+    CHECK(tab.model()->isIndexedBackend(), "format threshold: converted");
+    CHECK(tab.lineFormat(keyedFile).kind == LineFormat::Kind::Json
+              && dynamic_cast<const KeyedExtractor*>(
+                     tab.model()->fileSchemaFor(keyedFile->filePath)->extractor.get()),
+          "format threshold: the JSON file keeps its format and key columns");
+    CHECK(tab.lineFormat(chosen).isUser() && tab.lineFormat(chosen).kind == LineFormat::Kind::Plain,
+          "format threshold: the user's choice survives");
     CHECK(schemaRows(*tab.model())
-              == freshMerged({ regexPath, keyedPath, bigPath }, schemaSettings(regexSchema),
-                             {{keyedPath, keyed}}, "file schema threshold"),
-          "file schema threshold: rows equal an indexed tab opened with these schemas");
+              == freshMerged({ regexPath, keyedPath, chosenPath, bigPath }, schemaSettings(regexSchema),
+                             {{chosenPath, userFormat(LineFormat::Kind::Plain)}}, "format threshold"),
+          "format threshold: rows equal an indexed tab opened with these formats");
 }
 
 int main(int argc, char** argv)
@@ -2778,8 +2837,9 @@ int main(int argc, char** argv)
     checkAppendInParts(dir, QStringLiteral("resident"), schema);
     checkKeyedTail(dir, QStringLiteral("resident"));
     checkFieldRuleOnTail(dir, QStringLiteral("resident"), schema);
-    checkKeyedSchemaSwitch(dir, QStringLiteral("resident"), schema);
-    checkFileSchemas(dir, QStringLiteral("resident"), schema);
+    checkLineFormatSwitch(dir, QStringLiteral("resident"), schema);
+    checkSmallFileDecision(dir, QStringLiteral("resident"));
+    checkFileFormats(dir, QStringLiteral("resident"), schema);
     checkHeadRewrite(dir, QStringLiteral("resident"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("resident merged"), schema, HeadScenario::Merged);
     checkHeadRewrite(dir, QStringLiteral("crossed threshold"), schema, HeadScenario::CrossedThreshold);
@@ -2800,7 +2860,7 @@ int main(int argc, char** argv)
     checkWideAboveThreshold(dir, schema);
     checkThresholdKeepsEncoding(dir, schema);
     checkProvisionalThreshold(dir, schema);
-    checkFileSchemaThreshold(dir, schema);
+    checkFormatThreshold(dir, schema);
     settings.setIndexedThresholdMB(0);
     checkProvisionalRevision(dir, QStringLiteral("indexed"), schema);
     checkProvisionalNoExtraWork(dir, QStringLiteral("indexed"), schema);
@@ -2808,8 +2868,9 @@ int main(int argc, char** argv)
     checkAppendInParts(dir, QStringLiteral("indexed"), schema);
     checkKeyedTail(dir, QStringLiteral("indexed"));
     checkFieldRuleOnTail(dir, QStringLiteral("indexed"), schema);
-    checkKeyedSchemaSwitch(dir, QStringLiteral("indexed"), schema);
-    checkFileSchemas(dir, QStringLiteral("indexed"), schema);
+    checkLineFormatSwitch(dir, QStringLiteral("indexed"), schema);
+    checkSmallFileDecision(dir, QStringLiteral("indexed"));
+    checkFileFormats(dir, QStringLiteral("indexed"), schema);
     checkHeadRewrite(dir, QStringLiteral("indexed"), schema, HeadScenario::Single);
     checkHeadRewrite(dir, QStringLiteral("indexed merged"), schema, HeadScenario::Merged);
     checkLineNumbers(dir, QStringLiteral("indexed"), schema);

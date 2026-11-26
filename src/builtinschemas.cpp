@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
@@ -17,6 +18,57 @@ namespace {
 constexpr int kManifestVersion = 1;
 const QLatin1String kStateInstalled("installed");
 const QLatin1String kStateDeclined("declined");
+const QLatin1String kStateRetired("retired");
+
+// Снятые с поставки встроенные схемы (F-17, шаг 7): файл, имя и ключевая
+// часть в том виде, в каком они поставлялись (F-4, PR 4).
+struct RetiredSchema {
+    const char* file;
+    const char* name;
+    const char* format;
+};
+constexpr RetiredSchema kRetired[] = {
+    {"json-lines.json", "JSON Lines", "json"},
+    {"logfmt.json", "logfmt", "logfmt"},
+};
+
+QJsonObject retiredKeyed(const char* format)
+{
+    const auto list = [](std::initializer_list<const char*> items) {
+        QJsonArray a;
+        for (const char* item : items)
+            a.append(QString::fromLatin1(item));
+        return a;
+    };
+    QJsonObject k;
+    k.insert(QStringLiteral("format"), QString::fromLatin1(format));
+    k.insert(QStringLiteral("timeKeys"), list({"ts", "time", "timestamp", "@timestamp", "@t", "t"}));
+    k.insert(QStringLiteral("levelKeys"),
+             list({"level", "lvl", "severity", "loglevel", "levelname", "log.level", "@l"}));
+    k.insert(QStringLiteral("messageKeys"), list({"msg", "message", "@m", "@mt", "event"}));
+    k.insert(QStringLiteral("extraColumns"), QJsonArray());
+    k.insert(QStringLiteral("epochUnit"), QStringLiteral("auto"));
+    k.insert(QStringLiteral("numericLevels"), QStringLiteral("auto"));
+    return k;
+}
+
+// Файл снятой схемы — как поставлялся: имя, ключевая часть и запасной
+// «Message» (описание и форматирование не важны).
+bool isUntouchedRetired(const QByteArray& bytes, const RetiredSchema& retired)
+{
+    const QJsonObject root = QJsonDocument::fromJson(bytes).object();
+    if (root.value(QStringLiteral("name")).toString() != QLatin1String(retired.name)
+        || root.value(QStringLiteral("keyed")).toObject() != retiredKeyed(retired.format))
+        return false;
+    PatternDefinition def;
+    if (!LogPattern::deserializeDefinition(QString::fromUtf8(bytes), &def, true, false)
+        || def.blocks.size() != 1 || !def.linePrefix.isEmpty())
+        return false;
+    const PatternBlock& b = def.blocks.first();
+    return b.name == QLatin1String("Message") && b.matchKind == PatternBlock::MatchKind::Remainder
+        && b.leadingText.isEmpty() && b.closingText.isEmpty() && b.separator.isEmpty()
+        && b.customRegex.isEmpty() && !b.ignored;
+}
 
 struct ParsedSchema {
     QString name;
@@ -237,6 +289,30 @@ InstallReport install(const QString& sourceDir, const QString& targetDir)
         report.updated << file;
         report.replaced.append({onDisk.canonical, builtin.canonical});
         markInstalled();
+    }
+
+    for (const RetiredSchema& retired : kRetired) {
+        const QString file = QString::fromLatin1(retired.file);
+        if (shipped.contains(file))
+            continue;   // источник прежнего выпуска (тест) ещё поставляет её
+        const QJsonObject record = entries.value(file).toObject();
+        if (record.value(QStringLiteral("state")).toString() != kStateInstalled)
+            continue;   // не ставили, отклонили или уже сняли
+        const QString path = target.filePath(file);
+        QByteArray bytes;
+        if (QFileInfo::exists(path)) {
+            if (!readFile(path, &bytes) || !isUntouchedRetired(bytes, retired))
+                continue;   // изменена пользователем — его схема
+            if (!QFile::remove(path)) {
+                report.errors << QStringLiteral("%1: cannot remove").arg(QDir::toNativeSeparators(path));
+                continue;
+            }
+            report.retired << file;
+        }
+        QJsonObject r;
+        r.insert(QStringLiteral("state"), kStateRetired);
+        entries.insert(file, r);
+        manifestDirty = true;
     }
 
     if (manifestDirty) {

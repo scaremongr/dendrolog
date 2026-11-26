@@ -198,9 +198,10 @@ static void checkMigrationAndBuiltins()
     CHECK(old >= 0, "migrated schema is in the catalogue");
     CHECK(QFileInfo::exists(QDir(SchemaStore::patternsDir()).filePath(QStringLiteral("Old.json"))),
           "migrated schema is written as a file");
-    CHECK(indexOf(c.schemas(), QStringLiteral("JSON Lines")) >= 0
-              && indexOf(c.schemas(), QStringLiteral("logfmt")) >= 0,
-          "built-in schemas are installed, keyed ones included");
+    CHECK(indexOf(c.schemas(), QStringLiteral("Logback / Log4j")) >= 0
+              && indexOf(c.schemas(), QStringLiteral("JSON Lines")) < 0
+              && indexOf(c.schemas(), QStringLiteral("logfmt")) < 0,
+          "built-in schemas are installed; JSON Lines and logfmt are line formats, not schemas");
     CHECK(c.activeIndex() == old && c.activeSchema() == legacy, "active schema found by its text");
     CHECK(c.activeSchemaName() == QLatin1String("Old"), "active schema name for sessions");
     CHECK(c.showFields() && c.fieldDisplayEnabled(), "Filter blocks restored");
@@ -481,15 +482,17 @@ static void checkViews(const QDir& dir, bool indexed)
               label + ": Apply Schema to All Tabs reaches every tab");
     }
 
-    // Ключевая схема (F-4) — тем же путём.
+    // JSON-файл (F-17, шаг 7): поля — ключи формата строк файла, при любой
+    // схеме вкладки; колонки ролей — те же имена (Level).
     LogViewWidget* keyed = newTab(json);
     c.setCurrentView(keyed);
-    c.selectSchema(indexOf(c.schemas(), QStringLiteral("JSON Lines")));
     c.setVisibleFieldNames({QStringLiteral("Level")});
     CHECK(settled(*keyed), label + ": keyed tab settles");
-    const QString jsonLines = c.activeSchema();
-    CHECK(LogPattern(jsonLines).isKeyed() && keyed->parserPattern() == jsonLines,
-          label + ": keyed schema reaches the tab");
+    CHECK(!keyed->loadedFiles().isEmpty()
+              && keyed->lineFormat(keyed->loadedFiles().first()).kind == LineFormat::Kind::Json
+              && dynamic_cast<const KeyedExtractor*>(
+                     keyed->model()->fileSchemaFor(keyed->loadedFiles().first()->filePath)->extractor.get()),
+          label + ": the JSON file reads its keys");
     FilterRuleSet keyedRules = levelRule(QStringLiteral("Level"), QStringLiteral("ERROR"));
     FieldSchemaController::bindRules(keyed, keyedRules);
     keyed->model()->setFilterRules(keyedRules);

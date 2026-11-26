@@ -35,6 +35,7 @@
 #include "logtabwidget.h"
 #include "logviewwidget.h"
 #include "mainwindow.h"
+#include "lineformatindicator.h"
 #include "viewexport.h"
 #include "openrouting.h"
 #include "schemastore.h"
@@ -2857,35 +2858,25 @@ QString selectWord(LogViewWidget* tab, int row, const QString& word, int* xOut =
     return QApplication::clipboard()->text();
 }
 
-// F-4, PR 3: ключевая схема на открытой вкладке. Выбор встроенной JSON Lines
-// перечитывает файл — момент и уровень из ключей, Entry Details — все ключи
-// строки; регексная схема (и «Apply Schema to All Tabs» с ней) — обратно
-// эвристика; JSON Lines всем вкладкам — снова ключи.
-void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
+// F-17, шаг 7: формат строк файла. JSON-лог открывается с моментами и
+// уровнями из ключей без единого действия; Entry Details — все ключи строки;
+// схема полей чтения не меняет; индикатор в строке статуса — «JSON Lines
+// (auto)», выбор «Plain text» перечитывает файл эвристикой, «JSON Lines» и
+// «Detect automatically» — снова ключи.
+void scenarioLineFormat(MainWindow& win, const Fixtures& fx)
 {
-    section(QStringLiteral("keyed schema on an open tab"));
+    section(QStringLiteral("line format of a JSON log"));
     auto* fieldsDock = win.findChild<QDockWidget*>(QStringLiteral("fieldVisibilityDockWidget"));
     auto* combo = fieldsDock ? fieldsDock->findChild<QComboBox*>() : nullptr;
-    QAction* applyToAll = win.findChild<QAction*>(QStringLiteral("applySchemaToAllTabs"));
     auto* scanner = win.findChild<DirectoryScanner*>();
-    const int jsonLines = combo ? combo->findText(QStringLiteral("JSON Lines")) : -1;
+    auto* indicator = win.findChild<LineFormatIndicator*>(QStringLiteral("lineFormatIndicator"));
     const int smoke = combo ? combo->findText(QStringLiteral("Smoke Fields")) : -1;
-    check(jsonLines >= 0 && smoke >= 0 && applyToAll && scanner,
-          QStringLiteral("JSON Lines and the smoke schema are in the catalogue"));
-    if (jsonLines < 0 || smoke < 0 || !applyToAll || !scanner)
+    check(combo && smoke >= 0 && scanner && indicator
+              && combo->findText(QStringLiteral("JSON Lines")) < 0,
+          QStringLiteral("the smoke schema is in the catalogue, JSON Lines is not a schema"));
+    if (!combo || smoke < 0 || !scanner || !indicator)
         return;
-    const auto setFilterBlocks = [&](bool on) {
-        for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
-                cb->click();
-    };
 
-    // Вторая вкладка — обычный лог (для «Apply Schema to All Tabs»).
-    if (tabIndexForFile(win, fx.b) < 0) {
-        emit scanner->fileActivated(fx.b);
-        check(waitFor([&]() { return tabIndexForFile(win, fx.b) >= 0; }) && waitAllLoaded(win),
-              QStringLiteral("a plain log opens in a tab"));
-    }
     const int before = tabs(win)->count();
     emit scanner->fileActivated(fx.jsonl);
     check(waitFor([&]() { return tabIndexForFile(win, fx.jsonl) >= 0; }) && waitAllLoaded(win),
@@ -2910,23 +2901,14 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
         const QDateTime ts = row >= 0 ? m->visibleTimestampAt(row) : QDateTime();
         return ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
     };
-    // Схема по умолчанию могла остаться ключевой от прошлых сценариев, а
-    // ключевая действует при чтении при любом показе полей (F-17, шаг 3):
-    // сначала регексная.
-    combo->setCurrentIndex(smoke);
-    check(waitAllLoaded(win), QStringLiteral("the tab settles under the regex schema"));
-    // Эвристика: строка с эпохой — продолжение записи над ней (её момент).
-    check(rowOfEpoch() >= 0 && momentOfEpoch() != keyMoment,
-          QStringLiteral("without a keyed schema the epoch is no moment"));
-
-    combo->setCurrentIndex(jsonLines);
-    setFilterBlocks(true);
-    check(waitAllLoaded(win), QStringLiteral("the tab settles after JSON Lines"));
     check(momentOfEpoch() == keyMoment && rowOfEpoch() >= 0
               && m->visibleLevelAt(rowOfEpoch()) == LogLevel::Error,
-          QStringLiteral("JSON Lines on the open tab: moment and level from the keys"));
+          QStringLiteral("the JSON log opens with moments and levels from the keys"));
+    check(waitFor([&]() { return indicator->isVisible()
+                                 && indicator->text() == QStringLiteral("JSON Lines (auto)"); }),
+          QStringLiteral("the status bar shows the line format: %1").arg(indicator->text()));
 
-    // Entry Details: все ключи строки, не только колонки схемы.
+    // Entry Details: все ключи строки.
     auto* detailsDock = win.findChild<QDockWidget*>(QStringLiteral("entryDetailsDockWidget"));
     auto* browser = detailsDock ? detailsDock->findChild<QTextBrowser*>() : nullptr;
     check(browser, QStringLiteral("Entry Details has a browser"));
@@ -2944,38 +2926,38 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
             detailsDock->hide();
     }
 
+    // Схема полей чтения не меняет.
     combo->setCurrentIndex(smoke);
-    check(waitAllLoaded(win) && momentOfEpoch() != keyMoment,
-          QStringLiteral("keyed → regex on the open tab: back to the heuristic"));
-    combo->setCurrentIndex(jsonLines);
     check(waitAllLoaded(win) && momentOfEpoch() == keyMoment,
-          QStringLiteral("regex → keyed on the open tab: moments from the keys again"));
+          QStringLiteral("a regex schema on the JSON tab: moments still from the keys"));
 
-    // «Apply Schema to All Tabs»: регексная схема — на вкладку JSON
-    // Lines тоже, затем JSON Lines — на все (обычный лог — beta).
-    const int ib = tabIndexForFile(win, fx.b);
-    LogViewWidget* plainTab = ib >= 0 ? tabAt(win, ib) : nullptr;
-    if (!plainTab)
-        return;
-    tabs(win)->setCurrentIndex(ib);
-    combo->setCurrentIndex(smoke);
-    setFilterBlocks(true);
-    applyToAll->trigger();
-    check(waitAllLoaded(win) && momentOfEpoch() != keyMoment,
-          QStringLiteral("Apply Schema to All Tabs (regex) rereads the keyed tab"));
-    const int plainRows = plainTab->model()->rowCount();
-    tabs(win)->setCurrentIndex(tabIndexForFile(win, fx.jsonl));
-    combo->setCurrentIndex(jsonLines);
-    applyToAll->trigger();
-    check(waitAllLoaded(win) && momentOfEpoch() == keyMoment,
-          QStringLiteral("Apply Schema to All Tabs (JSON Lines) rereads with the keys"));
-    check(plainTab->parserPattern() == t->parserPattern() && plainTab->model()->rowCount() == plainRows,
-          QStringLiteral("the plain log under JSON Lines keeps its lines"));
+    const auto trigger = [&](const char* name) {
+        QAction* action = indicator->menu() ? indicator->menu()->findChild<QAction*>(QString::fromLatin1(name))
+                                            : nullptr;
+        if (!action)
+            for (QAction* a : indicator->menu() ? indicator->menu()->actions() : QList<QAction*>())
+                if (a->objectName() == QLatin1String(name))
+                    action = a;
+        check(action, QStringLiteral("the line format menu has %1").arg(QLatin1String(name)));
+        if (action)
+            action->trigger();
+        return action != nullptr;
+    };
+    if (trigger("lineFormatPlain")) {
+        check(waitAllLoaded(win) && momentOfEpoch() != keyMoment,
+              QStringLiteral("Plain text: the file is reread by the heuristic"));
+        check(indicator->text() == QStringLiteral("Plain text (manual)"),
+              QStringLiteral("the indicator shows the choice: %1").arg(indicator->text()));
+    }
+    if (trigger("lineFormatJson"))
+        check(waitAllLoaded(win) && momentOfEpoch() == keyMoment,
+              QStringLiteral("JSON Lines: moments from the keys again"));
+    if (trigger("lineFormatAuto"))
+        check(waitAllLoaded(win) && momentOfEpoch() == keyMoment
+                  && indicator->text() == QStringLiteral("JSON Lines (auto)"),
+              QStringLiteral("Detect automatically: JSON Lines (auto) again"));
 
-    // Как было: первая схема без Filter blocks на всех вкладках.
     combo->setCurrentIndex(0);
-    setFilterBlocks(false);
-    applyToAll->trigger();
     check(waitAllLoaded(win), QStringLiteral("schema back to the first one"));
     tabs(win)->setCurrentIndex(tabIndexForFile(win, fx.jsonl));
     pressCommand(win, QStringLiteral("closeTab"));
@@ -2985,8 +2967,9 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
 
 // Схема файла слитой вкладки (F-5, PR 3): «Applies to» в доке Log Fields —
 // только у вкладки из нескольких файлов; выбор файла — комбобокс меняет его
-// схему (JSON Lines у файла JSON Lines, регексная — у обычного лога), «All
-// files» при разных схемах — «(mixed)»; выбор схемы всем файлам снимает свои.
+// схему (у обычного лога — своя, у JSON-файла поля — ключи его формата
+// строк, F-17, шаг 7), «All files» при разных схемах — «(mixed)»; выбор
+// схемы всем файлам снимает свои.
 void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
 {
     section(QStringLiteral("schema per file in a merged tab"));
@@ -2995,11 +2978,11 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     auto* target = fieldsDock ? fieldsDock->findChild<QComboBox*>(QStringLiteral("schemaTargetCombo"))
                               : nullptr;
     auto* scanner = win.findChild<DirectoryScanner*>();
-    const int jsonLines = combo ? combo->findText(QStringLiteral("JSON Lines")) : -1;
     const int smoke = combo ? combo->findText(QStringLiteral("Smoke Fields")) : -1;
-    check(combo && target && jsonLines >= 0 && smoke >= 0 && scanner,
+    const int other = combo ? combo->findText(QStringLiteral("Logback / Log4j")) : -1;
+    check(combo && target && other >= 0 && smoke >= 0 && scanner,
           QStringLiteral("Log Fields has the schema and Applies to combos"));
-    if (!combo || !target || jsonLines < 0 || smoke < 0 || !scanner)
+    if (!combo || !target || other < 0 || smoke < 0 || !scanner)
         return;
     const auto setFilterBlocks = [&](bool on) {
         for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
@@ -3008,7 +2991,6 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     };
 
     const int before = tabs(win)->count();
-    // Своя вкладка: копия обычного лога (вкладки alpha и beta нужны дальше).
     const QString plain = QFileInfo(fx.a).dir().filePath(QStringLiteral("file-schemas.log"));
     QFile::remove(plain);
     check(QFile::copy(fx.a, plain), QStringLiteral("a copy of the plain log"));
@@ -3025,8 +3007,6 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     check(waitAllLoaded(win), QStringLiteral("the plain tab settles with the smoke schema"));
     check(!target->isVisibleTo(fieldsDock), QStringLiteral("a one-file tab has no Applies to"));
 
-    // JSON Lines уже открывался (его память файла принесла бы свою схему —
-    // это проверяет document_state): начать с чистого.
     QFile::remove(QDir(AppSettings::configDir()).filePath(
         QStringLiteral("memory/") + FileMemoryStore::fileNameForPath(fx.jsonl)));
     t->addLogFile(fx.jsonl);
@@ -3044,7 +3024,6 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     if (!jsonFile || !plainFile)
         return;
     LogModel* m = t->model();
-    // Запись 2 фикстуры JSON Lines (строка 3): эпоха в мс, pino 50.
     const qint64 keyMoment = keyedfx::baseMs() + 2000;
     const auto momentOfEpoch = [&]() {
         for (int row = 0; row < m->rowCount(); ++row) {
@@ -3056,32 +3035,28 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
         }
         return std::numeric_limits<qint64>::max(); // строки нет
     };
-    check(momentOfEpoch() != keyMoment, QStringLiteral("the JSON Lines file reads with the tab's regex schema"));
-
-    target->setCurrentIndex(target->findData(jsonFile->filePath));
-    check(combo->currentIndex() == smoke, QStringLiteral("the combo shows the file's schema (the tab's)"));
-    combo->setCurrentIndex(jsonLines);
-    check(waitAllLoaded(win), QStringLiteral("the tab settles after the file's schema"));
-    check(t->fileSchema(jsonFile).schemaName == QStringLiteral("JSON Lines")
-              && t->fileSchema(plainFile).schemaName == QStringLiteral("Smoke Fields")
-              && t->fieldSettings().schemaName == QStringLiteral("Smoke Fields"),
-          QStringLiteral("each file has its own schema"));
-    check(momentOfEpoch() == keyMoment, QStringLiteral("the JSON Lines file: moments from the keys"));
+    check(momentOfEpoch() == keyMoment, QStringLiteral("the JSON file in a merged tab: moments from the keys"));
     check(m->availableFields().contains(QStringLiteral("Thread")) && m->availableFields().contains(QStringLiteral("Level")),
           QStringLiteral("the tab's columns are the union (%1)").arg(m->availableFields().join(',')));
 
     target->setCurrentIndex(target->findData(plainFile->filePath));
     check(combo->currentIndex() == smoke, QStringLiteral("the combo shows the plain file's schema"));
+    combo->setCurrentIndex(other);
+    check(waitAllLoaded(win), QStringLiteral("the tab settles after the file's schema"));
+    check(t->fileSchema(plainFile).schemaName == QStringLiteral("Logback / Log4j")
+              && t->fieldSettings().schemaName == QStringLiteral("Smoke Fields"),
+          QStringLiteral("the plain file has its own schema"));
+    check(momentOfEpoch() == keyMoment, QStringLiteral("a file schema does not change the reading"));
     target->setCurrentIndex(0);
     check(combo->currentIndex() == -1 && combo->placeholderText() == QStringLiteral("(mixed)"),
           QStringLiteral("All files with different schemas — (mixed): %1").arg(combo->currentText()));
 
     // Соседняя вкладка и обратно: цель — снова все файлы.
-    target->setCurrentIndex(target->findData(jsonFile->filePath));
-    const int other = ip == 0 ? 1 : 0;
-    if (other < tabs(win)->count()) {
-        tabs(win)->setCurrentIndex(other);
-        check(!target->isVisibleTo(fieldsDock) || tabAt(win, other)->fileCount() > 1,
+    target->setCurrentIndex(target->findData(plainFile->filePath));
+    const int neighbour = ip == 0 ? 1 : 0;
+    if (neighbour < tabs(win)->count()) {
+        tabs(win)->setCurrentIndex(neighbour);
+        check(!target->isVisibleTo(fieldsDock) || tabAt(win, neighbour)->fileCount() > 1,
               QStringLiteral("Applies to follows the active tab"));
         tabs(win)->setCurrentIndex(ip);
         check(target->currentIndex() == 0, QStringLiteral("back on the merged tab: All files"));
@@ -3091,7 +3066,7 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     target->setCurrentIndex(0);
     combo->setCurrentIndex(smoke);
     check(waitAllLoaded(win) && !t->hasFileSchemas() && combo->currentIndex() == smoke
-              && momentOfEpoch() != keyMoment,
+              && momentOfEpoch() == keyMoment,
           QStringLiteral("a schema for All files drops the files' own schemas"));
 
     tabs(win)->setCurrentIndex(tabIndexForFile(win, plain));
@@ -4549,7 +4524,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioFileLabels(win);
         scenarioAutoReload(win, dir);
         scenarioTar(win, fx); // после сценариев, которым нужен alpha в Recent Files
-        scenarioKeyedSchema(win, fx);
+        scenarioLineFormat(win, fx);
         scenarioFileSchemas(win, fx);
         section(QStringLiteral("shortcuts: every one fires"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars shown"));

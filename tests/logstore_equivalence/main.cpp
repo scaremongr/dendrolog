@@ -2382,10 +2382,10 @@ static void testKeyedSchemas(const QDir& dir)
         const bool json = format == Format::JsonObject;
         const QString tag = json ? QStringLiteral("JSON Lines") : QStringLiteral("logfmt");
         const QString ext = json ? QStringLiteral(".jsonl") : QStringLiteral(".logfmt");
+        // Схемы нет (F-17, шаг 7): формат строк решает загрузчик, колонки —
+        // ключи формата (keyedfx::expectedFormat).
         const QString keyedSchema = keyedfx::schema(format);
-        const LogPattern keyedPattern(keyedSchema);
-        CHECK(keyedPattern.isValid() && keyedPattern.isKeyed(), tag + QStringLiteral(": схема"));
-        const QStringList fieldNames = keyedPattern.fieldNames();
+        const QStringList fieldNames = keyedfx::expectedFormat(format).keys.columnNames();
 
         const keyedfx::Fixture fx = keyedfx::make(format, 96);
         const QString path = writeFile(dir, QStringLiteral("keyed") + ext, fx.bytes);
@@ -2675,14 +2675,21 @@ static void testMixedSchemas(const QDir& dir)
             g_contextFailures = 0;
             // Резидентная: файлы дописываются во вкладку по одному, каждый
             // своей схемой; индексная — по одному или разом.
+            // Формат строк JSON-файла (F-17, шаг 7) — заранее, как у файла,
+            // формат которого уже решён: колонки вкладки растут в порядке
+            // файлов на обоих бэкендах (иначе у индексной вкладки, открытой
+            // разом, колонки ключей пришли бы позже — по решению прохода).
+            const LineFormat keyedFormat = LineFormatDetector::detectInFile(keyedPath);
             Document res;
             res.model = std::make_unique<LogModel>();
+            res.formats.insert(keyedPath, keyedFormat);
             for (int i = 0; i < order.paths.size(); ++i)
                 addResidentFiles(res, {order.paths[i]}, order.schemas[i]);
             reportLoadErrors(res);
             CHECK(settle(*res.model), QStringLiteral("резидентная модель не пришла в покой"));
             Document idx;
             idx.model = std::make_unique<LogModel>();
+            idx.formats.insert(keyedPath, keyedFormat);
             addIndexedFiles(idx, order.paths, QString(), mode, order.schemas);
             reportLoadErrors(idx);
             CHECK(settle(*idx.model), QStringLiteral("индексная модель не пришла в покой"));

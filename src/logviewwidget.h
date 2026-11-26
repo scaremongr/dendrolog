@@ -277,6 +277,21 @@ public:
     // продолжала решать рядом). Тем же путём, что выбор: индексная —
     // без переиндексации, резидентная — перечитывание с подменой записей.
     void restoreAutomaticEncoding(const LogFilePtr& logFile);
+
+    // ---- Формат строк файла (F-17, шаг 7; lineformat.h) -------------------------
+    // Как кодировка: у индексного — в сторе, у резидентного — во вкладке
+    // (m_fileFormats); переход порога в обе стороны, дозапись и объединение
+    // вкладок несут его. «Не решён» — пока в файле меньше 20 непустых строк.
+    LineFormat lineFormat(const LogFilePtr& logFile) const;
+    // Выбор пользователя (индикатор в строке статуса): Origin::User. Если
+    // выбор читает файл иначе (LineFormat::readingSignature), файл
+    // перечитывается путём смены ключевой схемы F-4, PR 3 (резидентный —
+    // подмена записей под одним reset, индексный — переиндексация), позиция,
+    // закладки и история — через RecordLocator. Колонки полей JSON-файла —
+    // ключи формата. Не загруженный файл берёт выбор при загрузке.
+    void setLineFormat(const LogFilePtr& logFile, const LineFormat& format);
+    // «Detect automatically»: выбор снимается, формат решается по файлу заново.
+    void restoreAutomaticLineFormat(const LogFilePtr& logFile);
     QString parserPattern() const;
     QStringList parserFieldNames() const;
 
@@ -427,6 +442,8 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     // пересмотр, выбор пользователя, «авто», перечитывание переписанного
     // файла) — индикатор кодировки перечитывает fileEncoding.
     void fileEncodingChanged(const LogFilePtr& logFile);
+    // Формат строк файла решён или выбран (F-17, шаг 7).
+    void lineFormatChanged(const LogFilePtr& logFile);
     // Флаг авто-обновления вкладки сменился (setAutoReload, применение
     // состояния) — окно обновляет таймер и кнопку.
     void autoReloadChanged(bool enabled);
@@ -594,7 +611,7 @@ private:
     // Полная перезагрузка файла с нуля: строки сбрасываются и файл читается
     // заново. Используется, когда файл переписан, обрезан или удалён и создан
     // заново. Состояние файла обнуляется и помечается «загрузка в полёте».
-    void startFullReload(const LogFilePtr& logFile);
+    void startFullReload(const LogFilePtr& logFile, bool keepFormat = false);
 
     // ---- Перечитывание по смене схемы (F-4, PR 3) ----------------------------
     // Что из схемы файла действует при чтении: ключевая часть без колонок,
@@ -728,6 +745,23 @@ private:
     // (takeEncodingsForIndexed), при откате — возвращается из стора. У
     // индексной вкладки не используется: там состояние держит стор.
     QHash<QString, FileEncoding> m_fileEncodings;
+    // Резидентный путь: формат строк файла (F-17, шаг 7), как m_fileEncodings.
+    QHash<QString, LineFormat> m_fileFormats;
+    // Формат, с которым файл начнёт загрузку (объединение вкладок, выбор
+    // пользователя до загрузки, снимок состояния); берётся при старте.
+    QHash<QString, LineFormat> m_pendingFormats;
+    // То же по источнику (RecordLocator::sourceKey): снимок состояния и
+    // память файла знают источник, а не путь копии сжатого файла.
+    QHash<QString, LineFormat> m_pendingSourceFormats;
+    // Формат прохода: решённый, иначе ожидающий, иначе «не решён».
+    LineFormat passFormat(const LogFilePtr& logFile);
+    void storeLineFormat(const LogFilePtr& logFile, const LineFormat& format);
+    void handleLineFormatDecided(const LogFilePtr& logFile, const LineFormat& format,
+                                 bool afterLines);
+    // Колонки структурированного формата файла — в раскладку (только растёт).
+    void adoptFormatColumns(const LogFilePtr& logFile);
+    // Файл переписан: решение автоматики к новому содержимому не относится.
+    void forgetAutoFormat(const LogFilePtr& logFile);
     void handleEncodingDecided(const LogFilePtr& logFile, const FileEncoding& encoding);
     // Состояние кодировки резидентного файла целиком: декодер сменился —
     // перечитывание (startReencode; загрузка в полёте — после неё).
@@ -792,7 +826,6 @@ private:
     // файла нет строк, раскладка растёт.
     void adoptPendingSchema(const LogFilePtr& logFile);
     QHash<QString, FieldSettings> normalizedFileSchemas(const QHash<QString, FieldSettings>& files) const;
-    FileSchemaPtr passSchema(const QString& filePath) const;
     QString m_schemaName;
     bool m_showFieldsFlag = false;
     QStringList m_visibleFields;

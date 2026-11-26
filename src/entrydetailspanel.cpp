@@ -632,10 +632,14 @@ const LogEntry* EntryDetailsPanel::fieldsSource() const
 
 QVector<std::pair<QString, QString>> EntryDetailsPanel::keyPairs() const
 {
-    if (!m_schema || !m_schema->pattern.isKeyed() || !m_line || m_line->isPlainText())
+    // Ключевые поля — у файла формата JSON / logfmt (F-17, шаг 7): его схема
+    // — KeyedExtractor по ключам формата.
+    const auto* keyed = m_schema ? dynamic_cast<const KeyedExtractor*>(m_schema->extractor.get())
+                                 : nullptr;
+    if (!keyed || !m_line || m_line->isPlainText())
         return {};
     const LogEntry* src = fieldsSource();
-    return src ? m_schema->pattern.keyValuePairs(src->message())
+    return src ? KeyedLine::keyValuePairs(src->message(), keyed->definition().format)
                : QVector<std::pair<QString, QString>>();
 }
 

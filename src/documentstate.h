@@ -4,6 +4,7 @@
 #include "bookmarkstore.h"
 #include "filterruleset.h"
 #include "logentry.h"
+#include "lineformat.h"
 #include "recordid.h"
 #include "textencoding.h"
 #include "textmatchhighlighter.h"
@@ -145,6 +146,9 @@ struct TabSource {
     SourceIdentity source;
     std::optional<TextEncoding> userEncoding; // nullopt — решает автоматика
     std::optional<FieldSettings> schema;      // nullopt — схема вкладки
+    // Выбор формата строк пользователем (F-17, шаг 7; lineformat.h);
+    // nullopt — решает автоматика. Ключ «lineFormat» необязателен.
+    std::optional<LineFormat> lineFormat;
 
     QJsonObject toJson() const;
     static std::optional<TabSource> fromJson(const QJsonObject& json, QString* error = nullptr);

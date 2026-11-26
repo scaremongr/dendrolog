@@ -147,7 +147,7 @@ private:
 };
 
 // ----------------------------------------------------------------------------
-// Прежняя блочная схема (LogPattern: каскад регексов, или ключевая) за тем
+// Прежняя блочная схема (LogPattern: каскад регексов) за тем
 // же интерфейсом — до шага 9 F-17, где блочная модель удаляется. Cost —
 // Inline (шаг 6: регексы блочных схем всегда шли на GUI-потоке, у встроенных
 // их много; Background — у шаблона с /регексом/). Full — полный регекс,
@@ -165,13 +165,12 @@ public:
     QStringList fields() const override { return m_fields; }
     Cost cost() const override { return Cost::Inline; }
     int tailField() const override;
-    bool isKeyed() const override;
     Outcome extract(QStringView line, LogEntryFields* out, int upTo = -1,
                     Stop* stop = nullptr) const override;
     MatchReport explain(QStringView line) const override;
 
     /// extract плюс результат регексного каскада строки (редактор схем красит
-    /// по нему предпросмотр; keyed — спаны колонок).
+    /// по нему предпросмотр).
     Outcome extractWithMatch(QStringView line, LogEntryFields* out, LineMatchResult* match,
                              Stop* stop = nullptr) const;
     /// Причина остановки по готовому результату каскада (SchemaFit::explain).

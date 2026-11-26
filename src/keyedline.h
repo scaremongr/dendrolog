@@ -143,6 +143,10 @@ qsizetype unescapedSize(QStringView escaped, bool keepControls = false);
 // текст, число и литерал — токен.
 QString valueText(QStringView text, const Pair& pair);
 
+// Все пары верхнего уровня строки как текст (раздел Keys Entry Details):
+// ключ — раскодированный, значение — valueText. Строка не той формы — пусто.
+QVector<std::pair<QString, QString>> keyValuePairs(QStringView line, KeyedDefinition::Format format);
+
 // Найденная колонка: значение в тексте строки (абсолютное смещение —
 // вложенные значения тоже).
 struct Hit {

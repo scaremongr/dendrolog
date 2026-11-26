@@ -22,6 +22,7 @@
 
 #include "keyedline.h"
 #include "logentry.h"
+#include "lineformat.h"
 #include "logpattern.h"
 
 #include <QByteArray>
@@ -34,16 +35,25 @@
 
 namespace keyedfx {
 
-// Ключевая схема формата с колонкой Thread (её знают конфигурации фильтров
-// tests/common/filterconfigs.h): колонки Timestamp, Level, Message, Thread.
-inline QString schema(KeyedDefinition::Format format)
+// Схемы у фикстур нет (F-17, шаг 7): JSON Lines и logfmt — формат строк
+// файла, его решает загрузчик сам; колонки полей — ключи ролей и ключи
+// начала файла: Timestamp, Level, Message, Thread (Thread — в 6 из 8 строк
+// записей; её знают конфигурации фильтров tests/common/filterconfigs.h).
+inline QString schema(KeyedDefinition::Format)
 {
-    PatternDefinition def;
+    return QString();
+}
+
+// Формат строк, который решает детектор на фикстуре (выбор пользователя
+// «Keys…» с теми же ключами — Timestamp, Level, Message, Thread).
+inline LineFormat expectedFormat(KeyedDefinition::Format format)
+{
     KeyedDefinition k;
     k.format = format;
     k.extraColumns = {QStringLiteral("Thread")};
-    def.keyed = k;
-    return LogPattern::serializeDefinition(def);
+    return LineFormat::structured(format == KeyedDefinition::Format::Logfmt
+                                      ? LineFormat::Kind::Logfmt : LineFormat::Kind::Json,
+                                  k, LineFormat::Origin::Auto);
 }
 
 struct Record {

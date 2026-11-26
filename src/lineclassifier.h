@@ -108,11 +108,11 @@ struct ClockDates {
     bool matched = false;
 };
 
-class LogPattern;
+struct LineFormatReader;
 
-// Классификация строки ключевой схемой (F-4) — LineClassifier::classifyKeyed.
-struct KeyedClassification {
-    bool matched = false;        ///< Строку распознала схема (keyedline.h).
+// Классификация строки при загрузке — LineClassifier::classifyLine.
+struct LineClassification {
+    bool matched = false;        ///< Строку распознал формат строк (Json / Logfmt, keyedline.h).
     bool hasTs = false;
     qint64 tsMs = kNoTimestampMs;
     bool leading = false;        ///< Метка ведущая (только у эвристики по строке).
@@ -120,7 +120,8 @@ struct KeyedClassification {
     LogLevel level = LogLevel::Unknown;
     bool tsFromKey = false;      ///< Момент взят из значения ключа, а не эвристикой.
     bool levelFromKey = false;   ///< Уровень взят из значения ключа.
-    bool isPrimary() const;      ///< LineClassifier::isPrimaryLine по этим полям.
+    bool primary = false;        ///< Строка начинает запись (см. classifyLine).
+    bool isPrimary() const { return primary; }
 };
 
 class LineClassifier {
@@ -212,28 +213,25 @@ public:
     // 30 Warning, 40 Error, 50+ Fatal. Не по шкале — false.
     bool levelFromValue(QStringView value, bool isNumber,
                         KeyedDefinition::NumericLevels scale, LogLevel& level) const;
-    // Один вызов на строку для обоих путей загрузки вместо пары детекторов,
-    // когда у схемы есть ключевая часть: распознана ли строка, момент и
-    // уровень из ключей; ключа нет или значение не читается — эвристика по
-    // строке (detectTimestampMs с leading и clock, detectLogLevel), как без
-    // схемы. Не ключевая схема — только эвристика (matched = false).
-    KeyedClassification classifyKeyed(const LogPattern& pattern, QStringView line,
-                                      const YearReference& year = YearReference(),
-                                      ClockDates* clock = nullptr) const;
     // Классификация строки при ЗАГРУЗКЕ — одно место правила для LogParser
-    // (резидентный путь и счётчики сканера) и LogIndexer (F-4, PR 2):
-    // keyedSchema — ключевая схема, если у вкладки включено извлечение полей
-    // и схема ключевая (LogPattern::isKeyed), иначе nullptr — тогда только
-    // эвристика по строке, как без схемы. fields (может быть nullptr) —
-    // поля распознанной строки ключевой схемы (LogPattern::keyedFields) без
-    // второго разбора; у нераспознанной — пусто. Регексную схему вызывающий
-    // спрашивает сам (extractFields): она решает только «первичная ли».
-    KeyedClassification classifyLine(const LogPattern* keyedSchema, QStringView line,
-                                     const YearReference& year, ClockDates* clock,
-                                     LogEntryFields* fields = nullptr) const;
+    // (резидентный путь и счётчики сканера) и LogIndexer (F-17, шаг 7):
+    // формат строк файла (lineformat.h; nullptr — Plain). Json / Logfmt —
+    // распознана ли строка (keyedline.h), момент и уровень из ключей ролей;
+    // ключа нет или значение не читается — эвристика по строке
+    // (detectTimestampMs с leading и clock, detectLogLevel), как у Plain.
+    // primary — строка начинает запись: распознана форматом, ИЛИ
+    // isPrimaryLine по метке и уровню, ИЛИ (Plain с levelStartsRecord)
+    // строка начинается словом уровня с позиции 0 или 1 за «[».
+    // fields (может быть nullptr) — поля распознанной строки по колонкам
+    // ключей формата (без второго разбора); у нераспознанной — пусто.
+    LineClassification classifyLine(const LineFormatReader* format, QStringView line,
+                                    const YearReference& year = YearReference(),
+                                    ClockDates* clock = nullptr,
+                                    LogEntryFields* fields = nullptr) const;
 
-    // Правило первичной строки логической записи (F-12, docs/design/F-12.md).
-    // Строка первична, если её распознала схема, ИЛИ у неё есть метка и
+    // Правило первичной строки логической записи (F-12, docs/design/F-12.md;
+    // без схемы — F-17, шаг 7: формат строк добавляет своё в classifyLine).
+    // Строка первична, если у неё есть метка и
     // слово уровня, ИЛИ метка ВЕДУЩАЯ — открывает строку:
     //   • стоит с позиции 0 (любая форма; syslog, фолбэк-формы и время без
     //     даты — F-11 — только так, время без даты ещё и с позиции 1 за «[»);
@@ -244,10 +242,9 @@ public:
     // сообщения (JSON, SQL, XML) с меткой в середине или с отступом.
     // Правило построчное, без состояния: одно у LogParser, LogIndexer и
     // сканера каталога (analyzeFileForStats).
-    static bool isPrimaryLine(bool schemaMatched, bool hasTimestamp,
-                              bool leadingTimestamp, bool hasLevel)
+    static bool isPrimaryLine(bool hasTimestamp, bool leadingTimestamp, bool hasLevel)
     {
-        return schemaMatched || (hasTimestamp && (leadingTimestamp || hasLevel));
+        return hasTimestamp && (leadingTimestamp || hasLevel);
     }
 
 private:

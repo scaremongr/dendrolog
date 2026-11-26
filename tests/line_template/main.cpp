@@ -761,11 +761,8 @@ void testOtherExtractors()
     for (const SchemaCase& sc : cases()) {
         const LogPattern old = blockPattern(sc.file);
         const LegacyPatternExtractor legacy(old);
-        std::unique_ptr<KeyedExtractor> keyed;
-        if (old.isKeyed())
-            keyed = std::make_unique<KeyedExtractor>(*old.keyed());
         check(legacy.fields() == old.fieldNames() && legacy.tailField() == old.tailFieldIndex()
-                  && legacy.isKeyed() == old.isKeyed(),
+                  && !legacy.isKeyed(),
               QStringLiteral("%1: прежний извлекатель — колонки и хвост схемы").arg(sc.file));
         for (const Sample& s : sc.samples) {
             const LogEntryFields want = old.extractFields(s.line);
@@ -774,21 +771,29 @@ void testOtherExtractors()
             check(fieldsOf(old.fieldNames(), s.line, want) == fieldsOf(legacy.fields(), s.line, got)
                       && FieldExtractor::accepted(o) == old.matchLine(s.line).ok,
                   QStringLiteral("%1: прежний извлекатель = LogPattern на «%2»").arg(sc.file, s.line));
-            if (!keyed)
+        }
+    }
+    // Ключевой извлекатель — колонки формата строк JSON Lines и logfmt
+    // (F-17, шаг 7): на образцах форматов поля ролей — заданные значения,
+    // продолжения не приняты.
+    for (const SchemaCase& sc : formatCases()) {
+        KeyedDefinition k;
+        k.format = sc.file == QLatin1String("logfmt") ? KeyedDefinition::Format::Logfmt
+                                                      : KeyedDefinition::Format::JsonObject;
+        const KeyedExtractor keyed(k);
+        for (const Sample& s : sc.samples) {
+            LogEntryFields got;
+            const Outcome o = keyed.extract(s.line, &got);
+            if (s.continuation) {
+                check(o == Outcome::Rejected, QStringLiteral("%1: продолжение не принято: %2").arg(sc.file, s.line));
                 continue;
-            LogEntryFields k;
-            const Outcome ko = keyed->extract(s.line, &k);
-            check(fieldsOf(keyed->fields(), s.line, k) == fieldsOf(old.fieldNames(), s.line, want)
-                      && (ko == Outcome::Full) == !s.continuation
-                      && (s.continuation || k.spans.size() == want.spans.size()),
-                  QStringLiteral("%1: ключевой извлекатель = LogPattern на «%2»").arg(sc.file, s.line));
-            for (int c = 0; c < k.size() && c < want.size(); ++c)
-                check(k.isEscaped(c) == want.isEscaped(c), QStringLiteral("%1: бит экранирования").arg(sc.file));
+            }
+            const Fields f = fieldsOf(keyed.fields(), s.line, got);
+            check(o == Outcome::Full && f == s.fields,
+                  QStringLiteral("%1: ключевой извлекатель на «%2»: %3").arg(sc.file, s.line, describe(f)));
         }
-        if (keyed) {
-            check(keyed->explain(QStringLiteral("plain text")).expect == MatchReport::Expect::Record,
-                  QStringLiteral("%1: ключевой explain — Record").arg(sc.file));
-        }
+        check(keyed.explain(QStringLiteral("plain text")).expect == MatchReport::Expect::Record,
+              QStringLiteral("%1: ключевой explain — Record").arg(sc.file));
     }
 }
 
@@ -809,12 +814,6 @@ void testSchemaFit()
         check(a.full == b.full && a.partial == b.partial && a.missed == b.missed && a.loose == b.loose
                   && a.filled == b.filled && a.distinct == b.distinct && a.valid && b.valid,
               QStringLiteral("%1: SchemaFit по LogPattern = по LegacyPatternExtractor").arg(sc.file));
-        if (isKeyedFile(sc.file)) {
-            const SchemaFit::Result k = SchemaFit::evaluate(KeyedExtractor(*old.keyed()), lines);
-            check(SchemaFit::verdict(k) == SchemaFit::Verdict::Fits,
-                  QStringLiteral("%1: ключевой извлекатель «подходит» своим образцам").arg(sc.file));
-            continue;
-        }
         const auto tpl = builtinTemplate(templateFileFor(sc.file));
         if (!tpl)
             continue;

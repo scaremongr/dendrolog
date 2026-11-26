@@ -47,7 +47,7 @@ struct CandidateRule {
                                                         &leading, &clock);
         LogLevel level = LogLevel::Unknown;
         const bool hasLevel = classifier.detectLogLevel(line, level);
-        return LineClassifier::isPrimaryLine(false, hasTs, leading, hasLevel);
+        return LineClassifier::isPrimaryLine(hasTs, leading, hasLevel);
     }
 };
 

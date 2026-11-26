@@ -82,20 +82,10 @@ static void appendToFile(const QString& path, const QByteArray& bytes)
     f.write(bytes);
 }
 
-// Схема прохода (F-5) из строки схемы: пустая — без схемы. Одна схема на
-// файл — колонки тождественны колонкам схемы.
-static FileSchemaPtr passSchema(const QString& schema)
-{
-    if (schema.isEmpty())
-        return nullptr;
-    FieldLayout layout;
-    return layout.schemaFor(schema);
-}
-
 // Полная индексация файла; блокирует до завершения.
 static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
                                             bool* fallback = nullptr,
-                                            const QString& schema = QString())
+                                            const LineFormat& format = LineFormat())
 {
     auto index = std::make_shared<LineIndex>();
     // Флаги объявлены ДО индексатора: при таймауте его деструктор дожидается
@@ -112,7 +102,7 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
     QObject::connect(&indexer, &LogIndexer::needsResidentFallback, &indexer,
                      [&](const LogFilePtr&, const QString&) { fb = true; done = true; },
                      Qt::DirectConnection);
-    indexer.startIndexing(lf, index, FileEncoding(), passSchema(schema));
+    indexer.startIndexing(lf, index, FileEncoding(), format);
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -125,14 +115,13 @@ static std::shared_ptr<LineIndex> indexFile(const LogFilePtr& lf,
 // Дозапись хвоста; блокирует до завершения.
 static void indexAppend(LogIndexer& indexer, const LogFilePtr& lf,
                         const std::shared_ptr<LineIndex>& index,
-                        bool reindexProvisionalTail, const QString& schema = QString())
+                        bool reindexProvisionalTail, const LineFormat& format = LineFormat())
 {
     std::atomic_bool done{false};
     auto conn = QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
                                  [&](qint64, const LogFilePtr&) { done = true; },
                                  Qt::DirectConnection);
-    indexer.startIndexingFrom(lf, index, reindexProvisionalTail, FileEncoding(),
-                              passSchema(schema));
+    indexer.startIndexingFrom(lf, index, reindexProvisionalTail, FileEncoding(), format);
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -142,7 +131,7 @@ static void indexAppend(LogIndexer& indexer, const LogFilePtr& lf,
 
 // Резидентный парсинг файла; блокирует до завершения.
 static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf,
-                                                    const QString& schema = QString())
+                                                    const LineFormat& format = LineFormat())
 {
     QVector<std::shared_ptr<LogEntry>> all;
     std::atomic_bool done{false}; // до парсера — см. indexFile()
@@ -157,7 +146,7 @@ static QVector<std::shared_ptr<LogEntry>> parseFile(const LogFilePtr& lf,
     QObject::connect(&parser, &LogParser::parsingFailed, &parser,
                      [&](const LogFilePtr&) { done = true; },
                      Qt::DirectConnection);
-    parser.startParsing(lf, FileEncoding(), passSchema(schema));
+    parser.startParsing(lf, FileEncoding(), format);
     QElapsedTimer t; t.start();
     while (!done && t.elapsed() < 30000)
         QThread::msleep(2);
@@ -2279,33 +2268,28 @@ static void testPre1970(const QDir& dir)
           "pre1970_grow.log: the appended continuation of a -1 ms record is not plain text");
 }
 
-// Схема для замеров: «jsonl» / «logfmt» — ключевая схема с ключами по
-// умолчанию (F-4), путь к существующему файлу — его текст, иначе сама строка.
-static QString benchSchema(const QString& arg)
+// Формат строк для замеров (F-17, шаг 7): «plain» / «jsonl» / «logfmt» —
+// выбор пользователя с ключами по умолчанию; пусто — решает детектор.
+static LineFormat benchFormat(const QString& arg)
 {
-    if (arg == QLatin1String("jsonl") || arg == QLatin1String("logfmt")) {
-        PatternDefinition def;
-        KeyedDefinition k;
-        k.format = arg == QLatin1String("jsonl") ? KeyedDefinition::Format::JsonObject
-                                                 : KeyedDefinition::Format::Logfmt;
-        def.keyed = k;
-        return LogPattern::serializeDefinition(def);
-    }
-    QFile f(arg);
-    if (!arg.isEmpty() && f.open(QIODevice::ReadOnly))
-        return QString::fromUtf8(f.readAll());
-    return arg;
+    if (arg == QLatin1String("plain"))
+        return LineFormat::plain(LineFormat::Origin::User);
+    if (arg == QLatin1String("jsonl"))
+        return LineFormat::structured(LineFormat::Kind::Json, {}, LineFormat::Origin::User);
+    if (arg == QLatin1String("logfmt"))
+        return LineFormat::structured(LineFormat::Kind::Logfmt, {}, LineFormat::Origin::User);
+    return LineFormat();
 }
 
-// Бенчмарк-режим: lineindex_smoke --bench <файл> [схема] — чистая
+// Бенчмарк-режим: lineindex_smoke --bench <файл> [формат] — чистая
 // скорость LogIndexer без GUI (для локализации узких мест индексации).
-// Схема — см. benchSchema; с ней включено извлечение полей.
-static int runBench(const QString& path, const QString& patternString)
+// Формат — см. benchFormat; без него решает детектор (его цена — в замере).
+static int runBench(const QString& path, const QString& formatName)
 {
     auto lf = std::make_shared<LogFile>(path);
     auto index = std::make_shared<LineIndex>();
     LogIndexer indexer;
-    const FileSchemaPtr schema = passSchema(patternString);
+    const LineFormat schema = benchFormat(formatName);
     std::atomic_bool done{false};
     QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
                      [&](qint64, const LogFilePtr&) { done = true; },
@@ -2329,14 +2313,13 @@ static int runBench(const QString& path, const QString& patternString)
 }
 
 // Бенчмарк резидентного пути: lineindex_smoke --bench-resident <файл>
-// [схема] — чистая скорость LogParser (разбор в записи, без модели): время
-// до parsingFinished. Замер цены транспорта байтов F-1 (шаг 3) и ключевой
-// схемы F-4 (схема — см. benchSchema; с ней включено извлечение полей).
-static int runBenchResident(const QString& path, const QString& patternString)
+// [формат] — чистая скорость LogParser (разбор в записи, без модели): время
+// до parsingFinished. Формат строк — см. benchFormat.
+static int runBenchResident(const QString& path, const QString& formatName)
 {
     auto lf = std::make_shared<LogFile>(path);
     LogParser parser;
-    const FileSchemaPtr schema = passSchema(patternString);
+    const LineFormat schema = benchFormat(formatName);
     std::atomic_bool done{false};
     std::atomic<qint64> entries{0};
     QObject::connect(&parser, &LogParser::entriesParsed, &parser,
@@ -3061,25 +3044,143 @@ static void testKeyedValues()
     }
 }
 
-// F-4, PR 2: ключевая схема на загрузке. Парсер и индексатор берут момент,
-// уровень и границу записи из ключей одним правилом (classifyLine):
-// золотое сравнение на фикстурах JSON Lines и logfmt с заданными моментами
-// и уровнями (tests/common/keyedfixtures.h), дозапись объекта частями (обрыв
-// посреди строки в кавычках, \u и вложенного) = индекс, построенный разом;
-// без извлечения полей схема инертна (эвристика); счётчики сканера
-// (analyzeFileForStats) с той же схемой — те же записи, уровни и From/To.
+// F-17, шаг 7 (бывший F-4, PR 2): JSON Lines и logfmt БЕЗ схемы. Формат
+// строк файла решает детектор в начале прохода обоих загрузчиков, момент,
+// уровень и граница записи — из ключей одним правилом (classifyLine):
+// золотое сравнение на фикстурах с заданными моментами и уровнями
+// (tests/common/keyedfixtures.h), дозапись объекта частями (обрыв посреди
+// строки в кавычках, \u и вложенного) = индекс, построенный разом; выбор
+// «Plain text» — эвристика; счётчики сканера (analyzeFileForStats) тем же
+// детектором — те же записи, уровни и From/To.
+// F-17, шаг 7: формат строк Plain без схемы. (1) Лог без меток со словом
+// уровня в начале строки (Python basicConfig) — levelStartsRecord: запись
+// начинает «WARNING:root:…», traceback — в своей записи. (2) Лог с метками
+// и ведущим «ERROR:» в продолжении — запись не рвётся (решение на файл).
+// (3) Малый файл (< 20 непустых строк) — «не решён», строки читаются как
+// Plain; дозапись, после которой строк хватает, решает формат и сообщает
+// его с afterLines (вкладка перечитывает файл, tests/logview_lifecycle).
+static void testLineFormatPlain(const QDir& dir)
+{
+    {
+        QByteArray bytes;
+        int records = 0;
+        for (int i = 0; i < 30; ++i) {
+            if (i % 3 == 2) {
+                bytes += "ERROR:root:failed " + QByteArray::number(i) + "\n"
+                         "Traceback (most recent call last):\n"
+                         "  File \"app.py\", line 7, in <module>\n"
+                         "ValueError: bad " + QByteArray::number(i) + "\n";
+            } else {
+                bytes += (i % 3 == 0 ? "INFO:root:step " : "[WARNING] retry ") + QByteArray::number(i) + "\n";
+            }
+            ++records;
+        }
+        const QString path = writeFile(dir, QStringLiteral("levels.log"), bytes);
+        const LineFormat detected = LineFormatDetector::detectInFile(path);
+        CHECK(detected.kind == LineFormat::Kind::Plain && detected.levelStartsRecord
+                  && detected.origin == LineFormat::Origin::Auto,
+              "levels.log: plain with levelStartsRecord");
+        auto lf = std::make_shared<LogFile>(path);
+        const auto entries = parseFile(lf);
+        const auto index = indexFile(lf);
+        compareParserVsIndex(QStringLiteral("levels.log"), path, lf, entries, *index);
+        CHECK(index->logicalEntryCount() == records, "levels.log: one record per leading level");
+        for (qint64 i = 0; i < index->lineCount(); ++i) {
+            const QString text = textFromIndex(path, *index, i);
+            const bool head = text.startsWith(QLatin1String("INFO")) || text.startsWith(QLatin1String("ERROR"))
+                || text.startsWith(QLatin1String("[WARNING]"));
+            CHECK(index->isPrimary(i) == head,
+                  qPrintable(QStringLiteral("levels.log: line %1 primary").arg(i + 1)));
+            if (text.startsWith(QLatin1String("Traceback")) || text.startsWith(QLatin1String("ValueError")))
+                CHECK(index->level(i) == LogLevel::Error,
+                      qPrintable(QStringLiteral("levels.log: traceback line %1 in its ERROR record").arg(i + 1)));
+        }
+        // Выбор «Plain text» без дополнения — весь файл записями только по меткам.
+        const LineFormat plain = LineFormat::plain(LineFormat::Origin::User);
+        CHECK(indexFile(lf, nullptr, plain)->logicalEntryCount() == 1,
+              "levels.log: plain without levelStartsRecord — one record (no stamps)");
+    }
+    {
+        QByteArray bytes;
+        for (int i = 0; i < 30; ++i)
+            bytes += "2026-11-18 10:00:" + QByteArray::number(10 + i) + " INFO start " + QByteArray::number(i)
+                     + "\nERROR: detail " + QByteArray::number(i) + "\n";
+        const QString path = writeFile(dir, QStringLiteral("stamped-error.log"), bytes);
+        const LineFormat detected = LineFormatDetector::detectInFile(path);
+        CHECK(detected.kind == LineFormat::Kind::Plain && !detected.levelStartsRecord,
+              "stamped-error.log: stamps — no levelStartsRecord");
+        auto lf = std::make_shared<LogFile>(path);
+        const auto entries = parseFile(lf);
+        const auto index = indexFile(lf);
+        compareParserVsIndex(QStringLiteral("stamped-error.log"), path, lf, entries, *index);
+        CHECK(index->logicalEntryCount() == 30, "stamped-error.log: ERROR: continuation stays in its record");
+        for (qint64 i = 1; i < index->lineCount(); i += 2)
+            CHECK(!index->isPrimary(i) && index->logicalId(i) == index->logicalId(i - 1),
+                  qPrintable(QStringLiteral("stamped-error.log: line %1 is a continuation").arg(i + 1)));
+    }
+    {
+        const auto jsonLine = [](int i) {
+            return "{\"ts\":" + QByteArray::number(1700000000 + i) + ",\"level\":30,\"msg\":\"m"
+                   + QByteArray::number(i) + "\"}\n";
+        };
+        QByteArray head;
+        for (int i = 0; i < 5; ++i)
+            head += jsonLine(i);
+        const QString path = writeFile(dir, QStringLiteral("small.jsonl"), head);
+        CHECK(!LineFormatDetector::detectInFile(path).isDecided(), "small.jsonl: undecided below 20 lines");
+        auto lf = std::make_shared<LogFile>(path);
+        QVector<std::pair<LineFormat, bool>> decisions;
+        LogIndexer indexer;
+        QObject::connect(&indexer, &LogIndexer::lineFormatDecided, &indexer,
+                         [&](const LogFilePtr&, const LineFormat& f, bool afterLines) {
+                             decisions.append({f, afterLines});
+                         }, Qt::DirectConnection);
+        std::atomic_bool done{false};
+        QObject::connect(&indexer, &LogIndexer::indexingFinished, &indexer,
+                         [&](qint64, const LogFilePtr&) { done = true; }, Qt::DirectConnection);
+        auto index = std::make_shared<LineIndex>();
+        indexer.startIndexing(lf, index, FileEncoding(), LineFormat());
+        QElapsedTimer t; t.start();
+        while (!done && t.elapsed() < 30000)
+            QThread::msleep(2);
+        CHECK(decisions.isEmpty(), "small.jsonl: no decision on 5 lines");
+        CHECK(index->logicalEntryCount() == 1, "small.jsonl: read as plain (no stamps, no levels)");
+        // Резидентный путь — то же самое.
+        CHECK(parseFile(lf).size() == 5 && parseFile(lf).last()->logicalEntryId() == 0,
+              "small.jsonl: resident reads it as plain too");
+        QByteArray tail;
+        for (int i = 5; i < 25; ++i)
+            tail += jsonLine(i);
+        appendToFile(path, tail);
+        indexAppend(indexer, lf, index, index->lastLineProvisional());
+        CHECK(decisions.size() == 1 && decisions.first().second
+                  && decisions.first().first.kind == LineFormat::Kind::Json,
+              "small.jsonl: the append that reaches 20 lines decides JSON (afterLines)");
+        // Решённый формат — с начала: каждая строка — запись с моментом из ключа.
+        const auto whole = indexFile(lf);
+        CHECK(whole->logicalEntryCount() == 25 && whole->timestampMs(0) == 1700000000000LL
+                  && whole->level(0) == LogLevel::Info,
+              "small.jsonl: decided format reads each object as a record");
+    }
+}
+
 static void testKeyedLoad(const QDir& dir)
 {
     using Format = KeyedDefinition::Format;
     for (const Format format : {Format::JsonObject, Format::Logfmt}) {
         const bool json = format == Format::JsonObject;
         const QString tag = json ? QStringLiteral("keyed jsonl") : QStringLiteral("keyed logfmt");
-        const QString schema = keyedfx::schema(format);
         const keyedfx::Fixture fx = keyedfx::make(format, 64);
         const QString path = writeFile(dir, tag + ".log", fx.bytes);
         auto lf = std::make_shared<LogFile>(path);
-        const auto entries = parseFile(lf, schema);
-        const auto index = indexFile(lf, nullptr, schema);
+        // Решение детектора — формат с ключами Thread (ключ начала файла).
+        const LineFormat detected = LineFormatDetector::detectInFile(path);
+        CHECK(detected == keyedfx::expectedFormat(format),
+              qPrintable(tag + QStringLiteral(": detected %1 / %2").arg(detected.displayName(),
+                                                                       detected.keys.extraColumns.join(','))));
+        const LineFormat schema = detected;   // формат дозаписи — решённый
+        const auto entries = parseFile(lf);
+        const auto index = indexFile(lf);
         compareParserVsIndex(tag, path, lf, entries, *index);
 
         // Заданные значения: момент и уровень каждой строки, записи.
@@ -3098,11 +3199,12 @@ static void testKeyedLoad(const QDir& dir)
         CHECK(index->logicalEntryCount() == fx.records.size(),
               qPrintable(tag + ": one logical record per fixture record"));
 
-        // Без извлечения полей схема не действует — те же строки, что без схемы.
+        // Выбор пользователя «Plain text» — эвристика по строке.
         {
-            const auto heuristic = parseFile(lf);
-            const auto heuristicIndex = indexFile(lf);
-            compareParserVsIndex(tag + " (extraction off)", path, lf, heuristic, *heuristicIndex);
+            const LineFormat plain = LineFormat::plain(LineFormat::Origin::User);
+            const auto heuristic = parseFile(lf, plain);
+            const auto heuristicIndex = indexFile(lf, nullptr, plain);
+            compareParserVsIndex(tag + " (plain text)", path, lf, heuristic, *heuristicIndex);
             CHECK(heuristicIndex->logicalEntryCount() != fx.records.size(),
                   qPrintable(tag + ": the heuristic splits this file differently (fixture sanity)"));
         }
@@ -3121,7 +3223,7 @@ static void testKeyedLoad(const QDir& dir)
                                int(last.size())};
             const QString growPath = writeFile(dir, tag + "-grow.log", fx.bytes);
             auto growLf = std::make_shared<LogFile>(growPath);
-            const auto grow = indexFile(growLf, nullptr, schema);
+            const auto grow = indexFile(growLf);
             LogIndexer indexer;
             int done = 0;
             for (const int to : cuts) {
@@ -3131,10 +3233,10 @@ static void testKeyedLoad(const QDir& dir)
                 const QString wholePath = writeFile(dir, tag + QString("-whole-%1.log").arg(to),
                                                     fx.bytes + last.left(to));
                 auto wholeLf = std::make_shared<LogFile>(wholePath);
-                const auto whole = indexFile(wholeLf, nullptr, schema);
+                const auto whole = indexFile(wholeLf);
                 compareIndexes(tag + QString(" append up to %1").arg(to), *grow, *whole);
                 compareParserVsIndex(tag + QString(" whole up to %1").arg(to), wholePath, wholeLf,
-                                     parseFile(wholeLf, schema), *whole);
+                                     parseFile(wholeLf), *whole);
             }
             const qint64 lastLine = grow->lineCount() - 1;
             CHECK(grow->timestampMs(grow->logicalId(lastLine)) == keyedfx::baseMs() + 70000
@@ -3142,12 +3244,10 @@ static void testKeyedLoad(const QDir& dir)
                   qPrintable(tag + ": the completed object is a record with its key moment and pino level"));
         }
 
-        // Счётчики сканера: то же правило, что у вкладки с этой схемой.
+        // Счётчики сканера: тот же детектор, что у вкладки.
         {
             LogParser scanner;
-            const LogPattern scanSchema(schema);
-            const LogParser::FileStats st =
-                scanner.analyzeFileForStats(path, LogParser::StatsResume(), nullptr, &scanSchema).stats;
+            const LogParser::FileStats st = scanner.analyzeFileForStats(path).stats;
             int warn = 0, error = 0, fatal = 0;
             for (const keyedfx::Record& r : fx.records) {
                 warn += r.level == LogLevel::Warn;
@@ -3162,10 +3262,12 @@ static void testKeyedLoad(const QDir& dir)
             CHECK(st.firstEntryTimestamp.toMSecsSinceEpoch() == fx.records.first().ms
                       && st.lastEntryTimestamp.toMSecsSinceEpoch() == fx.records.last().ms,
                   qPrintable(tag + ": scanner From/To from the keys"));
-            // Сканер каталога схему не задаёт — счётчики по эвристике.
+            // Формат «Plain text» — счётчики по эвристике.
             LogParser noSchema;
-            CHECK(noSchema.analyzeFileForStats(path).stats.totalEntries != fx.records.size(),
-                  qPrintable(tag + ": without the schema the scanner counts by the heuristic"));
+            const LineFormat plain = LineFormat::plain(LineFormat::Origin::User);
+            CHECK(noSchema.analyzeFileForStats(path, LogParser::StatsResume(), nullptr, &plain)
+                          .stats.totalEntries != fx.records.size(),
+                  qPrintable(tag + ": plain text counts by the heuristic"));
         }
     }
 }
@@ -3176,10 +3278,10 @@ int main(int argc, char** argv)
 
     if (argc >= 3 && qstrcmp(argv[1], "--bench") == 0)
         return runBench(QString::fromLocal8Bit(argv[2]),
-                        benchSchema(argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString()));
+                        argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && qstrcmp(argv[1], "--bench-resident") == 0)
         return runBenchResident(QString::fromLocal8Bit(argv[2]),
-                                benchSchema(argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString()));
+                                argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && qstrcmp(argv[1], "--bench-stages") == 0)
         return runBenchStages(QString::fromLocal8Bit(argv[2]),
                               argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
@@ -3196,6 +3298,7 @@ int main(int argc, char** argv)
     testTimestampGolden();
     testKeyedValues();
     testKeyedLoad(dir);
+    testLineFormatPlain(dir);
     testPre1970(dir);
     testGolden(dir);
     testNewTimestampFormsBackends(dir);

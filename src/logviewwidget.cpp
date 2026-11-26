@@ -172,6 +172,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_logParser, &LogParser::parsingProgress, this, [this](int p, const LogFilePtr& f){ emit fileParsingProgress(f, p); });
     connect(m_logParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
     connect(m_logParser, &LogParser::encodingDecided, this, &LogViewWidget::handleEncodingDecided);
+    connect(m_logParser, &LogParser::lineFormatDecided, this, &LogViewWidget::handleLineFormatDecided);
     connect(m_logParser, &LogParser::parsingFinished, this, &LogViewWidget::handleParsingFinished);
     connect(m_logParser, &LogParser::parsingFailed,   this, &LogViewWidget::handleParsingFailed);
 
@@ -179,6 +180,7 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     connect(m_reloadParser, &LogParser::entriesParsed, this, &LogViewWidget::handleIncrementalEntriesParsed);
     connect(m_reloadParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
     connect(m_reloadParser, &LogParser::encodingDecided, this, &LogViewWidget::handleEncodingDecided);
+    connect(m_reloadParser, &LogParser::lineFormatDecided, this, &LogViewWidget::handleLineFormatDecided);
     // Запасная кодировка — настройка приложения; её смену вкладка применяет
     // сама (новые проходы и предварительные решения), окну тут делать нечего.
     m_fallbackEncoding = AppSettings::instance().fallbackEncoding();
@@ -294,6 +296,12 @@ QStringList LogViewWidget::layoutInputs() const
     for (const LogFilePtr& f : m_loadedFiles) {
         if (!f)
             continue;
+        const QString format = lineFormat(f).fieldDefinition();
+        if (!format.isEmpty()) {
+            // JSON / logfmt (F-17, шаг 7): колонки — ключи формата строк.
+            inputs << format;
+            continue;
+        }
         const auto it = m_fileSchemas.constFind(f->filePath);
         if (it != m_fileSchemas.constEnd() && it->hasSchema())
             inputs << it->schema;
@@ -362,6 +370,19 @@ void LogViewWidget::applySchemaToModel()
     for (auto it = m_fileSchemas.cbegin(); it != m_fileSchemas.cend(); ++it) {
         const FileSchemaPtr schema = m_layoutSchemas.value(it->schema);
         schemas.byPath.insert(it.key(), schema && schema->isValid() ? schema : FileSchemaPtr());
+    }
+    // Файл JSON / logfmt (F-17, шаг 7): поля — ключи его формата строк,
+    // главнее схемы вкладки и своей схемы (строчная схема по строке-объекту
+    // ничего бы не разобрала).
+    for (const LogFilePtr& f : std::as_const(m_loadedFiles)) {
+        if (!f)
+            continue;
+        const QString format = lineFormat(f).fieldDefinition();
+        if (format.isEmpty())
+            continue;
+        const FileSchemaPtr schema = m_layoutSchemas.value(format);
+        if (schema && schema->isValid())
+            schemas.byPath.insert(f->filePath, schema);
     }
     m_model->setFileSchemas(schemas);
 }
@@ -480,10 +501,6 @@ void LogViewWidget::adoptPendingSchema(const LogFilePtr& logFile)
         emit fieldLayoutGrown();
 }
 
-FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
-{
-    return m_model ? m_model->fileSchemaFor(filePath) : FileSchemaPtr();
-}
 
 void LogViewWidget::setShowFields(bool enabled)
 {
@@ -529,17 +546,183 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings,
 
 QString LogViewWidget::readingSignature(const QString& filePath) const
 {
-    // Ключевая схема действует при чтении (LineClassifier::classifyLine у
-    // парсера и индексатора; до шага 7 F-17) при любом показе полей.
-    // Колонки сверх ролей момент, уровень и границу записи не меняют.
-    const FileSchemaPtr schema = passSchema(filePath);
-    const KeyedDefinition* keyed = schema ? schema->pattern.keyed() : nullptr;
-    if (!keyed)
-        return QString();
-    PatternDefinition def;
-    def.keyed = *keyed;
-    def.keyed->extraColumns.clear();
-    return LogPattern::serializeDefinition(def);
+    // Чтение не знает о схеме полей (F-17, шаг 7): момент, уровень и границу
+    // записи решает только формат строк файла.
+    for (const LogFilePtr& f : m_loadedFiles)
+        if (f && f->filePath == filePath)
+            return lineFormat(f).readingSignature();
+    return QString();
+}
+
+// =============================================================================
+// Формат строк файла (F-17, шаг 7)
+// =============================================================================
+
+LineFormat LogViewWidget::lineFormat(const LogFilePtr& logFile) const
+{
+    if (!logFile)
+        return {};
+    if (const auto* store = m_model ? m_model->indexedOrNull() : nullptr) {
+        if (store->indexForFile(logFile->filePath))
+            return store->lineFormat(logFile);
+    } else {
+        const auto it = m_fileFormats.constFind(logFile->filePath);
+        if (it != m_fileFormats.constEnd())
+            return *it;
+    }
+    return m_pendingFormats.value(logFile->filePath);
+}
+
+void LogViewWidget::storeLineFormat(const LogFilePtr& logFile, const LineFormat& format)
+{
+    if (!logFile)
+        return;
+    auto* store = m_model->indexedOrNull();
+    if (store && store->indexForFile(logFile->filePath)) {
+        store->setLineFormat(logFile, format);
+        m_pendingFormats.remove(logFile->filePath);
+    } else if (!store) {
+        m_fileFormats.insert(logFile->filePath, format);
+        m_pendingFormats.remove(logFile->filePath);
+    } else {
+        m_pendingFormats.insert(logFile->filePath, format);   // файл ещё не подключён
+    }
+}
+
+LineFormat LogViewWidget::passFormat(const LogFilePtr& logFile)
+{
+    if (!logFile)
+        return {};
+    // Ожидающий формат (выбор до загрузки, объединение, переход порога)
+    // становится форматом файла на старте прохода.
+    const auto pending = m_pendingFormats.constFind(logFile->filePath);
+    if (pending != m_pendingFormats.constEnd()) {
+        const LineFormat format = *pending;
+        storeLineFormat(logFile, format);
+        if (format.isStructured())
+            adoptFormatColumns(logFile);
+        return format;
+    }
+    // Выбор из снимка или памяти файла ждёт файл по источнику (сжатый
+    // читается копией с другим путём).
+    if (!m_pendingSourceFormats.isEmpty()) {
+        const auto bySource = m_pendingSourceFormats.find(RecordLocator::sourceKey(*logFile));
+        if (bySource != m_pendingSourceFormats.end()) {
+            const LineFormat format = *bySource;
+            m_pendingSourceFormats.erase(bySource);
+            storeLineFormat(logFile, format);
+            if (format.isStructured())
+                adoptFormatColumns(logFile);
+            return format;
+        }
+    }
+    return lineFormat(logFile);
+}
+
+void LogViewWidget::forgetAutoFormat(const LogFilePtr& logFile)
+{
+    const LineFormat current = lineFormat(logFile);
+    if (current.isDecided() && !current.isUser())
+        storeLineFormat(logFile, LineFormat());
+}
+
+void LogViewWidget::adoptFormatColumns(const LogFilePtr& logFile)
+{
+    const QString definition = lineFormat(logFile).fieldDefinition();
+    if (definition.isEmpty() || m_layoutInputs.contains(definition)) {
+        refreshSchemas();
+        return;
+    }
+    // Раскладка растёт (как у схемы файла, пришедшей позже): колонки ключей
+    // — в конец; показаны, если были показаны все прежние.
+    const QStringList before = m_fieldLayout.columns;
+    const bool allVisible = std::all_of(before.cbegin(), before.cend(),
+        [this](const QString& name) { return m_visibleFields.contains(name); });
+    layoutSchema(definition);
+    m_layoutInputs << definition;
+    if (allVisible)
+        for (const QString& name : std::as_const(m_fieldLayout.columns))
+            if (!before.contains(name) && !m_visibleFields.contains(name))
+                m_visibleFields << name;
+    refreshSchemas();
+    if (m_fieldLayout.columns != before)
+        emit fieldLayoutGrown();
+}
+
+void LogViewWidget::handleLineFormatDecided(const LogFilePtr& logFile, const LineFormat& format,
+                                            bool afterLines)
+{
+    if (!logFile || !m_loadedFiles.contains(logFile))
+        return;
+    const LineFormat before = lineFormat(logFile);
+    // Выбор пользователя, сделанный посреди прохода, главнее решения прохода
+    // (перечитывание по нему уже назначено).
+    if (before.isUser())
+        return;
+    const bool reread = afterLines && format.readingSignature() != before.readingSignature();
+    const std::optional<RereadPosition> position =
+        reread ? captureRereadPosition() : std::nullopt;
+    storeLineFormat(logFile, format);
+    adoptFormatColumns(logFile);
+    emit lineFormatChanged(logFile);
+    // Малый файл (меньше 20 непустых строк) решился в дозаписи, и формат
+    // читает строки иначе, чем Plain, которым читались прежние проходы, —
+    // файл перечитывается один раз (проход в полёте — по его концу).
+    if (reread)
+        rereadAfterSchemaChange(position, {logFile->filePath});
+}
+
+void LogViewWidget::setLineFormat(const LogFilePtr& logFile, const LineFormat& format)
+{
+    if (!logFile || !m_loadedFiles.contains(logFile))
+        return;
+    LineFormat chosen = format;
+    chosen.origin = LineFormat::Origin::User;
+    if (chosen.isStructured())
+        chosen = LineFormat::structured(chosen.kind, chosen.keys, LineFormat::Origin::User);
+    else
+        chosen.keys = KeyedDefinition();
+    const LineFormat before = lineFormat(logFile);
+    if (!fileHasRows(logFile)) {
+        m_pendingFormats.insert(logFile->filePath, chosen);
+        emit lineFormatChanged(logFile);
+        return;
+    }
+    const std::optional<RereadPosition> position = captureRereadPosition();
+    // Проход в полёте читает форматом, с которым начался (или решит свой), —
+    // перечитать по его концу в любом случае.
+    const bool inFlight = m_fileReloadStates.value(logFile->filePath).loadInFlight;
+    storeLineFormat(logFile, chosen);
+    // Колонки — выбор пользователя: раскладка строится заново.
+    m_layoutInputs.clear();
+    refreshSchemas();
+    emit fieldLayoutGrown();
+    emit lineFormatChanged(logFile);
+    if (inFlight || chosen.readingSignature() != before.readingSignature())
+        rereadAfterSchemaChange(position, {logFile->filePath});
+}
+
+void LogViewWidget::restoreAutomaticLineFormat(const LogFilePtr& logFile)
+{
+    if (!logFile || !m_loadedFiles.contains(logFile) || !lineFormat(logFile).isUser())
+        return;
+    // Решение автоматики — заново по файлу (то же правило, что у прохода).
+    const LineFormat automatic = LineFormatDetector::detectInFile(logFile->filePath);
+    const LineFormat before = lineFormat(logFile);
+    if (!fileHasRows(logFile)) {
+        m_pendingFormats.remove(logFile->filePath);
+        emit lineFormatChanged(logFile);
+        return;
+    }
+    const std::optional<RereadPosition> position = captureRereadPosition();
+    const bool inFlight = m_fileReloadStates.value(logFile->filePath).loadInFlight;
+    storeLineFormat(logFile, automatic);
+    m_layoutInputs.clear();
+    refreshSchemas();
+    emit fieldLayoutGrown();
+    emit lineFormatChanged(logFile);
+    if (inFlight || automatic.readingSignature() != before.readingSignature())
+        rereadAfterSchemaChange(position, {logFile->filePath});
 }
 
 QHash<QString, QString> LogViewWidget::readingSignatures() const
@@ -632,7 +815,7 @@ void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>&
         if (it == m_fileReloadStates.end() || it->unsupported)
             continue;
         if (it->loadInFlight) {
-            // Проход идёт со старой схемой (её дал passSchema на старте).
+            // Проход идёт с прежним форматом строк (его дал passFormat на старте).
             it->schemaRereadPending = true;
             continue;
         }
@@ -654,7 +837,7 @@ void LogViewWidget::rereadForSchema(const LogFilePtr& logFile)
         // Индекс не хранит, какая схема решила границы, — файл индексируется
         // заново (как переписанный, Q-19): строки сброшены, закладки и
         // история найдут свои строки через RecordLocator, позиция — тоже.
-        startFullReload(logFile);
+        startFullReload(logFile, /*keepFormat=*/true);
         requestRereadPosition(logFile);
         return;
     }
@@ -880,6 +1063,8 @@ void LogViewWidget::startReencode(const LogFilePtr& logFile, bool rekey)
         connect(m_reencodeParser, &LogParser::tailState, this, &LogViewWidget::handleTailState);
         connect(m_reencodeParser, &LogParser::encodingDecided, this,
                 &LogViewWidget::handleEncodingDecided);
+        connect(m_reencodeParser, &LogParser::lineFormatDecided, this,
+                &LogViewWidget::handleLineFormatDecided);
         connect(m_reencodeParser, &LogParser::parsingFinished, this,
                 [this](int, const LogFilePtr& f) { finishReencode(f); });
         connect(m_reencodeParser, &LogParser::parsingFailed, this,
@@ -891,7 +1076,7 @@ void LogViewWidget::startReencode(const LogFilePtr& logFile, bool rekey)
     m_reencodeBuffers[logFile->filePath].clear();
     m_reencodeParser->setFallbackEncoding(m_fallbackEncoding);
     m_reencodeParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
-                                   passSchema(logFile->filePath));
+                                   passFormat(logFile));
     updateLoadingState();
 }
 
@@ -1022,6 +1207,12 @@ void LogViewWidget::forgetAutoEncoding(const QString& filePath)
 
 QHash<QString, FileEncoding> LogViewWidget::takeEncodingsForIndexed()
 {
+    // Формат строк (F-17, шаг 7) переходит в стор на старте прохода
+    // (passFormat берёт ожидающий).
+    for (auto it = m_fileFormats.cbegin(); it != m_fileFormats.cend(); ++it)
+        if (it->isDecided() && !m_pendingFormats.contains(it.key()))
+            m_pendingFormats.insert(it.key(), *it);
+    m_fileFormats.clear();
     QHash<QString, FileEncoding> encodings;
     encodings.swap(m_fileEncodings);
     return encodings;
@@ -1033,9 +1224,13 @@ void LogViewWidget::captureEncodingsFromIndexed()
     if (!store)
         return;
     m_fileEncodings.clear();
+    m_fileFormats.clear();
     for (const auto& lf : m_loadedFiles) {
         if (!lf)
             continue;
+        const LineFormat format = store->lineFormat(lf);
+        if (format.isDecided())
+            m_fileFormats.insert(lf->filePath, format);
         const FileEncoding encoding = store->fileEncoding(lf);
         if (encoding.decided())
             m_fileEncodings.insert(lf->filePath, encoding);
@@ -1101,6 +1296,12 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
     for (const LogFilePtr& lf : other.loadedFiles()) {
         if (!lf)
             continue;
+        // Формат строк (F-17, шаг 7) — к загрузке файла здесь.
+        const LineFormat format = other.lineFormat(lf);
+        if (format.isDecided()
+            && std::none_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
+                            [&lf](const LogFilePtr& f) { return f && f->filePath == lf->filePath; }))
+            m_pendingFormats.insert(lf->filePath, format);
         if (lf->source().kind == LogSource::Kind::Stream) {
             // Спул потока (F-7) делится: тот же файл, источник и SpoolItem.
             const bool present = std::any_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
@@ -1426,7 +1627,7 @@ void LogViewWidget::startLoad(const LogFilePtr& logFile, const FileEncoding& ini
     st.loadInFlight = true;
     if (initial.decided())
         m_fileEncodings.insert(filePath, initial);
-    m_logParser->startParsing(logFile, m_fileEncodings.value(filePath), passSchema(filePath));
+    m_logParser->startParsing(logFile, m_fileEncodings.value(filePath), passFormat(logFile));
     updateLoadingState();
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
@@ -1815,13 +2016,18 @@ void LogViewWidget::dropRowsForFile(const LogFilePtr& logFile)
     emit currentRowChanged(cur.isValid() ? cur.row() : -1, m_model->rowCount());
 }
 
-void LogViewWidget::startFullReload(const LogFilePtr& logFile)
+void LogViewWidget::startFullReload(const LogFilePtr& logFile, bool keepFormat)
 {
     if (!logFile)
         return;
     // Ключ уже есть в хэше у всех вызывающих — вставки (и рехэша, который
     // инвалидировал бы их ссылку на состояние) здесь не происходит.
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
+    // Содержимое новое — решение автоматики о формате строк к нему не
+    // относится (F-17, шаг 7); выбор пользователя остаётся. Перечитывание
+    // ради формата (rereadForSchema) формат сохраняет.
+    if (!keepFormat)
+        forgetAutoFormat(logFile);
 
     if (auto* store = m_model->indexedOrNull()) {
         // Строки файла сбрасываются: закладки и история переходов найдут их
@@ -1838,7 +2044,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
         // resetFileIndex вернул автоматике «не решено», выбор пользователя
         // оставил — с ним и перечитываем.
         m_indexer->startIndexing(logFile, fresh, store->fileEncoding(logFile),
-                                 passSchema(logFile->filePath));
+                                 passFormat(logFile));
         updateLoadingState();
         emit fileEncodingChanged(logFile);
         return;
@@ -1853,7 +2059,7 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     // пользователя остаётся (с ним и перечитываем после setFileEncoding).
     forgetAutoEncoding(logFile->filePath);
     m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
-                              passSchema(logFile->filePath));
+                              passFormat(logFile));
     updateLoadingState();
     emit fileEncodingChanged(logFile);
 }
@@ -1881,6 +2087,7 @@ void LogViewWidget::ensureIndexer()
     // декодером. Первое решение — без reset (прежние строки — ASCII);
     // пересмотр предварительного (шаг 3а) — reset и при текстовых правилах
     // перефильтрация, как ручная смена (IndexedLogStore::adoptDetectedEncoding).
+    connect(m_indexer, &LogIndexer::lineFormatDecided, this, &LogViewWidget::handleLineFormatDecided);
     connect(m_indexer, &LogIndexer::encodingDecided, this,
             [this](const LogFilePtr& logFile, const FileEncoding& encoding) {
                 adoptIndexedEncoding(logFile, encoding, /*wholeState=*/false);
@@ -1907,7 +2114,7 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile, FileEncoding enc
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st = FileReloadState{};
     st.loadInFlight = true;
-    m_indexer->startIndexing(logFile, index, encoding, passSchema(logFile->filePath));
+    m_indexer->startIndexing(logFile, index, encoding, passFormat(logFile));
     updateLoadingState();
 }
 
@@ -2001,7 +2208,7 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
         st = FileReloadState{};
         st.loadInFlight = true;
         m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
-                                  passSchema(logFile->filePath));
+                                  passFormat(logFile));
         return;
     }
     // Отката нет: помечаем файл неподдерживаемым, чтобы авто-обновление не
@@ -2228,7 +2435,7 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                     m_indexer->startIndexingFrom(logFile, index,
                                                  index->lastLineProvisional(),
                                                  indexedStore->fileEncoding(logFile),
-                                                 passSchema(logFile->filePath));
+                                                 passFormat(logFile));
                     // Re-anchor: следующий тик поллинга не должен снова
                     // классифицировать этот же диапазон как дозапись.
                     const qint64 newSize = QFileInfo(logFile->filePath).size();
@@ -2282,7 +2489,7 @@ bool LogViewWidget::reloadChangedFiles(bool force)
             // байты — состоянием файла; «не решено» решит не-ASCII строка хвоста.
             m_reloadParser->startParsingFrom(logFile, from, context, st.encoding,
                                              m_fileEncodings.value(logFile->filePath),
-                                             passSchema(logFile->filePath));
+                                             passFormat(logFile));
             anyChanged = true;
             break;
         }
@@ -2623,6 +2830,10 @@ TabState LogViewWidget::captureState() const
         const FileEncoding encoding = fileEncoding(lf);
         if (encoding.source == FileEncoding::Source::User)
             ts.userEncoding = encoding.decoder.encoding();
+        // Формат строк (F-17, шаг 7) — только выбор пользователя.
+        const LineFormat format = lineFormat(lf);
+        if (format.isUser())
+            ts.lineFormat = format;
         // Своя схема файла (F-5, PR 3) — только если отличается от схемы вкладки.
         const auto own = m_fileSchemas.constFind(lf->filePath);
         if (own != m_fileSchemas.constEnd())
@@ -2832,6 +3043,8 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         FileEncoding initial;
         if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
             initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+        if (source.lineFormat)
+            m_pendingSourceFormats.insert(RecordLocator::sourceKey(source.source), *source.lineFormat);
         // Память файла здесь дополняет снимок только закладками: вид, фильтры
         // и позиция — снимка (сессия главнее памяти, docs/design/R-5.md).
         const bool wasApplying = std::exchange(m_applyingState, true);
@@ -2877,6 +3090,8 @@ void LogViewWidget::addRelocatedSource(const QString& savedPath, const TabSource
     FileEncoding initial;
     if (source.userEncoding && TextEncodings::isDecodable(*source.userEncoding))
         initial = FileEncoding().withUserChoice(TextDecoder(*source.userEncoding));
+    if (source.lineFormat)
+        m_pendingSourceFormats.insert(RecordLocator::sourceKey(source.source), *source.lineFormat);
     const bool wasApplying = std::exchange(m_applyingState, true);
     openSource(source.source.path, source.source.member, initial);
     m_applyingState = wasApplying;
@@ -3069,6 +3284,10 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
                 }
             }
         }
+        // Выбор формата строк (F-17, шаг 7) — как выбор кодировки.
+        if (!m_applyingState && memory.source.lineFormat)
+            m_pendingSourceFormats.insert(RecordLocator::sourceKey(memory.source.source),
+                                          *memory.source.lineFormat);
         FileEncoding encoding = initial;
         if (!m_applyingState && initial.source != FileEncoding::Source::User && memory.source.userEncoding
             && TextEncodings::isDecodable(*memory.source.userEncoding))

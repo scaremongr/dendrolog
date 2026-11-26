@@ -1,7 +1,7 @@
 #include "lineclassifier.h"
+#include "lineformat.h"
 #include "ansiescape.h"
 #include "logfile.h"
-#include "logpattern.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -1059,11 +1059,6 @@ bool parseDigits(QStringView s, quint64& out)
 
 } // namespace
 
-bool KeyedClassification::isPrimary() const
-{
-    return LineClassifier::isPrimaryLine(matched, hasTs, leading, hasLevel);
-}
-
 bool LineClassifier::epochFromValue(QStringView v, KeyedDefinition::EpochUnit unit, qint64& msecs)
 {
     using Unit = KeyedDefinition::EpochUnit;
@@ -1187,30 +1182,28 @@ bool LineClassifier::levelFromValue(QStringView value, bool isNumber,
     return detectLogLevel(value, level);
 }
 
-KeyedClassification LineClassifier::classifyKeyed(const LogPattern& pattern, QStringView line,
-                                                  const YearReference& year,
-                                                  ClockDates* clock) const
-{
-    return classifyLine(&pattern, line, year, clock);
-}
-
-KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, QStringView line,
-                                                 const YearReference& year, ClockDates* clock,
-                                                 LogEntryFields* fields) const
+LineClassification LineClassifier::classifyLine(const LineFormatReader* format, QStringView line,
+                                                const YearReference& year, ClockDates* clock,
+                                                LogEntryFields* fields) const
 {
     if (fields)
         *fields = LogEntryFields();
-    KeyedClassification r;
-    if (const KeyedDefinition* keyed = keyedSchema ? keyedSchema->keyed() : nullptr) {
+    LineClassification r;
+    if (format && format->format.isStructured()) {
+        const KeyedDefinition& keyed = format->format.keys;
         KeyedLine::Hits hits;
         // Без полей (индексатор, счётчики) нужны только метка и уровень:
         // разбор кончается, когда у обеих найден первый ключ-кандидат.
         static_assert(KeyedDefinition::kTimestampColumn < 2 && KeyedDefinition::kLevelColumn < 2,
                       "classification reads the first two columns only");
-        r.matched = keyedSchema->scanKeyed(line, &hits, fields ? -1 : 2);
+        r.matched = format->lookup.scan(line, &hits, fields ? -1 : 2);
         if (r.matched) {
-            if (fields)
-                *fields = keyedSchema->keyedFields(hits);
+            if (fields) {
+                fields->spans.resize(hits.size());
+                for (int c = 0; c < hits.size(); ++c)
+                    if (hits[c].isValid())
+                        fields->spans[c].set(hits[c].start, hits[c].length, hits[c].escaped);
+            }
             // Экранированное значение (редко: метка и уровень — ASCII без
             // кавычек внутри) раскодируется во временную строку.
             QString decoded;
@@ -1224,7 +1217,7 @@ KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, 
             if (ts.isValid()) {
                 qint64 ms = 0;
                 if (timestampFromValue(valueOf(ts), ts.kind == KeyedLine::ValueKind::Number,
-                                       keyed->epochUnit, year, ms)) {
+                                       keyed.epochUnit, year, ms)) {
                     r.hasTs = r.tsFromKey = true;
                     r.tsMs = ms;
                 }
@@ -1233,7 +1226,7 @@ KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, 
             if (lv.isValid()) {
                 LogLevel level = LogLevel::Unknown;
                 if (levelFromValue(valueOf(lv), lv.kind == KeyedLine::ValueKind::Number,
-                                   keyed->numericLevels, level)) {
+                                   keyed.numericLevels, level)) {
                     r.hasLevel = r.levelFromKey = true;
                     r.level = level;
                 }
@@ -1251,5 +1244,10 @@ KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, 
     }
     if (!r.levelFromKey)
         r.hasLevel = detectLogLevel(line, r.level);
+    r.primary = r.matched || isPrimaryLine(r.hasTs, r.leading, r.hasLevel);
+    if (!r.primary && format && format->format.levelStartsRecord && r.hasLevel) {
+        r.primary = levelLengthAt(line, 0) > 0
+            || (line.size() > 1 && line.front() == QLatin1Char('[') && levelLengthAt(line, 1) > 0);
+    }
     return r;
 }

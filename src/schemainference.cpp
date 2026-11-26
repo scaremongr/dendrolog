@@ -2041,7 +2041,7 @@ Result infer(const QVector<SchemaFit::Sample>& input, const Options& options)
         if (!corpus.candidate[i])
             continue;
         rows.append(i);
-        if (PatternHeuristics::detectLineFormat(corpus.samples[i].text) != PatternHeuristics::LineFormat::Blocks)
+        if (PatternHeuristics::detectLineFormat(corpus.samples[i].text) != PatternHeuristics::LineShape::Blocks)
             ++keyed;
     }
     result.candidates = int(rows.size());

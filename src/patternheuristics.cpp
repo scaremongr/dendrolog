@@ -263,41 +263,41 @@ QStringList topLevelKeys(QStringView line, KeyedDefinition::Format format,
     return keys;
 }
 
-KeyedDefinition::Format keyedFormat(LineFormat format)
+KeyedDefinition::Format keyedFormat(LineShape format)
 {
-    return format == LineFormat::Logfmt ? KeyedDefinition::Format::Logfmt
+    return format == LineShape::Logfmt ? KeyedDefinition::Format::Logfmt
                                         : KeyedDefinition::Format::JsonObject;
 }
 
-LineFormat lineFormatOf(KeyedDefinition::Format format)
+LineShape lineFormatOf(KeyedDefinition::Format format)
 {
-    return format == KeyedDefinition::Format::Logfmt ? LineFormat::Logfmt : LineFormat::Json;
+    return format == KeyedDefinition::Format::Logfmt ? LineShape::Logfmt : LineShape::Json;
 }
 
 } // namespace
 
-LineFormat detectLineFormat(QStringView line)
+LineShape detectLineFormat(QStringView line)
 {
     if (line.isEmpty())
-        return LineFormat::Blocks;
+        return LineShape::Blocks;
     KeyedLine::Pair pair;
     if (line.front() == QLatin1Char('{')) {
         KeyedLine::PairReader reader(line, KeyedDefinition::Format::JsonObject);
-        return reader.next(&pair) ? LineFormat::Json : LineFormat::Blocks;
+        return reader.next(&pair) ? LineShape::Json : LineShape::Blocks;
     }
     KeyedLine::PairReader reader(line, KeyedDefinition::Format::Logfmt);
     if (!reader.structured())
-        return LineFormat::Blocks;
+        return LineShape::Blocks;
     int pairs = 0;
     while (pairs < 2 && reader.next(&pair))
         ++pairs;
-    return pairs >= 2 ? LineFormat::Logfmt : LineFormat::Blocks;
+    return pairs >= 2 ? LineShape::Logfmt : LineShape::Blocks;
 }
 
 QStringList keyedSampleKeys(const QStringList& sampleLines, const KeyedDefinition& definition,
                             double minShare)
 {
-    const LineFormat wanted = lineFormatOf(definition.format);
+    const LineShape wanted = lineFormatOf(definition.format);
     QSet<QString> excluded;   // точные ключи ролей и колонок
     for (const QStringList* list : {&definition.timeKeys, &definition.levelKeys,
                                     &definition.messageKeys, &definition.extraColumns})
@@ -350,7 +350,7 @@ QStringList keyedSampleKeys(const QStringList& sampleLines, const KeyedDefinitio
     return result;
 }
 
-bool suggestKeyedSchema(const QStringList& sampleLines, PatternDefinition* definition)
+bool suggestKeyedDefinition(const QStringList& sampleLines, KeyedDefinition* definition)
 {
     int nonEmpty = 0, json = 0, logfmt = 0;
     for (const QString& line : sampleLines) {
@@ -358,15 +358,15 @@ bool suggestKeyedSchema(const QStringList& sampleLines, PatternDefinition* defin
             continue;
         ++nonEmpty;
         switch (detectLineFormat(line)) {
-        case LineFormat::Json:   ++json; break;
-        case LineFormat::Logfmt: ++logfmt; break;
-        case LineFormat::Blocks: break;
+        case LineShape::Json:   ++json; break;
+        case LineShape::Logfmt: ++logfmt; break;
+        case LineShape::Blocks: break;
         }
     }
-    const LineFormat format = json * 2 > nonEmpty ? LineFormat::Json
-        : logfmt * 2 > nonEmpty ? LineFormat::Logfmt
-        : LineFormat::Blocks;
-    if (format == LineFormat::Blocks)
+    const LineShape format = json * 2 > nonEmpty ? LineShape::Json
+        : logfmt * 2 > nonEmpty ? LineShape::Logfmt
+        : LineShape::Blocks;
+    if (format == LineShape::Blocks)
         return false;
 
     KeyedDefinition keyed;
@@ -391,24 +391,12 @@ bool suggestKeyedSchema(const QStringList& sampleLines, PatternDefinition* defin
         }
     }
     keyed.extraColumns = keyedSampleKeys(sampleLines, keyed, 0.5);
-
-    PatternDefinition def;
-    PatternBlock message;
-    message.name = QStringLiteral("Message");
-    message.matchKind = PatternBlock::MatchKind::Remainder;
-    def.blocks.append(message);
-    def.keyed = keyed;
-    *definition = def;
+    *definition = keyed;
     return true;
 }
 
 PatternDefinition suggestSchema(const QString& sampleLine)
 {
-    if (detectLineFormat(sampleLine) != LineFormat::Blocks) {
-        PatternDefinition keyed;
-        if (suggestKeyedSchema({sampleLine}, &keyed))
-            return keyed;
-    }
     PatternDefinition def;
     const QString line = sampleLine;
     const int n = line.size();

@@ -1,4 +1,5 @@
 #include "logindexer.h"
+#include "lineformat.h"
 
 #include <QDebug>
 #include <QElapsedTimer>
@@ -28,13 +29,11 @@ LogIndexer::~LogIndexer()
 
 void LogIndexer::startIndexing(const LogFilePtr& logFile,
                                const std::shared_ptr<LineIndex>& index,
-                               FileEncoding encoding, FileSchemaPtr schema)
+                               FileEncoding encoding, LineFormat format)
 {
-    // Схема прохода — неизменяемое значение, лямбда держит её живой.
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, index, schema = std::move(schema),
-                                      encoding, fallback]() {
-        this->doIndex(logFile, index, schema.get(),
+    (void)QtConcurrent::run(&m_pool, [this, logFile, index, format, encoding, fallback]() {
+        this->doIndex(logFile, index, format,
                       /*initial=*/true, /*reindexProvisionalTail=*/false,
                       encoding, fallback);
     });
@@ -43,18 +42,18 @@ void LogIndexer::startIndexing(const LogFilePtr& logFile,
 void LogIndexer::startIndexingFrom(const LogFilePtr& logFile,
                                    const std::shared_ptr<LineIndex>& index,
                                    bool reindexProvisionalTail,
-                                   FileEncoding encoding, FileSchemaPtr schema)
+                                   FileEncoding encoding, LineFormat format)
 {
     const TextEncoding fallback = m_fallbackEncoding;
-    (void)QtConcurrent::run(&m_pool, [this, logFile, index, schema = std::move(schema),
+    (void)QtConcurrent::run(&m_pool, [this, logFile, index, format,
                                       reindexProvisionalTail, encoding, fallback]() {
-        this->doIndex(logFile, index, schema.get(),
+        this->doIndex(logFile, index, format,
                       /*initial=*/false, reindexProvisionalTail, encoding, fallback);
     });
 }
 
 void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index,
-                         const FileSchema* schema,
+                         LineFormat lineFormat,
                          bool initial, bool reindexProvisionalTail,
                          FileEncoding encoding, TextEncoding fallback)
 {
@@ -165,11 +164,11 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
     // как у LogParser: дозапись после Нового года получает новый год.
     const LineClassifier::YearReference yearRef =
         LineClassifier::yearReferenceForFile(logFile->filePath);
-    // Схема прохода (F-5) — как у LogParser: nullptr — без схемы; решает
-    // только чтение (граница записи, у ключевой — метка и уровень).
-    const LogPattern* const pattern =
-        (schema && schema->pattern.isValid()) ? &schema->pattern : nullptr;
-    const LogPattern* const keyedSchema = (pattern && pattern->isKeyed()) ? pattern : nullptr;
+    // Формат строк (F-17, шаг 7) — как у LogParser: «не решён» решается по
+    // началу файла до первой строки, сигнал — раньше первой порции.
+    if (LineFormatDetector::advance(lineFormat, logFile->filePath, &m_abort))
+        emit lineFormatDecided(logFile, lineFormat, /*afterLines=*/!initial);
+    const LineFormatReader formatReader(lineFormat);
     // Дата времени без даты (F-11) — как у LogParser: дозапись продолжает
     // состояние прошлого прохода, предпросмотр — от начала этого прохода.
     ClockDates clock;
@@ -205,31 +204,18 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
 
         // Метка (мс epoch, без QDateTime), уровень и граница записи —
         // LineClassifier::classifyLine, то же правило, что у LogParser:
-        // ключевая схема (F-4) берёт их из ключей (поля — по требованию в
-        // сторе, здесь не нужны), без неё — эвристика по строке.
-        const KeyedClassification cls = m_classifier.classifyLine(keyedSchema, text, yearRef, &clock);
+        // формат строк файла (F-17, шаг 7).
+        const LineClassification cls = m_classifier.classifyLine(&formatReader, text, yearRef, &clock);
         const bool hasTs = cls.hasTs;
         const qint64 tsMs = cls.tsMs;
         const LogLevel lvl = cls.hasLevel ? cls.level : LogLevel::Unknown;
-        // Регексная схема нужна ТОЛЬКО для решения primary/continuation
-        // (спаны выбрасываются). Строка, первичная и без схемы (метка с
-        // уровнем или ведущая метка), схему не спрашивает — регекс схемы
-        // (самая дорогая часть, минуты на десятках миллионов строк) гоняем
-        // только там, где он реально решает.
-        const bool primaryWithoutSchema =
-            LineClassifier::isPrimaryLine(false, cls.hasTs, cls.leading, cls.hasLevel);
-        const bool schemaMatched = keyedSchema
-            ? cls.matched
-            : (!primaryWithoutSchema && pattern)
-                ? !pattern->extractFields(text).isEmpty()
-                : false;
 
         LineIndex::LineRecord rec;
         rec.byteLength = quint32(len);
         rec.eolBytes = eol;
         rec.hasOwnTimestamp = hasTs;
 
-        if (primaryWithoutSchema || schemaMatched) {
+        if (cls.primary) {
             currentId = nextId++;
             currentLevel = lvl;
             currentTsMs = hasTs ? tsMs : kNoTimestampMs;
@@ -247,9 +233,9 @@ void LogIndexer::doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> i
 
         rec.level = currentLevel;
         // Паритет с LogEntry::isPlainText(): унаследованные ts/level пусты и
-        // схема эту строку не распознала (у primary со схемой fields непусты).
+        // формат строк эту строку не распознал.
         rec.isPlainText = !hasTimestampMs(currentTsMs) && currentLevel == LogLevel::Unknown
-                       && !schemaMatched;
+                       && !cls.matched;
         rec.logicalId = currentId;
         index->appendLine(rec);
         ++pendingLines;

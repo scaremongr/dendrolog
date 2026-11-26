@@ -42,14 +42,8 @@ QT_END_NAMESPACE
 /// regex can never freeze the UI; schemas are validated before they
 /// can be applied ("Use Selected").
 ///
-/// Format (F-4, docs/design/F-4.md): "Blocks" edits the regex chain;
-/// "JSON" / "logfmt" edit a keyed schema instead — role keys (time, level,
-/// message), extra columns (with "Add keys from sample"), epoch unit and
-/// numeric level scale — on a card that replaces the chain. The cards stay
-/// in the editor while the format is switched, so Blocks → JSON → Blocks
-/// loses nothing until Apply (a keyed schema saves only the fallback
-/// "Message" block). The preview runs the same LogPattern::matchLine and
-/// colours the found values by column.
+/// JSON and logfmt are not schemas (F-17, step 7): they are the line format
+/// of a file (lineformat.h), chosen in the status bar.
 ///
 /// Coverage (F-17, step 1): the preview status line and, with a source tab
 /// (setSource), a line under the editor report SchemaFit — the one measure of
@@ -118,9 +112,6 @@ private slots:
     void onSchemaNameEdited(const QString& text);
     void onSchemaDescriptionEdited(const QString& text);
     void onAddBlock();
-    void onFormatChanged();
-    void onKeyedEdited();
-    void onAddSampleKeys();
     void onBlocksEdited();
     void onApplyChanges();
     void onRevertChanges();
@@ -155,17 +146,6 @@ private:
     void refreshCardChrome();
     PatternDefinition currentDefinitionFromEditor() const;
     void replaceCurrentBlocks(const PatternDefinition& definition);
-
-    // ---- Ключевой режим (F-4) ----
-    void buildKeyedEditor();
-    /// Формат и поля ключевой карточки; nullopt — режим Blocks (поля —
-    /// умолчания KeyedDefinition, а с keepFields — как были).
-    void setKeyedEditor(const std::optional<KeyedDefinition>& keyed, bool keepFields = false);
-    /// Ключевая часть из полей карточки; режим Blocks — nullopt.
-    std::optional<KeyedDefinition> keyedFromEditor() const;
-    bool isKeyedMode() const;
-    void updateFormatMode();
-    void updateKeyedLegend();
 
     void rebuildPresetMenu();
     void applyPreset(const PatternDefinition& definition);
@@ -226,18 +206,6 @@ private:
     int           m_chosenResultIndex = -1;
     bool          m_syncing = false;
     bool          m_dirty = false;   ///< Editor changes not yet applied to the schema row.
-
-    QComboBox*    m_formatCombo = nullptr;      ///< Blocks / JSON / logfmt.
-    CardFrame*    m_keyedCard = nullptr;
-    QWidget*      m_keyedHost = nullptr;        ///< Card + stretch, in place of the chain.
-    QLineEdit*    m_timeKeysEdit = nullptr;
-    QLineEdit*    m_levelKeysEdit = nullptr;
-    QLineEdit*    m_messageKeysEdit = nullptr;
-    QLineEdit*    m_columnsEdit = nullptr;
-    QComboBox*    m_epochUnitCombo = nullptr;
-    QComboBox*    m_numericLevelsCombo = nullptr;
-    QPushButton*  m_addSampleKeysBtn = nullptr;
-    QLabel*       m_keyedLegend = nullptr;
 
     QAction*      m_importAction = nullptr;     ///< Items of the "⋯" schema-list menu.
     QAction*      m_exportAction = nullptr;

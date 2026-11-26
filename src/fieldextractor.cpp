@@ -90,11 +90,6 @@ int LegacyPatternExtractor::tailField() const
     return m_pattern->tailFieldIndex();
 }
 
-bool LegacyPatternExtractor::isKeyed() const
-{
-    return m_pattern->isKeyed();
-}
-
 FieldExtractor::Outcome LegacyPatternExtractor::extract(QStringView line, LogEntryFields* out,
                                                         int upTo, Stop* stop) const
 {
@@ -125,14 +120,6 @@ FieldExtractor::Outcome LegacyPatternExtractor::extractWithMatch(QStringView lin
             stop->offset = 0;
         return Outcome::Rejected;
     }
-    if (m_pattern->isKeyed()) {
-        if (out) {
-            *out = m_pattern->extractFields(text);   // спаны с битом экранирования
-            if (out->spans.size() != columns)
-                out->spans.resize(columns);
-        }
-        return Outcome::Full;
-    }
     if (out) {
         *out = m_pattern->fieldsFromMatch(text, m);
         if (out->spans.size() != columns)
@@ -161,13 +148,6 @@ MatchReport LegacyPatternExtractor::explainMatch(const PatternDefinition& defini
                                                  const LineMatchResult& match)
 {
     MatchReport reason;
-    if (definition.keyed) {
-        if (!match.ok) {
-            reason.expect = MatchReport::Expect::Record;
-            reason.found = line.left(24);
-        }
-        return reason;
-    }
     const bool partial = match.ok && (match.unparsedStart >= 0 || match.skippedFrom >= 0);
     reason.partial = partial;
     if (match.ok && !partial)
