@@ -382,7 +382,7 @@ static void checkViews(const QDir& dir, bool indexed)
                 list << t.get();
             return list;
         },
-        [&]() { ++starts; } });
+        [&](bool starting) { starts += starting ? 1 : 0; } });
     QObject::connect(&c, &FieldSchemaController::filtersRebound, [&](LogViewWidget*) { ++rebound; });
     QObject::connect(&c, &FieldSchemaController::schemaApplied, [&] { ++applied; });
     {
@@ -488,11 +488,19 @@ static void checkBackgroundReextraction(const QDir& dir)
     const QString path = writeFile(dir, QStringLiteral("big.log"), logBytes(records));
     auto tab = std::make_unique<LogViewWidget>();
     FieldSchemaController c;
-    int starts = 0;
+    int starts = 0, beforeApply = 0;
     bool filteringAtApply = false;
     c.setWindow({
         [&]() { return QList<LogViewWidget*>{tab.get()}; },
-        [&]() { ++starts; } });
+        [&](bool starting) {
+            if (starting) {
+                ++starts;
+                return;
+            }
+            ++beforeApply;
+            // Перед установкой полей фильтры вкладок уже остановлены.
+            filteringAtApply = filteringAtApply || tab->model()->isFiltering();
+        } });
     int startedEntries = 0, finished = 0;
     QObject::connect(&c, &FieldSchemaController::reextractionStarted, [&](int n) { startedEntries = n; });
     QObject::connect(&c, &FieldSchemaController::reextractionFinished, [&] {
@@ -518,7 +526,7 @@ static void checkBackgroundReextraction(const QDir& dir)
     CHECK(!tab->model()->fieldDisplayFilterEnabled(), "column display off while re-extracting");
     CHECK(waitFor([&] { return !c.isReextracting(); }, 120000) && finished == 1,
           "background re-extraction finishes");
-    CHECK(starts >= 1, "readers outside the tabs are stopped first");
+    CHECK(starts >= 1 && beforeApply == 1, "readers outside the tabs are stopped first and before apply");
 
     finished = 0;
     c.selectSchema(indexOf(c.schemas(), QStringLiteral("B")));

@@ -345,7 +345,7 @@ void FieldSchemaController::applyToAllViews()
     // вкладок — до синхронной мутации ниже (инвариант 4). finishApplication()
     // перефильтрует отменённое, окно повторит поиск.
     if (m_window.stopFieldReaders)
-        m_window.stopFieldReaders();
+        m_window.stopFieldReaders(true);
     cancelFilterJobs();
 
     auto pattern = std::make_shared<LogPattern>(m_active);
@@ -409,11 +409,13 @@ void FieldSchemaController::onReextractionFinished()
 {
     if (!m_reextraction)
         return;
-    // Filters started while the fields were being computed (Apply, level
-    // buttons, appended lines) read entry->fields(): stop them before the new
-    // fields go in; finishApplication() re-applies them. Save View As started
-    // meanwhile does not read fields (display is off), Search is not started.
+    // Readers started while the fields were being computed (filters: Apply,
+    // level buttons, appended lines; Save View As to CSV / JSON Lines) read
+    // entry->fields(): stop them before the new fields go in;
+    // finishApplication() re-applies the filters. Search is not started then.
     cancelFilterJobs();
+    if (m_window.stopFieldReaders)
+        m_window.stopFieldReaders(false);
     m_reextraction->apply();
     m_reextraction->deleteLater();
     m_reextraction = nullptr;

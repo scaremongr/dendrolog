@@ -184,7 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_schemas = new FieldSchemaController(this);
     m_schemas->setWindow({
         [this]() { return logViews(); },
-        [this]() { stopFieldReaders(); } });
+        [this](bool starting) { stopFieldReaders(starting); } });
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
     // ДО loadSettings — restoreState() должен знать тулбар по objectName.
@@ -1695,14 +1695,20 @@ void MainWindow::onManagePatterns()
             tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
 }
 
-void MainWindow::stopFieldReaders()
+void MainWindow::stopFieldReaders(bool starting)
 {
     // Выдача Search делит записи с источником: clear() ждёт её фильтр.
     // Повторит поиск schemaApplied; посреди фонового расчёта поиск не
     // запускается (runSearchIntoResults).
-    clearSearchResults();
-    // A background Save View As reads the fields of resident entries too.
-    if (m_exportJob && m_exportJob->isRunning()) {
+    if (starting)
+        clearSearchResults();
+    // A background Save View As reads the fields of resident entries too:
+    // CSV / JSON Lines always, text only with the blocks shown — and during a
+    // background re-extraction they are not (FieldSchemaController), so a
+    // text export started then is left to finish.
+    const bool readsFields = m_exportJob
+        && (starting || m_exportJob->format() != ViewExport::Format::Text);
+    if (readsFields && m_exportJob->isRunning()) {
         m_exportCancelReason = tr("Save View As cancelled: the field schema changed. "
                                   "%1 was not changed.")
                                    .arg(QFileInfo(m_exportJob->destination()).fileName());

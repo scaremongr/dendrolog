@@ -499,7 +499,7 @@ private:
     void onTabContextMenu(int index, const QPoint& globalPos);
     // Читатели полей вне вкладок — выдача Search и Save View As — перед
     // сменой полей записей (инвариант 4; FieldSchemaController::Window).
-    void stopFieldReaders();
+    void stopFieldReaders(bool starting);
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.
