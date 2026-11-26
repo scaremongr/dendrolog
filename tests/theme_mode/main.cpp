@@ -48,6 +48,8 @@
 #include <QLineEdit>
 #include <QToolButton>
 #include <QSettings>
+#include <QSplitter>
+#include <QVBoxLayout>
 #include <QStandardPaths>
 #include <QStyleFactory>
 #include <QTemporaryDir>
@@ -818,6 +820,54 @@ static void checkOpenPanels(const QDir& dir)
     });
 }
 
+// ---------------------------------------------------------------------------
+// MutedLabel внутри QSplitter (U-27): подпись в половине сплиттера, прямо
+// в нём и во вложенном сплиттере после смены темы выглядит как созданная
+// сразу в новой теме. Раскладка — как у окна «Find a Schema» до обхода
+// ролью палитры: в нём эти подписи оставались цветом прежней темы. Падала
+// и подпись прямо в окне: причина не в сплиттере, а в палитре окна верхнего
+// уровня, приходящей posted-событием (ColorSchemeController::
+// repolishStyledWidgets).
+// ---------------------------------------------------------------------------
+static void checkMutedLabelInSplitter()
+{
+    ColorSchemeController controller;
+    checkRepaintsOnThemeChange("MutedLabel in QSplitter", []() -> std::unique_ptr<QWidget> {
+        auto window = std::make_unique<QWidget>();
+        auto* root = new QVBoxLayout(window.get());
+        auto* outside = new MutedLabel(QStringLiteral("Outside the splitter"), window.get());
+        outside->setObjectName(QStringLiteral("outsideLabel"));
+        root->addWidget(outside);
+
+        auto* splitter = new QSplitter(Qt::Horizontal, window.get());
+        root->addWidget(splitter, 1);
+
+        auto* left = new QWidget(splitter);
+        auto* leftLayout = new QVBoxLayout(left);
+        leftLayout->setContentsMargins(0, 0, 0, 0);
+        auto* inPane = new MutedLabel(QStringLiteral("In a pane of the splitter"), left);
+        inPane->setObjectName(QStringLiteral("paneLabel"));
+        inPane->setWordWrap(true);
+        inPane->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        leftLayout->addWidget(inPane);
+        leftLayout->addStretch(1);
+
+        auto* direct = new MutedLabel(QStringLiteral("Directly in the splitter"), splitter);
+        direct->setObjectName(QStringLiteral("directLabel"));
+
+        auto* nested = new QSplitter(Qt::Vertical, splitter);
+        auto* deep = new MutedLabel(QStringLiteral("In a nested splitter"), nested);
+        deep->setObjectName(QStringLiteral("nestedLabel"));
+        auto* later = new QWidget();
+        auto* laterLayout = new QVBoxLayout(later);
+        auto* added = new MutedLabel(QStringLiteral("Added with addWidget"), later);
+        added->setObjectName(QStringLiteral("addedLabel"));
+        laterLayout->addWidget(added);
+        nested->addWidget(later);
+        return window;
+    });
+}
+
 // Фон поля быстрого поиска «не найдено» считается из палитры на момент
 // вызова — MainWindow пересчитывает его на PaletteChange.
 static void checkNotFoundColour()
@@ -855,6 +905,7 @@ int main(int argc, char** argv)
     checkOpenView(QDir(temporary.path()));
     checkOpenPanels(QDir(temporary.path()));
     checkScrollbarMarks(QDir(temporary.path()));
+    checkMutedLabelInSplitter();
 
     QFile::remove(AppSettings::iniFilePath());
     if (failures) {

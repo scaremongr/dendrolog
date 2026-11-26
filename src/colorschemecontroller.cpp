@@ -139,6 +139,16 @@ QPalette ColorSchemeController::paletteFor(Qt::ColorScheme effective)
 // PaletteChange), и применяет таблицу заново — заодно пересчитываются
 // ссылки palette(...) внутри неё. Порядок — от родителей к детям: палитра
 // ребёнка берётся у родителя.
+//
+// Сначала окна верхнего уровня (U-27). QApplication::setPalette сразу шлёт
+// ApplicationPaletteChange только виджетам, которые не окна, а окну —
+// posted-событием (QGuiApplication::event → QWidgetWindow), то есть уже
+// после нас. До него окно в старой палитре, и всё под ним берёт старую:
+// MutedLabel, считающий цвет строки стиля из палитры родителя, запоминал
+// цвет прежней темы. Окно, получившее палитру позже, доводит её только до
+// детей без WA_StyleSheet, и подпись так и оставалась старой (в окне
+// «Find a Schema» — подписи в QSplitter). Событие отправляем сами и
+// синхронно; пришедшее потом posted палитру уже не меняет.
 // ---------------------------------------------------------------------------
 void ColorSchemeController::repolishStyledWidgets()
 {
@@ -146,10 +156,22 @@ void ColorSchemeController::repolishStyledWidgets()
     const auto topLevels = QApplication::topLevelWidgets();
     for (QWidget* top : topLevels)
         widgets.append(top);
+    for (const QPointer<QWidget>& top : std::as_const(widgets)) {
+        if (top) {
+            QEvent changed(QEvent::ApplicationPaletteChange);
+            QCoreApplication::sendEvent(top, &changed);
+        }
+    }
+    // Обработчик палитры окна вправе удалить другое окно — отсюда проверка.
+    // Окно-ребёнок (диалог главного окна) уже в списке как окно верхнего
+    // уровня: вторая переполировка его поддерева не нужна.
     for (int i = 0; i < widgets.size(); ++i) {
-        const QObjectList children = widgets.at(i)->children();
+        const QWidget* parent = widgets.at(i);
+        if (!parent)
+            continue;
+        const QObjectList children = parent->children();
         for (QObject* child : children) {
-            if (child->isWidgetType())
+            if (child->isWidgetType() && !static_cast<QWidget*>(child)->isWindow())
                 widgets.append(static_cast<QWidget*>(child));
         }
     }

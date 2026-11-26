@@ -2,6 +2,7 @@
 
 #include "aiconsentdialog.h"
 #include "appsettings.h"
+#include "cardframe.h"
 #include "fieldschemacontroller.h"
 #include "LogListView.h"
 #include "logmodel.h"
@@ -32,16 +33,6 @@ QUrl& endpointOverride()
 
 constexpr int kVariantRole = Qt::UserRole + 1;
 
-// Приглушённая подпись ролью палитры, без таблицы стилей: внутри QSplitter
-// MutedLabel (цвет — строкой стиля) после смены темы оставался прежним
-// (theme_mode), а роль палитры следует за темой сама.
-QLabel* mutedLabel(QWidget* parent)
-{
-    auto* label = new QLabel(parent);
-    label->setForegroundRole(QPalette::PlaceholderText);
-    return label;
-}
-
 QString coverageText(const SchemaFit::Result& fit)
 {
     if (fit.timedOut)
@@ -68,7 +59,7 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
     resize(1000, 640);
 
     auto* root = new QVBoxLayout(this);
-    m_sourceLabel = mutedLabel(this);
+    m_sourceLabel = new MutedLabel(QString(), this);
     m_sourceLabel->setObjectName(QStringLiteral("schemaSourceLabel"));
     root->addWidget(m_sourceLabel);
 
@@ -83,14 +74,14 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
     m_list->setObjectName(QStringLiteral("schemaVariantList"));
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
     leftLayout->addWidget(m_list, 1);
-    m_status = mutedLabel(left);
+    m_status = new MutedLabel(QString(), left);
     m_status->setObjectName(QStringLiteral("schemaVariantStatus"));
     m_status->setWordWrap(true);
     leftLayout->addWidget(m_status);
     m_askAi = new QPushButton(left);
     m_askAi->setObjectName(QStringLiteral("askAiButton"));
     leftLayout->addWidget(m_askAi);
-    m_aiStatus = mutedLabel(left);
+    m_aiStatus = new MutedLabel(QString(), left);
     m_aiStatus->setObjectName(QStringLiteral("aiStatusLabel"));
     m_aiStatus->setWordWrap(true);
     m_aiStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -115,7 +106,7 @@ SchemaCandidatesWindow::SchemaCandidatesWindow(FieldSchemaController* schemas, Q
     m_summary->setObjectName(QStringLiteral("schemaVariantSummary"));
     m_summary->setWordWrap(true);
     rightLayout->addWidget(m_summary);
-    m_notes = mutedLabel(right);
+    m_notes = new MutedLabel(QString(), right);
     m_notes->setObjectName(QStringLiteral("schemaVariantNotes"));
     m_notes->setWordWrap(true);
     m_notes->setTextInteractionFlags(Qt::TextSelectableByMouse);
