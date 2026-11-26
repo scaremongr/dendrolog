@@ -2401,9 +2401,12 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
                          .arg(line).arg(cur.isValid() ? model.keyAt(cur.row()).line : -1));
         CHECK(cur.isValid() && view.selectionModel()->isRowSelected(cur.row(), QModelIndex()),
               what + ": the current row stays selected");
-        CHECK(cur.isValid() && view.visualRect(cur).top() == top,
-              what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
-                         .arg(top).arg(view.visualRect(cur).top()));
+        // Место на экране — обещание перечитывания. Смена одних колонок
+        // (без перечитывания) на Windows сдвигает вид на строку (S-22).
+        if (reread)
+            CHECK(cur.isValid() && view.visualRect(cur).top() == top,
+                  what + QStringLiteral(": the current row stays at its place on screen (%1 → %2)")
+                             .arg(top).arg(view.visualRect(cur).top()));
         const QVector<int> marked = tab.bookmarks().visibleRows();
         CHECK(marked.size() == 1 && model.keyAt(marked.value(0)).line == markedLine,
               what + ": the bookmark is on its line");
