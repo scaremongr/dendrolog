@@ -8,6 +8,8 @@
 #include <QVector>
 #include <QWidget>
 
+#include "timehistogram.h"
+
 #include <atomic>
 #include <memory>
 
@@ -32,7 +34,8 @@ enum class LogLevel;
 // Данные берутся из видимых строк модели активной вкладки (обход
 // метаданных scanSnapshot(true), без текста), поэтому гистограмма всегда
 // соответствует видимому списку. Список отсортирован по времени (строки
-// без метки — в конце): min/max берутся с краёв, а получатель клика
+// без метки — в конце; одно-файловая индексная — порядок файла): шкала —
+// настоящие минимум и максимум меток (TimeHistogram, S-13), получатель клика
 // ищет строку через LogModel::firstVisibleRowAtOrAfter.
 // Сборка: один проход по записям → kBins корзин + префикс-суммы
 // (O(1) на пиксельную колонку при отрисовке, независимо от ширины).
@@ -105,12 +108,9 @@ private:
     void scheduleRebuild();
     void rebuildHistogram();
 
-    // Результат биннинга: префикс-суммы корзин + границы шкалы.
-    struct HistogramData {
-        QVector<quint32> totalPrefix, warnPrefix, errorPrefix, fatalPrefix;
-        qint64 tMin = 0, tMax = 0;
-        bool   hasData = false;
-    };
+    // Результат биннинга: префикс-суммы корзин + границы шкалы (расчёт —
+    // TimeHistogram, ядро).
+    using HistogramData = TimeHistogram;
     // Чистый расчёт по снапшоту — безопасен в воркере. filter*Ms — активный
     // фильтр по времени (расширяет шкалу); cancel — кооперативная отмена
     // (обрезанный результат отбрасывается проверкой поколения).

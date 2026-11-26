@@ -42,6 +42,17 @@ inline qint64 tsOf(const QVector<std::shared_ptr<LineIndex::TsBlock>>& tsBlocks,
         ->ms[logicalId % LineIndex::kTsBlockEntries];
 }
 
+inline bool rangeOut(qint64 minMs, qint64 maxMs, qint64* outMin, qint64* outMax)
+{
+    if (!hasTimestampMs(maxMs))
+        return false;
+    if (outMin)
+        *outMin = minMs;
+    if (outMax)
+        *outMax = maxMs;
+    return true;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -137,6 +148,12 @@ qint64 LineIndex::timestampMs(quint32 logicalId) const
     return tsOf(m_tsBlocks, logicalId, m_logicalCount);
 }
 
+bool LineIndex::timeRangeMs(qint64* minMs, qint64* maxMs) const
+{
+    QMutexLocker lock(&m_mutex);
+    return rangeOut(m_minMs, m_maxMs, minMs, maxMs);
+}
+
 LineIndexSnapshot LineIndex::snapshot() const
 {
     QMutexLocker lock(&m_mutex);
@@ -145,6 +162,8 @@ LineIndexSnapshot LineIndex::snapshot() const
     snap.m_tsBlocks = m_tsBlocks;
     snap.m_lineCount = m_lineCount;
     snap.m_logicalCount = m_logicalCount;
+    snap.m_minMs = m_minMs;
+    snap.m_maxMs = m_maxMs;
     return snap;
 }
 
@@ -211,7 +230,15 @@ void LineIndex::setLogicalTimestamp(quint32 logicalId, qint64 tsMs)
         QMutexLocker lock(&m_mutex);
         m_tsBlocks.append(std::move(block));
     }
-    m_tsBlocks.at(blockIdx)->ms[logicalId % kTsBlockEntries] = tsMs;
+    TsBlock* block = m_tsBlocks.at(blockIdx).get();
+    block->ms[logicalId % kTsBlockEntries] = tsMs;
+    if (hasTimestampMs(tsMs)) {
+        // Поля блока читает только аппендер (truncateFrom) — без мьютекса.
+        block->minMs = qMin(block->minMs, tsMs);
+        block->maxMs = qMax(block->maxMs, tsMs);
+        m_pendingMinMs = qMin(m_pendingMinMs, tsMs);
+        m_pendingMaxMs = qMax(m_pendingMaxMs, tsMs);
+    }
 }
 
 void LineIndex::publish()
@@ -220,6 +247,8 @@ void LineIndex::publish()
     m_lineCount = m_pendingLines;
     m_logicalCount = m_pendingLogical;
     m_endOffset = m_nextOffset;
+    m_minMs = m_pendingMinMs;
+    m_maxMs = m_pendingMaxMs;
 }
 
 void LineIndex::truncateFrom(qint64 line)
@@ -252,6 +281,35 @@ void LineIndex::truncateFrom(qint64 line)
             m_tsBlocks.last() = std::move(copy);
         }
     }
+
+    // Минимум и максимум уцелевших записей: целые блоки — по своим полям,
+    // частичный (уже COW-копия) — пересчётом по его записям до cutLogical,
+    // хвост копии — «метки нет» (будет переписан). O(число блоков + 4096).
+    qint64 minMs = std::numeric_limits<qint64>::max();
+    qint64 maxMs = kNoTimestampMs;
+    const int fullTsBlocks = int(qMin<qint64>(cutLogical / kTsBlockEntries, m_tsBlocks.size()));
+    for (int i = 0; i < fullTsBlocks; ++i) {
+        const TsBlock* b = m_tsBlocks.at(i).get();
+        minMs = qMin(minMs, b->minMs);
+        maxMs = qMax(maxMs, b->maxMs);
+    }
+    const int partial = int(cutLogical % kTsBlockEntries);
+    if (partial > 0 && fullTsBlocks < m_tsBlocks.size()) {
+        TsBlock* b = m_tsBlocks[fullTsBlocks].get(); // копия, снапшотам не видна
+        std::fill(b->ms + partial, b->ms + kTsBlockEntries, kNoTimestampMs);
+        b->minMs = std::numeric_limits<qint64>::max();
+        b->maxMs = kNoTimestampMs;
+        for (int k = 0; k < partial; ++k) {
+            if (hasTimestampMs(b->ms[k])) {
+                b->minMs = qMin(b->minMs, b->ms[k]);
+                b->maxMs = qMax(b->maxMs, b->ms[k]);
+            }
+        }
+        minMs = qMin(minMs, b->minMs);
+        maxMs = qMax(maxMs, b->maxMs);
+    }
+    m_pendingMinMs = m_minMs = minMs;
+    m_pendingMaxMs = m_maxMs = maxMs;
 
     m_pendingLines = line;
     m_pendingLogical = cutLogical;
@@ -320,4 +378,9 @@ quint32 LineIndexSnapshot::logicalId(qint64 line) const
 qint64 LineIndexSnapshot::timestampMs(quint32 logicalId) const
 {
     return tsOf(m_tsBlocks, logicalId, m_logicalCount);
+}
+
+bool LineIndexSnapshot::timeRangeMs(qint64* minMs, qint64* maxMs) const
+{
+    return rangeOut(m_minMs, m_maxMs, minMs, maxMs);
 }

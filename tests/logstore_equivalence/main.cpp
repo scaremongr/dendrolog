@@ -52,6 +52,7 @@
 #include "keyedfixtures.h"
 #include "testdocuments.h"
 #include "textmatchhighlighter.h"
+#include "timehistogram.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -674,6 +675,17 @@ static void compareScanSnapshots(const LogModel& res, const LogModel& idx)
                      what + QStringLiteral(": sourceFile"));
         }
 
+        // Диапазон меток (S-13) — настоящие минимум и максимум, одинаковые
+        // на обоих бэкендах.
+        qint64 rMin = 0, rMax = 0, iMin = 0, iMax = 0;
+        const bool rHas = rs.timeRange(&rMin, &rMax);
+        const bool iHas = is.timeRange(&iMin, &iMax);
+        CHECK_EQ(rHas, iHas, tag + QStringLiteral(": timeRange — есть метки"));
+        if (rHas && iHas) {
+            CHECK_EQ(rMin, iMin, tag + QStringLiteral(": timeRange — минимум"));
+            CHECK_EQ(rMax, iMax, tag + QStringLiteral(": timeRange — максимум"));
+        }
+
         // Последовательный обход текста — то, как снапшот читают воркеры.
         QStringList rTexts;
         QStringList iTexts;
@@ -961,6 +973,245 @@ static void testSingleFileOrdering(const QString& monotonicPath,
         CHECK(!idx.model->visibleTimestampAt(0).isValid(),
               QStringLiteral("индексный бэкенд: преамбула ожидается первой строкой"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// S-13. Диапазон таймлайна и статистики на файле с метками не по порядку.
+//
+// Одно-файловая индексная вкладка держит порядок файла (testSingleFileOrdering),
+// и диапазон меток раньше брался по первой и последней строке с меткой — записи
+// вне него прижимались к крайним корзинам. Теперь у обоих бэкендов (и у одной,
+// и у слитой вкладки, с фильтром и без, после дозаписи с новым минимумом и
+// максимумом) диапазон — настоящие минимум и максимум, а корзины таймлайна
+// (TimeHistogram) — те, что даёт перебор метаданных снапшота. Эталон —
+// перебор, не другой бэкенд: общую ошибку сравнение бэкендов не увидело бы.
+// Заодно — арифметика корзин при времени фильтра вне годов 0001–9999.
+// ---------------------------------------------------------------------------
+struct BruteRange {
+    bool   has = false;
+    qint64 lo = std::numeric_limits<qint64>::max();
+    qint64 hi = kNoTimestampMs;
+};
+
+static BruteRange bruteRange(const LogScanSnapshot& snap)
+{
+    BruteRange r;
+    for (qint64 row = 0; row < snap.rowCount(); ++row) {
+        const qint64 ts = snap.metaAt(row).timestampMs;
+        if (!hasTimestampMs(ts))
+            continue;
+        r.has = true;
+        r.lo = qMin(r.lo, ts);
+        r.hi = qMax(r.hi, ts);
+    }
+    return r;
+}
+
+// Корзины перебором: логическая запись — серия строк одной записи одного файла.
+static QVector<quint32> bruteBins(const LogScanSnapshot& snap, qint64 tMin, qint64 tMax,
+                                  int bins, bool errorsOnly)
+{
+    QVector<quint32> out(bins, 0);
+    const qint64 span = qMax<qint64>(1, tMax - tMin);
+    int prevId = 0;
+    const LogFile* prevFile = nullptr;
+    for (qint64 row = 0; row < snap.rowCount(); ++row) {
+        const LogEntryMeta m = snap.metaAt(row);
+        const bool continuation = row > 0 && m.logicalEntryId == prevId && m.sourceFile == prevFile;
+        prevId = m.logicalEntryId;
+        prevFile = m.sourceFile;
+        if (continuation || !hasTimestampMs(m.timestampMs))
+            continue;
+        if (errorsOnly && m.level != LogLevel::Error)
+            continue;
+        const qint64 ts = qBound(tMin, m.timestampMs, tMax);
+        ++out[int(qMin<qint64>(bins - 1, (ts - tMin) * bins / span))];
+    }
+    return out;
+}
+
+static QVector<quint32> binsOf(const QVector<quint32>& prefix)
+{
+    QVector<quint32> out;
+    for (int b = 0; b + 1 < prefix.size(); ++b)
+        out << prefix[b + 1] - prefix[b];
+    return out;
+}
+
+static QString describe(const QVector<quint32>& v)
+{
+    QStringList parts;
+    for (quint32 x : v)
+        parts << QString::number(x);
+    return parts.join(QLatin1Char(','));
+}
+
+static void checkTimeRangeAgainstScan(const QString& what, const LogModel& m)
+{
+    constexpr int kTestBins = 64;
+    for (const bool filteredOnly : { true, false }) {
+        const QString tag = what + (filteredOnly ? QStringLiteral(" / видимые")
+                                                 : QStringLiteral(" / все строки"));
+        const LogScanSnapshot snap = m.scanSnapshot(filteredOnly);
+        const BruteRange want = bruteRange(snap);
+        qint64 lo = 0, hi = 0;
+        const bool has = snap.timeRange(&lo, &hi);
+        CHECK_EQ(has, want.has, tag + QStringLiteral(": timeRange — есть метки"));
+        if (!has || !want.has)
+            continue;
+        CHECK_EQ(lo, want.lo, tag + QStringLiteral(": timeRange — минимум"));
+        CHECK_EQ(hi, want.hi, tag + QStringLiteral(": timeRange — максимум"));
+
+        if (!filteredOnly) {
+            const QPair<QDateTime, QDateTime> full = m.fullTimeRange();
+            CHECK_EQ(full.first.toMSecsSinceEpoch(), want.lo, tag + QStringLiteral(": fullTimeRange — от"));
+            CHECK_EQ(full.second.toMSecsSinceEpoch(), want.hi, tag + QStringLiteral(": fullTimeRange — до"));
+            continue;
+        }
+
+        // Таймлайн без фильтра времени: шкала — диапазон данных, корзины — перебор.
+        const TimeHistogram h = TimeHistogram::build(snap, kTestBins, 0, 0, false);
+        CHECK(h.hasData && h.tMin == want.lo && h.tMax == want.hi,
+              tag + QStringLiteral(": шкала таймлайна %1 — %2, ожидалось %3 — %4")
+                        .arg(h.tMin).arg(h.tMax).arg(want.lo).arg(want.hi));
+        CHECK_EQ(describe(binsOf(h.totalPrefix)), describe(bruteBins(snap, want.lo, want.hi, kTestBins, false)),
+                 tag + QStringLiteral(": корзины таймлайна"));
+        CHECK_EQ(describe(binsOf(h.errorPrefix)), describe(bruteBins(snap, want.lo, want.hi, kTestBins, true)),
+                 tag + QStringLiteral(": корзины ошибок"));
+
+        // Фильтр времени вне годов 0001–9999 (его задаёт пользователь, QDateTime
+        // — сотни миллионов лет): шкала прижата к поддерживаемым годам, ни
+        // одна запись не потеряна, корзины — перебор на той же шкале (UBSan
+        // ловит переполнение в санитайзерной сборке).
+        const qint64 farPast = QDateTime(QDate(-200000, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+        const qint64 farFuture = QDateTime(QDate(200000, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+        const struct { qint64 from, to; const char* name; } filters[] = {
+            { farPast, farFuture, "годы -200000…200000" },
+            { std::numeric_limits<qint64>::min() + 1, std::numeric_limits<qint64>::max(), "края qint64" },
+            { farPast, want.lo + 1, "только начало вне диапазона" },
+        };
+        for (const auto& f : filters) {
+            const TimeHistogram fh = TimeHistogram::build(snap, kTestBins, f.from, f.to, true);
+            const qint64 expMin = TimeBins::clampMs(qMin(f.from, want.lo));
+            const qint64 expMax = TimeBins::clampMs(qMax(f.to, want.hi));
+            CHECK(fh.hasData && fh.tMin == expMin && fh.tMax == expMax,
+                  tag + QStringLiteral(": фильтр %1 — шкала %2 — %3, ожидалось %4 — %5")
+                            .arg(QString::fromUtf8(f.name)).arg(fh.tMin).arg(fh.tMax)
+                            .arg(expMin).arg(expMax));
+            CHECK_EQ(describe(binsOf(fh.totalPrefix)), describe(bruteBins(snap, expMin, expMax, kTestBins, false)),
+                     tag + QStringLiteral(": фильтр ") + QString::fromUtf8(f.name) + QStringLiteral(": корзины"));
+        }
+    }
+}
+
+// Лог «не по порядку»: преамбула, записи через эпоху с шагами назад, минимум
+// (1901 год) и максимум (2031 год) посреди файла, свободный текст в конце.
+static QByteArray unorderedTimeBytes(quint32 seed)
+{
+    const QDateTime base(QDate(1969, 12, 31), QTime(23, 58));
+    QByteArray out = makeLogBytes(140, seed, "\n", base, /*withPreamble*/ true,
+                                  /*trailingNewline*/ true, /*monotonic*/ false);
+    out += "1901-03-05 10:00:00.000 [main] ERROR - far minimum in the middle\n"
+           "    at com.example.Deep.call(Deep.java:1)\n";
+    out += makeLogBytes(120, seed + 1, "\n", base.addSecs(30), false, true, false);
+    out += "2031-01-02 03:04:05.006 [main] WARN - far maximum in the middle\n";
+    out += makeLogBytes(100, seed + 2, "\n", base.addSecs(-30), false, true, false);
+    out += "free text at the end, no stamp\n";
+    return out;
+}
+
+static void testUnorderedTimeRange(const QDir& dir, const QString& schema,
+                                   const QStringList& fieldNames, const QString& otherPath)
+{
+    const QByteArray bytes = unorderedTimeBytes(31u);
+    const QString resPath = writeFile(dir, QStringLiteral("s13-res.log"), bytes);
+    const QString idxPath = writeFile(dir, QStringLiteral("s13-idx.log"), bytes);
+    const QString sharedPath = writeFile(dir, QStringLiteral("s13-shared.log"), bytes);
+
+    // Первая и последняя строка с меткой — не минимум и не максимум: иначе
+    // проверка ничего не ловит.
+    {
+        Document idx = loadIndexed({ sharedPath }, schema);
+        const int rows = idx.model->rowCount();
+        qint64 first = kNoTimestampMs, last = kNoTimestampMs;
+        for (int row = 0; row < rows; ++row) {
+            const QDateTime t = idx.model->visibleTimestampAt(row);
+            if (!t.isValid())
+                continue;
+            if (!hasTimestampMs(first))
+                first = t.toMSecsSinceEpoch();
+            last = t.toMSecsSinceEpoch();
+        }
+        const BruteRange all = bruteRange(idx.model->scanSnapshot(false));
+        g_context = QStringLiteral("S-13 / фикстура");
+        CHECK(all.has && first != all.lo && last != all.hi && all.lo < 0,
+              QStringLiteral("фикстура: первая/последняя метка %1/%2 против минимума/максимума %3/%4")
+                  .arg(first).arg(last).arg(all.lo).arg(all.hi));
+    }
+
+    const auto runConfigs = [&](const QString& name, Document& res, Document& idx) {
+        const QPair<QDateTime, QDateTime> range = res.model->fullTimeRange();
+        for (const FilterConfig& cfg : allConfigs(range.first, range.second)) {
+            g_context = QStringLiteral("S-13 / ") + name + QStringLiteral(" / ") + cfg.name;
+            g_contextFailures = 0;
+            applyChecked(*res.model, cfg, fieldNames);
+            applyChecked(*idx.model, cfg, fieldNames);
+            checkTimeRangeAgainstScan(QStringLiteral("резидентный"), *res.model);
+            checkTimeRangeAgainstScan(QStringLiteral("индексный"), *idx.model);
+            // Шкала и корзины от порядка вкладки не зависят — бэкенды равны.
+            const TimeHistogram rh = TimeHistogram::build(res.model->scanSnapshot(true), 64, 0, 0, false);
+            const TimeHistogram ih = TimeHistogram::build(idx.model->scanSnapshot(true), 64, 0, 0, false);
+            CHECK(rh.tMin == ih.tMin && rh.tMax == ih.tMax && rh.totalPrefix == ih.totalPrefix
+                      && rh.errorPrefix == ih.errorPrefix && rh.warnPrefix == ih.warnPrefix,
+                  QStringLiteral("таймлайн резидентной и индексной вкладки различается"));
+        }
+    };
+
+    {
+        Document res = loadResident({ sharedPath }, schema);
+        Document idx = loadIndexed({ sharedPath }, schema);
+        runConfigs(QStringLiteral("один файл"), res, idx);
+    }
+    for (const IndexedLoad mode : { IndexedLoad::Sequential, IndexedLoad::Concurrent }) {
+        Document res = loadResident({ sharedPath, otherPath }, schema);
+        Document idx = loadIndexed({ sharedPath, otherPath }, schema, mode);
+        runConfigs(QStringLiteral("слитая вкладка, ") + describe(mode), res, idx);
+    }
+
+    // Дозапись хвоста: новый минимум и новый максимум посреди дописанного,
+    // у индексной — сперва оборванной последней строкой (предварительная,
+    // при следующей дозаписи переиндексируется — truncateFrom).
+    g_context = QStringLiteral("S-13 / дозапись");
+    g_contextFailures = 0;
+    Document res = loadResident({ resPath }, schema);
+    Document idx = loadIndexed({ idxPath }, schema);
+    const QByteArray tail1 =
+        "2026-03-05 10:00:00.000 [main] INFO - appended\n"
+        "1900-06-01 00:00:00.000 [main] ERROR - new minimum\n"
+        "2026-03-05 10:00:01.000 [main] INFO - appended again\n";
+    const QByteArray tail2a = "2045-07-08 09:10:11.012 [main] WARN - new max";
+    const QByteArray tail2b = "imum, completed\n2026-03-05 10:00:02.000 [main] INFO - last\n";
+    CHECK(appendResidentTail(res, 0, tail1, schema), QStringLiteral("резидентная дозапись 1"));
+    CHECK(appendIndexedTail(idx, 0, tail1, schema), QStringLiteral("индексная дозапись 1"));
+    checkTimeRangeAgainstScan(QStringLiteral("резидентный после дозаписи"), *res.model);
+    checkTimeRangeAgainstScan(QStringLiteral("индексный после дозаписи"), *idx.model);
+    qint64 lo = 0, hi = 0;
+    CHECK(idx.model->scanSnapshot(false).timeRange(&lo, &hi)
+              && lo == QDateTime(QDate(1900, 6, 1), QTime(0, 0)).toMSecsSinceEpoch(),
+          QStringLiteral("индексный: новый минимум из дозаписи"));
+
+    CHECK(appendIndexedTail(idx, 0, tail2a, schema), QStringLiteral("индексная дозапись 2a (оборванная)"));
+    checkTimeRangeAgainstScan(QStringLiteral("индексный, оборванная строка"), *idx.model);
+    CHECK(appendIndexedTail(idx, 0, tail2b, schema), QStringLiteral("индексная дозапись 2b"));
+    CHECK(appendResidentTail(res, 0, tail2a + tail2b, schema), QStringLiteral("резидентная дозапись 2"));
+    checkTimeRangeAgainstScan(QStringLiteral("резидентный после дозаписи 2"), *res.model);
+    checkTimeRangeAgainstScan(QStringLiteral("индексный после дозаписи 2"), *idx.model);
+    const qint64 newMax = QDateTime(QDate(2045, 7, 8), QTime(9, 10, 11, 12)).toMSecsSinceEpoch();
+    qint64 rlo = 0, rhi = 0;
+    CHECK(idx.model->scanSnapshot(false).timeRange(&lo, &hi) && hi == newMax
+              && res.model->scanSnapshot(false).timeRange(&rlo, &rhi) && rhi == newMax && rlo == lo,
+          QStringLiteral("новый максимум из дозаписи: индексный %1, резидентный %2, ожидалось %3")
+              .arg(hi).arg(rhi).arg(newMax));
 }
 
 // ---------------------------------------------------------------------------
@@ -2530,6 +2781,7 @@ int main(int argc, char** argv)
 
     testSingleFileOrdering(fileA, fileC, schema, fieldNames);
     testSingleFileUnsortedLookups(fileC, schema, fieldNames);
+    testUnorderedTimeRange(dir, schema, fieldNames, fileA);
     testZonedMerge(dir, schema);
     testPre1970Merge(dir, schema);
     testAttachWithActiveFilter(fileC, fileD, schema, fieldNames);

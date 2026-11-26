@@ -192,6 +192,18 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Timeline and Statistics on a large file whose timestamps go back and
+  forth.** A file opened alone above the index threshold (512 MB) is shown in
+  file order, and the time scale used to run from its first to its last
+  timestamp: records outside that span were squeezed into the edge bars, and
+  **Whole Log** in *Time Filter* put the same partial span into From / To.
+  The scale is now the real earliest and latest timestamp (kept by the index
+  while it reads the file, so it costs nothing on the screen), and the same
+  file below and above the threshold gives the same timeline and the same
+  time range, rate and peak in statistics.
+  The first and last time of a file in *Statistics* are its earliest and
+  latest timestamps too. A time filter set far outside years 1–9999 no longer
+  breaks the timeline scale.
 - **Go to Next / Previous Line of This File** (right-click a chip of the
   file legend) no longer freezes the window on a huge merged tab when the
   file is small or its next line is far away: above a million shown lines

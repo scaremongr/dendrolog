@@ -112,6 +112,8 @@ set(DENDROLOG_CORE_SOURCES
     src/commandspooler.cpp
     src/logscan.h
     src/logscan.cpp
+    src/timehistogram.h
+    src/timehistogram.cpp
     src/lineclassifier.h
     src/lineclassifier.cpp
     src/lineindex.h

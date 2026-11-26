@@ -225,9 +225,16 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
     s.valid = true;
     s.rows = int(snapshot.rowCount());
 
-    // Диапазон времени: список отсортирован по времени, записи без метки —
-    // в конце (как на таймлайне). Метка до 1970 года — отрицательный момент.
-    const bool hasTime = snapshot.timeRange(&s.tMinMs, &s.tMaxMs);
+    // Диапазон времени — настоящие минимум и максимум меток в любом порядке
+    // вкладки (S-13, как у таймлайна). Метка до 1970 года — отрицательный
+    // момент.
+    // На одно-файловой индексной вкладке под фильтром это проход по видимым
+    // строкам — отменяемый.
+    const bool hasTime = snapshot.timeRange(&s.tMinMs, &s.tMaxMs, nullptr, cancel.get());
+    if (cancel && cancel->load(std::memory_order_relaxed)) {
+        s.cancelled = true;
+        return s;
+    }
     const qint64 spanMs   = hasTime ? qMax<qint64>(0, s.tMaxMs - s.tMinMs) : 0;
     const double bucketMs = spanMs > 0 ? double(spanMs) / kBins : 0.0;
 
@@ -284,13 +291,14 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
         const qint64 tsMs = m.timestampMs;
         if (hasTimestampMs(tsMs)) {
             ++s.recordsWithTs;
-            if (!hasTimestampMs(fs.firstMs))
-                fs.firstMs = tsMs;
-            fs.lastMs = tsMs;
+            // Минимум и максимум, а не первая и последняя: в порядке файла
+            // (одно-файловая индексная вкладка) метки бывают не по порядку.
+            fs.firstMs = hasTimestampMs(fs.firstMs) ? qMin(fs.firstMs, tsMs) : tsMs;
+            fs.lastMs = hasTimestampMs(fs.lastMs) ? qMax(fs.lastMs, tsMs) : tsMs;
 
             if (bucketMs > 0) {
-                // Прижать до приведения к int: в порядке файла (одно-файловая
-                // индексная вкладка) метка может лежать вне [tMin, tMax].
+                // Прижать до приведения к int (страховка: метка лежит в
+                // [tMin, tMax] — диапазон настоящий, S-13).
                 const int b = int(qBound(0.0, double(tsMs - s.tMinMs) / bucketMs,
                                          double(kBins - 1)));
                 ++totalBins[b];
@@ -322,9 +330,8 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
         if (it != templates.end()) {
             ++it->count;
             if (hasTimestampMs(tsMs)) {
-                if (!hasTimestampMs(it->firstMs))
-                    it->firstMs = tsMs;
-                it->lastMs = tsMs;
+                it->firstMs = hasTimestampMs(it->firstMs) ? qMin(it->firstMs, tsMs) : tsMs;
+                it->lastMs = hasTimestampMs(it->lastMs) ? qMax(it->lastMs, tsMs) : tsMs;
             }
         } else if (templates.size() >= kMaxTemplates) {
             s.templatesCapped = true; // топ приблизительный: словарь переполнен

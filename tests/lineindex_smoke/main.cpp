@@ -857,6 +857,118 @@ static void testAppendReindex(const QDir& dir)
     compareIndexes("append-vs-fresh", *index, *fresh);
 }
 
+// ---------------------------------------------------------------------------
+// S-13. Минимум и максимум меток, которые ведёт индекс: против перебора
+// timestampMs по всем опубликованным записям — на случайной дозаписи с
+// метками не по порядку (до 1970, «метки нет», записи из нескольких строк),
+// через границы блоков меток (4096 записей) и после truncateFrom посреди
+// блока и на его границе. Снапшот, взятый до усечения, свою пару не меняет.
+// ---------------------------------------------------------------------------
+static void testTimeRangeTracking()
+{
+    LineIndex index;
+    QRandomGenerator rng(1313u);
+    qint64 offset = 0;
+    quint32 nextId = 0;
+    index.beginAppend(0);
+
+    const auto bruteCheck = [&](const char* what) {
+        qint64 lo = std::numeric_limits<qint64>::max();
+        qint64 hi = kNoTimestampMs;
+        for (quint32 id = 0; id < index.logicalEntryCount(); ++id) {
+            const qint64 ts = index.timestampMs(id);
+            if (!hasTimestampMs(ts))
+                continue;
+            lo = qMin(lo, ts);
+            hi = qMax(hi, ts);
+        }
+        qint64 gotLo = 0, gotHi = 0;
+        const bool has = index.timeRangeMs(&gotLo, &gotHi);
+        CHECK(has == hasTimestampMs(hi), what);
+        if (has && hasTimestampMs(hi))
+            CHECK(gotLo == lo && gotHi == hi, what);
+        qint64 sLo = 0, sHi = 0;
+        const LineIndexSnapshot snap = index.snapshot();
+        CHECK(snap.timeRangeMs(&sLo, &sHi) == has && (!has || (sLo == gotLo && sHi == gotHi)),
+              "time range: snapshot copies the published pair");
+    };
+
+    CHECK(!index.timeRangeMs(nullptr, nullptr), "time range: empty index has none");
+
+    const auto appendRecords = [&](int records) {
+        for (int r = 0; r < records; ++r) {
+            const quint32 id = nextId++;
+            const int roll = int(rng.bounded(100));
+            qint64 ts = kNoTimestampMs;
+            if (roll >= 15) // разброс в обе стороны от эпохи: −10^12…+10^12 мс
+                ts = qint64(rng.bounded(2000000)) * 1000000 - 1000000000000LL;
+            index.setLogicalTimestamp(id, ts);
+            const int lines = 1 + (rng.bounded(100) < 20 ? int(rng.bounded(3)) : 0);
+            for (int l = 0; l < lines; ++l) {
+                LineIndex::LineRecord rec;
+                rec.byteLength = 10;
+                rec.eolBytes = 1;
+                rec.isPrimary = l == 0;
+                rec.hasOwnTimestamp = l == 0 && hasTimestampMs(ts);
+                rec.logicalId = id;
+                index.appendLine(rec);
+                offset += 11;
+            }
+        }
+        index.publish();
+    };
+
+    appendRecords(3000);
+    bruteCheck("time range: first publish");
+    appendRecords(6000); // через границы блоков меток
+    bruteCheck("time range: across timestamp blocks");
+
+    // Усечение посреди второго блока меток, затем на границе блока и до нуля.
+    const qint64 cutLines[] = { index.lineCount() - 3, 0, 0 };
+    for (int step = 0; step < 3; ++step) {
+        qint64 cut = cutLines[step];
+        if (step == 1) {
+            // Первая строка записи 4096 — граница блока меток.
+            for (qint64 line = 0; line < index.lineCount(); ++line) {
+                if (index.logicalId(line) == quint32(LineIndex::kTsBlockEntries)) {
+                    cut = line;
+                    break;
+                }
+            }
+        }
+        if (step == 2) {
+            cut = index.lineCount() / 3;
+        }
+        qint64 beforeLo = 0, beforeHi = 0;
+        const LineIndexSnapshot before = index.snapshot();
+        const bool beforeHas = before.timeRangeMs(&beforeLo, &beforeHi);
+
+        index.truncateFrom(cut);
+        nextId = index.logicalEntryCount();
+        index.beginAppend(index.endOffset());
+        bruteCheck("time range: after truncateFrom");
+
+        qint64 lo = 0, hi = 0;
+        CHECK(before.timeRangeMs(&lo, &hi) == beforeHas && lo == beforeLo && hi == beforeHi,
+              "time range: snapshot before truncateFrom keeps its pair");
+
+        appendRecords(1500 + int(rng.bounded(3000)));
+        bruteCheck("time range: append after truncateFrom");
+    }
+
+    // Только записи без метки — диапазона нет.
+    LineIndex plain;
+    plain.beginAppend(0);
+    for (quint32 id = 0; id < 10; ++id) {
+        plain.setLogicalTimestamp(id, kNoTimestampMs);
+        LineIndex::LineRecord rec;
+        rec.logicalId = id;
+        plain.appendLine(rec);
+    }
+    plain.publish();
+    CHECK(!plain.timeRangeMs(nullptr, nullptr), "time range: no stamps — no range");
+}
+
 static void testSnapshotStability(const QDir& dir)
 {
     // Снапшот, взятый до truncateFrom, продолжает видеть старую версию хвоста.
@@ -2890,6 +3002,7 @@ int main(int argc, char** argv)
     testBlockBoundaries(dir);
     testAppendReindex(dir);
     testSnapshotStability(dir);
+    testTimeRangeTracking();
     testSequentialReaderDirections(dir);
     testEncodingDetection(dir);
     testEncodingInTail(dir);

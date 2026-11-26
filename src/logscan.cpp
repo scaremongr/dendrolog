@@ -16,6 +16,17 @@ LogEntryMeta LogScanSnapshot::metaFor(const LogEntry& entry)
 bool LogScanSnapshot::timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
                                 const std::atomic_bool* cancel) const
 {
+    if (!m_impl) {
+        if (timedRows)
+            *timedRows = 0;
+        return false;
+    }
+    return m_impl->timeRange(minMs, maxMs, timedRows, cancel);
+}
+
+bool LogScanSnapshot::Impl::timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
+                                      const std::atomic_bool* cancel) const
+{
     qint64 end = rowCount();
     while (end > 0 && !hasTimestampMs(metaAt(end - 1).timestampMs)) {
         --end;
@@ -28,8 +39,8 @@ bool LogScanSnapshot::timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
         *timedRows = end;
     if (end <= 0)
         return false;
-    // Первая строка с меткой. В порядке времени это строка 0; в порядке файла
-    // (одно-файловая индексная вкладка) перед ней может стоять преамбула.
+    // Первая строка с меткой — в порядке времени это строка 0 (проход на
+    // случай преамбулы — страховка, а не порядок файла: тот переопределён).
     qint64 begin = 0;
     while (!hasTimestampMs(metaAt(begin).timestampMs)) {
         ++begin;   // строка end - 1 с меткой — выход гарантирован

@@ -531,9 +531,9 @@ static void checkPre1970(const QDir& dir, const QString& schema)
     checkWide("indexed wide", testdocs::buildIndexed({wide}, schema));
 
     // Одно-файловая индексная вкладка держит порядок файла: преамбула без
-    // метки сверху и строка 0001 года посреди 2026-го. Диапазон — от первой
-    // до последней строки с меткой, далёкая строка прижимается к краю корзин
-    // (без переполнения при приведении к int — UBSan).
+    // метки сверху и строка 0001 года посреди 2026-го. Диапазон — настоящие
+    // минимум и максимум (S-13), как у резидентной; первое и последнее время
+    // файла в разбивке по файлам — тоже.
     const QString stray = testdocs::writeFile(dir, "stray.log",
         "=== service started ===\n"
         "2026-03-05T10:00:00.000Z [main] INFO - a\n"
@@ -543,9 +543,15 @@ static void checkPre1970(const QDir& dir, const QString& schema)
     {
         testdocs::Document doc = testdocs::buildIndexed({stray}, schema);
         const DocumentStats stats = collectDocumentStats(doc.model->scanSnapshot(false), nullptr, 0);
-        CHECK(stats.tMinMs == tenUtc && stats.tMaxMs == tenUtc + 3600000 && stats.recordsWithTs == 3,
+        CHECK(stats.tMinMs == year1 && stats.tMaxMs == tenUtc + 3600000 && stats.recordsWithTs == 3,
               QStringLiteral("indexed stray: range %1 — %2, stamped %3")
                   .arg(stats.tMinMs).arg(stats.tMaxMs).arg(stats.recordsWithTs));
+        CHECK(stats.files.size() == 1 && stats.files[0].firstMs == year1
+                  && stats.files[0].lastMs == tenUtc + 3600000,
+              "indexed stray: per-file range is the real minimum and maximum");
+        CHECK(doc.model->fullTimeRange().first.toMSecsSinceEpoch() == year1
+                  && doc.model->fullTimeRange().second.toMSecsSinceEpoch() == tenUtc + 3600000,
+              "indexed stray: Whole Log range is the real minimum and maximum");
     }
     {
         testdocs::Document doc = testdocs::buildResident({stray}, schema);

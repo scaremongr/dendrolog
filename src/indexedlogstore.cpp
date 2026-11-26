@@ -811,6 +811,21 @@ QPair<QDateTime, QDateTime> IndexedLogStore::fullTimeRange() const
     if (total <= 0)
         return {};
 
+    // Один файл — порядок файла, метки бывают не по порядку (S-13): диапазон
+    // — настоящие минимум и максимум. Весь файл — из индекса, O(1). База
+    // поиска из части строк (выдача Search по одно-файловой вкладке) —
+    // проходом снапшота по её строкам, O(N) на GUI-потоке; вызывающие
+    // (Whole Log, отдаление таймлайна, Go to) берут вкладку, а не выдачу.
+    if (m_files.size() == 1) {
+        qint64 lo = 0, hi = 0;
+        const bool ok = identityAll()
+            ? m_files.first().index->timeRangeMs(&lo, &hi)
+            : scanSnapshot(/*filteredOnly=*/false).timeRange(&lo, &hi);
+        if (!ok)
+            return {};
+        return { QDateTime::fromMSecsSinceEpoch(lo), QDateTime::fromMSecsSinceEpoch(hi) };
+    }
+
     // Снапшоты один раз — обратный проход по невалидному хвосту может быть
     // длинным, мьютекс на строку недопустим.
     QVector<LineIndexSnapshot> snaps;
@@ -1286,6 +1301,66 @@ public:
         const FileSnap& f = files[fileId];
         return (f.schema && f.schema->isValid() && f.index.isPrimary(line))
             ? f.schema->extractFields(text) : LogEntryFields();
+    }
+
+    bool timeRange(qint64* minMs, qint64* maxMs, qint64* timedRows,
+                   const std::atomic_bool* cancel) const override
+    {
+        // Несколько файлов — порядок времени (инвариант 11): первая и
+        // последняя строка с меткой и есть минимум и максимум.
+        if (files.size() != 1)
+            return LogScanSnapshot::Impl::timeRange(minMs, maxMs, timedRows, cancel);
+
+        // Один файл — порядок файла, метки бывают не по порядку (S-13).
+        // Строки без метки стоят где угодно: обход до конца.
+        const qint64 n = rowCount();
+        // timedRows — все строки, если метки есть, иначе 0 (как у порядка
+        // времени: обходить нечего).
+        const auto done = [&](bool has) {
+            if (timedRows)
+                *timedRows = has ? n : 0;
+            return has;
+        };
+        if (n <= 0)
+            return done(false);
+        const LineIndexSnapshot& index = files[0].index;
+        // Без фильтра — весь файл: минимум и максимум ведёт индекс, O(1).
+        // Пара — по записям снимка индекса, а не по строкам вкладки: снимок
+        // бывает на порцию впереди (опубликована, но ещё не дошла до
+        // GUI-потока) или позади (предварительная последняя строка снята
+        // truncateFrom на время переиндексации). Расхождение — до следующей
+        // вставки строк, которая перестраивает таймлайн и статистику сама.
+        if (refs.isEmpty())
+            return done(index.timeRangeMs(minMs, maxMs));
+
+        // Фильтр — проход по видимым строкам (только метаданные индекса).
+        qint64 lo = std::numeric_limits<qint64>::max();
+        qint64 hi = kNoTimestampMs;
+        quint32 prevLogical = 0;
+        bool havePrev = false;
+        for (qint64 i = 0; i < n; ++i) {
+            if (cancel && (i & 0x3FFF) == 0 && cancel->load(std::memory_order_relaxed))
+                return done(false);
+            int fileId; qint64 line;
+            resolve(i, fileId, line);
+            const quint32 logical = index.logicalId(line);
+            if (havePrev && logical == prevLogical)
+                continue; // продолжение записи — метка та же
+            havePrev = true;
+            prevLogical = logical;
+            const qint64 ts = index.timestampMs(logical);
+            if (!hasTimestampMs(ts))
+                continue;
+            lo = qMin(lo, ts);
+            hi = qMax(hi, ts);
+        }
+        if (!hasTimestampMs(hi))
+            return done(false);
+        if (minMs)
+            *minMs = lo;
+        if (maxMs)
+            *maxMs = hi;
+        return done(true);
     }
 
 private:

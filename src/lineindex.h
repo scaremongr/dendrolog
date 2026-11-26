@@ -4,6 +4,7 @@
 #include "logentry.h"
 #include <QMutex>
 #include <QVector>
+#include <limits>
 #include <memory>
 
 // ============================================================================
@@ -21,6 +22,11 @@
 //   • читатели (GUI-поток) берут значения через const-методы (короткий
 //     мьютекс на вызов), воркеры сканов — через snapshot() (копия векторов
 //     указателей на блоки; блоки за пределами своего count не читает);
+//   • минимум и максимум меток файла (S-13) аппендер ведёт сам, O(1) на
+//     запись: у каждого TsBlock — свои (их читает только аппендер, в
+//     truncateFrom), у индекса — опубликованная пара (под мьютексом, вместе
+//     со счётчиками; снапшот берёт её копией). Одно-файловая вкладка в
+//     порядке файла берёт диапазон таймлайна и статистики отсюда;
 //   • опубликованные строки неизменны. Единственное исключение —
 //     «предварительный» хвост без \n: перед его переиндексацией
 //     truncateFrom() СНАЧАЛА подменяет затрагиваемые блоки копиями (COW),
@@ -49,6 +55,10 @@ public:
     };
     struct TsBlock {
         qint64 ms[kTsBlockEntries];          // kNoTimestampMs — метки нет
+        // Минимум и максимум меток блока (S-13); без меток — maxMs ==
+        // kNoTimestampMs. Пишет и читает только аппендер.
+        qint64 minMs = std::numeric_limits<qint64>::max();
+        qint64 maxMs = kNoTimestampMs;
     };
 
     // Данные одной строки для аппендера.
@@ -83,6 +93,10 @@ public:
     bool    isPlainTextLine(qint64 line) const;
     quint32 logicalId(qint64 line) const;
     qint64  timestampMs(quint32 logicalId) const;   // kNoTimestampMs — метки нет
+    // Настоящие минимум и максимум меток опубликованных записей (S-13; не
+    // первая и последняя — записи файла бывают не по порядку). false — меток
+    // нет. O(1).
+    bool    timeRangeMs(qint64* minMs, qint64* maxMs) const;
 
     LineIndexSnapshot snapshot() const;
 
@@ -90,6 +104,7 @@ public:
     // Начать (про)дозапись с абсолютного смещения (0/после BOM/якорь хвоста).
     void beginAppend(qint64 startOffset);
     void appendLine(const LineRecord& rec);
+    // Один раз на запись (id по порядку): минимум и максимум только растут.
     void setLogicalTimestamp(quint32 logicalId, qint64 tsMs);
     // Сделать всё дозаписанное видимым читателям.
     void publish();
@@ -110,11 +125,15 @@ private:
     qint64  m_lineCount = 0;      // опубликовано строк
     quint32 m_logicalCount = 0;   // опубликовано логических записей
     qint64  m_endOffset = 0;      // конец опубликованных байт
+    qint64  m_minMs = std::numeric_limits<qint64>::max(); // опубликованные мин./макс. меток
+    qint64  m_maxMs = kNoTimestampMs;
 
     // Состояние аппендера (только поток индексатора; читатели не трогают).
     qint64  m_pendingLines = 0;   // всего строк с учётом неопубликованных
     quint32 m_pendingLogical = 0;
     qint64  m_nextOffset = 0;     // смещение начала следующей строки
+    qint64  m_pendingMinMs = std::numeric_limits<qint64>::max();
+    qint64  m_pendingMaxMs = kNoTimestampMs;
 };
 
 // Снимок индекса для воркеров: копия векторов указателей на блоки + счётчики.
@@ -134,6 +153,8 @@ public:
     bool    isPlainTextLine(qint64 line) const;
     quint32 logicalId(qint64 line) const;
     qint64  timestampMs(quint32 logicalId) const;
+    // Минимум и максимум меток записей снимка (LineIndex::timeRangeMs).
+    bool    timeRangeMs(qint64* minMs, qint64* maxMs) const;
 
 private:
     friend class LineIndex;
@@ -141,6 +162,8 @@ private:
     QVector<std::shared_ptr<LineIndex::TsBlock>> m_tsBlocks;
     qint64  m_lineCount = 0;
     quint32 m_logicalCount = 0;
+    qint64  m_minMs = std::numeric_limits<qint64>::max();
+    qint64  m_maxMs = kNoTimestampMs;
 };
 
 #endif // LINEINDEX_H
