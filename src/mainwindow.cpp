@@ -1032,6 +1032,10 @@ MainWindow::~MainWindow()
     // tests/mainwindow_smoke под ASan).
     if (m_sessionController)
         disconnect(m_sessionController, nullptr, this, nullptr);
+    // Выдача Search: удалённая вкладка-источник сбрасывает её (clear() →
+    // statusChanged) уже после того, как окна не стало.
+    if (m_searchController)
+        disconnect(m_searchController, nullptr, this, nullptr);
     if (ui->tabWidget)
         disconnect(ui->tabWidget, nullptr, this, nullptr);
     delete ui;
