@@ -1908,6 +1908,7 @@ void MainWindow::setupTimeFilterDockContents()
     // точность, а формат локали по умолчанию обрезает время до минут.
     const QString timeFormat = QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz");
     m_timeFilterFrom = new QDateTimeEdit(this);
+    m_timeFilterFrom->setObjectName(QStringLiteral("timeFilterFrom"));
     m_timeFilterFrom->setCalendarPopup(true);
     m_timeFilterFrom->setDisplayFormat(timeFormat);
     m_timeFilterFrom->setToolTip(tr("Show lines at or after this moment.\n"
@@ -1915,6 +1916,7 @@ void MainWindow::setupTimeFilterDockContents()
     formLayout->addRow(tr("From:"), m_timeFilterFrom);
 
     m_timeFilterTo = new QDateTimeEdit(this);
+    m_timeFilterTo->setObjectName(QStringLiteral("timeFilterTo"));
     m_timeFilterTo->setCalendarPopup(true);
     m_timeFilterTo->setDisplayFormat(timeFormat);
     m_timeFilterTo->setToolTip(tr("Show lines at or before this moment.\n"
@@ -1935,6 +1937,7 @@ void MainWindow::setupTimeFilterDockContents()
     connect(m_timeFilterTo, &QDateTimeEdit::dateTimeChanged, this, markEdited);
 
     m_timeFilterErrorLabel = new QLabel(this);
+    m_timeFilterErrorLabel->setObjectName(QStringLiteral("timeFilterError"));
     m_timeFilterErrorLabel->setWordWrap(true);
     m_timeFilterErrorLabel->setStyleSheet(QStringLiteral("color: %1;")
         .arg(AppTheme::instance().logError.darker(115).name()));
@@ -1942,6 +1945,7 @@ void MainWindow::setupTimeFilterDockContents()
     timeFilterMainLayout->addWidget(m_timeFilterErrorLabel);
 
     auto* wholeLogButton = new QPushButton(tr("Whole Log"), this);
+    wholeLogButton->setObjectName(QStringLiteral("timeFilterWholeLog"));
     wholeLogButton->setToolTip(tr("Put the first and last timestamps of the log into From / To\n"
                                   "(nothing is applied until you press Apply)."));
     connect(wholeLogButton, &QPushButton::clicked, this, [this]() {
@@ -1956,10 +1960,12 @@ void MainWindow::setupTimeFilterDockContents()
     });
 
     m_applyTimeFilterButton = new QPushButton(tr("Apply"), this);
+    m_applyTimeFilterButton->setObjectName(QStringLiteral("timeFilterApply"));
     m_applyTimeFilterButton->setToolTip(tr("Show only the lines between From and To in the current tab"));
     connect(m_applyTimeFilterButton, &QPushButton::clicked, this, &MainWindow::onApplyTimeFilterClicked);
 
     m_resetTimeFilterButton = new QPushButton(tr("Reset"), this);
+    m_resetTimeFilterButton->setObjectName(QStringLiteral("timeFilterReset"));
     m_resetTimeFilterButton->setToolTip(tr("Turn the time filter of the current tab off"));
     connect(m_resetTimeFilterButton, &QPushButton::clicked, this, &MainWindow::onResetTimeFilterClicked);
 
@@ -1972,6 +1978,7 @@ void MainWindow::setupTimeFilterDockContents()
 
     // Диапазон лога и состояние фильтра — чтобы не гадать, что уже применено.
     m_timeFilterInfoLabel = new QLabel(this);
+    m_timeFilterInfoLabel->setObjectName(QStringLiteral("timeFilterInfo"));
     m_timeFilterInfoLabel->setWordWrap(true);
     m_timeFilterInfoLabel->setTextFormat(Qt::RichText);
     timeFilterMainLayout->addWidget(m_timeFilterInfoLabel);

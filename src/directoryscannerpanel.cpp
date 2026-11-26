@@ -89,6 +89,7 @@ void DirectoryScannerPanel::buildUi()
 
     m_scanButton = card->makeToolButton(QString(),
         tr("Choose a folder and scan it for log files"));
+    m_scanButton->setObjectName(QStringLiteral("scannerScanButton"));
     m_scanButton->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
     m_scanButton->setFixedSize(squareBtn);
     headerRow->addWidget(m_scanButton);
@@ -118,12 +119,14 @@ void DirectoryScannerPanel::buildUi()
 
     m_settingsToggle = card->makeToolButton(QStringLiteral("⚙"),
         tr("Show/hide content and date filters"));
+    m_settingsToggle->setObjectName(QStringLiteral("scannerFiltersToggle"));
     m_settingsToggle->setCheckable(true);
     m_settingsToggle->setFixedSize(squareBtn);
     headerRow->addWidget(m_settingsToggle);
 
     m_extsButton = card->makeToolButton(QString(),
         tr("Configure which file extensions are scanned (e.g. log, txt)"));
+    m_extsButton->setObjectName(QStringLiteral("scannerExtensionsButton"));
     m_extsButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     m_extsButton->setFixedSize(squareBtn);
     headerRow->addWidget(m_extsButton);
@@ -146,6 +149,7 @@ void DirectoryScannerPanel::buildUi()
     auto* contentRow = new QHBoxLayout();
     contentRow->setSpacing(4);
     m_contentEdit = new QLineEdit(m_filterArea);
+    m_contentEdit->setObjectName(QStringLiteral("scannerContentEdit"));
     m_contentEdit->setPlaceholderText(tr("Filter files by content…"));
     m_contentEdit->setClearButtonEnabled(true);
     m_contentEdit->setToolTip(tr("Keep only files whose contents match this text.\n"
@@ -196,8 +200,10 @@ void DirectoryScannerPanel::buildUi()
     actionRow->setSpacing(4);
     m_applyButton = new QPushButton(tr("Apply"), m_filterArea);
     m_applyButton->setToolTip(tr("Apply the content and date filters"));
+    m_applyButton->setObjectName(QStringLiteral("scannerApplyButton"));
     m_applyButton->setDefault(true);
     m_resetButton = new QPushButton(tr("Reset"), m_filterArea);
+    m_resetButton->setObjectName(QStringLiteral("scannerResetButton"));
     m_resetButton->setToolTip(tr("Clear all filters and show every file"));
     actionRow->addWidget(m_applyButton);
     actionRow->addWidget(m_resetButton);

@@ -14,6 +14,15 @@
 #include <unistd.h>
 #endif
 
+namespace {
+std::atomic_int g_inputDescriptorForTesting{-1};
+}
+
+void StdinSpooler::setInputDescriptorForTesting(int fd)
+{
+    g_inputDescriptorForTesting.store(fd);
+}
+
 StdinSpooler::StdinSpooler(QObject* parent)
     : QThread(parent)
 {
@@ -54,9 +63,13 @@ bool StdinSpooler::startSpooling(const QString& spoolRoot, QString* errorString)
 
 void StdinSpooler::run()
 {
+    const int testFd = g_inputDescriptorForTesting.load();
 #ifdef Q_OS_WIN
+    const int inputFd = testFd >= 0 ? testFd : _fileno(stdin);
     // Иначе Windows-CRT в текстовом режиме портит \r\n и режет на Ctrl+Z.
-    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(inputFd, _O_BINARY);
+#else
+    const int inputFd = testFd >= 0 ? testFd : 0;
 #endif
 
     QFile out(m_path);
@@ -65,7 +78,6 @@ void StdinSpooler::run()
 
     char buf[64 * 1024];
     qint64 total = 0;
-    qint64 unflushed = 0;
     QElapsedTimer sinceEmit;
     sinceEmit.start();
 
@@ -74,28 +86,27 @@ void StdinSpooler::run()
         // буфер, и живой поток отдавался бы кусками по 64 КБ. read возвращает
         // столько, сколько есть в пайпе (но хотя бы один байт).
 #ifdef Q_OS_WIN
-        const int got = _read(_fileno(stdin), buf, int(sizeof(buf)));
+        const int got = _read(inputFd, buf, int(sizeof(buf)));
 #else
-        const qint64 got = ::read(0, buf, sizeof(buf));
+        const qint64 got = ::read(inputFd, buf, sizeof(buf));
 #endif
         if (got <= 0)
             break; // EOF либо ошибка пайпа
         out.write(buf, qint64(got));
+        // Сразу в файл: QFile буферизует запись, а следующий read может
+        // ждать данных сколько угодно — порция, после которой источник
+        // замолчал, иначе не видна поллингу до новых данных или EOF (P-9).
+        out.flush();
         total += qint64(got);
-        unflushed += qint64(got);
 
-        // Свежие данные становятся видимыми файловому поллингу немедленно,
-        // но сигналим не чаще ~3 раз в секунду, чтобы не дёргать GUI.
+        // Свежие данные видны файловому поллингу немедленно, а сигналим не
+        // чаще ~3 раз в секунду, чтобы не дёргать GUI.
         if (sinceEmit.elapsed() >= 300) {
-            out.flush();
-            unflushed = 0;
             sinceEmit.restart();
             emit bytesAppended(total);
         }
     }
 
-    if (unflushed > 0)
-        out.flush();
     emit bytesAppended(total);
     emit streamFinished(total);
 }

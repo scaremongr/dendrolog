@@ -187,6 +187,10 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- Standard input (`program | DendroLog -`): lines that arrived in one burst
+  after which the program went quiet did not show up until it wrote more
+  (or exited) — they waited in a write buffer of the spool file. They now
+  reach the spool at once and show up with the tab's next refresh.
 - While a new field schema was being applied to a large tab in the
   background, ticking a block in **Log Fields** showed the new columns over
   the old fields (and Save View As started then could read the fields while

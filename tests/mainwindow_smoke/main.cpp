@@ -46,6 +46,12 @@
 #include "directoryscannerpanel.h"
 #include "archiveregistry.h"
 #include "updatechecker.h"
+#include "markerpanelwidget.h"
+#include "spooldir.h"
+#include "stdinspooler.h"
+#include "viewidle.h"
+#include "welcomewidget.h"
+#include "colorschemecontroller.h"
 
 #include <QApplication>
 #include <QDockWidget>
@@ -77,6 +83,16 @@
 #include <QThread>
 #include <QDialogButtonBox>
 #include <QTextBrowser>
+#include <QClipboard>
+#include <QDateTimeEdit>
+#include <QInputDialog>
+#include <QKeySequenceEdit>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QSpinBox>
+#include <QTextDocumentFragment>
+#include <QTreeWidget>
 #include "timelinehistogramwidget.h"
 
 #include <cstdio>
@@ -86,6 +102,14 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
+
+#ifdef Q_OS_WIN
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -612,6 +636,10 @@ Fixtures makeFixtures(const QDir& root)
         testdocs::makeLogBytes(20, 44, "\n", base, false, true, true));
     testdocs::writeFile(scan, QStringLiteral("two.log"),
         testdocs::makeLogBytes(20, 55, "\n", base, false, true, true));
+    // Файл, который один находит фильтр сканера по содержимому (P-9).
+    testdocs::writeFile(scan, QStringLiteral("needle.log"),
+        QByteArrayLiteral("2026-11-26 09:00:00.000 [main] INFO - NEEDLE-P9 found here\n"
+                          "2026-11-26 09:00:01.000 [main] INFO - nothing else\n"));
     f.dir = scan.absolutePath();
     f.sessionPath = root.filePath(QStringLiteral("saved.dlsession"));
     return f;
@@ -1934,21 +1962,44 @@ void scenarioSession(MainWindow& win, const Fixtures& fx)
         auto* report = win.findChild<SessionReportDialog*>();
         check(report && waitFor([&]() { return report->isVisible(); }, 5000),
               QStringLiteral("report link opens the report"));
+        // Locate File… — пропавший файл указан на новом месте (P-9).
+        auto* list = report ? report->findChild<QTreeWidget*>(QStringLiteral("sessionReportList")) : nullptr;
+        auto* locate = report ? report->findChild<QPushButton*>(QStringLiteral("sessionReportLocate")) : nullptr;
+        check(list && list->topLevelItemCount() == 1 && list->topLevelItem(0)->text(1).contains(QStringLiteral("gone.log")),
+              QStringLiteral("the report names the missing file"));
+        check(locate && locate->isEnabled(), QStringLiteral("Locate File is enabled for the missing file"));
+        if (list && locate && locate->isEnabled()) {
+            bool asked = false;
+            g_driver->expect([&](QWidget* w) {
+                asked = true;
+                if (auto* dialog = qobject_cast<QFileDialog*>(w))
+                    typeFileName(dialog, hidden);
+                else
+                    DialogDriver::close(w);
+            });
+            locate->click();
+            check(waitFor([&]() { return asked && tabIndexForFile(win, hidden) >= tabsInSession; }),
+                  QStringLiteral("Locate File opens the file in the session tab (%1)").arg(describeTabs(win)));
+            g_driver->dropExpectations();
+            check(tabIndexForFile(win, hidden) >= 0 && waitLoaded(tabAt(win, tabIndexForFile(win, hidden)), 50),
+                  QStringLiteral("the located file loads"));
+            check(waitFor([&]() { return list->topLevelItemCount() == 1 && !locate->isEnabled(); }, 5000),
+                  QStringLiteral("the report marks the file as located: %1")
+                      .arg(list->topLevelItemCount() ? list->topLevelItem(0)->text(2) : QString()));
+        }
         if (report)
             report->close();
     }
     check(waitAllLoaded(win), QStringLiteral("session tabs load"));
-    // Вкладку с пропавшим файлом закрыли — отчёт пуст, ссылка гаснет.
-    if (link && link->isVisible()) {
-        for (int i = tabs(win)->count() - 1; i >= tabsInSession; --i) {
-            const int n = tabs(win)->count();
-            tabs(win)->setCurrentIndex(i);
-            command(win, QStringLiteral("closeTab"))->trigger();
-            waitFor([&]() { return tabs(win)->count() == n - 1; });
-        }
-        check(waitFor([&]() { return !link->isVisible(); }, 5000),
-              QStringLiteral("report link hides once the tabs with problems are closed"));
+    // Вкладки второй сессии закрыли — отчёт пуст, ссылка гаснет.
+    for (int i = tabs(win)->count() - 1; i >= tabsInSession; --i) {
+        const int n = tabs(win)->count();
+        tabs(win)->setCurrentIndex(i);
+        command(win, QStringLiteral("closeTab"))->trigger();
+        waitFor([&]() { return tabs(win)->count() == n - 1; });
     }
+    check(!link || waitFor([&]() { return !link->isVisible(); }, 5000),
+          QStringLiteral("report link hides once the tabs with problems are closed"));
     QFile::rename(hidden, fx.gone);
 
     // .dlsession, брошенный в окно, — сессия, а не лог.
@@ -2579,6 +2630,1054 @@ void scenarioCommand(MainWindow& win)
           QStringLiteral("finished command tab closes with its spool"));
 }
 
+// ---------------------------------------------------------------------------
+// P-9: то, что смоук P-8 не проходил.
+// ---------------------------------------------------------------------------
+
+// Следующее всплывающее меню: выбрать пункт по тексту (без «&» и
+// многоточий; prefix — по началу), как с клавиатуры. *enabled — состояние
+// найденного пункта; выключенный не выбирается, меню закрывается.
+void pickMenuItem(const QString& text, bool* picked, bool* enabled = nullptr, bool prefix = false)
+{
+    g_driver->expect([=](QWidget* w) {
+        auto* menu = qobject_cast<QMenu*>(w);
+        for (QAction* a : menu ? menu->actions() : QList<QAction*>()) {
+            const QString t = plainText(a->text());
+            if (prefix ? !t.startsWith(text) : t != text)
+                continue;
+            if (enabled)
+                *enabled = a->isEnabled();
+            if (!a->isEnabled())
+                break;
+            *picked = true;
+            menu->setActiveAction(a);
+            QTest::keyClick(menu, Qt::Key_Return);
+            return;
+        }
+        DialogDriver::close(w);
+    });
+}
+
+// Правый щелчок по строке лога (по тексту, а не по жёлобу).
+void rowContextMenu(LogViewWidget* tab, int row, int x = -1)
+{
+    LogListView* v = tab->view();
+    const QRect rect = v->visualRect(tab->model()->index(row, 0));
+    const QPoint at(x >= 0 ? x : v->textLeft() + 8, rect.center().y());
+    QContextMenuEvent e(QContextMenuEvent::Mouse, at, v->viewport()->mapToGlobal(at));
+    QApplication::sendEvent(v->viewport(), &e);
+}
+
+// Правый щелчок по вкладке.
+void tabContextMenu(MainWindow& win, int index)
+{
+    QTabBar* bar = tabs(win)->tabBar();
+    const QPoint at = bar->tabRect(index).center();
+    QContextMenuEvent e(QContextMenuEvent::Mouse, at, bar->mapToGlobal(at));
+    QApplication::sendEvent(bar, &e);
+}
+
+QAbstractButton* buttonEndingWith(QWidget* parent, const QString& text)
+{
+    for (QAbstractButton* b : parent->findChildren<QAbstractButton*>())
+        if (b->text().endsWith(text))
+            return b;
+    check(false, QStringLiteral("%1 has a button '%2'").arg(parent->objectName(), text));
+    return nullptr;
+}
+
+QDockWidget* dock(MainWindow& win, const char* name)
+{
+    auto* d = win.findChild<QDockWidget*>(QString::fromLatin1(name));
+    check(d, QStringLiteral("window has dock %1").arg(QLatin1String(name)));
+    return d;
+}
+
+bool showDock(MainWindow& win, QDockWidget* d, bool visible = true)
+{
+    if (d->isVisible() != visible)
+        d->toggleViewAction()->trigger();
+    return waitFor([&]() { return d->isVisible() == visible; }, 5000);
+}
+
+// Первая строка не раньше from, в показанном тексте которой есть word
+// (с учётом регистра: её слово выделяется двойным щелчком).
+int rowWithText(LogModel* model, const QString& word, int from = 0)
+{
+    for (int r = from; r < model->rowCount(); ++r)
+        if (model->data(model->index(r, 0), Qt::DisplayRole).toString().contains(word))
+            return r;
+    return -1;
+}
+
+int rowsWithText(LogModel* model, const QString& word)
+{
+    int n = 0;
+    for (int r = 0; r < model->rowCount(); ++r)
+        if (model->entryAt(r)->message().contains(word, Qt::CaseInsensitive))
+            ++n;
+    return n;
+}
+
+// Двойной щелчок по слову word в строке row — выделение текста мышью, как у
+// пользователя. Позиция — по метрике шрифта view (не по ширине «M»).
+QString selectWord(LogViewWidget* tab, int row, const QString& word, int* xOut = nullptr)
+{
+    LogListView* v = tab->view();
+    v->goToRow(row);
+    testdocs::idleViews();
+    const QString text = tab->model()->data(tab->model()->index(row, 0), Qt::DisplayRole).toString();
+    const int col = text.indexOf(word);
+    if (col < 0)
+        return QString();
+    const QFontMetricsF fm(v->font());
+    const QRect rect = v->visualRect(tab->model()->index(row, 0));
+    const int x = v->textLeft() + 4
+        + int(fm.horizontalAdvance(text.left(col)) + fm.horizontalAdvance(word.left(2)));
+    const QPoint at(x, rect.top() + fm.height() / 2 + 1);
+    QTest::mouseDClick(v->viewport(), Qt::LeftButton, Qt::NoModifier, at);
+    if (xOut)
+        *xOut = x;
+    // Выделенное — через Ctrl+C, как его видит пользователь.
+    QApplication::clipboard()->clear();
+    QKeyEvent copyKey(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+    QApplication::sendEvent(v, &copyKey);
+    return QApplication::clipboard()->text();
+}
+
+// Контекстное меню лога над выделенным текстом (U-…): найти, Find All,
+// оставить / скрыть строки с ним, маркер.
+void scenarioTextActions(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("log context menu over selected text"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, fx.a));
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    const int allRows = model->rowCount();
+    const QString word = QStringLiteral("Disk");
+    const int expected = rowsWithText(model, word);
+    check(expected > 0 && expected < allRows, QStringLiteral("alpha has lines with %1 (%2)").arg(word).arg(expected));
+
+    // Выделить слово и выбрать пункт меню над ним.
+    const auto menuOverWord = [&](const QString& item) {
+        const int row = rowWithText(model, word, allRows / 3);
+        int x = -1;
+        const QString selected = row >= 0 ? selectWord(tab, row, word, &x) : QString();
+        check(selected == word, QStringLiteral("double click selects '%1' (got '%2')").arg(word, selected));
+        bool picked = false;
+        pickMenuItem(item + QStringLiteral(" “"), &picked, nullptr, /*prefix=*/true);
+        rowContextMenu(tab, row, x); // меню — вложенным циклом внутри события
+        g_driver->dropExpectations();
+        check(picked, QStringLiteral("context menu offers '%1 “%2”'").arg(item, word));
+        return row;
+    };
+
+    // Find «…» — быстрый поиск этого текста, литералом.
+    {
+        auto* field = win.findChild<QLineEdit*>(QStringLiteral("searchLineEdit"));
+        const int from = menuOverWord(QStringLiteral("Find"));
+        check(waitFor([&]() {
+            const auto e = selectedEntry(tab);
+            return !tab->isQuickSearchRunning() && e && tab->view()->userSelectedRow() > from
+                && e->message().contains(word);
+        }), QStringLiteral("Find selects the next line with the text"));
+        check(field && field->text() == word, QStringLiteral("Find puts the text into the search field: %1").arg(field ? field->text() : QString()));
+        check(!command(win, QStringLiteral("findRegex"))->isChecked(), QStringLiteral("Find searches the text literally"));
+    }
+
+    // Find All «…» — панель Search.
+    {
+        auto* searchDock = dock(win, "searchResultsDockWidget");
+        menuOverWord(QStringLiteral("Find All"));
+        check(waitFor([&]() { return searchDock->isVisible(); }), QStringLiteral("Find All shows the Search panel"));
+        LogListView* resultsView = nullptr;
+        for (LogListView* v : searchDock->findChildren<LogListView*>())
+            resultsView = v;
+        auto* resultsModel = resultsView ? qobject_cast<LogModel*>(resultsView->model()) : nullptr;
+        check(resultsModel && waitFor([&]() { return !resultsModel->isFiltering() && resultsModel->rowCount() == expected; }),
+              QStringLiteral("Find All lists every line with the text (%1 expected, %2)")
+                  .arg(expected).arg(resultsModel ? resultsModel->rowCount() : -1));
+        showDock(win, searchDock, false);
+    }
+
+    // Show Only Lines with «…» — правило в Text Filters, применено к вкладке.
+    {
+        auto* textDock = dock(win, "textFilterDockWidget");
+        // Панель описывает вкладку (обе пусты) — правило идёт в панель.
+        if (auto* panel = textDock->findChild<FilterPanelWidget*>())
+            panel->setRuleSet(FilterRuleSet());
+        menuOverWord(QStringLiteral("Show Only Lines with"));
+        check(testdocs::settle(*model), QStringLiteral("include filter settles"));
+        bool allMatch = model->rowCount() > 0;
+        for (int r = 0; r < model->rowCount() && allMatch; ++r) {
+            const auto entry = model->entryAt(r);
+            allMatch = entry->message().contains(word, Qt::CaseInsensitive)
+                || !entry->timestamp().isValid() || entry->message().trimmed().isEmpty();
+        }
+        check(allMatch && model->rowCount() < allRows,
+              QStringLiteral("Show Only Lines with keeps the lines with the text (%1 of %2)").arg(model->rowCount()).arg(allRows));
+        check(textDock->isVisible(), QStringLiteral("Show Only Lines with shows Text Filters"));
+        FilterPanelWidget* panel = textDock->findChild<FilterPanelWidget*>();
+        const FilterRuleSet panelRules = panel ? panel->ruleSet() : FilterRuleSet();
+        check(panelRules == model->filterRules() && !panelRules.rules.isEmpty()
+                  && panelRules.rules.constLast().text == word,
+              QStringLiteral("the rule is in Text Filters and applied to the tab"));
+        check(filtersToolBarAction(win, QStringLiteral("Text"))->isChecked(), QStringLiteral("Filters → Text is checked"));
+        pressCommand(win, QStringLiteral("resetFilters"));
+        check(testdocs::settle(*model) && model->rowCount() == allRows, QStringLiteral("Reset Filters shows every line"));
+        if (panel)
+            panel->setRuleSet(FilterRuleSet());
+        showDock(win, textDock, false);
+    }
+
+    // Hide Lines with «…» — в панели другие, не применённые правила: их не
+    // трогают, правило идёт только к вкладке, строка статуса объясняет.
+    {
+        FilterPanelWidget* panel = dock(win, "textFilterDockWidget")->findChild<FilterPanelWidget*>();
+        FilterRuleSet other;
+        FilterRule otherRule;
+        otherRule.text = QStringLiteral("not applied");
+        other.rules << otherRule;
+        if (panel)
+            panel->setRuleSet(other);
+        menuOverWord(QStringLiteral("Hide Lines with"));
+        check(panel && panel->ruleSet().rules.size() == 1 && panel->ruleSet().rules[0].text == otherRule.text,
+              QStringLiteral("Hide Lines with leaves the panel's own rules alone"));
+        check(statusText(win).contains(QStringLiteral("Filter added to this tab")),
+              QStringLiteral("the status line explains where the filter went: %1").arg(statusText(win)));
+        check(testdocs::settle(*model), QStringLiteral("exclude filter settles"));
+        bool noneMatch = true;
+        for (int r = 0; r < model->rowCount() && noneMatch; ++r)
+            noneMatch = !model->entryAt(r)->message().contains(word, Qt::CaseInsensitive);
+        check(noneMatch && model->rowCount() == allRows - expected,
+              QStringLiteral("Hide Lines with hides exactly the lines with the text (%1 of %2, %3 hidden)")
+                  .arg(model->rowCount()).arg(allRows).arg(expected));
+        pressCommand(win, QStringLiteral("resetFilters"));
+        check(testdocs::settle(*model) && model->rowCount() == allRows, QStringLiteral("Reset Filters after Hide"));
+        if (panel)
+            panel->setRuleSet(FilterRuleSet());
+        showDock(win, dock(win, "textFilterDockWidget"), false);
+    }
+
+    // Highlight Lines with «…» — маркер в Row Highlighters и на вкладке.
+    {
+        auto* markerDock = dock(win, "rowMarkerDockWidget");
+        menuOverWord(QStringLiteral("Highlight Lines with"));
+        check(waitFor([&]() { return !model->rowMarkers().isEmpty(); }, 5000)
+                  && model->rowMarkers().constLast().text == word,
+              QStringLiteral("Highlight Lines with adds a marker to the tab"));
+        check(markerDock && markerDock->isVisible(), QStringLiteral("Highlight Lines with shows Row Highlighters"));
+        const int hit = rowWithText(model, word);
+        const int miss = [&]() {
+            for (int r = 0; r < model->rowCount(); ++r)
+                if (!model->entryAt(r)->message().contains(word, Qt::CaseInsensitive))
+                    return r;
+            return -1;
+        }();
+        check(hit >= 0 && model->data(model->index(hit, 0), LogModel::RowMarkerColorRole).value<QColor>().isValid(),
+              QStringLiteral("a line with the text gets the marker colour"));
+        check(miss >= 0 && !model->data(model->index(miss, 0), LogModel::RowMarkerColorRole).value<QColor>().isValid(),
+              QStringLiteral("a line without the text has no marker colour"));
+        check(filtersToolBarAction(win, QStringLiteral("Markers"))->isChecked(), QStringLiteral("Filters → Markers is checked"));
+        if (auto* reset = markerDock ? buttonEndingWith(markerDock, QStringLiteral("Reset")) : nullptr)
+            reset->click();
+        check(waitFor([&]() { return model->rowMarkers().isEmpty(); }, 5000), QStringLiteral("Row Highlighters Reset clears the tab's markers"));
+        if (auto* panel = markerDock ? markerDock->findChild<MarkerPanelWidget*>() : nullptr)
+            panel->setMarkers({});
+        showDock(win, markerDock, false);
+    }
+}
+
+// Доки Time Filter (поля, Whole Log, Apply / Reset, ошибка диапазона), Row
+// Highlighters (Apply / Reset), Statistics (переход по ссылке).
+void scenarioPanels(MainWindow& win, const Fixtures& fx)
+{
+    const int ia = tabIndexForFile(win, fx.a);
+    const int ib = tabIndexForFile(win, fx.b);
+    tabs(win)->setCurrentIndex(ia);
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    const int allRows = model->rowCount();
+
+    section(QStringLiteral("time filter dock"));
+    {
+        auto* timeDock = dock(win, "timeFilterDockWidget");
+        pressCommand(win, QStringLiteral("panelTimeFilter"));
+        check(waitFor([&]() { return timeDock->isVisible(); }), QStringLiteral("the shortcut shows Time Filter"));
+        auto* from = timeDock->findChild<QDateTimeEdit*>(QStringLiteral("timeFilterFrom"));
+        auto* to = timeDock->findChild<QDateTimeEdit*>(QStringLiteral("timeFilterTo"));
+        auto* apply = timeDock->findChild<QPushButton*>(QStringLiteral("timeFilterApply"));
+        auto* reset = timeDock->findChild<QPushButton*>(QStringLiteral("timeFilterReset"));
+        auto* whole = timeDock->findChild<QPushButton*>(QStringLiteral("timeFilterWholeLog"));
+        auto* error = timeDock->findChild<QLabel*>(QStringLiteral("timeFilterError"));
+        auto* info = timeDock->findChild<QLabel*>(QStringLiteral("timeFilterInfo"));
+        check(from && to && apply && reset && whole && error && info, QStringLiteral("Time Filter has its fields and buttons"));
+        if (from && to && apply && reset && whole && error && info) {
+            const auto range = model->fullTimeRange();
+            check(from->dateTime() == range.first && to->dateTime() == range.second,
+                  QStringLiteral("the fields show the range of the tab (%1 – %2)")
+                      .arg(from->dateTime().toString(Qt::ISODateWithMs), to->dateTime().toString(Qt::ISODateWithMs)));
+            const QDateTime base = testdocs::fixtureBaseTime();
+            from->setDateTime(base.addSecs(60));
+            to->setDateTime(base.addSecs(300));
+            apply->click();
+            check(testdocs::settle(*model), QStringLiteral("time filter settles"));
+            check(model->startTimeFilter() == base.addSecs(60) && model->endTimeFilter() == base.addSecs(300)
+                      && model->rowCount() > 0 && model->rowCount() < allRows,
+                  QStringLiteral("Apply filters the tab by time (%1 of %2)").arg(model->rowCount()).arg(allRows));
+            bool inRange = true;
+            for (int r = 0; r < model->rowCount() && inRange; ++r) {
+                const QDateTime t = model->entryAt(r)->timestamp();
+                inRange = !t.isValid() || (t >= base.addSecs(60) && t <= base.addSecs(300));
+            }
+            check(inRange, QStringLiteral("every shown line is in the range"));
+            check(filtersToolBarAction(win, QStringLiteral("Time"))->isChecked(), QStringLiteral("Filters → Time is checked"));
+            check(!info->text().isEmpty() && error->isHidden(), QStringLiteral("the info line describes the filter: %1").arg(info->text()));
+
+            // Другая вкладка — её поля; назад — поля фильтра alpha.
+            tabs(win)->setCurrentIndex(ib);
+            const auto betaRange = tabAt(win, ib)->model()->fullTimeRange();
+            check(from->dateTime() == betaRange.first && to->dateTime() == betaRange.second,
+                  QStringLiteral("the fields follow the tab (beta: its range)"));
+            tabs(win)->setCurrentIndex(ia);
+            check(from->dateTime() == base.addSecs(60) && to->dateTime() == base.addSecs(300),
+                  QStringLiteral("the fields follow the tab (alpha: its filter)"));
+
+            // From позже To — объяснение, фильтр вкладки не тронут.
+            const int filtered = model->rowCount();
+            from->setDateTime(base.addSecs(400));
+            apply->click();
+            check(!error->isHidden() && !error->text().isEmpty(), QStringLiteral("From later than To explains: %1").arg(error->text()));
+            check(testdocs::settle(*model) && model->rowCount() == filtered && model->startTimeFilter() == base.addSecs(60),
+                  QStringLiteral("an inverted range leaves the filter alone"));
+
+            whole->click();
+            check(from->dateTime() == range.first && to->dateTime() == range.second,
+                  QStringLiteral("Whole Log puts the range of the log into the fields"));
+            check(model->startTimeFilter() == base.addSecs(60), QStringLiteral("Whole Log applies nothing"));
+            reset->click();
+            check(testdocs::settle(*model) && !model->startTimeFilter().isValid() && model->rowCount() == allRows,
+                  QStringLiteral("Reset turns the time filter off"));
+            check(!filtersToolBarAction(win, QStringLiteral("Time"))->isChecked(), QStringLiteral("Filters → Time unchecked after Reset"));
+        }
+        pressCommand(win, QStringLiteral("panelTimeFilter"));
+        check(waitFor([&]() { return !timeDock->isVisible(); }), QStringLiteral("the shortcut hides Time Filter"));
+    }
+
+    section(QStringLiteral("row highlighters dock"));
+    {
+        auto* markerDock = dock(win, "rowMarkerDockWidget");
+        pressCommand(win, QStringLiteral("panelRowHighlighters"));
+        check(waitFor([&]() { return markerDock->isVisible(); }), QStringLiteral("the shortcut shows Row Highlighters"));
+        auto* panel = markerDock->findChild<MarkerPanelWidget*>();
+        check(panel, QStringLiteral("Row Highlighters has its panel"));
+        if (panel) {
+            HighlightPattern p;
+            p.text = QStringLiteral("timeout");
+            p.color = QColor(Qt::yellow);
+            panel->setMarkers({ p });
+            check(model->rowMarkers().isEmpty(), QStringLiteral("markers are not applied before Apply"));
+            if (auto* apply = buttonEndingWith(markerDock, QStringLiteral("Apply")))
+                apply->click();
+            check(waitFor([&]() { return model->rowMarkers().size() == 1; }, 5000),
+                  QStringLiteral("Apply puts the marker on the active tab"));
+            const int hit = rowWithText(model, QStringLiteral("imeout"));
+            check(hit >= 0 && model->data(model->index(hit, 0), LogModel::RowMarkerColorRole).value<QColor>() == QColor(Qt::yellow),
+                  QStringLiteral("a matching line gets the marker colour"));
+            check(model->rowCount() == allRows, QStringLiteral("markers do not filter"));
+            tabs(win)->setCurrentIndex(ib);
+            check(tabAt(win, ib)->model()->rowMarkers().isEmpty() && !filtersToolBarAction(win, QStringLiteral("Markers"))->isChecked(),
+                  QStringLiteral("markers are per tab (beta has none)"));
+            tabs(win)->setCurrentIndex(ia);
+            check(filtersToolBarAction(win, QStringLiteral("Markers"))->isChecked(), QStringLiteral("Filters → Markers on alpha"));
+            if (auto* reset = buttonEndingWith(markerDock, QStringLiteral("Reset")))
+                reset->click();
+            check(waitFor([&]() { return model->rowMarkers().isEmpty(); }, 5000), QStringLiteral("Reset takes the markers off the tab"));
+            check(panel->markers().size() == 1, QStringLiteral("Reset keeps the markers in the panel"));
+            panel->setMarkers({});
+        }
+        pressCommand(win, QStringLiteral("panelRowHighlighters"));
+        check(waitFor([&]() { return !markerDock->isVisible(); }), QStringLiteral("the shortcut hides Row Highlighters"));
+    }
+
+    section(QStringLiteral("statistics dock"));
+    {
+        auto* statsDock = dock(win, "statisticsDockWidget");
+        pressCommand(win, QStringLiteral("panelStatistics"));
+        check(waitFor([&]() { return statsDock->isVisible(); }), QStringLiteral("the shortcut shows Statistics"));
+        QTextBrowser* browser = statsDock->findChild<QTextBrowser*>();
+        static const QRegularExpression link(QStringLiteral("<a href=\"(nav:\\d+)\"[^>]*>(.*?)</a>"));
+        QList<QPair<QString, QString>> links; // ссылка, текст
+        check(browser && waitFor([&]() {
+            links.clear();
+            for (auto it = link.globalMatch(browser->toHtml()); it.hasNext();) {
+                const auto m = it.next();
+                QTextDocumentFragment text = QTextDocumentFragment::fromHtml(m.captured(2));
+                links << qMakePair(m.captured(1), text.toPlainText());
+            }
+            return !links.isEmpty();
+        }), QStringLiteral("Statistics shows links to lines"));
+        int moved = 0, matched = 0;
+        static const QRegularExpression firstWord(QStringLiteral("[A-Za-z]{4,}"));
+        for (const auto& [href, text] : std::as_const(links)) {
+            // Щелчок по ссылке — с последней строки, а если цель она сама, —
+            // с первой.
+            bool ok = false;
+            for (const int from : { model->rowCount() - 1, 0 }) {
+                tab->view()->goToRow(from);
+                emit browser->anchorClicked(QUrl(href));
+                ok = waitFor([&]() { return tab->view()->userSelectedRow() != from; }, 3000);
+                if (ok)
+                    break;
+            }
+            moved += ok ? 1 : 0;
+            check(ok, QStringLiteral("Statistics link %1 (%2) selects a line").arg(href, text));
+            // Ссылка-шаблон сообщения — строка с этим сообщением.
+            const auto word = firstWord.match(text);
+            const auto entry = selectedEntry(tab);
+            if (ok && word.hasMatch() && entry && text.contains(QLatin1Char('#'))) {
+                check(entry->message().contains(word.captured(0)),
+                      QStringLiteral("the message link '%1' selects such a line: %2").arg(text, entry->message()));
+                ++matched;
+            }
+        }
+        check(moved > 0 && matched > 0, QStringLiteral("Statistics links: %1 jump, %2 to messages").arg(moved).arg(matched));
+        pressCommand(win, QStringLiteral("panelStatistics"));
+        check(waitFor([&]() { return !statsDock->isVisible(); }), QStringLiteral("the shortcut hides Statistics"));
+    }
+}
+
+// Directory Scanner: кнопки панели (скан с выбором папки, обновление,
+// расширения), фильтр по содержимому — Apply и Reset.
+void scenarioScannerPanel(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("directory scanner panel"));
+    auto* scannerDock = dock(win, "directoryScannerDockWidget");
+    auto* panel = win.findChild<DirectoryScannerPanel*>();
+    auto* scanner = win.findChild<DirectoryScanner*>();
+    auto* tree = scannerDock->findChild<QTreeWidget*>();
+    const auto button = [&](const char* name) {
+        auto* b = scannerDock->findChild<QAbstractButton*>(QString::fromLatin1(name));
+        check(b, QStringLiteral("scanner has %1").arg(QLatin1String(name)));
+        return b;
+    };
+    QAbstractButton* scan = button("scannerScanButton");
+    QAbstractButton* refresh = button("scannerRefreshButton");
+    QAbstractButton* filters = button("scannerFiltersToggle");
+    QAbstractButton* exts = button("scannerExtensionsButton");
+    QAbstractButton* apply = button("scannerApplyButton");
+    QAbstractButton* reset = button("scannerResetButton");
+    auto* content = scannerDock->findChild<QLineEdit*>(QStringLiteral("scannerContentEdit"));
+    if (!panel || !scanner || !tree || !scan || !refresh || !filters || !exts || !apply || !reset || !content)
+        return;
+    check(showDock(win, scannerDock), QStringLiteral("the scanner dock shows"));
+
+    const auto shown = [&]() {
+        QStringList names;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            if (!tree->topLevelItem(i)->isHidden())
+                names << tree->topLevelItem(i)->text(0);
+        names.sort();
+        return names;
+    };
+    const QStringList all { QStringLiteral("needle.log"), QStringLiteral("one.log"), QStringLiteral("two.log") };
+
+    // Скан: кнопка → выбор папки.
+    bool asked = false;
+    g_driver->expect([&](QWidget* w) {
+        asked = true;
+        if (auto* dialog = qobject_cast<QFileDialog*>(w))
+            typeFileName(dialog, fx.dir);
+        else
+            DialogDriver::close(w);
+    });
+    scan->click();
+    check(waitFor([&]() { return asked && QDir(scanner->rootPath()) == QDir(fx.dir) && shown() == all; }),
+          QStringLiteral("the scan button scans the chosen folder: %1 [%2]").arg(scanner->rootPath(), shown().join(',')));
+    g_driver->dropExpectations(); // не дождались диалога — обработчик ссылается на локальные
+
+    // Обновление: новый файл появляется.
+    const QString late = testdocs::writeFile(QDir(fx.dir), QStringLiteral("late.log"),
+        testdocs::makeLogBytes(5, 66, "\n", testdocs::fixtureBaseTime(), false, true, true));
+    check(refresh->isEnabled(), QStringLiteral("refresh is enabled after a scan"));
+    refresh->click();
+    check(waitFor([&]() { return shown().contains(QStringLiteral("late.log")) && !scanner->isRescanning(); }),
+          QStringLiteral("refresh picks up a new file [%1]").arg(shown().join(',')));
+    QFile::remove(late);
+    refresh->click();
+    check(waitFor([&]() { return shown() == all && !scanner->isRescanning(); }),
+          QStringLiteral("refresh drops a removed file [%1]").arg(shown().join(',')));
+
+    // Фильтр по содержимому: ⚙ → текст → Apply; Reset.
+    filters->click();
+    check(waitFor([&]() { return content->isVisible(); }, 5000), QStringLiteral("⚙ shows the filters"));
+    bool finished = false;
+    const auto conn = QObject::connect(scanner, &DirectoryScanner::contentFilterFinished, &win,
+                                       [&](int, int) { finished = true; });
+    content->setText(QStringLiteral("needle-p9"));
+    apply->click();
+    check(waitFor([&]() { return finished && !scanner->isContentFilterRunning(); }), QStringLiteral("content filter finishes"));
+    check(shown() == QStringList{ QStringLiteral("needle.log") },
+          QStringLiteral("content filter keeps the file with the text [%1]").arg(shown().join(',')));
+    // Enter в поле — то же, что Apply.
+    finished = false;
+    content->setText(QStringLiteral("Disk"));
+    QTest::keyClick(content, Qt::Key_Return);
+    check(waitFor([&]() { return finished && !scanner->isContentFilterRunning(); }), QStringLiteral("Enter runs the content filter"));
+    check(shown() == QStringList({ QStringLiteral("one.log"), QStringLiteral("two.log") }),
+          QStringLiteral("Enter applies the new text [%1]").arg(shown().join(',')));
+    QObject::disconnect(conn);
+    reset->click();
+    check(waitFor([&]() { return shown() == all; }), QStringLiteral("Reset shows every file [%1]").arg(shown().join(',')));
+    check(content->text().isEmpty(), QStringLiteral("Reset clears the content field"));
+    filters->click();
+
+    // Расширения — Settings.
+    QString title;
+    g_driver->expect([&](QWidget* w) {
+        title = w->windowTitle();
+        DialogDriver::close(w);
+    });
+    exts->click();
+    check(waitFor([&]() { return !title.isEmpty(); }, 5000) && title == QStringLiteral("Settings"),
+          QStringLiteral("the extensions button opens Settings (%1)").arg(title));
+    g_driver->dropExpectations();
+    check(showDock(win, scannerDock, false), QStringLiteral("the scanner dock hides"));
+}
+
+// Редактор схем (Tools → Field Schemas…): образцы — строки активной
+// вкладки, новая схема по автоопределению, «Use Selected» — схема вкладки и
+// файл в каталоге схем.
+void scenarioFieldSchemasDialog(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("field schemas dialog"));
+    const int ia = tabIndexForFile(win, fx.a);
+    tabs(win)->setCurrentIndex(ia);
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    const int allRows = model->rowCount();
+    tab->view()->goToRow(5);
+    const QString sample = model->messageAt(5);
+    const QString before = tab->fieldSettings().schemaName;
+    const QString beforeSchema = tab->parserPattern();
+    const QString created = QStringLiteral("Smoke Detected");
+    bool shown = false;
+    QString samples;
+    g_driver->expect([&](QWidget* w) {
+        shown = true;
+        auto* sampleEdit = w->findChild<QPlainTextEdit*>(QStringLiteral("sampleEdit"));
+        auto* add = w->findChild<QPushButton*>(QStringLiteral("addSchemaBtn"));
+        auto* name = w->findChild<QLineEdit*>(QStringLiteral("nameEdit"));
+        auto* detect = w->findChild<QPushButton*>(QStringLiteral("autoDetectBtn"));
+        auto* applyBtn = w->findChild<QPushButton*>(QStringLiteral("applyBtn"));
+        auto* use = w->findChild<QPushButton*>(QStringLiteral("useBtn"));
+        if (!sampleEdit || !add || !name || !detect || !applyBtn || !use) {
+            check(false, QStringLiteral("Field Schemas has its controls"));
+            DialogDriver::close(w);
+            return;
+        }
+        samples = sampleEdit->toPlainText();
+        add->click();
+        name->setText(created);
+        emit name->textEdited(created);
+        detect->click();
+        check(applyBtn->isEnabled(), QStringLiteral("Auto-detect leaves an unsaved schema (Apply enabled)"));
+        applyBtn->click();
+        use->click(); // принять схему и закрыть
+    });
+    if (QAction* item = menuAction(win, QStringLiteral("Field Schemas")))
+        item->trigger();
+    check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 10000), QStringLiteral("Field Schemas opens and closes"));
+    g_driver->dropExpectations();
+    check(samples.startsWith(sample), QStringLiteral("the preview starts at the selected line: %1").arg(samples.left(80)));
+    check(waitAllLoaded(win), QStringLiteral("tabs settle after the schema"));
+    check(tab->fieldSettings().schemaName == created, QStringLiteral("Use Selected sets the schema of the tab (%1)").arg(tab->fieldSettings().schemaName));
+    check(model->rowCount() == allRows, QStringLiteral("the tab keeps its rows"));
+    auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
+    check(combo && combo->currentText() == created, QStringLiteral("Log Fields shows the new schema"));
+    bool saved = false;
+    for (const QString& f : QDir(SchemaStore::patternsDir()).entryList({ QStringLiteral("*.json") }, QDir::Files)) {
+        QFile file(QDir(SchemaStore::patternsDir()).filePath(f));
+        saved = saved || (file.open(QIODevice::ReadOnly) && file.readAll().contains(created.toUtf8()));
+    }
+    check(saved, QStringLiteral("the new schema is saved in the patterns folder"));
+    check(tab->fieldSettings().hasSchema() && tab->parserPattern() != beforeSchema,
+          QStringLiteral("the tab parses with the detected schema"));
+    // Как было: прежняя схема вкладки.
+    if (combo && combo->findText(before) >= 0)
+        combo->setCurrentIndex(combo->findText(before));
+    check(waitAllLoaded(win) && tab->fieldSettings().schemaName == before, QStringLiteral("the tab returns to %1").arg(before));
+}
+
+// Settings с изменёнными значениями: шрифт, порог индексного бэкенда, тема,
+// сочетание (конфликт — предупреждение, OK не закрывает), затем Clear
+// Memory… (No / Yes) и сброс сочетаний.
+void scenarioSettingsValues(MainWindow& win, const Fixtures& fx, bool indexed)
+{
+    section(QStringLiteral("settings values"));
+    AppSettings& s = AppSettings::instance();
+    const int fontSize = s.fontSize();
+    const ThemeMode theme = s.themeMode();
+    const int threshold0 = s.indexedThresholdMB();
+    const QKeySequence goToKeys = command(win, QStringLiteral("goTo"))->shortcut();
+    const QKeySequence newKeys(QStringLiteral("Ctrl+Alt+G"));
+    QString warning;
+    bool shown = false;
+    g_driver->expect([&](QWidget* w) {
+        shown = true;
+        auto* size = w->findChild<QSpinBox*>(QStringLiteral("fontSizeSpinBox"));
+        auto* themeBox = w->findChild<QComboBox*>(QStringLiteral("themeComboBox"));
+        auto* threshold = w->findChild<QSpinBox*>(QStringLiteral("indexedThresholdSpinBox"));
+        auto* goTo = w->findChild<QKeySequenceEdit*>(QStringLiteral("shortcut_goTo"));
+        auto* box = w->findChild<QDialogButtonBox*>();
+        if (!size || !themeBox || !threshold || !goTo || !box) {
+            check(false, QStringLiteral("Settings has its controls"));
+            DialogDriver::close(w);
+            return;
+        }
+        check(goTo->keySequence() == goToKeys, QStringLiteral("the shortcut field shows the current keys"));
+        size->setValue(fontSize + 2);
+        themeBox->setCurrentIndex(themeBox->findData(int(ThemeMode::Dark)));
+        threshold->setValue(indexed ? 512 : 0);
+        // Сочетание другой команды — конфликт: предупреждение, диалог открыт.
+        goTo->setKeySequence(command(win, QStringLiteral("open"))->shortcut());
+        g_driver->expect([&](QWidget* m) {
+            warning = m->windowTitle();
+            DialogDriver::close(m);
+        });
+        box->button(QDialogButtonBox::Ok)->click();
+        check(!warning.isEmpty() && w->isVisible(), QStringLiteral("a shortcut conflict warns and keeps Settings open (%1)").arg(warning));
+        goTo->setKeySequence(newKeys);
+        box->button(QDialogButtonBox::Ok)->click();
+    });
+    pressCommand(win, QStringLiteral("settings"));
+    check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 10000), QStringLiteral("Settings opens and closes"));
+    g_driver->dropExpectations();
+    check(s.fontSize() == fontSize + 2 && s.themeMode() == ThemeMode::Dark && s.indexedThresholdMB() == (indexed ? 512 : 0),
+          QStringLiteral("OK stores the values"));
+    bool fonts = tabs(win)->count() > 0;
+    for (int i = 0; i < tabs(win)->count(); ++i)
+        fonts = fonts && tabAt(win, i)->view()->font().pointSize() == fontSize + 2;
+    check(fonts, QStringLiteral("every tab gets the new font size"));
+    check(QApplication::palette().color(QPalette::Base).lightness() < 128,
+          QStringLiteral("the dark theme is applied at once"));
+    check(command(win, QStringLiteral("goTo"))->shortcut() == newKeys,
+          QStringLiteral("the action gets the new shortcut: %1").arg(command(win, QStringLiteral("goTo"))->shortcut().toString()));
+    bool goToShown = false;
+    g_driver->expect([&](QWidget* w) {
+        goToShown = w->windowTitle().startsWith(QStringLiteral("Go to"));
+        DialogDriver::close(w);
+    });
+    press(win, newKeys);
+    check(waitFor([&]() { return goToShown; }, 5000), QStringLiteral("the new shortcut opens Go to"));
+    g_driver->dropExpectations();
+    check(testdocs::idleViews(), QStringLiteral("views settle after the font change"));
+
+    // Порог: следующий файл открывается другим бэкендом.
+    win.openCommandLine(OpenRouting::parseCommandLine({ fx.gone }));
+    check(waitFor([&]() { return tabIndexForFile(win, fx.gone) >= 0; }), QStringLiteral("a file opens after the threshold change"));
+    LogViewWidget* opened = tabAt(win, tabIndexForFile(win, fx.gone));
+    check(waitLoaded(opened) && opened->model()->isIndexedBackend() == !indexed,
+          QStringLiteral("the new threshold picks the %1 backend").arg(indexed ? "resident" : "indexed"));
+    {
+        const int n = tabs(win)->count();
+        tabs(win)->setCurrentWidget(opened);
+        command(win, QStringLiteral("closeTab"))->trigger();
+        waitFor([&]() { return tabs(win)->count() == n - 1; });
+    }
+
+    // Как было; заодно Clear Memory… (сначала отказ, затем согласие).
+    const int memories = int(QDir(AppSettings::fileMemoryDir()).entryList({ QStringLiteral("*.json") }, QDir::Files).size());
+    check(memories > 0, QStringLiteral("file memory has files to clear (%1)").arg(memories));
+    shown = false;
+    g_driver->expect([&](QWidget* w) {
+        shown = true;
+        auto* size = w->findChild<QSpinBox*>(QStringLiteral("fontSizeSpinBox"));
+        auto* themeBox = w->findChild<QComboBox*>(QStringLiteral("themeComboBox"));
+        auto* threshold = w->findChild<QSpinBox*>(QStringLiteral("indexedThresholdSpinBox"));
+        auto* resetKeys = w->findChild<QPushButton*>(QStringLiteral("resetShortcutsButton"));
+        auto* clear = w->findChild<QPushButton*>(QStringLiteral("clearFileMemoryButton"));
+        auto* cleared = w->findChild<QLabel*>(QStringLiteral("clearFileMemoryLabel"));
+        auto* box = w->findChild<QDialogButtonBox*>();
+        if (!size || !themeBox || !threshold || !resetKeys || !clear || !cleared || !box) {
+            check(false, QStringLiteral("Settings has its controls (second time)"));
+            DialogDriver::close(w);
+            return;
+        }
+        check(size->value() == fontSize + 2 && threshold->value() == (indexed ? 512 : 0),
+              QStringLiteral("Settings shows the stored values"));
+        const auto answer = [&](QMessageBox::StandardButton which) {
+            g_driver->expect([which](QWidget* m) {
+                auto* mb = qobject_cast<QMessageBox*>(m);
+                if (mb && mb->button(which))
+                    mb->button(which)->click();
+                else
+                    DialogDriver::close(m);
+            });
+        };
+        // Запись памяти идёт в фоне (закрытая только что вкладка): файлов
+        // может только прибавиться, поэтому сверка — «не меньше».
+        const auto memoryFiles = []() {
+            return int(QDir(AppSettings::fileMemoryDir()).entryList({ QStringLiteral("*.json") }, QDir::Files).size());
+        };
+        const int beforeNo = memoryFiles();
+        answer(QMessageBox::No);
+        clear->click();
+        const int afterNo = memoryFiles();
+        check(beforeNo >= memories && afterNo >= beforeNo && cleared->text().isEmpty(),
+              QStringLiteral("Clear Memory… → No keeps the memory (%1 → %2)").arg(beforeNo).arg(afterNo));
+        answer(QMessageBox::Yes);
+        clear->click(); // FileMemoryStore::clear ждёт фоновые записи
+        const int afterYes = memoryFiles();
+        static const QRegularExpression number(QStringLiteral("\\d+"));
+        const int forgot = number.match(cleared->text()).captured(0).toInt();
+        check(afterYes == 0 && forgot >= afterNo,
+              QStringLiteral("Clear Memory… → Yes forgets every file (%1 left; %2)").arg(afterYes).arg(cleared->text()));
+        size->setValue(fontSize);
+        themeBox->setCurrentIndex(themeBox->findData(int(theme)));
+        threshold->setValue(threshold0);
+        resetKeys->click();
+        box->button(QDialogButtonBox::Ok)->click();
+    });
+    pressCommand(win, QStringLiteral("settings"));
+    check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 10000), QStringLiteral("Settings opens again"));
+    g_driver->dropExpectations();
+    check(s.fontSize() == fontSize && s.themeMode() == theme && s.indexedThresholdMB() == threshold0
+              && command(win, QStringLiteral("goTo"))->shortcut() == goToKeys,
+          QStringLiteral("Settings returns the values and the default shortcuts"));
+    check(testdocs::idleViews() && waitAllLoaded(win), QStringLiteral("tabs settle after Settings"));
+}
+
+// Заметка закладки (QInputDialog): «Add Bookmark with Note…» с текстом и
+// отменой, «Edit Bookmark Note…», заметка — в карточке панели.
+void scenarioBookmarkNote(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("bookmark note"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, fx.b));
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    BookmarkStore& store = tab->bookmarks();
+    const int before = store.count();
+    const int row = 12;
+    tab->view()->goToRow(row);
+    check(!model->data(model->index(row, 0), LogModel::BookmarkRole).toBool(), QStringLiteral("line 12 has no bookmark yet"));
+    const auto answerNote = [&](const QString& text, bool accept, QString* label) {
+        g_driver->expect([=](QWidget* w) {
+            auto* dialog = qobject_cast<QInputDialog*>(w);
+            if (label)
+                *label = dialog ? dialog->labelText() : QString();
+            if (!dialog || !accept) {
+                DialogDriver::close(w);
+                return;
+            }
+            dialog->setTextValue(text);
+            dialog->accept();
+        });
+    };
+    // Меню и диалог заметки идут вложенными циклами внутри события: к
+    // возврату оба обработчика отработали (остаток — сброшен, он ссылается
+    // на локальные переменные).
+    const auto noteMenu = [&](const QString& item, const QString& text, bool accept, QString* label) {
+        bool picked = false;
+        pickMenuItem(item, &picked);
+        answerNote(text, accept, label);
+        rowContextMenu(tab, row);
+        g_driver->dropExpectations();
+        return picked;
+    };
+
+    // Отмена «Add Bookmark with Note…» — закладки нет.
+    check(noteMenu(QStringLiteral("Add Bookmark with Note"), QString(), false, nullptr),
+          QStringLiteral("row menu offers Add Bookmark with Note"));
+    check(waitFor([]() { return !QApplication::activeModalWidget(); }, 5000) && store.count() == before,
+          QStringLiteral("cancelled Add Bookmark with Note adds nothing"));
+
+    QString label;
+    check(noteMenu(QStringLiteral("Add Bookmark with Note"), QStringLiteral("first note"), true, &label), QStringLiteral("row menu offers Add Bookmark with Note again"));
+    check(waitFor([&]() { return store.count() == before + 1; }, 5000), QStringLiteral("Add Bookmark with Note adds a bookmark"));
+    std::optional<Bookmark> added;
+    for (const Bookmark& b : store.bookmarks()) // список — копией
+        if (b.line == model->keyAt(row).line)
+            added = b;
+    check(added && added->note == QStringLiteral("first note"), QStringLiteral("the bookmark has the note"));
+    check(label.contains(QString::number(model->keyAt(row).line)), QStringLiteral("the note dialog names the line: %1").arg(label));
+    const int id = added ? added->id : -1;
+
+    check(noteMenu(QStringLiteral("Edit Bookmark Note"), QStringLiteral("edited note"), true, nullptr), QStringLiteral("row menu offers Edit Bookmark Note"));
+    check(waitFor([&]() { const Bookmark* b = store.find(id); return b && b->note == QStringLiteral("edited note"); }, 5000),
+          QStringLiteral("Edit Bookmark Note changes the note"));
+    check(noteMenu(QStringLiteral("Edit Bookmark Note"), QStringLiteral("discarded"), false, nullptr), QStringLiteral("row menu offers Edit Bookmark Note again"));
+    check(waitFor([]() { return !QApplication::activeModalWidget(); }, 5000) && store.find(id)
+              && store.find(id)->note == QStringLiteral("edited note"),
+          QStringLiteral("cancelled Edit Bookmark Note keeps the note and the bookmark"));
+
+    auto* bookmarkDock = dock(win, "bookmarksDockWidget");
+    showDock(win, bookmarkDock);
+    bool inCard = false;
+    for (QLineEdit* e : bookmarkDock->findChildren<QLineEdit*>(QStringLiteral("bookmarkNote")))
+        inCard = inCard || e->text() == QStringLiteral("edited note");
+    check(inCard, QStringLiteral("the bookmark card shows the note"));
+    showDock(win, bookmarkDock, false);
+}
+
+// Растущий файл в окне: авто-обновление кнопкой тулбара (таймер), follow-tail
+// на дозаписи, F5, правый щелчок по Reload.
+void scenarioAutoReload(MainWindow& win, const QDir& dir)
+{
+    section(QStringLiteral("auto-reload a growing file"));
+    const auto lines = [](int from, int count) {
+        QByteArray out;
+        for (int i = from; i < from + count; ++i)
+            out += QStringLiteral("2026-11-26 10:%1:%2.000 [main] INFO - grow line %3\n")
+                       .arg((i / 60) % 60, 2, 10, QLatin1Char('0')).arg(i % 60, 2, 10, QLatin1Char('0')).arg(i).toUtf8();
+        return out;
+    };
+    const QString path = testdocs::writeFile(dir, QStringLiteral("grow.log"), lines(0, 300));
+    win.openCommandLine(OpenRouting::parseCommandLine({ path }));
+    check(waitFor([&]() { return tabIndexForFile(win, path) >= 0; }), QStringLiteral("grow.log opens"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, path));
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    check(waitLoaded(tab, 300), QStringLiteral("grow.log loads"));
+    LogListView* view = tab->view();
+    QScrollBar* bar = view->verticalScrollBar();
+    QAction* autoReload = command(win, QStringLiteral("autoReload"));
+    QAction* reload = command(win, QStringLiteral("reload"));
+    QToolButton* autoButton = nullptr;
+    QToolButton* reloadButton = nullptr;
+    for (QToolBar* tb : win.findChildren<QToolBar*>()) {
+        if (auto* b = qobject_cast<QToolButton*>(tb->widgetForAction(autoReload)))
+            autoButton = b;
+        if (auto* b = qobject_cast<QToolButton*>(tb->widgetForAction(reload)))
+            reloadButton = b;
+    }
+    check(autoButton && reloadButton, QStringLiteral("the toolbar has Reload and Auto-Reload"));
+    if (!autoButton || !reloadButton || !autoReload)
+        return;
+    check(!tab->autoReload() && !autoReload->isChecked(), QStringLiteral("a file opens without auto-reload"));
+
+    autoButton->click();
+    check(tab->autoReload() && autoReload->isChecked(), QStringLiteral("the toolbar button turns auto-reload on"));
+    view->setFocus();
+    pressCommand(win, QStringLiteral("followTail"));
+    check(view->followTail(), QStringLiteral("follow tail on"));
+    const auto atTail = [&](int rows) {
+        return model->rowCount() == rows && !tab->isLoading() && !view->hasPendingLayout()
+            && bar->maximum() > 0 && bar->value() == bar->maximum();
+    };
+    check(waitFor([&]() { return atTail(300); }, 10000), QStringLiteral("follow tail scrolls to the end"));
+    // Таймер (интервал 1 с) дочитывает хвост, вид следует за ним.
+    testdocs::appendToFile(path, lines(300, 200));
+    check(waitFor([&]() { return atTail(500); }, 15000),
+          QStringLiteral("the timer reads the appended lines and follow tail keeps the end in view (%1 rows, %2 of %3)")
+              .arg(model->rowCount()).arg(bar->value()).arg(bar->maximum()));
+    check(view->followTail(), QStringLiteral("follow tail stays on after the append"));
+
+    // Без авто-обновления — F5.
+    autoButton->click();
+    check(!tab->autoReload() && !autoReload->isChecked(), QStringLiteral("the toolbar button turns auto-reload off"));
+    pressCommand(win, QStringLiteral("followTail"));
+    check(!view->followTail(), QStringLiteral("follow tail off"));
+    view->goToRow(10);
+    testdocs::appendToFile(path, lines(500, 20));
+    pressCommand(win, QStringLiteral("reload"));
+    check(waitFor([&]() { return model->rowCount() == 520 && !tab->isLoading(); }, 15000),
+          QStringLiteral("F5 reads the appended lines (%1)").arg(model->rowCount()));
+    check(testdocs::idleViews() && view->userSelectedRow() == 10 && bar->value() < bar->maximum(),
+          QStringLiteral("without follow tail the view stays at the selected line"));
+    // Прежний жест: правый щелчок по Reload — авто-обновление вкладки.
+    {
+        const QPoint at = reloadButton->rect().center();
+        QContextMenuEvent e(QContextMenuEvent::Mouse, at, reloadButton->mapToGlobal(at));
+        QApplication::sendEvent(reloadButton, &e);
+    }
+    check(tab->autoReload() && autoReload->isChecked(), QStringLiteral("right click on Reload turns auto-reload on"));
+    autoReload->trigger();
+    check(!tab->autoReload(), QStringLiteral("Auto-Reload action turns it off"));
+    const int n = tabs(win)->count();
+    command(win, QStringLiteral("closeTab"))->trigger();
+    check(waitFor([&]() { return tabs(win)->count() == n - 1; }), QStringLiteral("grow.log closes"));
+}
+
+// Раскладка доков и тулбаров перед выходом — её должно восстановить
+// следующее окно (saveState / restoreState через ini).
+struct DockLayout {
+    QMap<QString, QPair<bool, int>> docks; // видим, область
+    bool filtersToolBar = true;
+};
+
+DockLayout dockLayout(MainWindow& win)
+{
+    DockLayout l;
+    for (QDockWidget* d : win.findChildren<QDockWidget*>())
+        l.docks.insert(d->objectName(), qMakePair(d->isVisible(), int(win.dockWidgetArea(d))));
+    if (auto* tb = win.findChild<QToolBar*>(QStringLiteral("filtersToolBar")))
+        l.filtersToolBar = tb->isVisible();
+    return l;
+}
+
+QString describeLayout(const DockLayout& l)
+{
+    QStringList out;
+    for (auto it = l.docks.cbegin(); it != l.docks.cend(); ++it)
+        out << QStringLiteral("%1:%2/%3").arg(it.key()).arg(it.value().first).arg(it.value().second);
+    return out.join(' ') + QStringLiteral(" filters:%1").arg(l.filtersToolBar);
+}
+
+DockLayout arrangeDocks(MainWindow& win)
+{
+    section(QStringLiteral("dock layout before exit"));
+    auto* bookmarks = dock(win, "bookmarksDockWidget");
+    auto* stats = dock(win, "statisticsDockWidget");
+    // Перетаскивание дока к краю окна — тем же вызовом, что делает Qt.
+    win.addDockWidget(Qt::LeftDockWidgetArea, bookmarks);
+    showDock(win, bookmarks);
+    win.addDockWidget(Qt::TopDockWidgetArea, stats);
+    showDock(win, stats);
+    if (auto* tb = win.findChild<QToolBar*>(QStringLiteral("filtersToolBar")); tb && tb->isVisible())
+        tb->toggleViewAction()->trigger();
+    const DockLayout l = dockLayout(win);
+    check(l.docks.value(bookmarks->objectName()) == qMakePair(true, int(Qt::LeftDockWidgetArea))
+              && l.docks.value(stats->objectName()) == qMakePair(true, int(Qt::TopDockWidgetArea)) && !l.filtersToolBar,
+          QStringLiteral("docks arranged: %1").arg(describeLayout(l)));
+    return l;
+}
+
+void checkDockLayout(MainWindow& win, const DockLayout& expected)
+{
+    const DockLayout now = dockLayout(win);
+    check(now.docks == expected.docks && now.filtersToolBar == expected.filtersToolBar,
+          QStringLiteral("the next window restores the dock layout:\n  now %1\n  was %2")
+              .arg(describeLayout(now), describeLayout(expected)));
+}
+
+// Меню вкладки: Copy Full Path, Close Tabs to the Right, Close Others,
+// Close All (и что недоступно) — в отдельном окне, как его открывает
+// --new-instance: окно сценариев основного не теряет вкладок.
+void scenarioTabMenu(const Fixtures& fx)
+{
+    section(QStringLiteral("tab context menu"));
+    MainWindow win;
+    showWindow(win);
+    win.startUp(OpenRouting::parseCommandLine({ QStringLiteral("--new-instance"), fx.a, fx.b, fx.c, fx.gone }), false);
+    check(waitFor([&]() { return tabs(win)->count() == 4; }) && waitAllLoaded(win), QStringLiteral("four tabs open"));
+    const auto choose = [&](int index, const QString& item, bool* enabled = nullptr) {
+        bool picked = false;
+        bool seen = false;
+        pickMenuItem(item, &picked, &seen);
+        tabContextMenu(win, index); // меню — вложенным циклом внутри события
+        g_driver->dropExpectations();
+        if (enabled)
+            *enabled = seen;
+        return picked;
+    };
+
+    QApplication::clipboard()->clear();
+    check(choose(1, QStringLiteral("Copy Full Path")), QStringLiteral("Copy Full Path is offered"));
+    check(QApplication::clipboard()->text() == QDir::toNativeSeparators(fx.b),
+          QStringLiteral("Copy Full Path copies the path: %1").arg(QApplication::clipboard()->text()));
+    bool enabled = true;
+    choose(3, QStringLiteral("Close Tabs to the Right"), &enabled);
+    check(!enabled && tabs(win)->count() == 4, QStringLiteral("Close Tabs to the Right is off on the last tab"));
+    check(choose(1, QStringLiteral("Close Tabs to the Right")), QStringLiteral("Close Tabs to the Right is offered"));
+    check(waitFor([&]() { return tabs(win)->count() == 2; }) && tabIndexForFile(win, fx.a) == 0 && tabIndexForFile(win, fx.b) == 1,
+          QStringLiteral("Close Tabs to the Right keeps the tabs up to it (%1)").arg(describeTabs(win)));
+    check(choose(1, QStringLiteral("Close Others")), QStringLiteral("Close Others is offered"));
+    check(waitFor([&]() { return tabs(win)->count() == 1; }) && tabIndexForFile(win, fx.b) == 0,
+          QStringLiteral("Close Others keeps only that tab (%1)").arg(describeTabs(win)));
+    enabled = true;
+    choose(0, QStringLiteral("Close Others"), &enabled);
+    check(!enabled, QStringLiteral("Close Others is off with one tab"));
+    pressCommand(win, QStringLiteral("reopenTab"));
+    check(waitFor([&]() { return tabs(win)->count() == 2; }) && tabIndexForFile(win, fx.a) == 0,
+          QStringLiteral("Ctrl+Shift+T brings back a tab closed by Close Others (%1)").arg(describeTabs(win)));
+    check(choose(0, QStringLiteral("Close All")), QStringLiteral("Close All is offered"));
+    check(waitFor([&]() { return tabs(win)->count() == 0; }), QStringLiteral("Close All closes every tab"));
+    auto* welcome = win.findChild<WelcomeWidget*>();
+    check(!welcome || waitFor([&]() { return welcome->isVisible(); }, 5000), QStringLiteral("the start screen is back"));
+    win.close();
+}
+
+// stdin (`DendroLog -`): своё окно, вкладка «stdin» растёт по мере записи
+// в пайп, follow-tail держит конец, файл спула ни в недавних, ни во вкладке
+// после закрытия. Пайп — вместо дескриптора 0 (шов спулера).
+void scenarioStdin(const Fixtures& fx)
+{
+    section(QStringLiteral("stdin"));
+    int fds[2] = { -1, -1 };
+#ifdef Q_OS_WIN
+    const bool piped = _pipe(fds, 64 * 1024, _O_BINARY) == 0;
+#else
+    const bool piped = ::pipe(fds) == 0;
+#endif
+    check(piped, QStringLiteral("a pipe for stdin"));
+    if (!piped)
+        return;
+    const auto writeLines = [&](int from, int count) {
+        QByteArray out;
+        for (int i = from; i < from + count; ++i)
+            out += QStringLiteral("2026-11-26 11:00:%1.%2 [main] INFO - piped line %3\n")
+                       .arg((i / 1000) % 60, 2, 10, QLatin1Char('0')).arg(i % 1000, 3, 10, QLatin1Char('0')).arg(i).toUtf8();
+#ifdef Q_OS_WIN
+        return _write(fds[1], out.constData(), unsigned(out.size())) == out.size();
+#else
+        return ::write(fds[1], out.constData(), size_t(out.size())) == out.size();
+#endif
+    };
+    const auto closeWriteEnd = [&]() {
+        if (fds[1] < 0)
+            return;
+#ifdef Q_OS_WIN
+        _close(fds[1]);
+#else
+        ::close(fds[1]);
+#endif
+        fds[1] = -1;
+    };
+    StdinSpooler::setInputDescriptorForTesting(fds[0]);
+    {
+        MainWindow win;
+        showWindow(win);
+        const OpenRouting::CommandLine cl = OpenRouting::parseCommandLine({ QStringLiteral("-") });
+        check(cl.readStdin, QStringLiteral("'-' reads standard input"));
+        win.startUp(cl, /*primary=*/false);
+        check(waitFor([&]() { return tabs(win)->count() == 1; }), QStringLiteral("stdin opens a tab"));
+        LogViewWidget* tab = tabs(win)->count() ? currentTab(win) : nullptr;
+        if (!tab) {
+            closeWriteEnd();
+            StdinSpooler::setInputDescriptorForTesting(-1);
+            return; // fds[0] остаётся открытым — тест уже упал
+        }
+        check(tabs(win)->tabText(0).contains(QStringLiteral("stdin")), QStringLiteral("the tab is named stdin: %1").arg(tabs(win)->tabText(0)));
+        check(tab->autoReload() && tab->view()->followTail() && command(win, QStringLiteral("autoReload"))->isChecked(),
+              QStringLiteral("stdin tab: auto-reload and follow tail on"));
+        check(writeLines(0, 200), QStringLiteral("write to the pipe"));
+        check(waitFor([&]() { return tab->model()->rowCount() == 200 && !tab->isLoading(); }, 15000),
+              QStringLiteral("piped lines show up (%1)").arg(tab->model()->rowCount()));
+        check(writeLines(200, 300), QStringLiteral("write more"));
+        QScrollBar* bar = tab->view()->verticalScrollBar();
+        check(waitFor([&]() {
+            return tab->model()->rowCount() == 500 && !tab->isLoading() && !tab->view()->hasPendingLayout()
+                && bar->maximum() > 0 && bar->value() == bar->maximum();
+        }, 15000), QStringLiteral("more piped lines follow the tail (%1 rows, %2 of %3)")
+                       .arg(tab->model()->rowCount()).arg(bar->value()).arg(bar->maximum()));
+        const auto last = tab->model()->entryAt(tab->model()->rowCount() - 1);
+        check(last && last->message().endsWith(QStringLiteral("piped line 499")), QStringLiteral("the last line is the last piped one"));
+        const QString spool = tab->loadedFiles().value(0) ? tab->loadedFiles().value(0)->filePath : QString();
+        check(SpoolDir::isStreamFile(spool), QStringLiteral("the tab reads a stream spool: %1").arg(spool));
+        check(!inRecentFiles(win, spool), QStringLiteral("the spool is not in Recent Files"));
+        closeWriteEnd(); // EOF
+        win.close();
+    }
+    StdinSpooler::setInputDescriptorForTesting(-1);
+#ifdef Q_OS_WIN
+    _close(fds[0]);
+#else
+    ::close(fds[0]);
+#endif
+    (void)fx;
+}
+
 int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
 {
     const QString backend = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
@@ -2594,6 +3693,8 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
     settings.setRestoreSessionOnStartup(false);
     // Запасная кодировка по умолчанию зависит от локали машины.
     settings.setFallbackEncodingChoice(TextEncoding::Windows1251);
+    // Таймер авто-обновления — 1 с (сценарий растущего файла ждёт его тик).
+    settings.setAutoReloadIntervalSecs(1);
     settings.save();
 
     // Схема фикстур в каталоге (сценарий «schema per tab»).
@@ -2608,6 +3709,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
     }
 
     int restoredTabs = 0;
+    DockLayout layoutAtExit;
     QVector<QSet<QString>> exitBookmarks;
     QString exitTabs;
     {
@@ -2633,14 +3735,21 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioTabSwitch(win, fx);
         scenarioFullLog(win, fx);
         scenarioGlue(win, fx, dir);
+        scenarioTextActions(win, fx);
+        scenarioPanels(win, fx);
+        scenarioScannerPanel(win, fx);
+        scenarioFieldSchemasDialog(win, fx);
+        scenarioBookmarkNote(win, fx);
         scenarioSearchFollowsTab(win, fx);
         scenarioEncoding(win, fx);
         scenarioFileMemory(win, fx);
+        scenarioSettingsValues(win, fx, indexed);
         scenarioMerge(win, fx);
         scenarioSession(win, fx);
         scenarioDocks(win);
         scenarioLineWrap(win, dir, indexed);
         scenarioFileLabels(win);
+        scenarioAutoReload(win, dir);
         scenarioTar(win, fx); // после сценариев, которым нужен alpha в Recent Files
         section(QStringLiteral("shortcuts: every one fires"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars shown"));
@@ -2665,6 +3774,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         setToolBarsVisible(win, true);
         scenarioMenuSweep(win);
 
+        layoutAtExit = arrangeDocks(win);
         section(QStringLiteral("exit"));
         // Свип мог закрыть вкладки (Close Tab) — для сессии нужна хоть одна.
         if (tabs(win)->count() == 0) {
@@ -2701,6 +3811,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
             kept = restored[i].contains(exitBookmarks[i]);
         check(kept, QStringLiteral("restored tabs keep their bookmarks: %1 / at exit %2")
                         .arg(describeTabs(win), exitTabs));
+        checkDockLayout(win, layoutAtExit);
         win.close();
     }
 
@@ -2743,6 +3854,9 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         }
         win.close();
     }
+
+    scenarioTabMenu(fx);
+    scenarioStdin(fx);
     return 0;
 }
 
@@ -2856,6 +3970,10 @@ int main(int argc, char** argv)
     }
     DialogDriver driver;
     g_driver = &driver;
+    // Тема окна — как у приложения (main.cpp); тема «ОС» — светлая на любой
+    // машине (сценарий Settings переключает на тёмную и обратно).
+    ColorSchemeController colorScheme;
+    colorScheme.setSystemSchemeSource([]() { return Qt::ColorScheme::Light; });
 
     checkHelpShortcutTable();
 

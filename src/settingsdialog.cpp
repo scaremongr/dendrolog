@@ -198,6 +198,7 @@ void SettingsDialog::buildShortcutsTab()
 
     for (const auto& cmd : mgr.commands()) {
         auto* edit = new QKeySequenceEdit(content);
+        edit->setObjectName(QStringLiteral("shortcut_") + cmd.id);
         edit->setKeySequence(mgr.sequence(cmd.id));
         // A single combination is enough for application shortcuts.
         edit->setMaximumSequenceLength(1);
@@ -285,6 +286,7 @@ void SettingsDialog::buildPerformanceControls()
         return;
 
     m_indexedThresholdSpinBox = new QSpinBox(page);
+    m_indexedThresholdSpinBox->setObjectName(QStringLiteral("indexedThresholdSpinBox"));
     m_indexedThresholdSpinBox->setRange(0, 1 << 20);
     m_indexedThresholdSpinBox->setSuffix(tr(" MB"));
     m_indexedThresholdSpinBox->setSpecialValueText(tr("always"));
