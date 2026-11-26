@@ -74,6 +74,7 @@ private:
     QComboBox* m_epoch = nullptr;
     QComboBox* m_levels = nullptr;
     KeyedDefinition m_columns;   ///< Колонки прежнего выбора (ключи начала файла).
+    LineFormat::Kind m_columnsKind = LineFormat::Kind::Plain;
 };
 
 #endif // LINEFORMATINDICATOR_H

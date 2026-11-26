@@ -522,6 +522,15 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
     // файла тем же детектором, что у вкладки (сканер каталога).
     const LineFormatReader formatReader(
         lineFormat ? *lineFormat : LineFormatDetector::detectInFile(filePath, cancelled));
+    const QString formatSignature = formatReader.format.readingSignature();
+    if (from.offset > 0 && from.formatSignature != formatSignature) {
+        // Голову считали другим форматом (решение малого файла пришло с
+        // дозаписью) — продолжение разошлось бы со вкладкой, которая файл
+        // перечитывает: только полный проход.
+        stats.parseSuccess = false;
+        scan.complete = stats;
+        return scan;
+    }
     bool inRecord = from.inRecord;
     LogLevel recordLevel = LogLevel::Unknown;
     // Время без даты (F-11): предпросмотра нет (`.gz` пришлось бы
@@ -659,6 +668,7 @@ LogParser::StatsScan LogParser::analyzeFileForStats(const QString& filePath,
     scan.next.encoding = encoding;
     scan.next.inRecord = inRecord;
     scan.next.clock = clock.state;
+    scan.next.formatSignature = formatSignature;
     const bool completeFirstIsClock = firstIsClock, completeLastIsClock = lastIsClock;
     if (pending.size() >= unit.width)
         countLine(pending.left(pending.size() - pending.size() % unit.width));

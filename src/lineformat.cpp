@@ -234,7 +234,7 @@ LineFormat decide(const QStringList& lines, bool endOfFile)
     for (const QString& line : lines)
         if (!line.trimmed().isEmpty())
             ++nonEmpty;
-    if (endOfFile && nonEmpty < kMinLines)
+    if (nonEmpty == 0 || (endOfFile && nonEmpty < kMinLines))
         return LineFormat();   // не решено: читается как Plain
 
     KeyedDefinition keys;
@@ -300,8 +300,10 @@ QStringList sampleDevice(QIODevice& device, bool* endOfFile, const std::atomic_b
         const bool cut = end < 0;
         if (cut) {
             // Строка, оборванная пределом выборки, — не строка (её конец не
-            // прочитан); оборванная концом файла — строка.
-            if (!eof)
+            // прочитан), кроме случая, когда она первая: начало огромного
+            // JSON-объекта тоже говорит о формате. Оборванная концом файла —
+            // строка.
+            if (!eof && !lines.isEmpty())
                 break;
             end = size;
         }

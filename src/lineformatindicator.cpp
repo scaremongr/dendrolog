@@ -213,6 +213,7 @@ LineFormatKeysDialog::LineFormatKeysDialog(const LineFormat& current, QWidget* p
     setWindowTitle(tr("Line Format Keys"));
     const KeyedDefinition keys = current.isStructured() ? current.keys : KeyedDefinition();
     m_columns = keys;
+    m_columnsKind = current.kind;
     auto* form = new QFormLayout;
     m_kind = new QComboBox(this);
     m_kind->setObjectName(QStringLiteral("lineFormatKind"));
@@ -258,12 +259,15 @@ LineFormatKeysDialog::LineFormatKeysDialog(const LineFormat& current, QWidget* p
 
 LineFormat LineFormatKeysDialog::format() const
 {
+    const auto kind = LineFormat::Kind(m_kind->currentData().toInt());
     KeyedDefinition k = m_columns;
+    // Колонки (ключи начала файла) — только того же вида, что прежний формат.
+    if (kind != m_columnsKind)
+        k.extraColumns.clear();
     k.timeKeys = splitKeys(m_time->text());
     k.levelKeys = splitKeys(m_level->text());
     k.messageKeys = splitKeys(m_message->text());
     k.epochUnit = KeyedDefinition::EpochUnit(m_epoch->currentData().toInt());
     k.numericLevels = KeyedDefinition::NumericLevels(m_levels->currentData().toInt());
-    return LineFormat::structured(LineFormat::Kind(m_kind->currentData().toInt()), k,
-                                  LineFormat::Origin::User);
+    return LineFormat::structured(kind, k, LineFormat::Origin::User);
 }

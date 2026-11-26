@@ -570,7 +570,14 @@ LineFormat LogViewWidget::lineFormat(const LogFilePtr& logFile) const
         if (it != m_fileFormats.constEnd())
             return *it;
     }
-    return m_pendingFormats.value(logFile->filePath);
+    const auto pending = m_pendingFormats.constFind(logFile->filePath);
+    if (pending != m_pendingFormats.constEnd())
+        return *pending;
+    // Выбор из снимка или памяти, который ждёт загрузки файла (распаковка):
+    // его видят индикатор и captureState.
+    if (!m_pendingSourceFormats.isEmpty())
+        return m_pendingSourceFormats.value(RecordLocator::sourceKey(*logFile));
+    return {};
 }
 
 void LogViewWidget::storeLineFormat(const LogFilePtr& logFile, const LineFormat& format)
@@ -598,6 +605,8 @@ LineFormat LogViewWidget::passFormat(const LogFilePtr& logFile)
     const auto pending = m_pendingFormats.constFind(logFile->filePath);
     if (pending != m_pendingFormats.constEnd()) {
         const LineFormat format = *pending;
+        // Выбор по пути (сделан позже снимка) главнее выбора снимка.
+        m_pendingSourceFormats.remove(RecordLocator::sourceKey(*logFile));
         storeLineFormat(logFile, format);
         if (format.isStructured())
             adoptFormatColumns(logFile);
@@ -683,8 +692,11 @@ void LogViewWidget::setLineFormat(const LogFilePtr& logFile, const LineFormat& f
     else
         chosen.keys = KeyedDefinition();
     const LineFormat before = lineFormat(logFile);
+    m_pendingSourceFormats.remove(RecordLocator::sourceKey(*logFile));
     if (!fileHasRows(logFile)) {
-        m_pendingFormats.insert(logFile->filePath, chosen);
+        // Строк ещё нет (распаковка, загрузка сорвалась) — следующий проход
+        // начнётся с выбора.
+        storeLineFormat(logFile, chosen);
         emit lineFormatChanged(logFile);
         return;
     }
@@ -706,23 +718,23 @@ void LogViewWidget::restoreAutomaticLineFormat(const LogFilePtr& logFile)
 {
     if (!logFile || !m_loadedFiles.contains(logFile) || !lineFormat(logFile).isUser())
         return;
-    // Решение автоматики — заново по файлу (то же правило, что у прохода).
-    const LineFormat automatic = LineFormatDetector::detectInFile(logFile->filePath);
-    const LineFormat before = lineFormat(logFile);
+    // Решение автоматики — заново, в проходе загрузчика (не на GUI-потоке):
+    // формат «не решён», файл перечитывается, детектор решает в начале
+    // прохода (LineFormatDetector::advance).
+    m_pendingFormats.remove(logFile->filePath);
+    m_pendingSourceFormats.remove(RecordLocator::sourceKey(*logFile));
     if (!fileHasRows(logFile)) {
-        m_pendingFormats.remove(logFile->filePath);
+        storeLineFormat(logFile, LineFormat());
         emit lineFormatChanged(logFile);
         return;
     }
     const std::optional<RereadPosition> position = captureRereadPosition();
-    const bool inFlight = m_fileReloadStates.value(logFile->filePath).loadInFlight;
-    storeLineFormat(logFile, automatic);
+    storeLineFormat(logFile, LineFormat());
     m_layoutInputs.clear();
     refreshSchemas();
     emit fieldLayoutGrown();
     emit lineFormatChanged(logFile);
-    if (inFlight || automatic.readingSignature() != before.readingSignature())
-        rereadAfterSchemaChange(position, {logFile->filePath});
+    rereadAfterSchemaChange(position, {logFile->filePath});
 }
 
 QHash<QString, QString> LogViewWidget::readingSignatures() const

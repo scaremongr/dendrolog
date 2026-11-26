@@ -3101,6 +3101,17 @@ static void testLineFormatPlain(const QDir& dir)
               "levels.log: plain without levelStartsRecord — one record (no stamps)");
     }
     {
+        // Первая строка длиннее выборки (300 КБ JSON-объект): формат по её
+        // началу, а не «обычный текст» навсегда.
+        QByteArray bytes = "{\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"info\",\"msg\":\""
+                           + QByteArray(300 * 1024, 'x') + "\"}\n";
+        for (int i = 0; i < 30; ++i)
+            bytes += "{\"ts\":\"2026-11-18T10:00:01Z\",\"level\":\"info\",\"msg\":\"m\"}\n";
+        const QString path = writeFile(dir, QStringLiteral("long-first.jsonl"), bytes);
+        CHECK(LineFormatDetector::detectInFile(path).kind == LineFormat::Kind::Json,
+              "long-first.jsonl: a first line longer than the sample still decides JSON");
+    }
+    {
         QByteArray bytes;
         for (int i = 0; i < 30; ++i)
             bytes += "2026-11-18 10:00:" + QByteArray::number(10 + i) + " INFO start " + QByteArray::number(i)
@@ -3128,6 +3139,11 @@ static void testLineFormatPlain(const QDir& dir)
             head += jsonLine(i);
         const QString path = writeFile(dir, QStringLiteral("small.jsonl"), head);
         CHECK(!LineFormatDetector::detectInFile(path).isDecided(), "small.jsonl: undecided below 20 lines");
+        // Сканер каталога: голова посчитана как Plain (формат не решён).
+        LogParser scanner;
+        const LogParser::StatsScan headScan = scanner.analyzeFileForStats(path);
+        CHECK(headScan.stats.parseSuccess && headScan.next.offset == head.size(),
+              "small.jsonl: the scanner counts the head");
         auto lf = std::make_shared<LogFile>(path);
         QVector<std::pair<LineFormat, bool>> decisions;
         LogIndexer indexer;
@@ -3152,6 +3168,12 @@ static void testLineFormatPlain(const QDir& dir)
         for (int i = 5; i < 25; ++i)
             tail += jsonLine(i);
         appendToFile(path, tail);
+        // Продолжение сканера головы, посчитанной Plain, когда детектор решил
+        // JSON, не годится: полный проход (как перечитывание вкладки).
+        CHECK(!scanner.analyzeFileForStats(path, headScan.next).stats.parseSuccess,
+              "small.jsonl: the scanner does not resume across a format decision");
+        CHECK(scanner.analyzeFileForStats(path).stats.totalEntries == 25,
+              "small.jsonl: the scanner's full pass counts every object");
         indexAppend(indexer, lf, index, index->lastLineProvisional());
         CHECK(decisions.size() == 1 && decisions.first().second
                   && decisions.first().first.kind == LineFormat::Kind::Json,

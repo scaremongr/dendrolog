@@ -573,8 +573,8 @@ void DirectoryScanner::dispatchOneScan(const ScanRequest& request)
         scheduleScans();  // fill the freed slot from the queue
     });
     watcher->setFuture(QtConcurrent::run([request, cancel = m_statsCancel]() -> ScanResult {
-        // Records are counted the way a tab without field extraction splits
-        // them (timestamp + level), so the scanner needs no schema.
+        // Records are counted the way a tab splits them: by the file's line
+        // format (F-17, step 7), decided by the same detector — no schema.
         LogParser parser;
 
         ScanResult result;
