@@ -76,6 +76,14 @@ AiSchemaClient::AiSchemaClient(QObject* parent)
     , m_retryTimer(new QTimer(this))
 {
     qRegisterMetaType<AiSchemaClient::Result>();
+    // Конец ответа — сигнал менеджера, а не ответа (S-29): соединение одно на
+    // клиента, его слот создаётся и удаляется на GUI-потоке. Слот на самом
+    // ответе осиротел бы в его ~QObject (deleteLater), и освободить его мог
+    // деструктор делегата на HTTP-потоке QNetworkAccessManager — под мьютексом
+    // и атомиками соединений Qt, которых TSan не видит (ложная гонка
+    // operator new / delete слота). Менеджер испускает finished(reply) прямо
+    // из finished ответа, поэтому abort() по-прежнему завершает синхронно.
+    connect(m_network, &QNetworkAccessManager::finished, this, &AiSchemaClient::onReplyFinished);
     m_timeout->setSingleShot(true);
     connect(m_timeout, &QTimer::timeout, this, &AiSchemaClient::onTimeout);
     m_retryTimer->setSingleShot(true);
@@ -88,7 +96,7 @@ AiSchemaClient::AiSchemaClient(QObject* parent)
 AiSchemaClient::~AiSchemaClient()
 {
     if (m_reply) {
-        m_reply->disconnect(this);
+        m_network->disconnect(this);
         m_reply->abort();
         m_reply->deleteLater();
     }
@@ -164,7 +172,6 @@ void AiSchemaClient::startAttempt()
     ++m_totalAttempts;
     m_timedOut = false;
     m_reply = m_network->post(request, m_body);
-    connect(m_reply, &QNetworkReply::finished, this, &AiSchemaClient::onReplyFinished);
     m_timeout->start(qMax(1, m_config.timeoutMs));
 }
 
@@ -176,11 +183,14 @@ void AiSchemaClient::onTimeout()
     }
 }
 
-void AiSchemaClient::onReplyFinished()
+void AiSchemaClient::onReplyFinished(QNetworkReply* reply)
 {
-    QNetworkReply* reply = m_reply;
     if (!reply)
         return;
+    if (reply != m_reply) {
+        reply->deleteLater();   // не наш текущий — не копить у менеджера
+        return;
+    }
     m_reply = nullptr;
     m_timeout->stop();
     reply->deleteLater();

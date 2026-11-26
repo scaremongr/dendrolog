@@ -372,6 +372,10 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Grey captions follow a theme change.** In a window left open while
+  switching between the light and dark theme (for example *Find a Schema*),
+  grey captions could keep the colour of the previous theme until the window
+  was reopened.
 - **Statistics no longer report pauses that are not there.** On a large
   log shown in file order whose timestamps go back and forth, *Statistics*
   measured a "Gap" between neighbouring lines, so a step back in time and the

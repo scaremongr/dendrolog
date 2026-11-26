@@ -4,6 +4,7 @@
 #include <QString>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 // ---------------------------------------------------------------------------
 // UpdateChecker — проверка новых релизов через GitHub Releases API.
@@ -42,6 +43,8 @@ signals:
     void checkFailed(const QString& error);
 
 private:
+    void onReplyFinished(QNetworkReply* reply);
+
     QNetworkAccessManager* m_nam = nullptr;
     bool m_busy = false;
 };
