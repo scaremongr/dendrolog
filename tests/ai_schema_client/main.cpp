@@ -100,6 +100,7 @@ public:
     QUrl url() const { return QUrl(QStringLiteral("http://127.0.0.1:%1/v1/messages").arg(m_server.serverPort())); }
 
     QList<Response> script;
+    Response fallback;            // когда script кончился
     QList<Request> requests;
     int connections = 0;
 
@@ -128,7 +129,7 @@ private:
         buf.remove(0, headerEnd + 4 + length);
         requests.append(req);
 
-        const Response resp = script.isEmpty() ? Response() : script.takeFirst();
+        const Response resp = script.isEmpty() ? fallback : script.takeFirst();
         if (resp.mode == Response::Mode::Drop) {
             socket->abort();
             return;
@@ -343,13 +344,16 @@ void testErrors()
     // Обрыв.
     {
         FakeServer server;
+        // Каждый запрос — обрыв: Qt (6.8.3) сам повторяет POST после обрыва
+        // до первого байта ответа, этот повтор клиенту не виден.
         FakeServer::Response drop;
         drop.mode = FakeServer::Response::Mode::Drop;
-        server.script = {drop};
+        server.fallback = drop;
         auto run = makeClient(server);
         const AiSchemaClient::Result r = sendAndWait(*run, sampleBody());
-        check(r.status == AiSchemaClient::Result::Status::NetworkError && !r.message.contains(kKey),
-              QStringLiteral("обрыв соединения: %1").arg(r.message));
+        check(r.status == AiSchemaClient::Result::Status::NetworkError && r.attempts == 1 && !r.message.contains(kKey),
+              QStringLiteral("обрыв соединения: статус %1, попыток %2, «%3»")
+                  .arg(int(r.status)).arg(r.attempts).arg(r.message));
     }
     // Тайм-аут.
     {
