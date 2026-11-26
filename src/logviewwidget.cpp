@@ -1,15 +1,16 @@
 // logviewwidget.cpp
 #include "logviewwidget.h"
+#include "commandspooler.h"
+#include "commandstatusbar.h"
+#include "spooldir.h"
 #include "fulllogcontroller.h"
 #include "appsettings.h"
 #include "filememorystore.h"
 #include "indexedlogstore.h"
-#include "stdinspooler.h"
 #include "archiveregistry.h"
 #include "gzipdevice.h"
 #include "tararchive.h"
 #include "sourceunpacker.h"
-#include "spooldir.h"
 #include "quicksearch.h"
 #include "recordlocator.h"
 #include <QVBoxLayout>
@@ -45,6 +46,15 @@ LogViewWidget::LogViewWidget(QWidget *parent)
     m_view->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_view->setMinimumSize(0, 0);
     m_view->setWordWrap(true);
+
+    // Плашки команд (F-7) — выше остальных: процесс — главное во вкладке.
+    m_commandBars = new QWidget(this);
+    m_commandBars->setObjectName(QStringLiteral("commandBars"));
+    auto* commandBarsLayout = new QVBoxLayout(m_commandBars);
+    commandBarsLayout->setContentsMargins(0, 0, 0, 0);
+    commandBarsLayout->setSpacing(0);
+    m_commandBars->hide();
+    layout->addWidget(m_commandBars);
 
     // Плашка «вернуть фильтры прошлого раза» (память файла, R-4): над логом,
     // скрыта, пока фильтры не предложены.
@@ -238,6 +248,13 @@ LogViewWidget::LogViewWidget(QWidget *parent)
 
 LogViewWidget::~LogViewWidget()
 {
+    // Процессы команд (F-7): спулер уходит от вкладки и останавливает процесс
+    // сам (вежливо, затем принудительно), спул удаляется после его выхода.
+    for (CommandSpooler* spooler : std::as_const(m_commands)) {
+        spooler->disconnect(this);
+        spooler->release();
+    }
+    m_commands.clear();
     // Распаковки — до файлов (F-2): отмена срабатывает на ближайшем блоке
     // входа, частичный файл удаляет сам распаковщик; копию держит SpoolItem
     // файла, а он уходит вместе с m_loadedFiles — уже после ожидания.
@@ -596,6 +613,14 @@ void LogViewWidget::addFilesFrom(const LogViewWidget& other)
     for (const LogFilePtr& lf : other.loadedFiles()) {
         if (!lf)
             continue;
+        if (lf->source().kind == LogSource::Kind::Stream) {
+            // Спул потока (F-7) делится: тот же файл, источник и SpoolItem.
+            const bool present = std::any_of(m_loadedFiles.cbegin(), m_loadedFiles.cend(),
+                [&lf](const LogFilePtr& f) { return f && samePath(f->filePath, lf->filePath); });
+            if (!present)
+                addStream(lf->spool, lf->displayName, lf->source().label, other.fileEncoding(lf));
+            continue;
+        }
         if (!isArchive(lf)) {
             addLogFile(lf->filePath, other.fileEncoding(lf));
             continue;
@@ -669,14 +694,14 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
     // Архив с набором файлов (zip, tar, `.tar.gz`) вкладкой не читается:
     // двоичные байты вместо строк. Его открывает Directory Scanner (окно
     // направляет туда). Проверка — до gzip: `.tar.gz` тоже gzip.
-    if (!StdinSpooler::isSpoolFilePath(filePath) && ArchiveFormats::isMultiFileArchive(filePath)) {
+    if (!SpoolDir::isStreamFile(filePath) && ArchiveFormats::isMultiFileArchive(filePath)) {
         emit statusMessage(tr("%1 is an archive: open it in the Directory Scanner to see its files.")
                                .arg(QFileInfo(filePath).fileName()));
         return;
     }
     // Сжатый источник (F-2): по сигнатуре, а не по имени. Память файла —
     // после распаковки (continueArchive).
-    if (!StdinSpooler::isSpoolFilePath(filePath) && GzipDevice::fileHasSignature(filePath)) {
+    if (!SpoolDir::isStreamFile(filePath) && GzipDevice::fileHasSignature(filePath)) {
         addArchive(filePath, initial);
         return;
     }
@@ -689,6 +714,105 @@ void LogViewWidget::addLogFile(const QString &requestedPath, const FileEncoding&
     auto logFile = std::make_shared<LogFile>(filePath);
     m_loadedFiles.append(logFile);
     startLoad(logFile, initial);
+}
+
+// ---------------------------------------------------------------------------
+// Потоки: stdin и вывод команды (F-7)
+// ---------------------------------------------------------------------------
+
+void LogViewWidget::addStream(const std::shared_ptr<SpoolItem>& spool, const QString& name,
+                              const QString& label, const FileEncoding& initial)
+{
+    if (!spool)
+        return;
+    const QString filePath = normalizedPath(spool->path());
+    for (const auto& file : m_loadedFiles) {
+        if (file && samePath(file->filePath, filePath)) {
+            reopenLoaded(file, initial);
+            return;
+        }
+    }
+    auto logFile = std::make_shared<LogFile>(filePath);
+    logFile->displayName = name;
+    LogSource source;
+    source.kind = LogSource::Kind::Stream;
+    source.label = label;
+    logFile->setSource(source);
+    logFile->spool = spool;
+    m_loadedFiles.append(logFile);
+    startLoad(logFile, initial);
+}
+
+void LogViewWidget::addCommandOutput(CommandSpooler* spooler, const FileEncoding& initial)
+{
+    if (!spooler || m_commands.contains(spooler))
+        return;
+    spooler->setParent(this);
+    if (spooler->state() == CommandSpooler::State::NotStarted)
+        spooler->start();
+    // Не запустилась (каталог, строка) — файла может не быть: вкладка всё
+    // равно открывается пустой, причина — на плашке.
+    if (!QFileInfo::exists(spooler->spoolFilePath())) {
+        QFile empty(spooler->spoolFilePath());
+        if (empty.open(QIODevice::WriteOnly))
+            empty.close();
+    }
+    attachCommand(spooler);
+    addStream(spooler->spool(), spooler->spec().shortLabel(), spooler->spec().commandLine, initial);
+    // Живой поток: авто-обновление + автопрокрутка к новым строкам.
+    setAutoReload(true);
+    if (m_view)
+        m_view->setFollowTail(true);
+}
+
+void LogViewWidget::attachCommand(CommandSpooler* spooler)
+{
+    m_commands.append(spooler);
+    // Пинки спулера — сверх таймера авто-обновления: хвост подтягивается
+    // живо (спулер сигналит не чаще ~4 раз в секунду).
+    connect(spooler, &CommandSpooler::bytesAppended, this, &LogViewWidget::onStreamGrew);
+    connect(spooler, &CommandSpooler::stateChanged, this, [this]() { emit commandStateChanged(); });
+    connect(spooler, &QObject::destroyed, this, [this, spooler]() { m_commands.removeAll(spooler); });
+    auto* bar = new CommandStatusBar(spooler, m_commandBars);
+    connect(bar, &CommandStatusBar::restartRequested, this,
+            [this](CommandSpooler* s) { restartCommand(s); });
+    m_commandBars->layout()->addWidget(bar);
+    m_commandBars->show();
+    emit commandStateChanged();
+}
+
+QList<CommandSpooler*> LogViewWidget::commands() const
+{
+    return m_commands;
+}
+
+bool LogViewWidget::restartCommand(CommandSpooler* spooler)
+{
+    if (!spooler || !m_commands.contains(spooler) || spooler->isRunning())
+        return false;
+    if (!spooler->start())
+        return false;
+    if (m_view)
+        m_view->setFollowTail(true);
+    return true;
+}
+
+void LogViewWidget::adoptCommandsFrom(LogViewWidget& other)
+{
+    const QList<CommandSpooler*> moved = other.m_commands;
+    other.m_commands.clear();
+    for (CommandSpooler* spooler : moved) {
+        spooler->disconnect(&other);
+        // Плашка уходит с вкладкой-источником; здесь — своя.
+        const auto bars = other.m_commandBars->findChildren<CommandStatusBar*>();
+        for (CommandStatusBar* bar : bars)
+            if (bar->spooler() == spooler)
+                bar->deleteLater();
+        spooler->setParent(this);
+        attachCommand(spooler);
+    }
+    if (!moved.isEmpty())
+        setAutoReload(true);
 }
 
 void LogViewWidget::reopenLoaded(const LogFilePtr& file, const FileEncoding& initial)
@@ -1120,6 +1244,7 @@ void LogViewWidget::locatorFileLoaded(const LogFilePtr& logFile)
 
 void LogViewWidget::updateLoadingState()
 {
+    retryStreamKick();
     bool loading = m_model->recordLocator().isBusy() || isUnpacking();
     for (auto it = m_fileReloadStates.constBegin();
          it != m_fileReloadStates.constEnd(); ++it) {
@@ -1139,6 +1264,33 @@ void LogViewWidget::updateLoadingState()
     }
     if (!m_loading && m_reconsiderPending)
         reconsiderProvisional(); // запасную сменили посреди загрузки
+}
+
+bool LogViewWidget::anyLoadInFlight() const
+{
+    for (const FileReloadState& st : m_fileReloadStates)
+        if (st.loadInFlight)
+            return true;
+    return false;
+}
+
+void LogViewWidget::onStreamGrew()
+{
+    // Пинок потока (F-7), пока файл дочитывается: тик по файлу в полёте
+    // пропускается, а следующего пинка может не быть (процесс вышел) — без
+    // таймера окна хвост остался бы непрочитанным. Повтор — по концу загрузки.
+    if (anyLoadInFlight()) {
+        m_streamKickPending = true;
+        return;
+    }
+    m_streamKickPending = false;
+    reloadChangedFiles();
+}
+
+void LogViewWidget::retryStreamKick()
+{
+    if (m_streamKickPending && !anyLoadInFlight())
+        QTimer::singleShot(0, this, &LogViewWidget::onStreamGrew);
 }
 
 LogViewWidget::DiskStamp LogViewWidget::DiskStamp::of(const QString& filePath)
@@ -2300,7 +2452,7 @@ static QVector<RecordId> recordsOf(const QVector<BookmarkState>& list)
 bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding& initial,
                                     const LogFilePtr& self)
 {
-    if (StdinSpooler::isSpoolFilePath(filePath))
+    if (SpoolDir::isStreamFile(filePath))
         return false;
     // Член zip (F-2, шаг 4): ключ памяти — архив и имя члена.
     const QString member = self ? self->source().member : QString();

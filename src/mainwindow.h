@@ -199,6 +199,10 @@ public:
     // Приём потокового ввода (`program | DendroLog -`): спулит stdin во
     // временный файл и открывает его вкладкой-растущим логом с follow-tail.
     void openStdinStream(const FileEncoding& initial = {});
+    // File → Open Command Output… (F-7): диалог и запуск. openCommand —
+    // без диалога (команда уже выбрана): новая вкладка, спул, процесс.
+    void openCommandOutputDialog();
+    LogViewWidget* openCommand(const struct CommandSpec& spec);
 
 private:
     Ui::MainWindow *ui; // Pointer to the UI class generated from mainwindow.ui

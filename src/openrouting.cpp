@@ -2,7 +2,7 @@
 
 #include "archiveregistry.h"
 #include "sessionfile.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -148,7 +148,7 @@ QStringList absolutePaths(const QStringList& paths)
 
 bool RecentFiles::accepts(const QString& path)
 {
-    return !path.isEmpty() && !StdinSpooler::isSpoolFilePath(path)
+    return !path.isEmpty() && !SpoolDir::isStreamFile(path)
         && !ArchiveRegistry::instance().isInsideExtraction(path);
 }
 

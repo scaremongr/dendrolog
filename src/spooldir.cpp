@@ -179,10 +179,46 @@ std::shared_ptr<SpoolItem> SpoolDir::createDirectory(const QString& nameHint)
     return createItem(nameHint, true);
 }
 
-std::shared_ptr<SpoolItem> SpoolDir::createItem(const QString& nameHint, bool directory)
+std::shared_ptr<SpoolItem> SpoolDir::createStreamFile(const QString& nameHint)
+{
+    QString hint = sanitizedName(nameHint);
+    if (!hint.endsWith(QLatin1String(".log"), Qt::CaseInsensitive))
+        hint += QStringLiteral(".log");
+    return createItem(QStringLiteral("stream-") + hint, false, true);
+}
+
+bool SpoolDir::isStreamFile(const QString& path)
+{
+    const QFileInfo info(QDir::fromNativeSeparators(path));
+    const QString name = info.fileName();
+    static const QRegularExpression streamName(QStringLiteral("^[0-9]+-stream-[^/]+$"));
+    if (streamName.match(name).hasMatch()) {
+        const QString parent = QFileInfo(info.path()).fileName();
+        if (isInstanceName(parent))
+            return true;
+    }
+    // Спул stdin до F-7: <temp>/DendroLog-stdin-<pid>.log.
+    static const QRegularExpression legacyName(QStringLiteral("^DendroLog-stdin-[0-9]+\\.log$"));
+    if (!legacyName.match(name).hasMatch())
+        return false;
+#ifdef Q_OS_WIN
+    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    return QDir::cleanPath(info.absolutePath())
+               .compare(QDir::cleanPath(QDir::temp().absolutePath()), cs) == 0;
+}
+
+std::shared_ptr<SpoolItem> SpoolDir::createItem(const QString& nameHint, bool directory, bool stream)
 {
     const int n = m_counter.fetch_add(1, std::memory_order_relaxed) + 1;
-    const QString path = QDir(m_path).filePath(QStringLiteral("%1-%2").arg(n).arg(sanitizedName(nameHint)));
+    QString name = sanitizedName(nameHint);
+    // `<n>-stream-…` — только у файлов потока (isStreamFile): копия архива
+    // `stream-api.log.gz` иначе сошла бы за спул stdin.
+    if (!stream && name.startsWith(QLatin1String("stream-"), Qt::CaseInsensitive))
+        name.prepend(QStringLiteral("f-"));
+    const QString path = QDir(m_path).filePath(QStringLiteral("%1-%2").arg(n).arg(name));
     if (directory && !QDir().mkpath(path))
         return nullptr;
     return std::shared_ptr<SpoolItem>(new SpoolItem(shared_from_this(), path, directory));

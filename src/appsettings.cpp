@@ -134,6 +134,10 @@ void AppSettings::load()
     m_quickSearchHistory   = s.value(QStringLiteral("history")).toStringList();
     s.endGroup();
 
+    s.beginGroup(QStringLiteral("Commands"));
+    m_recentCommands = s.value(QStringLiteral("recent")).toStringList();
+    s.endGroup();
+
     // First-run font default: pick the best available monospaced font using the
     // same priority order as the old LogListView constructor used.
     if (m_fontFamily.isEmpty()) {
@@ -185,6 +189,7 @@ void AppSettings::save()
     s.endGroup();
 
     writeQuickSearch(s);
+    writeRecentCommands(s);
 
     // Save theme colors.
     AppTheme::instance().save(s);
@@ -277,6 +282,19 @@ void AppSettings::writeQuickSearch(QSettings& s) const
     s.setValue(QStringLiteral("regex"),     m_quickSearchRegex);
     s.setValue(QStringLiteral("history"),   m_quickSearchHistory);
     s.endGroup();
+}
+
+void AppSettings::writeRecentCommands(QSettings& s) const
+{
+    s.beginGroup(QStringLiteral("Commands"));
+    s.setValue(QStringLiteral("recent"), m_recentCommands);
+    s.endGroup();
+}
+
+void AppSettings::saveRecentCommands()
+{
+    QSettings s(iniFilePath(), QSettings::IniFormat);
+    writeRecentCommands(s);
 }
 
 void AppSettings::saveQuickSearch()

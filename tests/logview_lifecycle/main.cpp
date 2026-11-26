@@ -39,7 +39,7 @@
 #include "filememorystore.h"
 #include "logviewwidget.h"
 #include "sessioncontroller.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 #include "testdocuments.h"
 #include "keyedfixtures.h"
 #include "viewidle.h"
@@ -2074,7 +2074,7 @@ static void checkReopenClosedTab(const QDir& dir, const QString& name, const QSt
         LogViewWidget* blank = r.make();
         CHECK(blank->isBlank(), prefix + "new tab is blank");
         CHECK(!r.close(0), prefix + "empty tab is not remembered");
-        const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+        const QString spool = testdocs::streamSpoolPath(dir);
         CHECK(testdocs::writeFile(QDir(QFileInfo(spool).absolutePath()), QFileInfo(spool).fileName(),
                                   memoryLog("piped", 20)) == spool,
               prefix + "spool written");

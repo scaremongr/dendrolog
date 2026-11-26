@@ -24,6 +24,9 @@
 #include "apptheme.h"
 #include "updatechecker.h"
 #include "stdinspooler.h"
+#include "commandspooler.h"
+#include "commandoutputdialog.h"
+#include "spooldir.h"
 #include "openrouting.h"
 #include "archiveregistry.h"
 #include "tararchive.h"
@@ -319,6 +322,12 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     connect(ui->actionScanDirectory, &QAction::triggered, this, &MainWindow::onScanDirectoryClicked);
+    // Вывод команды как растущий лог (F-7): только по явному действию.
+    QAction* openCommandAction = new QAction(tr("Open Co&mmand Output..."), this);
+    openCommandAction->setObjectName(QStringLiteral("actionOpenCommandOutput"));
+    openCommandAction->setToolTip(tr("Run a command and show its output as a growing log"));
+    connect(openCommandAction, &QAction::triggered, this, &MainWindow::openCommandOutputDialog);
+    ui->menuFile->insertAction(ui->menuRecentFiles->menuAction(), openCommandAction);
     connect(ui->actionCloseTab, &QAction::triggered, this, [this]() {
         if (ui->tabWidget->count() > 0)
             closeTab(ui->tabWidget->currentIndex());
@@ -1974,6 +1983,7 @@ LogViewWidget* MainWindow::createLogViewWidget()
     // Память файла (R-4): вкладка читает и пишет её сама; окну — сообщения
     // и флаг авто-обновления, который могла поставить память.
     view->setFileMemory(m_fileMemory.get());
+    connect(view, &LogViewWidget::commandStateChanged, this, [this, view]() { updateTabLabel(view); });
     connect(view, &LogViewWidget::statusMessage, this,
             [this](const QString& text) { statusBar()->showMessage(text, 10000); });
     // Распаковка сжатого файла (F-2): строка состояния и кнопка отмены — по
@@ -2937,14 +2947,24 @@ void MainWindow::updateTabLabel(LogViewWidget* view)
     const int n = files.size();
     QString text;
     QString tip;
-    const bool isStdinSpool = m_stdinSpooler && n == 1 && files.first()
-        && LogViewWidget::samePath(files.first()->filePath,
-                                   LogViewWidget::normalizedPath(m_stdinSpooler->spoolFilePath()));
-    if (isStdinSpool) {
-        // Файл спула — техническая деталь: вкладка остаётся «stdin».
-        text = tr("stdin");
-        tip  = tr("Standard input (spooled to %1)")
-                   .arg(QDir::toNativeSeparators(files.first()->filePath));
+    const bool isStream = n == 1 && files.first()
+        && files.first()->source().kind == LogSource::Kind::Stream;
+    if (isStream) {
+        // Файл спула — техническая деталь: вкладка — «stdin» или команда (F-7).
+        const LogFilePtr& lf = files.first();
+        text = lf->shortName();
+        const QList<CommandSpooler*> commands = view->commands();
+        if (commands.isEmpty()) {
+            tip = tr("Standard input (spooled to %1)").arg(QDir::toNativeSeparators(lf->filePath));
+        } else {
+            const CommandSpooler* cmd = commands.first();
+            tip = tr("Command: %1").arg(cmd->spec().commandLine) + QLatin1Char('\n')
+                + cmd->statusText() + QLatin1Char('\n')
+                + tr("Output spooled to %1").arg(QDir::toNativeSeparators(lf->filePath));
+            // Процесс вышел — видно и по имени вкладки.
+            if (!cmd->isRunning())
+                text += QStringLiteral(" \u25A0");
+        }
     } else if (n == 1 && files.first()) {
         text = files.first()->shortName();
         tip  = files.first()->nativeDisplayPath();
@@ -2986,6 +3006,8 @@ void MainWindow::mergeTabs(int fromIndex, int toIndex)
 
     // Файлы — в приёмник штатным addLogFile (бэкенд, дубли), с их кодировкой.
     dst->addFilesFrom(*src);
+    // Процессы команд (F-7) переходят с файлами — не останавливаются.
+    dst->adoptCommandsFrom(*src);
 
     updateTabLabel(dst);
 
@@ -3005,8 +3027,10 @@ void MainWindow::mergeAllTabsInto(int keepIndex)
         return;
 
     for (int i = 0; i < ui->tabWidget->count(); ++i)
-        if (auto* v = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)); v && i != keepIndex)
+        if (auto* v = qobject_cast<LogViewWidget*>(ui->tabWidget->widget(i)); v && i != keepIndex) {
             dst->addFilesFrom(*v);
+            dst->adoptCommandsFrom(*v);
+        }
 
     updateTabLabel(dst);
 
@@ -4372,20 +4396,20 @@ void MainWindow::openStdinStream(const FileEncoding& initial)
     if (m_stdinSpooler)
         return;
     m_stdinSpooler = new StdinSpooler(this);
-    if (!m_stdinSpooler->startSpooling()) {
+    QString error;
+    if (!m_stdinSpooler->startSpooling(AppSettings::spoolRoot(), &error)) {
         QMessageBox::warning(this, tr("stdin"),
-            tr("Could not create a spool file for standard input."));
+            tr("Could not create a spool file for standard input: %1").arg(error));
         m_stdinSpooler->deleteLater();
         m_stdinSpooler = nullptr;
         return;
     }
 
-    const QString path = m_stdinSpooler->spoolFilePath();
-    openRecentFile(path, initial);
-
-    auto* lv = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget());
-    if (!lv)
-        return;
+    // Спул — в общем каталоге временных файлов (F-7): поток, а не файл —
+    // ни недавних, ни памяти файла, ни сессий.
+    LogViewWidget* lv = tabForOpening();
+    lv->addStream(m_stdinSpooler->spool(), tr("stdin"), QStringLiteral("stdin"), initial);
+    updateTabLabel(lv);
 
     // Живой поток: авто-догрузка + автопрокрутка к новым строкам.
     setTabAutoReload(lv, true);
@@ -4393,9 +4417,52 @@ void MainWindow::openStdinStream(const FileEncoding& initial)
         lv->view()->setFollowTail(true);
 
     // Пинки от спулера — сверх обычного поллинга, чтобы хвост подтягивался
-    // живо (спулер сигналит не чаще ~3 раз в секунду).
-    connect(m_stdinSpooler, &StdinSpooler::bytesAppended, lv,
-            [lv](qint64) { lv->reloadChangedFiles(); });
+    // живо (спулер сигналит не чаще ~3 раз в секунду). Вкладку ищем по
+    // файлу: после объединения вкладок спул живёт в другой.
+    const QString spoolPath = LogViewWidget::normalizedPath(m_stdinSpooler->spoolFilePath());
+    connect(m_stdinSpooler, &StdinSpooler::bytesAppended, this, [this, spoolPath](qint64) {
+        for (LogViewWidget* view : logViews()) {
+            const auto files = view->loadedFiles();
+            if (std::any_of(files.cbegin(), files.cend(), [&spoolPath](const LogFilePtr& f) {
+                    return f && LogViewWidget::samePath(f->filePath, spoolPath);
+                }))
+                view->onStreamGrew();
+        }
+    });
+}
+
+void MainWindow::openCommandOutputDialog()
+{
+    const QList<CommandSpec> recent = CommandHistory::fromStrings(AppSettings::instance().recentCommands());
+    const QString dir = !recent.isEmpty() && !recent.first().workingDirectory.isEmpty()
+        ? recent.first().workingDirectory
+        : (m_lastOpenDir.isEmpty() ? QDir::homePath() : m_lastOpenDir);
+    CommandOutputDialog dialog(recent, dir, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const CommandSpec spec = dialog.spec();
+    AppSettings::instance().setRecentCommands(
+        CommandHistory::toStrings(CommandHistory::pushed(recent, spec)));
+    AppSettings::instance().saveRecentCommands();
+    openCommand(spec);
+}
+
+LogViewWidget* MainWindow::openCommand(const CommandSpec& spec)
+{
+    QString error;
+    const std::shared_ptr<SpoolDir> dir = SpoolDir::shared(AppSettings::spoolRoot(), &error);
+    if (!dir) {
+        QMessageBox::warning(this, tr("Open Command Output"),
+            tr("No place for the output file of the command: %1").arg(error));
+        return nullptr;
+    }
+    auto* spooler = new CommandSpooler(spec, dir->createStreamFile(spec.shortLabel()));
+    // Своя вкладка (или пустая текущая): у команды свой процесс и плашка.
+    LogViewWidget* view = tabForOpening();
+    view->addCommandOutput(spooler);
+    updateTabLabel(view);
+    syncReloadButton();
+    return view;
 }
 
 QList<LogViewWidget*> MainWindow::logViews() const

@@ -20,6 +20,8 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "commandspooler.h"
+#include "commandstatusbar.h"
 #include "bookmarkstore.h"
 #include "compactstyle.h"
 #include "directoryscanner.h"
@@ -70,11 +72,15 @@
 #include <QtTest/QTest>
 #include <QToolBar>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QThread>
 #include <QDialogButtonBox>
 #include <QTextBrowser>
 #include "timelinehistogramwidget.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
@@ -2265,6 +2271,93 @@ void scenarioUpgradeFrom050(const QDir& root)
 }
 
 // ---------------------------------------------------------------------------
+// Вывод команды (F-7): File → Open Command Output…, диалог, вкладка-поток,
+// код возврата на плашке и в имени вкладки, недавние команды, закрытие
+// вкладки завершает процесс и убирает спул. Команда — сам этот exe в режиме
+// генератора (`--emit-lines`).
+QString selfCommand(const QString& args)
+{
+    return QLatin1Char('"') + QDir::toNativeSeparators(QCoreApplication::applicationFilePath())
+        + QStringLiteral("\" ") + args;
+}
+
+void runCommandDialog(MainWindow& win, const QString& line, bool* shown)
+{
+    g_driver->expect([line, shown](QWidget* w) {
+        *shown = w->objectName() == QLatin1String("commandOutputDialog");
+        auto* combo = w->findChild<QComboBox*>(QStringLiteral("commandLineCombo"));
+        auto* buttons = w->findChild<QDialogButtonBox*>();
+        if (!*shown || !combo || !buttons) {
+            DialogDriver::close(w);
+            return;
+        }
+        combo->setEditText(line);
+        buttons->button(QDialogButtonBox::Ok)->click();
+    });
+    QAction* action = win.findChild<QAction*>(QStringLiteral("actionOpenCommandOutput"));
+    check(action && menuActions(win).contains(action), QStringLiteral("File menu has Open Command Output"));
+    if (action)
+        action->trigger();
+}
+
+void scenarioCommand(MainWindow& win)
+{
+    section(QStringLiteral("command output"));
+    const int before = tabs(win)->count();
+    bool shown = false;
+    runCommandDialog(win, selfCommand(QStringLiteral("--emit-lines 40")), &shown);
+    check(waitFor([&]() { return shown && tabs(win)->count() == before + 1; }),
+          QStringLiteral("Run in the dialog opens a command tab"));
+    LogViewWidget* tab = tabAt(win, tabs(win)->count() - 1);
+    CommandSpooler* cmd = tab ? tab->commands().value(0) : nullptr;
+    check(cmd != nullptr, QStringLiteral("the tab owns the command"));
+    if (!tab || !cmd)
+        return;
+    check(tab->autoReload() && tab->view()->followTail(), QStringLiteral("command tab: auto-reload and follow-tail"));
+    check(waitFor([&]() { return !cmd->isRunning() && tab->model()->rowCount() == 40; }),
+          QStringLiteral("command lines arrive (%1 rows)").arg(tab->model()->rowCount()));
+    const int index = tabs(win)->indexOf(tab);
+    check(waitFor([&]() { return tabs(win)->tabText(index).endsWith(QStringLiteral("\u25A0")); }, 5000),
+          QStringLiteral("finished command is marked in the tab name: %1").arg(tabs(win)->tabText(index)));
+    check(tabs(win)->tabToolTip(index).contains(QStringLiteral("exited with code 0")),
+          QStringLiteral("tab tooltip names the exit code"));
+    auto* bar = tab->findChild<CommandStatusBar*>(QStringLiteral("commandStatusBar"));
+    check(bar && bar->text().contains(QStringLiteral("exited with code 0")), QStringLiteral("bar names the exit code"));
+    check(!inRecentFiles(win, cmd->spoolFilePath()), QStringLiteral("spool is not a recent file"));
+    const QList<CommandSpec> recent = CommandHistory::fromStrings(AppSettings::instance().recentCommands());
+    check(!recent.isEmpty() && recent.first().commandLine == selfCommand(QStringLiteral("--emit-lines 40")),
+          QStringLiteral("command is in the recent commands"));
+
+    // Живая команда: закрытие вкладки завершает процесс и убирает спул.
+    shown = false;
+    runCommandDialog(win, selfCommand(QStringLiteral("--emit-lines -1")), &shown);
+    check(waitFor([&]() { return shown && tabs(win)->count() == before + 2; }),
+          QStringLiteral("second command opens its own tab"));
+    LogViewWidget* live = tabAt(win, tabs(win)->count() - 1);
+    CommandSpooler* liveCmd = live ? live->commands().value(0) : nullptr;
+    check(liveCmd && waitFor([&]() { return liveCmd->processId() > 0 && live->model()->rowCount() > 5; }),
+          QStringLiteral("live command streams"));
+    if (!liveCmd)
+        return;
+    QPointer<CommandSpooler> guard(liveCmd);
+    const QString spool = liveCmd->spoolFilePath();
+    tabs(win)->setCurrentIndex(tabs(win)->count() - 1);
+    command(win, QStringLiteral("closeTab"))->trigger();
+    check(waitFor([&]() { return guard.isNull(); }, 15000), QStringLiteral("closing the tab stops the process"));
+    check(waitFor([&]() { return !QFileInfo::exists(spool); }, 10000), QStringLiteral("spool removed with the tab"));
+
+    const QString finishedSpool = cmd->spoolFilePath();
+    tabs(win)->setCurrentIndex(tabs(win)->indexOf(tab));
+    command(win, QStringLiteral("closeTab"))->trigger();
+    // Закрытие из сценария идёт вне цикла событий: deleteLater спулера
+    // доставляется явно (в программе — сам цикл).
+    check(waitFor([&]() {
+              QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+              return tabs(win)->count() == before && !QFileInfo::exists(finishedSpool);
+          }, 10000),
+          QStringLiteral("finished command tab closes with its spool"));
+}
+
 int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
 {
     const QString backend = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
@@ -2300,6 +2393,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioOpen(win, fx, indexed, instanceKey);
         scenarioOpenMore(win, fx);
         scenarioCompressed(win, fx);
+        scenarioCommand(win);
         scenarioZip(win, fx);
         section(QStringLiteral("shortcuts: with tabs"));
         checkShortcutAmbiguity(win, QStringLiteral("with tabs"));
@@ -2502,6 +2596,17 @@ void scenarioSeparateWindowFirst(const QDir& root, const QString& instanceKey)
 
 int main(int argc, char** argv)
 {
+    // Генератор строк для сценария команды (F-7): N строк, N < 0 — без конца.
+    if (argc > 2 && std::strcmp(argv[1], "--emit-lines") == 0) {
+        const int n = std::atoi(argv[2]);
+        for (int i = 1; n < 0 || i <= n; ++i) {
+            std::printf("2026-11-26 10:00:%02d.%03d INFO smoke command line %d\n", (i / 1000) % 60, i % 1000, i);
+            std::fflush(stdout);
+            if (n < 0)
+                QThread::msleep(20);
+        }
+        return 0;
+    }
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);

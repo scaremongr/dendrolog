@@ -84,6 +84,18 @@ inline QDateTime fixtureBaseTime()
 }
 
 // Пустая строка при ошибке — тест проверяет и сообщает сам.
+// Путь спула потока (stdin, вывод команды — F-7) внутри dir: так его называет
+// SpoolDir::createStreamFile (`<pid>-<16 hex>/<n>-stream-<имя>.log`), и
+// SpoolDir::isStreamFile узнаёт его без настоящего каталога экземпляра.
+// Каталог создаётся, файл — нет.
+inline QString streamSpoolPath(const QDir& dir, const QString& name = QStringLiteral("stdin"))
+{
+    const QString instance = QStringLiteral("%1-%2").arg(QCoreApplication::applicationPid())
+                                 .arg(quint64(0xF7), 16, 16, QLatin1Char('0'));
+    dir.mkpath(instance);
+    return QDir(dir.filePath(instance)).absoluteFilePath(QStringLiteral("1-stream-%1.log").arg(name));
+}
+
 inline QString writeFile(const QDir& dir, const QString& name, const QByteArray& bytes)
 {
     const QString path = dir.filePath(name);

@@ -23,7 +23,7 @@
 #include "directoryscannerpanel.h"
 #include "openrouting.h"
 #include "singleinstance.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 
 #include <QApplication>
 #include <QDir>
@@ -198,17 +198,25 @@ static void testFolderStartsScan(const QTemporaryDir& tmp)
 static void testRecentFiles(const QTemporaryDir& tmp)
 {
     const QString root = QDir(tmp.path()).absolutePath();
-    const QString spool = StdinSpooler::spoolFilePathFor(4242);
+    const QString spool = root + "/4242-00000000000000f7/3-stream-stdin.log";
+    const QString legacySpool = QDir::temp().filePath("DendroLog-stdin-4242.log");
     const QString a = root + "/a.log";
     const QString b = root + "/b.log";
 
-    CHECK(StdinSpooler::isSpoolFilePath(spool), "spool path is recognised");
-    CHECK(StdinSpooler::isSpoolFilePath(QDir::toNativeSeparators(spool)), "spool path with native separators is recognised");
-    CHECK(!StdinSpooler::isSpoolFilePath(a), "ordinary log is not a spool");
-    CHECK(!StdinSpooler::isSpoolFilePath(root + "/DendroLog-stdin-4242.log"),
-          "a file of the same name outside the temp folder is the user's own file");
-    CHECK(!StdinSpooler::isSpoolFilePath(QDir::temp().filePath("DendroLog-stdin-x.log")),
-          "name without a pid is not a spool");
+    CHECK(SpoolDir::isStreamFile(spool), "spool path is recognised");
+    CHECK(SpoolDir::isStreamFile(QDir::toNativeSeparators(spool)), "spool path with native separators is recognised");
+    CHECK(SpoolDir::isStreamFile(root + "/4242-00000000000000f7/9-stream-kubectl.log"),
+          "command output spool is recognised (F-7)");
+    CHECK(SpoolDir::isStreamFile(legacySpool), "stdin spool of earlier versions is recognised");
+    CHECK(!SpoolDir::isStreamFile(a), "ordinary log is not a spool");
+    CHECK(!SpoolDir::isStreamFile(root + "/3-stream-stdin.log"),
+          "a file of the same name outside an instance folder is the user's own file");
+    CHECK(!SpoolDir::isStreamFile(root + "/4242-00000000000000f7/3-app.log"),
+          "an unpacked copy is not a stream");
+    CHECK(!SpoolDir::isStreamFile(root + "/DendroLog-stdin-4242.log"),
+          "a file of the legacy name outside the temp folder is the user's own file");
+    CHECK(!SpoolDir::isStreamFile(QDir::temp().filePath("DendroLog-stdin-x.log")),
+          "legacy name without a pid is not a spool");
 
     RecentFiles recent;
     CHECK(recent.add(a), "ordinary file is added");
@@ -227,7 +235,7 @@ static void testRecentFiles(const QTemporaryDir& tmp)
     CHECK(recent.paths().first() == root + "/f14.log", "cap drops the oldest");
 
     // ini прежних версий: мёртвая запись спула вычищается при загрузке.
-    recent.setPaths({a, spool, b, a});
+    recent.setPaths({a, spool, b, legacySpool, a});
     CHECK(recent.paths() == QStringList({a, b}), "loading drops spool entries and duplicates");
 
     CHECK(recent.remove(a) && !recent.remove(a), "remove reports whether anything changed");

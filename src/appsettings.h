@@ -216,6 +216,14 @@ public:
     void setQuickSearchHistory(const QStringList& entries);
     void saveQuickSearch();
 
+    // ---- Недавние команды (F-7, File → Open Command Output…) --------------- //
+    // [Commands] recent: JSON на команду (CommandHistory, commandspooler.h),
+    // свежая первой. Как и история поиска — состояние, а не предпочтение:
+    // без settingsChanged; в ini — save() или saveRecentCommands().
+    QStringList recentCommands() const { return m_recentCommands; }
+    void setRecentCommands(const QStringList& entries) { m_recentCommands = entries; }
+    void saveRecentCommands();
+
 signals:
     // Emitted after any call to a set*() method, so consumers (e.g. the
     // directory scanner) can update themselves without each class needing
@@ -226,6 +234,8 @@ signals:
 
 private:
     void writeQuickSearch(QSettings& s) const;
+    void writeRecentCommands(QSettings& s) const;
+    QStringList m_recentCommands;
 
     AppSettings()  = default;
     ~AppSettings() = default;

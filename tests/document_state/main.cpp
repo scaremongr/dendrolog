@@ -75,7 +75,7 @@
 #include "sessionfile.h"
 #include "sessionreportdialog.h"
 #include "logviewwidget.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 #include "welcomewidget.h"
 #include "openrouting.h"
 #include "testdocuments.h"
@@ -838,7 +838,7 @@ static void checkHiddenFiles(const QDir& dir, const QString& name, const QString
 static void checkStdin(const QDir& dir, const QString& schema)
 {
     g_context = QStringLiteral("спул stdin");
-    const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+    const QString spool = testdocs::streamSpoolPath(dir);
     CHECK(writeBytes(spool, logBytes(50, 0, "piped")), QStringLiteral("спул создан"));
     const QString path = writeFile(dir, "stdin-neighbour.log", logBytes(50, 2, "file"));
     auto tab = makeTab(schema);
@@ -2209,7 +2209,7 @@ static void checkSessionProblems(const QDir& dir, const QString& schema)
 static void checkSessionStdin(const QDir& dir, const QString& schema)
 {
     g_context = QStringLiteral("сессия: stdin");
-    const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+    const QString spool = testdocs::streamSpoolPath(dir);
     CHECK(writeBytes(spool, logBytes(40, 0, "piped")), QStringLiteral("спул создан"));
     const QString path = writeFile(dir, QStringLiteral("session-stdin-neighbour.log"), logBytes(40, 2, "file"));
     auto onlyStdin = makeTab(schema);
@@ -2331,7 +2331,7 @@ static void checkLastSession(const QDir& dir, const QString& schema)
         CHECK(w.controller.canRestoreLastSession(), QStringLiteral("есть что восстанавливать"));
         CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptEmpty && readBytes(last) == saved,
               QStringLiteral("пустое окно прошлую сессию не затирает"));
-        const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+        const QString spool = testdocs::streamSpoolPath(dir);
         CHECK(writeBytes(spool, logBytes(20, 0, "piped")), QStringLiteral("спул"));
         w.openFile(spool);
         CHECK(w.controller.saveLastSession() == SessionController::SaveOutcome::KeptEmpty && readBytes(last) == saved,

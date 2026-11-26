@@ -26,7 +26,7 @@
 #include "filechangedetector.h"
 #include "recordid.h"
 #include "recordlocator.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 #include "testdocuments.h"
 
 #include <QCoreApplication>
@@ -475,7 +475,7 @@ static void testFileChangeDetector(const QDir& dir)
 
 static void testEphemeral(const QDir& dir)
 {
-    const QString spool = StdinSpooler::spoolFilePathFor(QCoreApplication::applicationPid());
+    const QString spool = testdocs::streamSpoolPath(dir);
     CHECK(rewrite(spool, "streamed line\n"), "спул stdin создан");
     const std::optional<SourceIdentity> id = SourceIdentity::capture(spool);
     CHECK(id && id->ephemeral && id->isValid(), "спул stdin — Ephemeral");
@@ -489,9 +489,9 @@ static void testEphemeral(const QDir& dir)
     QFile::remove(spool);
     if (id)
         expectState(*id, State::Ephemeral, "спул удалён — всё равно Ephemeral");
-    // Файл с именем спула вне временного каталога — обычный источник
-    // (StdinSpooler::isSpoolFilePath смотрит и на каталог).
-    const QString lookalike = writeFile(dir, QStringLiteral("DendroLog-stdin-1.log"), "x\n");
+    // Файл с именем спула вне каталога экземпляра — обычный источник
+    // (SpoolDir::isStreamFile смотрит и на каталог).
+    const QString lookalike = writeFile(dir, QStringLiteral("1-stream-stdin.log"), "x\n");
     const std::optional<SourceIdentity> l = SourceIdentity::capture(lookalike);
     CHECK(l && !l->ephemeral, "файл с именем спула вне временного каталога — обычный");
     if (l)

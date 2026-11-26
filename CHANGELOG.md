@@ -25,6 +25,22 @@ All notable changes to DendroLog are documented here. The format follows
   stay at format version 3 (older versions read such a schema as a single
   `Message` column and keep its key part when saving it). For now the keys
   are applied when a file is read: pick the schema before opening the file.
+- **Command output as a growing log.** **File → Open Command Output…** runs
+  a command (`kubectl logs -f deploy/api`, `journalctl -f`, `adb logcat`) and
+  opens its output — stdout and stderr together, as in a terminal — in a tab
+  that follows the tail. The dialog takes the command line, the working
+  folder and keeps the recent commands. By default no shell is involved: one
+  program is started, arguments are split at spaces, double quotes group
+  them; **Run through the shell** (`/bin/sh -c`, `cmd.exe /c`) is needed for
+  pipes and redirection. A bar above the log shows the command and its state
+  (running with its PID, the exit code, or why it could not start) with
+  **Stop** and **Restart** (the new run is appended below); a finished
+  command is marked `■` in the tab name. The lines stay after the process
+  exits. Closing the tab stops the process — politely, then forcibly after a
+  few seconds, children of a shell pipeline included — and removes its
+  temporary output file. A command never runs by itself: a command tab is
+  not saved in sessions, the previous session, the file memory or the
+  closed-tab list.
 - **Compressed logs.** A `.gz` file opens in a tab like any log — from the
   Open dialog, a drop, the command line, Recent Files or the Directory
   Scanner; gzip is recognised
@@ -115,6 +131,10 @@ All notable changes to DendroLog are documented here. The format follows
   archive shows “Parse Failed”.
 
 ### Changed
+- The spool of standard input (`program | DendroLog -`) lives in the same
+  temporary folder as unpacked archives, so files left behind by a crash are
+  removed at the next start; merging a stdin tab into another tab keeps it
+  live.
 - The file badge no longer sits at the right of every line of a merged tab:
   long file names no longer eat the width, and the text of all files now
   starts and ends on the same vertical. File colours were reworked to read

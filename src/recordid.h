@@ -248,7 +248,7 @@ struct SourceIdentity {
 
     // Снять идентичность файла по его первым size байтам (size < 0 — текущий
     // размер файла). nullopt — файла нет, он не читается или короче size.
-    // Спул stdin (StdinSpooler::isSpoolFilePath) — Ephemeral без чтения.
+    // Спул потока — stdin или вывод команды (SpoolDir::isStreamFile) — Ephemeral без чтения.
     static std::optional<SourceIdentity> capture(const QString& filePath, qint64 size = -1);
 
     // Снять идентичность файла вкладки (R-1 + F-2): содержимое — по пути

@@ -1,10 +1,9 @@
 #include "stdinspooler.h"
 
-#include <QCoreApplication>
-#include <QDir>
+#include "spooldir.h"
+
 #include <QElapsedTimer>
 #include <QFile>
-#include <QFileInfo>
 
 #include <cstdio>
 
@@ -30,47 +29,25 @@ StdinSpooler::~StdinSpooler()
         terminate();
         wait(200);
     }
-    if (!m_path.isEmpty())
-        QFile::remove(m_path);
+    // Файл удалит SpoolItem, когда его отпустит и вкладка.
+    m_spool.reset();
 }
 
-QString StdinSpooler::spoolFilePathFor(qint64 pid)
+bool StdinSpooler::startSpooling(const QString& spoolRoot, QString* errorString)
 {
-    return QDir::temp().filePath(QStringLiteral("DendroLog-stdin-%1.log").arg(pid));
-}
-
-bool StdinSpooler::isSpoolFilePath(const QString& path)
-{
-    const QFileInfo info(QDir::fromNativeSeparators(path));
-    const QString name = info.fileName();
-    const QLatin1String prefix("DendroLog-stdin-");
-    const QLatin1String suffix(".log");
-    if (!name.startsWith(prefix) || !name.endsWith(suffix))
+    const std::shared_ptr<SpoolDir> dir = SpoolDir::shared(spoolRoot, errorString);
+    if (!dir)
         return false;
-    const QStringView pid = QStringView(name).mid(prefix.size(),
-                                                  name.size() - prefix.size() - suffix.size());
-    if (pid.isEmpty())
+    std::shared_ptr<SpoolItem> item = dir->createStreamFile(QStringLiteral("stdin"));
+    QFile f(item->path());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errorString)
+            *errorString = f.errorString();
         return false;
-    for (const QChar ch : pid)
-        if (ch < QLatin1Char('0') || ch > QLatin1Char('9'))
-            return false;
-#ifdef Q_OS_WIN
-    const Qt::CaseSensitivity cs = Qt::CaseInsensitive;
-#else
-    const Qt::CaseSensitivity cs = Qt::CaseSensitive;
-#endif
-    return QDir::cleanPath(info.absolutePath())
-               .compare(QDir::cleanPath(QDir::temp().absolutePath()), cs) == 0;
-}
-
-bool StdinSpooler::startSpooling()
-{
-    const QString path = spoolFilePathFor(QCoreApplication::applicationPid());
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return false;
+    }
     f.close();
-    m_path = path;
+    m_spool = std::move(item);
+    m_path = m_spool->path();
     start();
     return true;
 }

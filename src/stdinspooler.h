@@ -4,6 +4,9 @@
 #include <QString>
 #include <QThread>
 #include <atomic>
+#include <memory>
+
+class SpoolItem;
 
 // ============================================================================
 // StdinSpooler — приём потокового ввода: `program | DendroLog -`.
@@ -15,6 +18,11 @@
 // Поток блокируется в чтении stdin; на выходе приложения при живом пайпе
 // прервать fread нечем — requestStop() + короткий wait, затем terminate()
 // (поток пишет только в свой буфер/файл — на завершении процесса безопасно).
+//
+// Файл спула (F-7) — SpoolItem в общем каталоге временных файлов (SpoolDir,
+// `<root>/<pid>-<hex>/<n>-stream-stdin.log`): уборка сирот после падения
+// убирает и его. Файл держат спулер и LogFile вкладки; удаляется, когда
+// отпущены оба.
 // ============================================================================
 class StdinSpooler : public QThread {
     Q_OBJECT
@@ -23,17 +31,13 @@ public:
     explicit StdinSpooler(QObject* parent = nullptr);
     ~StdinSpooler() override;
 
-    // Создаёт файл спула и запускает поток чтения. false — файл не создался.
-    bool startSpooling();
-    // Путь файла спула (валиден после успешного startSpooling()).
+    // Создаёт файл спула в каталоге экземпляра под spoolRoot
+    // (SpoolDir::shared) и запускает поток чтения. false — файл не создался.
+    bool startSpooling(const QString& spoolRoot, QString* errorString = nullptr);
+    // Файл спула (валиден после успешного startSpooling()).
     QString spoolFilePath() const { return m_path; }
+    std::shared_ptr<SpoolItem> spool() const { return m_spool; }
     void requestStop() { m_stop.store(true); }
-
-    // Где лежит спул процесса pid: <temp>/DendroLog-stdin-<pid>.log.
-    static QString spoolFilePathFor(qint64 pid);
-    // Путь — спул stdin (этого или другого экземпляра)? Спул — временный
-    // файл: его не запоминают в недавних (RecentFiles).
-    static bool isSpoolFilePath(const QString& path);
 
 signals:
     // В файл дописаны данные (не чаще ~3 раз в секунду). Приёмник дёргает
@@ -47,6 +51,7 @@ protected:
 
 private:
     QString m_path;
+    std::shared_ptr<SpoolItem> m_spool;
     std::atomic_bool m_stop{false};
 };
 

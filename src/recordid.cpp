@@ -2,7 +2,7 @@
 #include "tararchive.h"
 
 #include "gzipdevice.h"
-#include "stdinspooler.h"
+#include "spooldir.h"
 
 #include <QCryptographicHash>
 #include <QFile>
@@ -332,7 +332,7 @@ std::optional<SourceIdentity> SourceIdentity::capture(const QString& filePath, q
         return std::nullopt;
     SourceIdentity id;
     id.path = QFileInfo(filePath).absoluteFilePath();
-    if (StdinSpooler::isSpoolFilePath(filePath)) {
+    if (SpoolDir::isStreamFile(filePath)) {
         id.ephemeral = true;
         return id;
     }

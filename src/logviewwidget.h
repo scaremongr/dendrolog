@@ -19,6 +19,8 @@
 #include "documentstate.h"
 
 class QuickSearch;
+class CommandSpooler;
+class SpoolItem;
 class FileMemoryStore;
 class SourceUnpacker;
 class SpoolDir;
@@ -83,6 +85,32 @@ public:
     void cancelUnpacking();
     // Копия сжатого файла готова (распакована целиком).
     bool isUnpacked(const LogFilePtr& logFile) const;
+
+    // ---- Потоки: stdin и вывод команды (F-7) --------------------------------------
+    // Файл спула потока открывается как растущий лог: LogFile с источником
+    // Stream (подпись label — «stdin» или строка команды, имя вкладки name),
+    // владеет spool (удаляется, когда файл отпустят все). Временный источник
+    // (SpoolDir::isStreamFile → Ephemeral): ни недавних, ни памяти файла, ни
+    // сессий. Авто-обновление и follow-tail включает вызывающий (окно).
+    void addStream(const std::shared_ptr<SpoolItem>& spool, const QString& name,
+                   const QString& label, const FileEncoding& initial = FileEncoding());
+    // Вкладка берёт спулер себе (родитель — вкладка): запускает его, если он
+    // ещё не запущен, открывает его спул потоком, включает авто-обновление и
+    // follow-tail, ставит над логом плашку команды (состояние, код возврата,
+    // Stop / Restart). Строки после выхода процесса остаются. Закрытие вкладки
+    // останавливает процесс (CommandSpooler::release) — вежливо, затем
+    // принудительно; спул удаляется, когда процесс вышел.
+    void addCommandOutput(CommandSpooler* spooler, const FileEncoding& initial = FileEncoding());
+    QList<CommandSpooler*> commands() const;
+    // В файл потока дописаны байты (пинок спулера; stdin — от окна): дочитать
+    // хвост сейчас, а если загрузка в полёте — сразу после неё.
+    void onStreamGrew();
+    // Перезапуск после выхода: вывод дописывается в тот же файл, вид — к хвосту.
+    bool restartCommand(CommandSpooler* spooler);
+    // Объединение вкладок: спулеры other (с плашками) переходят сюда — процесс
+    // не останавливается вместе с закрытой вкладкой-источником. Звать после
+    // addFilesFrom(other).
+    void adoptCommandsFrom(LogViewWidget& other);
 
     // ---- Состояние вкладки вне вкладки (R-4, documentstate.h) ------------------
     // Снимок: файлы (идентичность по концу прочитанного, ручной выбор
@@ -315,6 +343,8 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void fileParsingFinished(const LogFilePtr& logFile, int totalEntries);
     void fileParsingFailed(const LogFilePtr& logFile);
 
+    // Состояние процесса команды (F-7) изменилось: имя и подсказка вкладки.
+    void commandStateChanged();
     // Emitted when an incremental reload finishes (new entry count passed).
     void reloadFinished(int newEntriesCount);
 
@@ -657,6 +687,13 @@ private:
     bool m_memoryApplying = false; // applyState памяти, перенос вкладки — без памяти
     bool m_applyingState = false;  // файлы applyState: из памяти — только закладки
     bool m_fromState = false;      // вкладка получила снимок (isBlank)
+    // Вывод команд (F-7): спулеры вкладки и их плашки (над остальными).
+    void attachCommand(CommandSpooler* spooler);
+    QList<CommandSpooler*> m_commands;
+    bool m_streamKickPending = false;
+    bool anyLoadInFlight() const;
+    void retryStreamKick();
+    QWidget* m_commandBars = nullptr;
     // Плашка «вернуть фильтры прошлого раза»; закрыта — до закрытия вкладки.
     QFrame* m_filtersOfferBar = nullptr;
     QLabel* m_filtersOfferText = nullptr;

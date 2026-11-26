@@ -67,10 +67,19 @@ public:
     // узнаваемости (`app.log`), недопустимые символы заменяются.
     std::shared_ptr<class SpoolItem> createFile(const QString& nameHint);
     std::shared_ptr<class SpoolItem> createDirectory(const QString& nameHint);
+    // Файл ПОТОКА (F-7): спул stdin или вывода команды — `<n>-stream-<hint>.log`.
+    // Такие файлы узнаёт isStreamFile: источник временный (Ephemeral) — не в
+    // недавние, не в память файла, не в сессии.
+    std::shared_ptr<class SpoolItem> createStreamFile(const QString& nameHint);
+    // Путь — спул потока (этого или другого экземпляра, в любом корне): файл
+    // `<n>-stream-…` в каталоге экземпляра `<pid>-<16 hex>`. Только по имени,
+    // диск не трогает. Узнаёт и спул stdin прежних версий
+    // (`<temp>/DendroLog-stdin-<pid>.log`) — его ещё вычищают из недавних.
+    static bool isStreamFile(const QString& path);
 
 private:
     SpoolDir() = default;
-    std::shared_ptr<SpoolItem> createItem(const QString& nameHint, bool directory);
+    std::shared_ptr<SpoolItem> createItem(const QString& nameHint, bool directory, bool stream = false);
 
     QString m_root;
     QString m_path;

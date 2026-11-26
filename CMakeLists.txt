@@ -106,6 +106,8 @@ set(DENDROLOG_CORE_SOURCES
     src/bytelinereader.h
     src/stdinspooler.h
     src/stdinspooler.cpp
+    src/commandspooler.h
+    src/commandspooler.cpp
     src/logscan.h
     src/logscan.cpp
     src/lineclassifier.h
@@ -165,6 +167,10 @@ set(DENDROLOG_WIDGETS_SOURCES
     src/filelegend.cpp
     src/encodingindicator.h
     src/encodingindicator.cpp
+    src/commandoutputdialog.h
+    src/commandoutputdialog.cpp
+    src/commandstatusbar.h
+    src/commandstatusbar.cpp
     src/scrollbarmarksoverlay.h
     src/scrollbarmarksoverlay.cpp
     src/logviewwidget.h
