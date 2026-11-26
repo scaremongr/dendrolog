@@ -1092,13 +1092,13 @@ LineMatchResult LogPattern::matchLine(const QString& line) const
     return result;
 }
 
-bool LogPattern::scanKeyed(QStringView line, KeyedLine::Hits* hits) const
+bool LogPattern::scanKeyed(QStringView line, KeyedLine::Hits* hits, int neededColumns) const
 {
     if (!isKeyed()) {
         hits->clear();
         return false;
     }
-    return m_keyedLookup.scan(line, hits);
+    return m_keyedLookup.scan(line, hits, neededColumns);
 }
 
 LogEntryFields LogPattern::keyedFields(const KeyedLine::Hits& hits) const

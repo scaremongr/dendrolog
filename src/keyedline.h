@@ -91,8 +91,8 @@ namespace KeyedLine {
 
 enum class ValueKind : quint8 {
     String,   ///< В кавычках; диапазон — без кавычек.
-    Number,   ///< Голый токен, начинается с цифры или «-».
-    Literal,  ///< true / false и прочие голые токены (logfmt: любое голое значение не-число).
+    Number,   ///< Голый токен: JSON — начинается с цифры или «-»; logfmt — весь токен вида [-]цифры[.цифры].
+    Literal,  ///< true / false и прочие голые токены (logfmt: любое голое значение не-число, «2026-11-18T…» тоже).
     Null,     ///< null — поля нет.
     Object,   ///< {…} целиком, текст как есть.
     Array,    ///< […] целиком, текст как есть.
@@ -124,6 +124,7 @@ private:
 
     QStringView m_text;
     qsizetype m_pos = 0;
+    qsizetype m_firstKeyEnd = -1;   ///< logfmt: конец первого ключа, найденный конструктором.
     KeyedDefinition::Format m_format;
     bool m_structured = false;
     bool m_done = false;
@@ -167,7 +168,14 @@ public:
 
     // Пары строки → найденные колонки (hits размером columnCount()).
     // true — строка распознана (см. блок в начале файла).
-    bool scan(QStringView line, Hits* hits) const;
+    //
+    // neededColumns — сколько первых колонок нужно вызывающему (0 и -1 — все).
+    // Разбор строки кончается, когда у каждой из них найден первый
+    // кандидат: классификации на загрузке (LineClassifier::classifyLine без
+    // полей — индексатор) хватает Timestamp и Level, и ключи после них не
+    // читаются. Ответ «распознана» от этого не меняется (найденная колонка
+    // роли — уже «да»), колонки за neededColumns в hits — неполные.
+    bool scan(QStringView line, Hits* hits, int neededColumns = -1) const;
 
 private:
     // Кандидат колонки: ключ дословно либо путь (key — первый сегмент).
@@ -186,8 +194,9 @@ private:
         bool nonAscii = false;
     };
     // settled — счётчик колонок, получивших первого кандидата (rank 0).
+    // Считаются только колонки < neededColumns.
     void consider(QStringView line, QStringView key, const Pair& pair, Hits* hits,
-                  int* settled) const;
+                  int neededColumns, int* settled) const;
 
     KeyedDefinition::Format m_format = KeyedDefinition::Format::JsonObject;
     int m_columnCount = 0;

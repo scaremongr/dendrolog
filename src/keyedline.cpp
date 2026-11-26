@@ -159,6 +159,33 @@ KeyedLine::ValueKind bareKind(QStringView token)
     return KeyedLine::ValueKind::Literal;
 }
 
+// Голое значение logfmt: число — только токен вида [-]цифры[.цифры], той
+// же формы, что читает LineClassifier::epochFromValue. В logfmt голым пишут
+// и текст, начинающийся с цифры: «ts=2026-11-18T10:00:00Z», «status=5xx» —
+// это не числа, иначе timestampFromValue и levelFromValue не прочли бы их
+// как текст (S-17).
+KeyedLine::ValueKind logfmtBareKind(QStringView token)
+{
+    const KeyedLine::ValueKind kind = bareKind(token);
+    if (kind != KeyedLine::ValueKind::Number)
+        return kind;
+    const char16_t* t = token.utf16();
+    const qsizetype n = token.size();
+    qsizetype i = t[0] == u'-' ? 1 : 0;
+    const auto digits = [&]() {
+        const qsizetype from = i;
+        while (i < n && t[i] >= u'0' && t[i] <= u'9')
+            ++i;
+        return i > from;
+    };
+    bool ok = digits();
+    if (ok && i < n && t[i] == u'.') {
+        ++i;
+        ok = digits();
+    }
+    return ok && i == n ? KeyedLine::ValueKind::Number : KeyedLine::ValueKind::Literal;
+}
+
 inline int hexValue(char16_t c)
 {
     if (c >= u'0' && c <= u'9') return c - u'0';
@@ -289,6 +316,7 @@ PairReader::PairReader(QStringView text, KeyedDefinition::Format format)
         const qsizetype i = findLogfmtKeyEnd(text.utf16(), 0, text.size());
         m_structured = i > 0 && i < text.size() && text[i] == QLatin1Char('=');
         m_pos = 0;
+        m_firstKeyEnd = i;   // первая пара — с этим концом ключа, без второго поиска
     }
     m_done = !m_structured;
 }
@@ -384,7 +412,12 @@ bool PairReader::nextLogfmt(Pair* pair)
         if (pos >= n)
             return false;
         const qsizetype keyStart = pos;
-        pos = findLogfmtKeyEnd(t.utf16(), pos, n);
+        if (m_firstKeyEnd >= 0) {
+            pos = m_firstKeyEnd;   // pos == 0: строка начинается с ключа (structured)
+            m_firstKeyEnd = -1;
+        } else {
+            pos = findLogfmtKeyEnd(t.utf16(), pos, n);
+        }
         if (pos == keyStart || pos >= n || t[pos] != QLatin1Char('=')) {
             // Не пара (голый ключ, «"…"» без ключа) — токен пропускается.
             if (pos < n && t[pos] == QLatin1Char('"')) {
@@ -416,7 +449,7 @@ bool PairReader::nextLogfmt(Pair* pair)
             pos = findLogfmtSpace(t.utf16(), pos, n);
             p.valueStart = int(start);
             p.valueLength = int(pos - start);
-            p.kind = p.valueLength > 0 ? bareKind(t.mid(start, pos - start))
+            p.kind = p.valueLength > 0 ? logfmtBareKind(t.mid(start, pos - start))
                                        : ValueKind::Literal;
         }
         m_pos = pos;
@@ -655,7 +688,7 @@ inline bool sameKey(QStringView a, const QString& b)
 } // namespace
 
 void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits* hits,
-                      int* settled) const
+                      int neededColumns, int* settled) const
 {
     const int length = qMin(int(key.size()), int(kMaxBucketedKey));
     // Ключ, не начинающийся ни с одной первой буквы кандидатов своей длины, —
@@ -674,7 +707,7 @@ void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits*
         if (e.path.isEmpty()) {
             if (!usableValue(pair))
                 continue;   // null или пусто — поля нет
-            if (e.rank == 0)
+            if (e.rank == 0 && e.column < neededColumns)
                 ++*settled;   // лучше первого кандидата не будет
             best.start = pair.valueStart;
             best.length = pair.valueLength;
@@ -692,24 +725,26 @@ void Lookup::consider(QStringView line, QStringView key, const Pair& pair, Hits*
     }
 }
 
-bool Lookup::scan(QStringView line, Hits* hits) const
+bool Lookup::scan(QStringView line, Hits* hits, int neededColumns) const
 {
+    if (neededColumns <= 0 || neededColumns > m_columnCount)
+        neededColumns = m_columnCount;
     hits->resize(m_columnCount);
     for (Hit& h : *hits)
         h = Hit();
     PairReader reader(line, m_format);
     if (!reader.structured())
         return false;
-    // Колонки, у которых уже найден первый кандидат: когда это все, дальше
-    // строку читать незачем — ни один следующий ключ ничего не поменяет.
+    // Нужные колонки, у которых уже найден первый кандидат: когда это все,
+    // дальше строку читать незачем — ни один следующий ключ их не поменяет.
     int settled = 0;
     Pair p;
-    while (settled < m_columnCount && reader.next(&p)) {
+    while (settled < neededColumns && reader.next(&p)) {
         const QStringView key = line.mid(p.keyStart, p.keyLength);
         if (p.keyEscaped)
-            consider(line, unescape(key), p, hits, &settled);
+            consider(line, unescape(key), p, hits, neededColumns, &settled);
         else
-            consider(line, key, p, hits, &settled);
+            consider(line, key, p, hits, neededColumns, &settled);
     }
     for (int c = 0; c < KeyedDefinition::kRoleColumns && c < hits->size(); ++c)
         if ((*hits)[c].isValid())

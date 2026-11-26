@@ -141,8 +141,9 @@ public:
     }
     /// Колонки строки по ключам (hits — по колонке fieldNames()); true —
     /// строка распознана. Горячий путь: без аллокаций, кроме ключей с
-    /// обратной косой. Не ключевая схема — false.
-    bool scanKeyed(QStringView line, KeyedLine::Hits* hits) const;
+    /// обратной косой. Не ключевая схема — false. neededColumns — см.
+    /// KeyedLine::Lookup::scan (-1 — все колонки).
+    bool scanKeyed(QStringView line, KeyedLine::Hits* hits, int neededColumns = -1) const;
     /// Поля распознанной строки по найденным scanKeyed колонкам — то же, что
     /// extractFields, без второго разбора строки (загрузка, F-4 PR 2).
     LogEntryFields keyedFields(const KeyedLine::Hits& hits) const;

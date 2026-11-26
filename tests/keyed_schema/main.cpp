@@ -365,6 +365,28 @@ void testClassifyKeyed()
     CHECK(!c.matched && !c.hasTs && !c.isPrimary(), "classify: stack frame is a continuation");
     c = classifier.classifyKeyed(p, u"2026-11-18 10:00:00 plain line");
     CHECK(!c.matched && c.hasTs && c.leading && c.isPrimary(), "classify: plain leading timestamp line");
+    // logfmt: голая метка ISO — текст, а не число (S-17): момент из ключа,
+    // а не самая левая метка строки; голое число — эпоха, как раньше.
+    const LogPattern lf = keyedPattern(KeyedDefinition::Format::Logfmt);
+    c = classifier.classifyKeyed(lf, u"start=2026-11-18T09:00:00Z ts=2026-11-18T10:00:00Z level=info msg=x");
+    CHECK(c.matched && c.tsFromKey && c.tsMs == tenUtc && !c.leading,
+          "classify (logfmt): bare ISO value is read from its key");
+    c = classifier.classifyKeyed(lf, u"ts=1700000000123 level=30 msg=x");
+    CHECK(c.tsFromKey && c.tsMs == 1700000000123LL && c.levelFromKey && c.level == LogLevel::Info,
+          "classify (logfmt): bare epoch and numeric level");
+    c = classifier.classifyKeyed(lf, u"ts=-1.5 level=5xx msg=x");
+    CHECK(c.tsFromKey && c.tsMs == -1500LL && !c.levelFromKey,
+          "classify (logfmt): bare negative fraction is an epoch, 5xx is not a level");
+    // Голое значение — Number только в форме, которую читает epochFromValue.
+    const QString bare = QStringLiteral("ts=1700000000 n=-12.5 e=1e3 d=2026-11-18 a=5xx b=-x c=1.");
+    KeyedLine::PairReader reader(bare, KeyedDefinition::Format::Logfmt);
+    QVector<KeyedLine::ValueKind> kinds;
+    for (KeyedLine::Pair q; reader.next(&q);)
+        kinds << q.kind;
+    using VK = KeyedLine::ValueKind;
+    CHECK(kinds == QVector<VK>({VK::Number, VK::Number, VK::Literal, VK::Literal, VK::Literal,
+                                VK::Literal, VK::Literal}),
+          "logfmt: bare Number only for [-]digits[.digits]");
     // Не ключевая схема — только эвристика.
     LogPattern plain(LogPattern::serializeDefinition(PatternDefinition{
         QString(), {PatternBlock{QStringLiteral("Message"), PatternBlock::MatchKind::Remainder}}, {}}));
@@ -376,6 +398,121 @@ void testClassifyKeyed()
     CHECK(!c.matched && c.hasTs && clock.matched, "classify: clock time with file context");
     c = classifier.classifyKeyed(p, u"{\"ts\":1700000000,\"msg\":\"x\"}", {}, &clock);
     CHECK(c.tsFromKey && !clock.matched, "classify: key timestamp resets clock.matched");
+}
+
+// Классификация без полей (индексатор, счётчики) кончает разбор строки,
+// когда у метки и уровня найден первый ключ-кандидат (S-17). Ответ обязан
+// быть тем же, что у полного разбора с полями: заданные случаи (поздний
+// главный ключ, повторный, null, путь, ключ с обратной косой) и случайные
+// строки обоих форматов из пула ключей в случайном порядке.
+bool sameClassification(const KeyedClassification& a, const KeyedClassification& b)
+{
+    return a.matched == b.matched && a.hasTs == b.hasTs && a.tsMs == b.tsMs
+        && a.leading == b.leading && a.hasLevel == b.hasLevel && a.level == b.level
+        && a.tsFromKey == b.tsFromKey && a.levelFromKey == b.levelFromKey;
+}
+
+void checkEarlyExit(const LineClassifier& classifier, const LogPattern& p, const QString& line,
+                    const char* what)
+{
+    const LineClassifier::YearReference ref =
+        LineClassifier::yearReference(QDate(2026, 11, 18));
+    LogEntryFields fields;
+    const KeyedClassification full = classifier.classifyLine(&p, line, ref, nullptr, &fields);
+    const KeyedClassification quick = classifier.classifyLine(&p, line, ref, nullptr, nullptr);
+    CHECK(sameClassification(full, quick),
+          QStringLiteral("early exit (%1): classification without fields = with fields: %2")
+              .arg(QLatin1String(what), line));
+    KeyedLine::Hits all, two;
+    const bool okAll = p.scanKeyed(line, &all);
+    const bool okTwo = p.scanKeyed(line, &two, 2);
+    bool same = okAll == okTwo && all.size() == two.size();
+    for (int c = 0; same && c < 2; ++c)
+        same = all[c].start == two[c].start && all[c].length == two[c].length
+            && all[c].escaped == two[c].escaped && all[c].kind == two[c].kind;
+    CHECK(same, QStringLiteral("early exit (%1): scan of two columns = full scan for them: %2")
+                    .arg(QLatin1String(what), line));
+}
+
+void testEarlyExit()
+{
+    const LineClassifier classifier;
+    const LogPattern json = keyedPattern(KeyedDefinition::Format::JsonObject, {QStringLiteral("user")});
+    const LogPattern lf = keyedPattern(KeyedDefinition::Format::Logfmt, {QStringLiteral("user")});
+    const LineClassifier::YearReference ref =
+        LineClassifier::yearReference(QDate(2026, 11, 18));
+    const qint64 elevenUtc =
+        QDateTime(QDate(2026, 11, 18), QTime(11, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+
+    // «time» — второй кандидат: «ts» дальше по строке главнее, разбор идёт до него.
+    KeyedClassification c = classifier.classifyLine(
+        &json, u"{\"time\":\"2026-11-18T10:00:00Z\",\"msg\":\"x\",\"level\":\"info\",\"ts\":\"2026-11-18T11:00:00Z\",\"lvl\":\"error\"}",
+        ref, nullptr, nullptr);
+    CHECK(c.matched && c.tsFromKey && c.tsMs == elevenUtc && c.level == LogLevel::Info,
+          "early exit: a later first-candidate key wins over an earlier second one");
+    c = classifier.classifyLine(
+        &lf, u"time=2026-11-18T10:00:00Z lvl=error msg=x level=warn ts=2026-11-18T11:00:00Z",
+        ref, nullptr, nullptr);
+    CHECK(c.matched && c.tsMs == elevenUtc && c.level == LogLevel::Warn,
+          "early exit (logfmt): a later first-candidate key wins over an earlier second one");
+    // Первый кандидат с null — не найден, разбор идёт дальше.
+    c = classifier.classifyLine(&json, u"{\"ts\":null,\"level\":\"info\",\"time\":\"2026-11-18T11:00:00Z\"}",
+                                ref, nullptr, nullptr);
+    CHECK(c.tsFromKey && c.tsMs == elevenUtc, "early exit: null first candidate does not stop the scan");
+
+    const QStringList fixed = {
+        QStringLiteral("{\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"info\",\"msg\":\"a\",\"user\":1}"),
+        QStringLiteral("{\"msg\":\"a\",\"level\":\"warn\",\"ts\":1700000000}"),
+        QStringLiteral("{\"level\":\"info\",\"level\":\"error\",\"ts\":1,\"ts\":2}"),
+        QStringLiteral("{\"log\":{\"level\":\"error\"},\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"debug\"}"),
+        QStringLiteral("{\"log\":{\"level\":\"error\"},\"ts\":\"2026-11-18T10:00:00Z\"}"),
+        QStringLiteral("{\"t\\u0073\":\"2026-11-18T10:00:00Z\",\"le\\u0076el\":\"warn\"}"),
+        QStringLiteral("{\"ts\":\"2026-11-18T10:00:00Z\",\"level\":\"info\",\"msg\":\"unterminated"),
+        QStringLiteral("{\"user\":1}"),
+        QStringLiteral("    at Foo.bar(Foo.java:1)"),
+        QStringLiteral("2026-11-18 10:00:00 ERROR plain"),
+    };
+    for (const QString& line : fixed)
+        checkEarlyExit(classifier, json, line, "json");
+    const QStringList fixedLf = {
+        QStringLiteral("ts=2026-11-18T10:00:00Z level=info msg=\"a b\" user=1"),
+        QStringLiteral("msg=a level=warn ts=1700000000"),
+        QStringLiteral("level=info level=error ts=1 ts=2"),
+        QStringLiteral("level= ts=2026-11-18T10:00:00Z level=error"),
+        QStringLiteral("ts=\"2026-11-18T10:00:00Z\" level=\"in\\\"fo\" msg=x"),
+        QStringLiteral("ts=2026-11-18T10:00:00Z level=info msg=\"unterminated"),
+        QStringLiteral("user=1 other=2"),
+        QStringLiteral("Caused by: x=1"),
+        QStringLiteral("2026-11-18 10:00:00 ERROR plain"),
+    };
+    for (const QString& line : fixedLf)
+        checkEarlyExit(classifier, lf, line, "logfmt");
+
+    // Случайные строки: ключи ролей и чужие, повторы, null / пустые значения.
+    QRandomGenerator rng(20261126);
+    const QStringList keys = {"ts", "time", "@t", "level", "lvl", "severity", "msg", "message",
+                              "user", "log", "x"};
+    const QStringList values = {"2026-11-18T10:00:00Z", "1700000000123", "info", "ERROR", "30",
+                                "hello world", "", "null"};
+    for (int iter = 0; iter < 4000; ++iter) {
+        const int count = 1 + int(rng.bounded(6));
+        QStringList jsonPairs, lfPairs;
+        for (int i = 0; i < count; ++i) {
+            const QString key = keys[int(rng.bounded(int(keys.size())))];
+            const QString value = values[int(rng.bounded(int(values.size())))];
+            const bool isNull = value == QLatin1String("null");
+            const bool number = !value.isEmpty() && value[0].isDigit() && !value.contains(u'-');
+            if (key == QLatin1String("log") && rng.bounded(2))
+                jsonPairs << QStringLiteral("\"log\":{\"level\":\"%1\"}").arg(value);
+            else
+                jsonPairs << QStringLiteral("\"%1\":%2").arg(
+                    key, isNull || number ? value : QStringLiteral("\"%1\"").arg(value));
+            lfPairs << QStringLiteral("%1=%2").arg(
+                key, value.contains(u' ') ? QStringLiteral("\"%1\"").arg(value) : value);
+        }
+        checkEarlyExit(classifier, json, QStringLiteral("{%1}").arg(jsonPairs.join(u',')), "json fuzz");
+        checkEarlyExit(classifier, lf, lfPairs.join(u' '), "logfmt fuzz");
+    }
 }
 
 void testSerialization()
@@ -455,7 +592,7 @@ void testSerialization()
 struct Cost {
     qint64 keyedNs = 0, regexNs = 0, heuristicNs = 0;
     qint64 classifyNs = 0;   ///< Только classifyKeyed — путь индексатора (поля по требованию).
-    qint64 scanNs = 0;       ///< Только разбор пар и поиск колонок (LogPattern::scanKeyed).
+    qint64 scanNs = 0;       ///< Только разбор пар и поиск метки и уровня (scanKeyed по двум колонкам — путь индексатора).
 };
 
 Cost measureCost(int count, int rounds)
@@ -531,7 +668,7 @@ Cost measureCost(int count, int rounds)
     cost.scanNs = best([&] {
         KeyedLine::Hits hits;
         for (const QString& line : jsonLines) {
-            keyed.scanKeyed(line, &hits);
+            keyed.scanKeyed(line, &hits, 2);   // как classifyLine без полей (S-17)
             sink += hits[0].start;
         }
     });
@@ -616,6 +753,7 @@ int main(int argc, char** argv)
     testFuzzAgainstQJson();
     testReaders();
     testClassifyKeyed();
+    testEarlyExit();
     testSerialization();
     testCost();
     if (g_failures == 0)

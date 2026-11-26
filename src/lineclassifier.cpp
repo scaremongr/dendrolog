@@ -1017,7 +1017,11 @@ KeyedClassification LineClassifier::classifyLine(const LogPattern* keyedSchema, 
     KeyedClassification r;
     if (const KeyedDefinition* keyed = keyedSchema ? keyedSchema->keyed() : nullptr) {
         KeyedLine::Hits hits;
-        r.matched = keyedSchema->scanKeyed(line, &hits);
+        // Без полей (индексатор, счётчики) нужны только метка и уровень:
+        // разбор кончается, когда у обеих найден первый ключ-кандидат.
+        static_assert(KeyedDefinition::kTimestampColumn < 2 && KeyedDefinition::kLevelColumn < 2,
+                      "classification reads the first two columns only");
+        r.matched = keyedSchema->scanKeyed(line, &hits, fields ? -1 : 2);
         if (r.matched) {
             if (fields)
                 *fields = keyedSchema->keyedFields(hits);
