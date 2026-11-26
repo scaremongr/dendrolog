@@ -80,6 +80,14 @@ struct FieldSettings {
     QString schema;              // определение; пусто — без схемы
     bool showFields = false;     // «Show selected fields only» (было «Filter blocks»)
     QStringList visibleFields;   // пусто — все колонки
+    // Откуда схема (F-17, шаг 8): Default — схема по умолчанию новой вкладки,
+    // подбором не решалась; Auto — подбор при открытии (док: «auto»); User —
+    // выбрал пользователь (док, редактор, Find a Schema), подбор её не
+    // оспаривает. Ключ «origin» («default» / «auto» / «user») пишется у
+    // схемы всегда; без него (снимки до шага 8) схема читается как User,
+    // «без схемы» — Default. В сравнение (operator==) не входит.
+    enum class Origin { Default, Auto, User };
+    Origin origin = Origin::Default;
 
     bool hasSchema() const { return !schema.isEmpty(); }
     bool operator==(const FieldSettings& o) const

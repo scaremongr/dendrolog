@@ -134,6 +134,7 @@
                     }
                 },
                 "fields": {
+                    "origin": "default",
                     "showFields": true,
                     "schema": {
                         "definition": {

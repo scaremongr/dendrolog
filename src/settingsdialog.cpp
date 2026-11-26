@@ -521,7 +521,20 @@ void SettingsDialog::buildFileMemoryControls()
            "standard input neither restore nor save it."));
     sessionsLayout->addWidget(m_restoreSessionCheckBox);
 
-    for (QGroupBox* box : { group, sessions }) {
+    // Подбор схемы полей при открытии (F-17, шаг 8).
+    auto* schemas = new QGroupBox(tr("Field Schemas"), page);
+    auto* schemasLayout = new QVBoxLayout(schemas);
+    m_autoPickSchemaCheckBox =
+        new QCheckBox(tr("Pick a field schema automatically when a log is opened"), schemas);
+    m_autoPickSchemaCheckBox->setObjectName(QStringLiteral("autoPickSchemaCheckBox"));
+    m_autoPickSchemaCheckBox->setToolTip(
+        tr("After the first lines of a new tab: the schema you chose before for a file with\n"
+           "this name, else the best schema of the catalogue that fits the lines, else the\n"
+           "default schema if it parses at least half of them. A schema you chose yourself\n"
+           "or the saved state of the file is never replaced. The file is not read again."));
+    schemasLayout->addWidget(m_autoPickSchemaCheckBox);
+
+    for (QGroupBox* box : { group, sessions, schemas }) {
         if (auto* form = qobject_cast<QFormLayout*>(page->layout()))
             form->addRow(box);
         else
@@ -671,6 +684,8 @@ void SettingsDialog::loadFromSettings()
         m_rememberFileStateCheckBox->setChecked(s.rememberFileState());
     if (m_restoreSessionCheckBox)
         m_restoreSessionCheckBox->setChecked(s.restoreSessionOnStartup());
+    if (m_autoPickSchemaCheckBox)
+        m_autoPickSchemaCheckBox->setChecked(s.autoPickSchema());
     if (m_aiEnabledCheckBox) {
         m_aiEnabledCheckBox->setChecked(s.aiEnabled());
         m_aiModelCombo->setCurrentText(s.aiModel());
@@ -736,6 +751,8 @@ void SettingsDialog::applyToSettings()
         s.setRememberFileState(m_rememberFileStateCheckBox->isChecked());
     if (m_restoreSessionCheckBox)
         s.setRestoreSessionOnStartup(m_restoreSessionCheckBox->isChecked());
+    if (m_autoPickSchemaCheckBox)
+        s.setAutoPickSchema(m_autoPickSchemaCheckBox->isChecked());
     if (m_fallbackEncodingCombo) {
         const int data = m_fallbackEncodingCombo->currentData().toInt();
         s.setFallbackEncodingChoice(data < 0 ? std::nullopt

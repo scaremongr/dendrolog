@@ -105,6 +105,7 @@ void AppSettings::load()
         s.value(QStringLiteral("fallbackEncoding")).toString());
     m_rememberFileState      = s.value(QStringLiteral("rememberFileState"), true).toBool();
     m_restoreSessionOnStartup = s.value(QStringLiteral("restoreSessionOnStartup"), false).toBool();
+    m_autoPickSchema         = s.value(QStringLiteral("autoPickSchema"), true).toBool();
 
     // Migrate: if this is a first run with the new key, check the old location.
     const bool hasMigratedWordWrap =
@@ -190,6 +191,7 @@ void AppSettings::save()
     s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
     s.setValue(QStringLiteral("rememberFileState"),      m_rememberFileState);
     s.setValue(QStringLiteral("restoreSessionOnStartup"), m_restoreSessionOnStartup);
+    s.setValue(QStringLiteral("autoPickSchema"),         m_autoPickSchema);
     s.endGroup();
 
     s.beginGroup(QStringLiteral("AI"));
@@ -490,6 +492,14 @@ void AppSettings::setRestoreSessionOnStartup(bool enabled)
     if (m_restoreSessionOnStartup == enabled)
         return;
     m_restoreSessionOnStartup = enabled;
+    emit settingsChanged();
+}
+
+void AppSettings::setAutoPickSchema(bool enabled)
+{
+    if (m_autoPickSchema == enabled)
+        return;
+    m_autoPickSchema = enabled;
     emit settingsChanged();
 }
 

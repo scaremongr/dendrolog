@@ -63,6 +63,10 @@
 #include "spooldir.h"
 #include <QFutureWatcher>
 #include <QInputDialog>
+#include <QPainter>
+#include <QRadioButton>
+#include <QStyledItemDelegate>
+#include <QStylePainter>
 #include <QMenu>
 #include <QActionGroup>
 #include <QApplication>
@@ -150,6 +154,74 @@ static void addSchemaComboItem(QComboBox* combo, const SchemaStore::SchemaEntry&
         combo->setItemData(combo->count() - 1, description, Qt::ToolTipRole);
 }
 
+namespace {
+
+// Комбобокс схем дока (F-17, шаг 8): текст пункта — имя схемы (его ищут
+// findText и тест окна), заметка справа — покрытие вкладки и «auto»; у
+// закрытого — имя и « · auto».
+constexpr int kSchemaIndexRole = Qt::UserRole + 7;   // номер в каталоге
+constexpr int kSchemaNoteRole = Qt::UserRole + 8;    // «auto · 99%»
+
+class SchemaNoteDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        QStyledItemDelegate::paint(painter, option, index);
+        const QString note = index.data(kSchemaNoteRole).toString();
+        if (note.isEmpty())
+            return;
+        painter->save();
+        const bool selected = option.state & QStyle::State_Selected;
+        painter->setPen(option.palette.color(selected ? QPalette::HighlightedText
+                                                      : QPalette::PlaceholderText));
+        painter->drawText(option.rect.adjusted(0, 0, -6, 0), Qt::AlignRight | Qt::AlignVCenter, note);
+        painter->restore();
+    }
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        const QString note = index.data(kSchemaNoteRole).toString();
+        if (!note.isEmpty())
+            size.rwidth() += option.fontMetrics.horizontalAdvance(note) + 18;
+        return size;
+    }
+};
+
+} // namespace
+
+class SchemaComboBox : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+    void setAutoMark(const QString& mark)
+    {
+        if (m_mark != mark) {
+            m_mark = mark;
+            update();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override
+    {
+        // Без пометки (и при пустом выборе — «(none)», «(mixed)») — как Qt.
+        if (currentIndex() < 0 || m_mark.isEmpty()) {
+            QComboBox::paintEvent(event);
+            return;
+        }
+        QStylePainter painter(this);
+        QStyleOptionComboBox opt;
+        initStyleOption(&opt);
+        opt.currentText = QStringLiteral("%1 \u00B7 %2").arg(opt.currentText, m_mark);
+        painter.drawComplexControl(QStyle::CC_ComboBox, opt);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, opt);
+    }
+
+private:
+    QString m_mark;
+};
+
 static QFont searchResultsFont()
 {
     QFont f(AppSettings::instance().fontFamily());
@@ -188,7 +260,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_schemas = new FieldSchemaController(this);
     m_schemas->setWindow({ [this]() { return logViews(); } });
     setupFieldVisibilityDock();
-    // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
+    // После setupFieldVisibilityDock (нужен переключатель показа полей) и
     // ДО loadSettings — restoreState() должен знать тулбар по objectName.
     setupFilterStatusToolbar();
 
@@ -1516,57 +1588,82 @@ void MainWindow::setupFieldVisibilityDock()
     // Поля и промежутки — от CompactStyle, как у остальных панелей.
     auto* rootLayout = new QVBoxLayout(contents);
 
-    // ---- Section: field schema (сначала — КАК разбирать строку) ----
-    auto* patternLabel = new QLabel(tr("<b>Field schema:</b>"), contents);
+    // ---- Схема (F-17, шаг 8; раздел 7 F-17.md) ----
+    //   Schema: [ Spring Boot · auto ▾ ] [Edit…] [⋯]
+    //   Parsed 99.6% of 2300 record lines · 3 did not match
+    //   Show in the log: (•) Whole line ( ) Selected fields
+    m_schemaRow = new QWidget(contents);
+    auto* schemaRow = new QHBoxLayout(m_schemaRow);
+    schemaRow->setContentsMargins(0, 0, 0, 0);
+    auto* patternLabel = new QLabel(tr("Schema:"), m_schemaRow);
     patternLabel->setToolTip(tr(
-        "A schema is an ordered list of blocks.\n"
-        "Each block has a name and a match rule: timestamp, level, integer, text until separator,\n"
-        "greedy text, custom regex, or remainder of line.\n\n"
-        "Use 'Manage...' to build and edit schemas."));
-    rootLayout->addWidget(patternLabel);
-
-    auto* schemaRow = new QHBoxLayout();
-    m_conversionPatternCombo = new QComboBox(contents);
+        "How a line is split into fields: one template line such as\n"
+        "{Timestamp:time} [{Thread}] {Level:level} {Message}.\n"
+        "Schemas that fit the lines of this tab come first, with the share of lines they parse."));
+    schemaRow->addWidget(patternLabel);
+    m_conversionPatternCombo = new SchemaComboBox(m_schemaRow);
+    m_conversionPatternCombo->setObjectName(QStringLiteral("schemaCombo"));
     m_conversionPatternCombo->setEditable(false);
     m_conversionPatternCombo->setToolTip(patternLabel->toolTip());
     m_conversionPatternCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_conversionPatternCombo->setMinimumContentsLength(8);
     m_conversionPatternCombo->setPlaceholderText(tr("(none)"));
+    m_conversionPatternCombo->setItemDelegate(new SchemaNoteDelegate(m_conversionPatternCombo));
+    patternLabel->setBuddy(m_conversionPatternCombo);
     connect(m_conversionPatternCombo,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onPatternComboChanged);
     connect(m_schemas, &FieldSchemaController::catalogueChanged, this, &MainWindow::syncSchemaCombo);
     schemaRow->addWidget(m_conversionPatternCombo, 1);
 
-    auto* manageBtn = new QPushButton(tr("Manage..."), contents);
-    manageBtn->setToolTip(tr("Create, edit and delete named field schemas."));
-    connect(manageBtn, &QPushButton::clicked,
-            this, &MainWindow::onManagePatterns);
-    schemaRow->addWidget(manageBtn);
-    // «Find a Schema» (F-17, шаг 5) — то же, что Tools → Find a Schema.
-    auto* findBtn = new QToolButton(contents);
-    findBtn->setObjectName(QStringLiteral("findSchemaButton"));
-    findBtn->setText(tr("Find..."));
-    findBtn->setToolTip(tr("Find a schema for the lines of this tab: your schemas, the structure of the "
-                           "lines, AI"));
-    connect(findBtn, &QToolButton::clicked, this, &MainWindow::openSchemaCandidates);
-    schemaRow->addWidget(findBtn);
+    auto* editBtn = new QPushButton(tr("Edit..."), m_schemaRow);
+    editBtn->setObjectName(QStringLiteral("editSchemaButton"));
+    editBtn->setToolTip(tr("Edit this schema and the others of the catalogue on the lines of this tab"));
+    connect(editBtn, &QPushButton::clicked, this, &MainWindow::onManagePatterns);
+    schemaRow->addWidget(editBtn);
+
+    // «⋯»: Detect for This Tab, Apply Schema to All Tabs, Find a Schema…,
+    // Manage Schemas…
+    m_detectSchemaAction = new QAction(tr("Detect for This Tab"), this);
+    m_detectSchemaAction->setObjectName(QStringLiteral("detectSchemaAction"));
+    m_detectSchemaAction->setToolTip(tr("Pick the schema for this tab again: the one chosen before for "
+                                        "files with this name, else the best fitting one"));
+    connect(m_detectSchemaAction, &QAction::triggered, this, [this]() {
+        if (auto* view = qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()))
+            m_schemas->detectForView(view);
+    });
     // Схема — у каждой вкладки своя (F-5); прежнее «одна на окно» — одним
-    // действием. Оно же — в меню View и в меню кнопки дока.
+    // действием. Оно же — в меню View.
     m_applySchemaToAllAction = new QAction(tr("Apply Schema to All Tabs"), this);
     m_applySchemaToAllAction->setObjectName(QStringLiteral("applySchemaToAllTabs"));
-    m_applySchemaToAllAction->setToolTip(tr("Use this tab's schema, \"Show selected fields only\" and visible "
-                                            "blocks in every open tab"));
+    m_applySchemaToAllAction->setToolTip(tr("Use this tab's schema, the way lines are shown and the "
+                                            "visible fields in every open tab"));
     connect(m_applySchemaToAllAction, &QAction::triggered, this, [this]() {
         m_schemas->applyToAllViews();
         updateFilterStatusButtons();
     });
-    auto* allTabsBtn = new QToolButton(contents);
-    allTabsBtn->setObjectName(QStringLiteral("applySchemaToAllTabsButton"));
-    allTabsBtn->setDefaultAction(m_applySchemaToAllAction);
-    allTabsBtn->setText(tr("All Tabs"));
-    schemaRow->addWidget(allTabsBtn);
-    rootLayout->addLayout(schemaRow);
+    auto* findAction = new QAction(tr("Find a Schema..."), this);
+    findAction->setObjectName(QStringLiteral("dockFindSchemaAction"));
+    findAction->setToolTip(tr("Find a schema for the lines of this tab: your schemas, the structure of "
+                              "the lines, AI"));
+    connect(findAction, &QAction::triggered, this, &MainWindow::openSchemaCandidates);
+    auto* manageAction = new QAction(tr("Manage Schemas..."), this);
+    manageAction->setObjectName(QStringLiteral("dockManageSchemasAction"));
+    connect(manageAction, &QAction::triggered, this, &MainWindow::onManagePatterns);
+    auto* moreBtn = new QToolButton(m_schemaRow);
+    moreBtn->setObjectName(QStringLiteral("schemaMoreButton"));
+    moreBtn->setText(QStringLiteral("⋯"));
+    moreBtn->setToolTip(tr("More: detect the schema, apply it to all tabs, find or manage schemas"));
+    moreBtn->setPopupMode(QToolButton::InstantPopup);
+    auto* moreMenu = new QMenu(moreBtn);
+    moreMenu->addAction(m_detectSchemaAction);
+    moreMenu->addAction(m_applySchemaToAllAction);
+    moreMenu->addSeparator();
+    moreMenu->addAction(findAction);
+    moreMenu->addAction(manageAction);
+    moreBtn->setMenu(moreMenu);
+    schemaRow->addWidget(moreBtn);
+    rootLayout->addWidget(m_schemaRow);
 
     // «Applies to» (F-5, PR 3): у слитой вкладки схема — всем файлам или
     // одному. У вкладки из одного файла строки нет.
@@ -1590,20 +1687,60 @@ void MainWindow::setupFieldVisibilityDock()
     targetLayout->addWidget(m_schemaTargetCombo, 1);
     m_schemaTargetRow->hide();
     rootLayout->addWidget(m_schemaTargetRow);
+
+    m_schemaCoverageLabel = new MutedLabel(QString(), contents);
+    m_schemaCoverageLabel->setObjectName(QStringLiteral("schemaCoverageLabel"));
+    m_schemaCoverageLabel->setWordWrap(true);
+    m_schemaCoverageLabel->setToolTip(tr("Checked on the first lines of the tab and lines spread over "
+                                         "the file"));
+    m_schemaCoverageLabel->hide();
+    rootLayout->addWidget(m_schemaCoverageLabel);
+
+    // ---- Файл JSON / logfmt: ключи начала файла вместо схемы ----
+    m_keysBox = new QWidget(contents);
+    m_keysBox->setObjectName(QStringLiteral("schemaKeysBox"));
+    auto* keysRoot = new QVBoxLayout(m_keysBox);
+    keysRoot->setContentsMargins(0, 0, 0, 0);
+    m_keysTitle = new QLabel(m_keysBox);
+    m_keysTitle->setObjectName(QStringLiteral("schemaKeysTitle"));
+    m_keysTitle->setToolTip(tr("The lines of this file are JSON objects or key=value pairs: time, "
+                               "level and message come from their keys. Checked keys are fields."));
+    keysRoot->addWidget(m_keysTitle);
+    m_keysLayout = new QVBoxLayout();
+    m_keysLayout->setContentsMargins(12, 0, 0, 0);
+    m_keysLayout->setSpacing(2);
+    keysRoot->addLayout(m_keysLayout);
+    auto* addKeyBtn = new QPushButton(tr("Add Key..."), m_keysBox);
+    addKeyBtn->setObjectName(QStringLiteral("addKeyButton"));
+    addKeyBtn->setToolTip(tr("Make another key of the lines a field"));
+    connect(addKeyBtn, &QPushButton::clicked, this, [this]() {
+        bool ok = false;
+        const QString key = QInputDialog::getText(this, tr("Add Key"), tr("Key of the lines:"),
+                                                  QLineEdit::Normal, QString(), &ok);
+        if (ok)
+            m_schemas->addKey(key);
+    });
+    keysRoot->addWidget(addKeyBtn, 0, Qt::AlignLeft);
+    m_keysBox->hide();
+    rootLayout->addWidget(m_keysBox);
+    connect(m_schemas, &FieldSchemaController::keysChanged, this, &MainWindow::syncKeyControls);
     rootLayout->addSpacing(CompactStyle::kSpacing);
 
-    // ---- Master enable/disable toggle ----
-    m_fieldFilterEnabledCheckBox = new QCheckBox(tr("Show selected fields only"), contents);
-    m_fieldFilterEnabledCheckBox->setChecked(false); // default: no filtering
-    m_fieldFilterEnabledCheckBox->setToolTip(tr(
-        "When checked, only the selected blocks below are shown.\n"
-        "Uncheck to display the original line regardless of block selection."));
-    {
-        QFont f = m_fieldFilterEnabledCheckBox->font();
-        f.setBold(true);
-        m_fieldFilterEnabledCheckBox->setFont(f);
-    }
-    rootLayout->addWidget(m_fieldFilterEnabledCheckBox);
+    // ---- Показ в логе: строка целиком или выбранные поля ----
+    auto* showRow = new QHBoxLayout();
+    auto* showLabel = new QLabel(tr("Show in the log:"), contents);
+    showRow->addWidget(showLabel);
+    m_showWholeLineRadio = new QRadioButton(tr("Whole line"), contents);
+    m_showWholeLineRadio->setObjectName(QStringLiteral("showWholeLineRadio"));
+    m_showWholeLineRadio->setToolTip(tr("Show each line as it is in the file"));
+    m_showSelectedFieldsRadio = new QRadioButton(tr("Selected fields"), contents);
+    m_showSelectedFieldsRadio->setObjectName(QStringLiteral("showSelectedFieldsRadio"));
+    m_showSelectedFieldsRadio->setToolTip(tr("Show only the fields checked below"));
+    m_showWholeLineRadio->setChecked(true);
+    showRow->addWidget(m_showWholeLineRadio);
+    showRow->addWidget(m_showSelectedFieldsRadio);
+    showRow->addStretch(1);
+    rootLayout->addLayout(showRow);
 
     // Container for the per-field controls — enabled/disabled together.
     m_fieldFilterControlsWidget = new QWidget(contents);
@@ -1612,11 +1749,8 @@ void MainWindow::setupFieldVisibilityDock()
     filterControlsLayout->setSpacing(2);
     filterControlsLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
-    auto* fieldsLabel = new QLabel(tr("<b>Visible blocks:</b>"), m_fieldFilterControlsWidget);
-    filterControlsLayout->addWidget(fieldsLabel);
-
-    // "All blocks" tri-state master toggle
-    m_allFieldsCheckBox = new QCheckBox(tr("(all blocks)"), m_fieldFilterControlsWidget);
+    // "All fields" tri-state master toggle
+    m_allFieldsCheckBox = new QCheckBox(tr("(all fields)"), m_fieldFilterControlsWidget);
     m_allFieldsCheckBox->setTristate(true);
     m_allFieldsCheckBox->setCheckState(Qt::Checked);
     connect(m_allFieldsCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
@@ -1673,13 +1807,19 @@ void MainWindow::setupFieldVisibilityDock()
                nullptr, int(m_schemas->conversionFailures().size()))
                 .arg(m_schemas->conversionFailures().join(QStringLiteral("; "))),
             60000);
-    connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
+    connect(m_showSelectedFieldsRadio, &QRadioButton::toggled, this, [this](bool enabled) {
         if (m_fieldFilterControlsWidget)
             m_fieldFilterControlsWidget->setEnabled(enabled && !m_fieldCheckBoxes.isEmpty());
         // Только показ выбранных колонок (F-17, шаг 3): правила по полю и
-        // Entry Details от галочки не зависят.
+        // Entry Details от выбора не зависят.
         m_schemas->setShowFields(enabled);
+        updateFilterStatusButtons();
     });
+    connect(m_schemas, &FieldSchemaController::schemaPicked, this,
+            [this](LogViewWidget* view, const QString& name) {
+                if (view == ui->tabWidget->currentWidget())
+                    statusBar()->showMessage(tr("Schema: %1 (auto)").arg(name), 10000);
+            });
     if (m_fieldFilterControlsWidget)
         m_fieldFilterControlsWidget->setEnabled(false);
 
@@ -1689,8 +1829,16 @@ void MainWindow::setupFieldVisibilityDock()
     ui->fieldVisibilityDockWidget->setSizePolicy(QSizePolicy::Preferred,
                                                   QSizePolicy::Preferred);
 
+    // «Schema: X (auto)» — схема активной вкладки в строке статуса.
+    m_schemaStatusLabel = new QLabel(this);
+    m_schemaStatusLabel->setObjectName(QStringLiteral("schemaStatusLabel"));
+    m_schemaStatusLabel->setToolTip(tr("Field schema of this tab; \"auto\" — picked when the log was opened"));
+    m_schemaStatusLabel->hide();
+    statusBar()->addPermanentWidget(m_schemaStatusLabel);
+
     syncSchemaCombo();
     syncFieldControls();
+    syncKeyControls();
 }
 
 void MainWindow::syncSchemaCombo()
@@ -1699,14 +1847,51 @@ void MainWindow::syncSchemaCombo()
         return;
     m_conversionPatternCombo->blockSignals(true);
     m_conversionPatternCombo->clear();
-    for (const auto& e : m_schemas->schemas())
-        addSchemaComboItem(m_conversionPatternCombo, e);
+    // Подходящие вкладке схемы — первыми, с покрытием (F-17, шаг 8); текст
+    // пункта — имя схемы, номер каталога — в данных пункта.
+    const auto& list = m_schemas->schemas();
+    const int active = m_schemas->isMixed() ? -1 : m_schemas->activeIndex();
+    const bool autoPicked = m_schemas->shownIsAuto();
+    for (int index : m_schemas->comboOrder()) {
+        if (index < 0 || index >= list.size())
+            continue;
+        addSchemaComboItem(m_conversionPatternCombo, list[index]);
+        const int item = m_conversionPatternCombo->count() - 1;
+        m_conversionPatternCombo->setItemData(item, index, kSchemaIndexRole);
+        QString note = m_schemas->coverageText(index);
+        if (index == active && autoPicked)
+            note = note.isEmpty() ? tr("auto") : tr("auto · %1").arg(note);
+        m_conversionPatternCombo->setItemData(item, note, kSchemaNoteRole);
+    }
     // No active schema (the default — extraction off) must show as none, not
     // as the first schema that addItem() selects by itself. Files of the
     // merged tab with different schemas — «(mixed)» (F-5, PR 3).
     m_conversionPatternCombo->setPlaceholderText(m_schemas->isMixed() ? tr("(mixed)") : tr("(none)"));
-    m_conversionPatternCombo->setCurrentIndex(m_schemas->isMixed() ? -1 : m_schemas->activeIndex());
+    m_conversionPatternCombo->setCurrentIndex(
+        active < 0 ? -1 : m_conversionPatternCombo->findData(active, kSchemaIndexRole));
+    static_cast<SchemaComboBox*>(m_conversionPatternCombo)->setAutoMark(autoPicked ? tr("auto") : QString());
     m_conversionPatternCombo->blockSignals(false);
+
+    if (m_schemaCoverageLabel) {
+        const QString summary = m_schemas->coverageSummary();
+        m_schemaCoverageLabel->setText(summary);
+        m_schemaCoverageLabel->setVisible(!summary.isEmpty() && !m_schemas->keyedFile());
+    }
+    if (m_detectSchemaAction)
+        m_detectSchemaAction->setEnabled(m_schemas->currentView() != nullptr);
+    if (m_schemaStatusLabel) {
+        LogViewWidget* view = m_schemas->currentView();
+        const FieldSettings tab = m_schemas->tabSettings();
+        if (view && tab.hasSchema()) {
+            const QString name = tab.schemaName.isEmpty() ? tr("(unnamed)") : tab.schemaName;
+            m_schemaStatusLabel->setText(m_schemas->shownIsAuto() ? tr("Schema: %1 (auto)").arg(name)
+                                                                  : tr("Schema: %1").arg(name));
+            m_schemaStatusLabel->show();
+        } else {
+            m_schemaStatusLabel->hide();
+        }
+    }
+    syncKeyControls();
 
     // «Applies to»: все файлы и каждый файл вкладки дока.
     if (m_schemaTargetCombo) {
@@ -1764,7 +1949,7 @@ void MainWindow::syncFieldControls()
         }
         if (fieldNames.isEmpty()) {
             auto* placeholder = new QLabel(
-                tr("No active schema. Build one in 'Manage...' and apply it to the open tabs."),
+                tr("No schema. Choose one above, or find one with \u22EF \u2192 Find a Schema..."),
                 m_fieldFilterControlsWidget);
             placeholder->setWordWrap(true);
             m_fieldCheckboxLayout->addWidget(placeholder);
@@ -1793,11 +1978,12 @@ void MainWindow::syncFieldControls()
             m_allFieldsCheckBox->setCheckState(Qt::PartiallyChecked);
         m_allFieldsCheckBox->blockSignals(false);
     }
-    if (m_fieldFilterEnabledCheckBox
-        && m_fieldFilterEnabledCheckBox->isChecked() != m_schemas->showFields()) {
-        m_fieldFilterEnabledCheckBox->blockSignals(true);
-        m_fieldFilterEnabledCheckBox->setChecked(m_schemas->showFields());
-        m_fieldFilterEnabledCheckBox->blockSignals(false);
+    if (m_showSelectedFieldsRadio && m_showSelectedFieldsRadio->isChecked() != m_schemas->showFields()) {
+        for (QRadioButton* r : {m_showWholeLineRadio, m_showSelectedFieldsRadio})
+            r->blockSignals(true);
+        (m_schemas->showFields() ? m_showSelectedFieldsRadio : m_showWholeLineRadio)->setChecked(true);
+        for (QRadioButton* r : {m_showWholeLineRadio, m_showSelectedFieldsRadio})
+            r->blockSignals(false);
     }
     if (m_fieldFilterControlsWidget)
         m_fieldFilterControlsWidget->setEnabled(m_schemas->showFields()
@@ -1824,7 +2010,67 @@ void MainWindow::onFieldVisibilityChanged()
 
 void MainWindow::onPatternComboChanged(int index)
 {
-    m_schemas->selectSchema(index);
+    // Пункты упорядочены по покрытию: номер каталога — в данных пункта.
+    m_schemas->selectSchema(index < 0 ? -1
+                                      : m_conversionPatternCombo->itemData(index, kSchemaIndexRole).toInt());
+}
+
+void MainWindow::syncKeyControls()
+{
+    if (!m_keysBox)
+        return;
+    // Файл JSON / logfmt (F-17, шаг 8): вместо списка схем — ключи начала
+    // файла галочками (отмеченные — поля).
+    const LogFilePtr file = m_schemas->keyedFile();
+    const bool keyed = file && m_schemas->currentView();
+    m_keysBox->setVisible(keyed);
+    if (m_schemaRow)
+        m_schemaRow->setVisible(!keyed);
+    if (!keyed) {
+        if (m_schemaCoverageLabel && m_schemaCoverageLabel->text().isEmpty())
+            m_schemaCoverageLabel->hide();
+        return;
+    }
+    if (m_schemaCoverageLabel)
+        m_schemaCoverageLabel->hide();
+    const LineFormat format = m_schemas->currentView()->lineFormat(file);
+    m_keysTitle->setText(tr("%1 \u00B7 keys").arg(format.displayName()));
+    const QStringList keys = m_schemas->availableKeys();
+    const QStringList checked = m_schemas->keyColumns();
+    // Пока файл читается, ключи не меняются: проход в полёте перечитал бы файл.
+    const bool busy = m_schemas->currentView()->isLoading();
+    QStringList shown;
+    for (QCheckBox* cb : std::as_const(m_keyCheckBoxes))
+        shown << cb->text();
+    if (shown != keys) {
+        // Перестройка может прийти из обработчика самой галочки — удалять позже.
+        for (QCheckBox* cb : std::as_const(m_keyCheckBoxes)) {
+            cb->hide();
+            m_keysLayout->removeWidget(cb);
+            cb->deleteLater();
+        }
+        m_keyCheckBoxes.clear();
+        for (const QString& key : keys) {
+            auto* cb = new QCheckBox(key, m_keysBox);
+            connect(cb, &QCheckBox::toggled, this, [this]() {
+                QStringList on;
+                for (QCheckBox* box : std::as_const(m_keyCheckBoxes))
+                    if (box->isChecked())
+                        on << box->text();
+                m_schemas->setKeyColumns(on);
+            });
+            m_keyCheckBoxes << cb;
+            m_keysLayout->addWidget(cb);
+        }
+    }
+    for (QCheckBox* cb : std::as_const(m_keyCheckBoxes)) {
+        cb->blockSignals(true);
+        cb->setChecked(checked.contains(cb->text()));
+        cb->blockSignals(false);
+        cb->setEnabled(!busy);
+    }
+    if (auto* addKey = m_keysBox->findChild<QPushButton*>(QStringLiteral("addKeyButton")))
+        addKey->setEnabled(!busy);
 }
 
 void MainWindow::onManagePatterns()
@@ -2514,9 +2760,9 @@ void MainWindow::setupFilterStatusToolbar()
         updateFilterStatusButtons();
     });
     connect(m_fieldFilterStatusAction, &QAction::triggered, this, [this](bool on) {
-        // Дальше отрабатывает toggled-пайплайн самого чекбокса Log Fields.
-        if (m_fieldFilterEnabledCheckBox)
-            m_fieldFilterEnabledCheckBox->setChecked(on);
+        // Дальше отрабатывает toggled-пайплайн переключателя Log Fields.
+        if (m_showSelectedFieldsRadio)
+            (on ? m_showSelectedFieldsRadio : m_showWholeLineRadio)->setChecked(true);
         updateFilterStatusButtons();
     });
     connect(m_markerStatusAction, &QAction::triggered, this, [this](bool on) {
@@ -2527,10 +2773,6 @@ void MainWindow::setupFilterStatusToolbar()
         updateFilterStatusButtons();
     });
 
-    // Глобальный чекбокс Log Fields могут переключить и из самого дока.
-    if (m_fieldFilterEnabledCheckBox)
-        connect(m_fieldFilterEnabledCheckBox, &QCheckBox::toggled,
-                this, &MainWindow::updateFilterStatusButtons);
 
     updateFilterStatusButtons();
 }

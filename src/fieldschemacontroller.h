@@ -3,11 +3,14 @@
 
 #include "documentstate.h"
 #include "logfile.h"
+#include "schemafit.h"
+#include "schemapick.h"
 #include "schemastore.h"
 
 #include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
 
@@ -17,6 +20,7 @@
 class FilterRuleSet;
 class LogViewWidget;
 class QSettings;
+class SchemaFitJob;
 
 // ============================================================================
 // FieldSchemaController — каталог схем полей и состояние дока Log Fields без
@@ -71,6 +75,22 @@ class QSettings;
 //     Выбор схемы файла схемой по умолчанию не становится. Своя схема файла
 //     из снимка (TabSource.schema) приходит сигналом вкладки
 //     savedFileSchemaFound и ищется в каталоге, как схема вкладки.
+//   • Подбор при открытии (F-17, шаг 8; SchemaPick): после первых строк
+//     вкладки (queued, первая порция не ждёт) — одно задание SchemaFitJob в
+//     пуле по снапшоту её строк (файл не перечитывается): меры всех схем
+//     каталога и схемы по умолчанию. Решение — SchemaPick::choose (имя →
+//     содержимое → умолчание) и только у вкладки, чья схема ещё «по
+//     умолчанию» (FieldSettings::Origin::Default): сохранённое состояние и
+//     выбор пользователя не оспариваются. Итог — Origin::Auto, сигнал
+//     schemaPicked. Те же меры — покрытие в доке (пункты «подходящие
+//     первыми», строка «Parsed …»). Настройка AppSettings::autoPickSchema
+//     выключена — заданий нет (кроме «Detect for This Tab»).
+//   • Таблица имён ([SchemaByName] в ini): выбор схемы в доке (и «No
+//     schema») запоминается для имени файла вкладки (SchemaPick::nameKey).
+//   • Файл JSON / logfmt (формат строк, F-17, шаг 7): вместо схемы док
+//     показывает ключи начала файла (keyedFile, availableKeys) — галочка
+//     делает ключ колонкой (setKeyColumns: выбор формата пользователем, без
+//     перечитывания — колонки не входят в подпись чтения).
 // ============================================================================
 class FieldSchemaController : public QObject {
     Q_OBJECT
@@ -167,6 +187,41 @@ public:
     std::optional<FieldSettings> resolveSaved(const FieldSettings& saved, bool addMissing,
                                               QString* error = nullptr);
 
+    // ---- Подбор при открытии и покрытие (F-17, шаг 8) -----------------------
+    // Меры схем каталога на вкладке (по номеру каталога); nullptr — не
+    // посчитаны или посчитаны для другого каталога.
+    const QVector<SchemaFit::Result>* coverageOf(const LogViewWidget* view) const;
+    // Пункты каталога для комбобокса: «подходящие» вкладке дока первыми
+    // (лучшая первой), остальные — в порядке каталога.
+    QVector<int> comboOrder() const;
+    // «99%» — покрытие схемы index на вкладке дока; пусто — не посчитано.
+    QString coverageText(int index) const;
+    // «Parsed 99.6% of 2300 record lines · 3 did not match» для схемы дока.
+    QString coverageSummary() const;
+    // Схема вкладки дока подобрана при открытии (пометка «auto»).
+    bool shownIsAuto() const;
+    // «Detect for This Tab»: подбор заново (имя, содержимое, умолчание) при
+    // любом происхождении схемы вкладки; итог — Origin::Auto.
+    void detectForView(LogViewWidget* view);
+    bool isPicking(const LogViewWidget* view) const;
+    // Сколько заданий подбора запущено (тест: настройка выключена — 0).
+    int pickJobsStarted() const { return m_pickJobs; }
+    SchemaPick::NameTable& nameTable() { return m_nameTable; }
+    // Бюджет одной меры (тест под санитайзером — без предела времени).
+    void setFitBudget(const SchemaFit::Budget& budget) { m_fitBudget = budget; }
+
+    // ---- Ключи файла JSON / logfmt (F-17, шаг 8) -----------------------------
+    // Файл дока с форматом строк JSON / logfmt: цель «Applies to», иначе
+    // файл вкладки из одного файла; nullptr — нет.
+    LogFilePtr keyedFile() const;
+    // Ключи-колонки формата файла (extraColumns, по порядку).
+    QStringList keyColumns() const;
+    // Ключи начала файла (читаются один раз в пуле) и колонки — для галочек.
+    QStringList availableKeys() const;
+    // Галочки: ключи-колонки файла (выбор формата пользователем).
+    void setKeyColumns(const QStringList& keys);
+    void addKey(const QString& key);
+
 signals:
     // Список схем или схема дока изменились — перестроить комбобокс.
     void catalogueChanged();
@@ -178,6 +233,10 @@ signals:
     void schemaApplied(LogViewWidget* view);
     // Для строки состояния (схема памяти файла не в каталоге, ошибка записи).
     void statusMessage(const QString& text);
+    // Подбор при открытии поставил вкладке схему (schemaName — её имя).
+    void schemaPicked(LogViewWidget* view, const QString& schemaName);
+    // Ключи файла дока изменились (дочитаны или выбраны).
+    void keysChanged();
 
 private:
     QList<LogViewWidget*> views() const;
@@ -200,7 +259,25 @@ private:
     void finishApplication(LogViewWidget* view);
     void onSavedFieldSettings(LogViewWidget* view, const FieldSettings& saved, bool fromMemory);
 
+    struct PickState;
+    PickState& pickState(LogViewWidget* view);
+    void onRowsArrived(LogViewWidget* view);
+    void startPick(LogViewWidget* view, bool pick, bool userRequested);
+    void onPickFinished(LogViewWidget* view);
+    void applyPick(LogViewWidget* view, PickState& st);
+    void refreshCoverage();
+    void rememberName(const FieldSettings& chosen);
+    QStringList catalogueDefinitions() const;
+    void sampleKeys(const LogFilePtr& file);
+
     Window m_window;
+    QHash<const LogViewWidget*, std::shared_ptr<PickState>> m_picks;
+    SchemaPick::NameTable m_nameTable;
+    SchemaFit::Budget m_fitBudget;
+    int m_pickJobs = 0;
+    QHash<QString, QStringList> m_sampledKeys;   // filePath → ключи начала файла
+    QHash<QString, QStringList> m_addedKeys;     // filePath → добавленные «Add Key…»
+    QSet<QString> m_keysPending;
     SchemaStore::SchemaList m_list;
     QStringList m_conversionFailures;
     FieldSettings m_defaults;

@@ -20,6 +20,7 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "builtinsamples.h"
 #include "apptheme.h"
 #include "commandspooler.h"
 #include "commandstatusbar.h"
@@ -89,6 +90,7 @@
 #include <QToolBar>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QRadioButton>
 #include <QThread>
 #include <QDialogButtonBox>
 #include <QTextBrowser>
@@ -145,6 +147,27 @@ void check(bool ok, const QString& what)
 }
 
 QElapsedTimer g_clock;
+
+// «Show in the log: Whole line / Selected fields» дока Log Fields (F-17,
+// шаг 8) — как прежняя галочка «Show selected fields only»: isChecked —
+// выбраны поля, click — переключить.
+struct ShowFieldsSwitch {
+    QRadioButton* selected = nullptr;
+    QRadioButton* whole = nullptr;
+    bool isChecked() const { return selected && selected->isChecked(); }
+    void click() { (isChecked() ? whole : selected)->click(); }
+    explicit operator bool() const { return selected && whole; }
+};
+
+ShowFieldsSwitch showFieldsSwitch(QWidget* dockWidget)
+{
+    ShowFieldsSwitch sw;
+    if (dockWidget) {
+        sw.selected = dockWidget->findChild<QRadioButton*>(QStringLiteral("showSelectedFieldsRadio"));
+        sw.whole = dockWidget->findChild<QRadioButton*>(QStringLiteral("showWholeLineRadio"));
+    }
+    return sw;
+}
 
 void section(const QString& name)
 {
@@ -1220,13 +1243,12 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
     LogViewWidget* b = tabAt(win, ib);
     if (combo && smoke >= 0 && applyToAll && b) {
         const int other = smoke == 0 ? 1 : 0;
-        QCheckBox* filterBlocks = nullptr;
+        ShowFieldsSwitch filterBlocks;
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Show selected fields only"))
-                    filterBlocks = cb;
-                else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
+                filterBlocks = showFieldsSwitch(fieldsDock);
+                if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
             }
             return found;
@@ -1243,8 +1265,8 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         check(a->parserPattern() == testdocs::buildSchema() && b->parserPattern() == betaSchema,
               QStringLiteral("the combo changes only the active tab"));
         columnBoxes();
-        if (filterBlocks && !filterBlocks->isChecked())
-            filterBlocks->click();
+        if (filterBlocks && !filterBlocks.isChecked())
+            filterBlocks.click();
         check(waitAllLoaded(win), QStringLiteral("alpha settles after Filter blocks"));
         for (QCheckBox* cb : columnBoxes())
             if (cb->isChecked() != (cb->text() == QLatin1String("Level")))
@@ -1279,12 +1301,12 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         tabs(win)->setCurrentIndex(ib);
         check(combo->currentIndex() == other, QStringLiteral("the combo follows the active tab (beta)"));
         columnBoxes();
-        check(filterBlocks && !filterBlocks->isChecked(), QStringLiteral("Filter blocks follows the tab (beta: off)"));
+        check(filterBlocks && !filterBlocks.isChecked(), QStringLiteral("Filter blocks follows the tab (beta: off)"));
         combo->setCurrentIndex(smoke);
         check(waitAllLoaded(win), QStringLiteral("beta settles"));
         combo->setCurrentIndex(other);
         if (filterBlocks)
-            filterBlocks->click();
+            filterBlocks.click();
         check(waitAllLoaded(win), QStringLiteral("beta settles after Filter blocks"));
         check(a->parserPattern() == testdocs::buildSchema() && model->fieldDisplayFilterEnabled()
                   && model->visibleFieldIndexes() == QVector<int>{2}
@@ -1296,7 +1318,7 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         for (QCheckBox* cb : columnBoxes())
             if (cb->isChecked())
                 checkedColumns << cb->text();
-        check(filterBlocks && filterBlocks->isChecked() && checkedColumns == QStringList{QStringLiteral("Level")},
+        check(filterBlocks && filterBlocks.isChecked() && checkedColumns == QStringList{QStringLiteral("Level")},
               QStringLiteral("Log Fields shows alpha's Filter blocks and columns (%1)").arg(checkedColumns.join(',')));
 
         // Новая вкладка — схема по умолчанию: последний выбор в доке (на
@@ -1358,8 +1380,8 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         for (QCheckBox* cb : columnBoxes())
             if (!cb->isChecked())
                 cb->click();
-        if (filterBlocks && filterBlocks->isChecked())
-            filterBlocks->click();
+        if (filterBlocks && filterBlocks.isChecked())
+            filterBlocks.click();
         applyToAll->trigger();
         check(waitAllLoaded(win) && model->rowCount() == allRows, QStringLiteral("schema back to the first one"));
     }
@@ -1367,15 +1389,14 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
     // «Filter blocks» и колонки дока Log Fields — на активной вкладке (F-5);
     // кнопка Fields тулбара Filters — та же галочка (FieldSchemaController).
     if (combo && combo->count() > 0) {
-        QCheckBox* filterBlocks = nullptr;
+        ShowFieldsSwitch filterBlocks;
         // Чекбоксы колонок окно может пересоздать при смене схемы и флага —
         // искать заново после каждого такого шага.
         const auto columnBoxes = [&]() {
             QList<QCheckBox*> found;
             for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
-                if (cb->text() == QLatin1String("Show selected fields only"))
-                    filterBlocks = cb;
-                else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
+                filterBlocks = showFieldsSwitch(fieldsDock);
+                if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
                     found << cb;
             }
             return found;
@@ -1385,9 +1406,9 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
               QStringLiteral("Log Fields shows Filter blocks and the columns (%1)").arg(columns.size()));
         QAction* fieldsStatus = filtersToolBarAction(win, QStringLiteral("Fields"));
         if (filterBlocks && !columns.isEmpty() && fieldsStatus) {
-            const bool wasOn = filterBlocks->isChecked();
+            const bool wasOn = filterBlocks.isChecked();
             if (!wasOn)
-                filterBlocks->click();
+                filterBlocks.click();
             check(waitAllLoaded(win), QStringLiteral("tabs settle after Filter blocks"));
             columns = columnBoxes();
             const auto everyTab = [&](const std::function<bool(LogModel*)>& pred) {
@@ -1410,12 +1431,12 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
             check(everyTab([&](LogModel* m) { return m->visibleFieldIndexes().size() == all; }),
                   QStringLiteral("column choice comes back"));
             fieldsStatus->trigger();
-            check(waitAllLoaded(win) && !filterBlocks->isChecked() && !fieldsStatus->isChecked()
+            check(waitAllLoaded(win) && !filterBlocks.isChecked() && !fieldsStatus->isChecked()
                       && everyTab([](LogModel* m) { return !m->fieldDisplayFilterEnabled(); }),
                   QStringLiteral("Fields button turns Filter blocks off on the active tab"));
             check(model->rowCount() == allRows, QStringLiteral("Filter blocks keeps the rows"));
             if (wasOn)
-                filterBlocks->click();
+                filterBlocks.click();
         }
     }
 
@@ -3062,9 +3083,8 @@ void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
     if (!combo || !target || other < 0 || smoke < 0 || !scanner)
         return;
     const auto setFilterBlocks = [&](bool on) {
-        for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != on)
-                cb->click();
+        if (ShowFieldsSwitch sw = showFieldsSwitch(fieldsDock); sw && sw.isChecked() != on)
+            sw.click();
     };
 
     const int before = tabs(win)->count();
@@ -3692,9 +3712,9 @@ void scenarioFindSchema(MainWindow& win, const Fixtures& fx)
     const auto restore = [&]() {
         if (combo && combo->findText(original.schemaName) >= 0)
             combo->setCurrentIndex(combo->findText(original.schemaName));
-        for (QCheckBox* cb : dock(win, "fieldVisibilityDockWidget")->findChildren<QCheckBox*>())
-            if (cb->text() == QLatin1String("Show selected fields only") && cb->isChecked() != original.showFields)
-                cb->click();
+        if (ShowFieldsSwitch sw = showFieldsSwitch(dock(win, "fieldVisibilityDockWidget"));
+            sw && sw.isChecked() != original.showFields)
+            sw.click();
         check(waitAllLoaded(win) && tab->fieldSettings().schemaName == original.schemaName
                   && tab->fieldSettings().showFields == original.showFields,
               QStringLiteral("the tab returns to %1").arg(original.schemaName));
@@ -4542,6 +4562,9 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
     settings.load();
     settings.setIndexedThresholdMB(indexed ? 0 : 512);
     settings.setRestoreSessionOnStartup(false);
+    // Подбор схемы при открытии (F-17, шаг 8) — свой сценарий
+    // (scenarioAutoPickSchema); здесь схемы задают сами сценарии.
+    settings.setAutoPickSchema(false);
     // Запасная кодировка по умолчанию зависит от локали машины.
     settings.setFallbackEncodingChoice(TextEncoding::Windows1251);
     // Таймер авто-обновления — 1 с (сценарий растущего файла ждёт его тик).
@@ -4723,6 +4746,178 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
 // третьего запуска и при выходе пишет last-session.json; отдельное окно
 // файлов не получает и последнюю сессию не пишет. Окна и SingleInstance —
 // как их собирает main.cpp.
+
+// Подбор схемы при открытии и док Log Fields (F-17, шаг 8): файл из
+// командной строки получает схему сам — «Schema: X (auto)» в строке статуса,
+// «auto» в доке, подходящие схемы первыми, строка покрытия; меню «⋯»; в доке
+// нет слова «block»; у JSON-файла — «JSON Lines · keys» с ключами
+// галочками, галочка — колонка без перечитывания файла.
+void scenarioAutoPickSchema(const QDir& root, bool indexed)
+{
+    section(QStringLiteral("auto pick schema (F-17, step 8), %1").arg(indexed ? "indexed" : "resident"));
+    const QDir dir(root.filePath(indexed ? QStringLiteral("autopick-indexed") : QStringLiteral("autopick-resident")));
+    QDir().mkpath(dir.absolutePath());
+    AppSettings::overrideConfigDirForTesting(dir.filePath(QStringLiteral("config")));
+    AppSettings& settings = AppSettings::instance();
+    settings.load();
+    check(settings.autoPickSchema(), QStringLiteral("auto pick is on by default"));
+    settings.setIndexedThresholdMB(indexed ? 0 : 512);
+    settings.setRestoreSessionOnStartup(false);
+    settings.setRememberFileState(false);
+    settings.save();
+
+    QByteArray logback;
+    const builtinsamples::SchemaCase logbackCase = builtinsamples::cases().constFirst();
+    for (int r = 0; r < 4; ++r)
+        for (const builtinsamples::Sample& sample : logbackCase.samples)
+            logback += sample.line.toUtf8() + '\n';
+    const QString plain = testdocs::writeFile(dir, QStringLiteral("service.log"), logback);
+    QByteArray json;
+    for (int i = 0; i < 40; ++i)
+        json += "{\"time\":\"2026-03-05T10:00:" + QByteArray::number(i % 60).rightJustified(2, '0')
+            + "Z\",\"level\":\"" + (i % 5 ? "info" : "error") + "\",\"msg\":\"m " + QByteArray::number(i)
+            + "\",\"thread\":\"t" + QByteArray::number(i % 3) + "\",\"req\":\"r" + QByteArray::number(i)
+            + "\"" + (i % 4 == 0 ? ",\"rare\":1" : "") + "}\n";
+    const QString jsonl = testdocs::writeFile(dir, QStringLiteral("events.jsonl"), json);
+
+    MainWindow win;
+    showWindow(win);
+    win.openCommandLine(OpenRouting::parseCommandLine({plain}));
+    check(waitFor([&]() { return tabIndexForFile(win, plain) >= 0; }) && waitAllLoaded(win),
+          QStringLiteral("the log from the command line opens"));
+    auto* status = win.findChild<QLabel*>(QStringLiteral("schemaStatusLabel"));
+    check(status && waitFor([&]() { return status->isVisible() && status->text().endsWith(QStringLiteral("(auto)")); }, 30000),
+          QStringLiteral("status bar shows \"Schema: … (auto)\" (%1)").arg(status ? status->text() : QString()));
+    check(status && status->text() == QStringLiteral("Schema: Logback / Log4j (auto)"),
+          QStringLiteral("the picked schema is Logback (%1)").arg(status ? status->text() : QString()));
+    QDockWidget* fieldsDock = dock(win, "fieldVisibilityDockWidget");
+    auto* combo = fieldsDock ? fieldsDock->findChild<QComboBox*>(QStringLiteral("schemaCombo")) : nullptr;
+    check(combo && combo->currentText() == QStringLiteral("Logback / Log4j") && combo->currentIndex() == 0,
+          QStringLiteral("the dock shows the picked schema first (%1, %2)")
+              .arg(combo ? combo->currentText() : QString()).arg(combo ? combo->currentIndex() : -1));
+    check(combo && combo->itemData(0, Qt::UserRole + 8).toString().startsWith(QStringLiteral("auto")),
+          QStringLiteral("the picked item is marked auto (%1)")
+              .arg(combo ? combo->itemData(0, Qt::UserRole + 8).toString() : QString()));
+    auto* coverage = fieldsDock ? fieldsDock->findChild<QLabel*>(QStringLiteral("schemaCoverageLabel")) : nullptr;
+    check(coverage && coverage->isVisibleTo(fieldsDock) && coverage->text().startsWith(QStringLiteral("Parsed")),
+          QStringLiteral("the coverage line of the tab (%1)").arg(coverage ? coverage->text() : QString()));
+    auto* whole = fieldsDock ? fieldsDock->findChild<QRadioButton*>(QStringLiteral("showWholeLineRadio")) : nullptr;
+    auto* selected = fieldsDock ? fieldsDock->findChild<QRadioButton*>(QStringLiteral("showSelectedFieldsRadio")) : nullptr;
+    check(whole && selected && whole->isChecked() && !selected->isChecked(),
+          QStringLiteral("Show in the log: Whole line / Selected fields"));
+    // «⋯»: четыре пункта.
+    auto* more = fieldsDock ? fieldsDock->findChild<QToolButton*>(QStringLiteral("schemaMoreButton")) : nullptr;
+    QStringList items;
+    if (more && more->menu())
+        for (QAction* a : more->menu()->actions())
+            if (!a->isSeparator())
+                items << a->text();
+    check(items == QStringList({QStringLiteral("Detect for This Tab"), QStringLiteral("Apply Schema to All Tabs"),
+                                QStringLiteral("Find a Schema..."), QStringLiteral("Manage Schemas...")}),
+          QStringLiteral("the ⋯ menu (%1)").arg(items.join(QStringLiteral(", "))));
+    // Слова «block» в доке нет.
+    QStringList blockWords;
+    const auto noBlock = [&blockWords](const QString& where, const QString& text) {
+        if (text.contains(QStringLiteral("block"), Qt::CaseInsensitive))
+            blockWords << where + QStringLiteral(": ") + text;
+    };
+    if (fieldsDock) {
+        for (QWidget* w : fieldsDock->findChildren<QWidget*>()) {
+            noBlock(QStringLiteral("tooltip"), w->toolTip());
+            if (auto* label = qobject_cast<QLabel*>(w))
+                noBlock(QStringLiteral("label"), label->text());
+            if (auto* button = qobject_cast<QAbstractButton*>(w))
+                noBlock(QStringLiteral("button"), button->text());
+        }
+        if (more && more->menu())
+            for (QAction* a : more->menu()->actions())
+                noBlock(QStringLiteral("menu"), a->text() + QLatin1Char(' ') + a->toolTip());
+    }
+    check(blockWords.isEmpty(), QStringLiteral("no \"block\" in the dock: %1").arg(blockWords.join(QStringLiteral("; "))));
+
+    // Выбор пользователя в доке — «auto» уходит; Detect for This Tab — снова.
+    if (combo && combo->count() > 1) {
+        combo->setCurrentIndex(1);
+        check(waitAllLoaded(win) && status && !status->text().endsWith(QStringLiteral("(auto)")),
+              QStringLiteral("the user's choice is not auto (%1)").arg(status ? status->text() : QString()));
+        QAction* detect = win.findChild<QAction*>(QStringLiteral("detectSchemaAction"));
+        if (detect)
+            detect->trigger();
+        check(detect && status && waitFor([&]() { return status->text() == QStringLiteral("Schema: Logback / Log4j (auto)"); }, 30000),
+              QStringLiteral("Detect for This Tab picks again (%1)").arg(status ? status->text() : QString()));
+    }
+
+    // JSON-файл: ключи начала файла галочками вместо схемы.
+    win.openCommandLine(OpenRouting::parseCommandLine({jsonl}));
+    check(waitFor([&]() { return tabIndexForFile(win, jsonl) >= 0; }) && waitAllLoaded(win),
+          QStringLiteral("the JSON Lines log opens"));
+    auto* keysBox = fieldsDock ? fieldsDock->findChild<QWidget*>(QStringLiteral("schemaKeysBox")) : nullptr;
+    auto* keysTitle = fieldsDock ? fieldsDock->findChild<QLabel*>(QStringLiteral("schemaKeysTitle")) : nullptr;
+    const auto keyBoxes = [&]() {
+        QList<QCheckBox*> found;
+        if (keysBox)
+            for (QCheckBox* cb : keysBox->findChildren<QCheckBox*>())
+                found << cb;
+        return found;
+    };
+    const auto keyBox = [&](const QString& key) -> QCheckBox* {
+        for (QCheckBox* cb : keyBoxes())
+            if (cb->text() == key && cb->isVisibleTo(keysBox))
+                return cb;
+        return nullptr;
+    };
+    // Ключи начала файла читаются в пуле: «rare» — только оттуда.
+    check(keysBox && waitFor([&]() { return keysBox->isVisibleTo(fieldsDock) && keyBox(QStringLiteral("rare")); }, 30000),
+          QStringLiteral("JSON file: the dock shows the keys of the file (%1)").arg(keyBoxes().size()));
+    check(keysTitle && keysTitle->text() == QStringLiteral("JSON Lines · keys") && combo && !combo->isVisibleTo(fieldsDock),
+          QStringLiteral("JSON file: \"JSON Lines · keys\" instead of the schema list (%1)")
+              .arg(keysTitle ? keysTitle->text() : QString()));
+    LogViewWidget* jsonTab = tabAt(win, tabIndexForFile(win, jsonl));
+    QCheckBox* reqBox = keyBox(QStringLiteral("req"));
+    QCheckBox* rareBox = keyBox(QStringLiteral("rare"));
+    check(reqBox && reqBox->isChecked() && rareBox && !rareBox->isChecked(),
+          QStringLiteral("keys of most lines are fields, a rare key is offered unchecked"));
+    if (jsonTab && reqBox && rareBox) {
+        int passes = 0;
+        QObject spy;
+        QObject::connect(jsonTab, &LogViewWidget::fileParsingStarted, &spy, [&passes]() { ++passes; });
+        reqBox->click();
+        check(waitAllLoaded(win) && !jsonTab->parserFieldNames().contains(QStringLiteral("req")),
+              QStringLiteral("unchecked key is no longer a field (%1)").arg(jsonTab->parserFieldNames().join(',')));
+        rareBox = keyBox(QStringLiteral("rare"));
+        check(rareBox && keyBox(QStringLiteral("req")) && !keyBox(QStringLiteral("req"))->isChecked(),
+              QStringLiteral("an unchecked key stays in the list"));
+        if (rareBox)
+            rareBox->click();
+        check(waitAllLoaded(win) && jsonTab->parserFieldNames().contains(QStringLiteral("rare")),
+              QStringLiteral("checked key becomes a field (%1)").arg(jsonTab->parserFieldNames().join(',')));
+        check(passes == 0, QStringLiteral("key columns do not read the file again (%1 passes)").arg(passes));
+        // Add Key…
+        auto* addKey = keysBox->findChild<QPushButton*>(QStringLiteral("addKeyButton"));
+        g_driver->expect([&](QWidget* w) {
+            auto* dialog = qobject_cast<QInputDialog*>(w);
+            if (!dialog) {
+                DialogDriver::close(w);
+                return;
+            }
+            dialog->setTextValue(QStringLiteral("absent"));
+            dialog->accept();
+        });
+        if (addKey)
+            addKey->click();
+        g_driver->dropExpectations();
+        check(addKey && waitAllLoaded(win) && jsonTab->parserFieldNames().contains(QStringLiteral("absent")),
+              QStringLiteral("Add Key... adds a field"));
+    }
+    // Назад на обычный лог — снова строка схемы.
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, plain));
+    check(combo && combo->isVisibleTo(fieldsDock) && keysBox && !keysBox->isVisibleTo(fieldsDock),
+          QStringLiteral("a plain log shows the schema row again"));
+    win.close();
+    settings.setAutoPickSchema(false);
+    settings.save();
+}
+
 void scenarioSeparateWindowFirst(const QDir& root, const QString& instanceKey)
 {
     section(QStringLiteral("separate window first (Q-20)"));
@@ -4733,6 +4928,7 @@ void scenarioSeparateWindowFirst(const QDir& root, const QString& instanceKey)
     AppSettings& settings = AppSettings::instance();
     settings.load();
     settings.setRestoreSessionOnStartup(false);
+    settings.setAutoPickSchema(false);
     settings.setFallbackEncodingChoice(TextEncoding::Windows1251);
     settings.save();
     const QString lastSession = AppSettings::lastSessionFile();
@@ -4846,6 +5042,9 @@ int main(int argc, char** argv)
         scenarioUpgradeFrom050(QDir(root.path()));
     if (only.isEmpty() || only == QLatin1String("separate"))
         scenarioSeparateWindowFirst(QDir(root.path()), instanceKey);
+    for (const bool indexed : {false, true})
+        if (only.isEmpty() || only == QLatin1String("autopick"))
+            scenarioAutoPickSchema(QDir(root.path()), indexed);
 
     std::fprintf(stderr, "dialogs closed by the driver: %s\n",
                  qPrintable(driver.closedByDefault().join(QStringLiteral("; "))));

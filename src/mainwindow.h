@@ -29,6 +29,7 @@ class LogViewWidget;
 class QDateTimeEdit;
 class QLineEdit;
 class QCheckBox;
+class QRadioButton;
 class QPushButton;
 class QVBoxLayout;
 class QDockWidget;
@@ -386,7 +387,18 @@ private:
 
     // Field-visibility dock widgets
     QVector<QCheckBox*> m_fieldCheckBoxes;
-    QCheckBox* m_fieldFilterEnabledCheckBox = nullptr; // master on/off toggle
+    // «Show in the log: Whole line / Selected fields» (F-17, шаг 8).
+    QRadioButton* m_showWholeLineRadio = nullptr;
+    QRadioButton* m_showSelectedFieldsRadio = nullptr;
+    // Строка схемы и покрытие вкладки; у JSON-файла вместо неё — ключи.
+    QWidget* m_schemaRow = nullptr;
+    QLabel* m_schemaCoverageLabel = nullptr;
+    QWidget* m_keysBox = nullptr;
+    QLabel* m_keysTitle = nullptr;
+    QVBoxLayout* m_keysLayout = nullptr;
+    QVector<QCheckBox*> m_keyCheckBoxes;
+    QAction* m_detectSchemaAction = nullptr;
+    QLabel* m_schemaStatusLabel = nullptr;   // «Schema: X (auto)» в строке статуса
     QCheckBox* m_allFieldsCheckBox    = nullptr;
     QWidget* m_fieldFilterControlsWidget = nullptr;
     QVBoxLayout* m_fieldCheckboxLayout = nullptr;
@@ -557,6 +569,7 @@ private:
     // Док Log Fields по состоянию FieldSchemaController.
     void syncSchemaCombo();
     void syncFieldControls();
+    void syncKeyControls();    // ключи JSON-файла (F-17, шаг 8)
     QStringList checkedFieldNames() const;
 
 };

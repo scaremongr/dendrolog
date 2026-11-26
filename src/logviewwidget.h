@@ -828,6 +828,7 @@ private:
     QHash<QString, FieldSettings> normalizedFileSchemas(const QHash<QString, FieldSettings>& files) const;
     QString m_schemaName;
     bool m_showFieldsFlag = false;
+    FieldSettings::Origin m_schemaOrigin = FieldSettings::Origin::Default; // F-17, шаг 8
     QStringList m_visibleFields;
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback(); // из AppSettings в конструкторе
 

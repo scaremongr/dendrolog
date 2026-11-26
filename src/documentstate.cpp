@@ -136,6 +136,13 @@ QJsonObject FieldSettings::toJson() const
     json.insert(QStringLiteral("showFields"), showFields);
     if (!visibleFields.isEmpty())
         json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
+    // Происхождение (F-17, шаг 8): у схемы — всегда (без ключа читается
+    // снимок до шага 8 — его схема считается выбором пользователя); «без
+    // схемы» по умолчанию — без ключа.
+    if (origin != Origin::Default || hasSchema())
+        json.insert(QStringLiteral("origin"), origin == Origin::Auto   ? QStringLiteral("auto")
+                                              : origin == Origin::User ? QStringLiteral("user")
+                                                                       : QStringLiteral("default"));
     return json;
 }
 
@@ -150,6 +157,20 @@ std::optional<FieldSettings> FieldSettings::fromJson(const QJsonObject& json, QS
         || !boolField(json, "showFields", &s.showFields, error)
         || !stringListField(json, "visibleFields", &s.visibleFields, error))
         return std::nullopt;
+    const QJsonValue origin = json.value(QLatin1String("origin"));
+    if (origin.isString() && origin.toString() == QLatin1String("auto"))
+        s.origin = Origin::Auto;
+    else if (origin.isString() && origin.toString() == QLatin1String("user"))
+        s.origin = Origin::User;
+    else if (origin.isString() && origin.toString() == QLatin1String("default"))
+        s.origin = Origin::Default;
+    else if (origin.isUndefined())
+        s.origin = s.hasSchema() ? Origin::User : Origin::Default;   // снимок до шага 8
+    else {
+        if (error)
+            *error = QStringLiteral("fields.origin: unknown value");
+        return std::nullopt;
+    }
     return s;
 }
 

@@ -117,6 +117,7 @@
                     }
                 },
                 "fields": {
+                    "origin": "default",
                     "showFields": true,
                     "schema": {
                         "definition": {
@@ -202,6 +203,7 @@
             "view": {
                 "autoReload": false,
                 "fields": {
+                    "origin": "default",
                     "showFields": false,
                     "schema": {
                         "definition": {
