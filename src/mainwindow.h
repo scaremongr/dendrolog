@@ -325,7 +325,6 @@ private:
     QPointer<SessionReportDialog> m_sessionReport;
     QLabel* m_sessionReportLink = nullptr;
     void saveSessionAs();
-    void applySessionSchema(const SessionState& session);
     void openSession(const SessionState& session, const QString& path, SessionController::Origin origin);
     void showSessionResult(const SessionController::OpenResult& result, SessionController::Origin origin);
     void reopenClosedTab(); // Ctrl+Shift+T
@@ -341,6 +340,8 @@ private:
     QAction* m_timeFilterStatusAction = nullptr;
     QAction* m_textFilterStatusAction = nullptr;
     QAction* m_fieldFilterStatusAction = nullptr;
+    // «Apply Schema to All Tabs» (F-5): схема дока Log Fields на все вкладки.
+    QAction* m_applySchemaToAllAction = nullptr;
     QAction* m_markerStatusAction = nullptr;
     // Фильтр по файлу (U-23): зажата — у вкладки скрыт файл; отжать —
     // показать все файлы. Зажать нечем: файлы скрывают чипы легенды.
@@ -499,7 +500,7 @@ private:
     void onTabContextMenu(int index, const QPoint& globalPos);
     // Читатели полей вне вкладок — выдача Search и Save View As — перед
     // сменой полей записей (инвариант 4; FieldSchemaController::Window).
-    void stopFieldReaders(bool starting);
+    void stopFieldReaders(LogViewWidget* view, bool starting);
     // Применить набор правил из конструктора фильтров (+ inline-подсветку
     // совпадений) к АКТИВНОЙ вкладке. Остальные документы не трогаются —
     // у каждой вкладки свой применённый набор.

@@ -6,6 +6,21 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **A field schema per tab.** The schema, **Filter blocks** and the column
+  selection of the *Log Fields* panel now belong to the active tab: picking
+  "nginx access" for one tab no longer takes the columns away from the Spring
+  log next to it, and the panel follows the tab you switch to. A new tab gets
+  the schema chosen last. **Apply Schema to All Tabs** (the **All Tabs**
+  button next to **Manage…** and the **View** menu) does what changing the
+  schema used to do — the active tab's schema, check box and columns on every
+  tab. Text Filters and Search bind column rules to the schema of the tab they
+  are applied to. Sessions, `last-session.json` and **Reopen Closed Tab**
+  keep each tab's schema; file memory keeps the schema of a file that was
+  alone in its tab (applied when the file is opened again, if the schema is
+  still in the catalogue). Sessions of 0.6 open with their single schema on
+  every tab, and 0.6 reads new sessions with the active tab's schema.
+
 ### Added
 - **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
   as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name

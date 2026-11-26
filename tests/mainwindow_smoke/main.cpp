@@ -27,6 +27,7 @@
 #include "directoryscanner.h"
 #include "encodingindicator.h"
 #include "filelegend.h"
+#include "filememorystore.h"
 #include "filterpanelwidget.h"
 #include "logmodel.h"
 #include "logtabwidget.h"
@@ -1154,29 +1155,163 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
           QStringLiteral("Settings opens and closes with OK"));
     check(waitAllLoaded(win) && model->rowCount() == allRows, QStringLiteral("tabs keep their rows after Settings OK"));
 
-    section(QStringLiteral("schema switch"));
+    section(QStringLiteral("schema per tab"));
     auto* fieldsDock = win.findChild<QDockWidget*>(QStringLiteral("fieldVisibilityDockWidget"));
     auto* combo = fieldsDock->findChild<QComboBox*>();
     check(combo && combo->count() > 1, QStringLiteral("Log Fields offers schemas (%1)").arg(combo ? combo->count() : 0));
-    if (combo && combo->count() > 1) {
-        // Две схемы по очереди: изначально схема может быть не выбрана (-1).
+    QAction* applyToAll = win.findChild<QAction*>(QStringLiteral("applySchemaToAllTabs"));
+    check(applyToAll, QStringLiteral("Apply Schema to All Tabs action"));
+    const int smoke = combo ? combo->findText(QStringLiteral("Smoke Fields")) : -1;
+    check(smoke >= 0, QStringLiteral("the smoke schema is in the catalogue"));
+    LogViewWidget* b = tabAt(win, ib);
+    if (combo && smoke >= 0 && applyToAll && b) {
+        const int other = smoke == 0 ? 1 : 0;
+        QCheckBox* filterBlocks = nullptr;
+        const auto columnBoxes = [&]() {
+            QList<QCheckBox*> found;
+            for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>()) {
+                if (cb->text() == QLatin1String("Filter blocks"))
+                    filterBlocks = cb;
+                else if (!cb->isTristate() && cb->isVisibleTo(fieldsDock))
+                    found << cb;
+            }
+            return found;
+        };
+        // beta — другая схема.
+        tabs(win)->setCurrentIndex(ib);
+        combo->setCurrentIndex(other);
+        check(waitAllLoaded(win), QStringLiteral("beta settles after its schema"));
+        const QString betaSchema = b->parserPattern();
+        // alpha — схема фикстур, «Filter blocks», колонка Level.
+        tabs(win)->setCurrentIndex(ia);
+        combo->setCurrentIndex(smoke);
+        check(waitAllLoaded(win), QStringLiteral("alpha settles after its schema"));
+        check(a->parserPattern() == testdocs::buildSchema() && b->parserPattern() == betaSchema,
+              QStringLiteral("the combo changes only the active tab"));
+        columnBoxes();
+        if (filterBlocks && !filterBlocks->isChecked())
+            filterBlocks->click();
+        check(waitAllLoaded(win), QStringLiteral("alpha settles after Filter blocks"));
+        for (QCheckBox* cb : columnBoxes())
+            if (cb->isChecked() != (cb->text() == QLatin1String("Level")))
+                cb->click();
+        check(model->fieldDisplayFilterEnabled() && model->visibleFieldIndexes() == QVector<int>{2},
+              QStringLiteral("alpha shows the Level column"));
+        // Фильтр по полю через Text Filters — привязан к схеме alpha.
+        auto* textDock = win.findChild<QDockWidget*>(QStringLiteral("textFilterDockWidget"));
+        FilterPanelWidget* filterPanel = textDock->findChild<FilterPanelWidget*>();
+        QAbstractButton* applyRules = nullptr;
+        QAbstractButton* resetRules = nullptr;
+        for (QAbstractButton* btn : filterPanel->findChildren<QAbstractButton*>()) {
+            if (btn->text().endsWith(QStringLiteral("Apply")))
+                applyRules = btn;
+            else if (btn->text().endsWith(QStringLiteral("Reset")))
+                resetRules = btn;
+        }
+        FilterRuleSet byLevel;
+        FilterRule levelRule;
+        levelRule.text = QStringLiteral("ERROR");
+        levelRule.fieldName = QStringLiteral("Level");
+        byLevel.rules << levelRule;
+        filterPanel->setRuleSet(byLevel);
+        if (applyRules)
+            applyRules->click();
+        check(testdocs::settle(*model) && !model->filterRules().fieldMissing(0)
+                  && model->rowCount() > 0 && model->rowCount() < allRows,
+              QStringLiteral("field filter on alpha (%1 of %2)").arg(model->rowCount()).arg(allRows));
+        const int errorRows = model->rowCount();
+
+        // beta: схема меняется ещё раз, Filter blocks — alpha не трогается.
+        tabs(win)->setCurrentIndex(ib);
+        check(combo->currentIndex() == other, QStringLiteral("the combo follows the active tab (beta)"));
+        columnBoxes();
+        check(filterBlocks && !filterBlocks->isChecked(), QStringLiteral("Filter blocks follows the tab (beta: off)"));
+        combo->setCurrentIndex(smoke);
+        check(waitAllLoaded(win), QStringLiteral("beta settles"));
+        combo->setCurrentIndex(other);
+        if (filterBlocks)
+            filterBlocks->click();
+        check(waitAllLoaded(win), QStringLiteral("beta settles after Filter blocks"));
+        check(a->parserPattern() == testdocs::buildSchema() && model->fieldDisplayFilterEnabled()
+                  && model->visibleFieldIndexes() == QVector<int>{2}
+                  && !model->filterRules().fieldMissing(0) && model->rowCount() == errorRows,
+              QStringLiteral("alpha's columns and field filter survive beta's schema changes"));
+        tabs(win)->setCurrentIndex(ia);
+        check(combo->currentIndex() == smoke, QStringLiteral("the combo follows the active tab (alpha)"));
+        QStringList checkedColumns;
+        for (QCheckBox* cb : columnBoxes())
+            if (cb->isChecked())
+                checkedColumns << cb->text();
+        check(filterBlocks && filterBlocks->isChecked() && checkedColumns == QStringList{QStringLiteral("Level")},
+              QStringLiteral("Log Fields shows alpha's Filter blocks and columns (%1)").arg(checkedColumns.join(',')));
+
+        // Новая вкладка — схема по умолчанию: последний выбор в доке (на
+        // beta — её схема с Filter blocks); закрыть и вернуть — её схема.
+        auto* scanner = win.findChild<DirectoryScanner*>();
+        const int before = tabs(win)->count();
+        // gone уже открывался: его память файла со своей схемой — убрать
+        // (новый файл вытеснил бы alpha из Recent Files, его ждут дальше).
+        const QString fresh = fx.gone;
+        QFile::remove(QDir(AppSettings::configDir()).filePath(
+            QStringLiteral("memory/") + FileMemoryStore::fileNameForPath(fresh)));
+        if (scanner)
+            emit scanner->fileActivated(fresh);
+        check(waitFor([&]() { return tabIndexForFile(win, fresh) >= 0; }) && waitAllLoaded(win),
+              QStringLiteral("a new tab opens"));
+        const int ig = tabIndexForFile(win, fresh);
+        LogViewWidget* g = ig >= 0 ? tabAt(win, ig) : nullptr;
+        check(g && g->parserPattern() == b->parserPattern()
+                  && g->fieldSettings().extraction == b->fieldSettings().extraction,
+              QStringLiteral("the new tab takes the default schema (the last choice)"));
+        if (g) {
+            tabs(win)->setCurrentIndex(ig);
+            combo->setCurrentIndex(smoke);
+            check(waitAllLoaded(win), QStringLiteral("new tab settles after its schema"));
+            const QString closedSchema = g->parserPattern();
+            pressCommand(win, QStringLiteral("closeTab"));
+            check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("the new tab closes"));
+            pressCommand(win, QStringLiteral("reopenTab"));
+            check(waitFor([&]() { return tabIndexForFile(win, fresh) >= 0; }) && waitAllLoaded(win),
+                  QStringLiteral("Ctrl+Shift+T reopens it"));
+            const int ir = tabIndexForFile(win, fresh);
+            check(ir >= 0 && tabAt(win, ir)->parserPattern() == closedSchema,
+                  QStringLiteral("the reopened tab keeps its schema"));
+            if (ir >= 0) {
+                tabs(win)->setCurrentIndex(ir);
+                pressCommand(win, QStringLiteral("closeTab"));
+                waitFor([&]() { return tabs(win)->count() == before; });
+            }
+        }
+
+        // «Apply Schema to All Tabs» — схема alpha на всех вкладках.
+        tabs(win)->setCurrentIndex(ia);
+        applyToAll->trigger();
+        check(waitAllLoaded(win), QStringLiteral("tabs settle after Apply Schema to All Tabs"));
+        bool all = true;
+        for (int i = 0; i < tabs(win)->count(); ++i) {
+            LogViewWidget* t = tabAt(win, i);
+            all = all && t->parserPattern() == testdocs::buildSchema() && t->model()->fieldDisplayFilterEnabled()
+                && t->model()->visibleFieldIndexes() == QVector<int>{2};
+        }
+        check(all, QStringLiteral("Apply Schema to All Tabs reaches every tab"));
+        check(model->rowCount() == errorRows, QStringLiteral("alpha keeps its field filter"));
+
+        // Как было: без фильтра, первая схема и Filter blocks выключен на всех.
+        if (resetRules)
+            resetRules->click();
+        check(testdocs::settle(*model) && model->rowCount() == allRows, QStringLiteral("text filter reset"));
         combo->setCurrentIndex(0);
-        check(waitAllLoaded(win), QStringLiteral("tabs settle after the first schema"));
-        const QString first = a->parserPattern();
-        combo->setCurrentIndex(1);
-        check(waitAllLoaded(win), QStringLiteral("tabs settle after the schema switch"));
-        bool same = true;
-        for (int i = 0; i < tabs(win)->count(); ++i)
-            same = same && tabAt(win, i)->parserPattern() == a->parserPattern();
-        check(!first.isEmpty() && a->parserPattern() != first, QStringLiteral("schema switch reaches the tab"));
-        check(same, QStringLiteral("schema switch reaches every tab"));
-        check(model->rowCount() == allRows, QStringLiteral("schema switch keeps the rows"));
-        combo->setCurrentIndex(0);
-        check(waitAllLoaded(win) && a->parserPattern() == first, QStringLiteral("schema switches back"));
+        for (QCheckBox* cb : columnBoxes())
+            if (!cb->isChecked())
+                cb->click();
+        if (filterBlocks && filterBlocks->isChecked())
+            filterBlocks->click();
+        applyToAll->trigger();
+        check(waitAllLoaded(win) && model->rowCount() == allRows, QStringLiteral("schema back to the first one"));
     }
 
-    // «Filter blocks» и колонки дока Log Fields — на всех вкладках; кнопка
-    // Fields тулбара Filters — та же галочка (FieldSchemaController, M-2).
+    // «Filter blocks» и колонки дока Log Fields — на активной вкладке (F-5);
+    // кнопка Fields тулбара Filters — та же галочка (FieldSchemaController).
     if (combo && combo->count() > 0) {
         QCheckBox* filterBlocks = nullptr;
         // Чекбоксы колонок окно может пересоздать при смене схемы и флага —
@@ -1202,14 +1337,11 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
             check(waitAllLoaded(win), QStringLiteral("tabs settle after Filter blocks"));
             columns = columnBoxes();
             const auto everyTab = [&](const std::function<bool(LogModel*)>& pred) {
-                bool all = true;
-                for (int i = 0; i < tabs(win)->count(); ++i)
-                    all = all && tabAt(win, i)->model() && pred(tabAt(win, i)->model());
-                return all;
+                return pred(model); // схема на вкладку: действует на активную
             };
             check(fieldsStatus->isChecked()
                       && everyTab([](LogModel* m) { return m->fieldDisplayFilterEnabled(); }),
-                  QStringLiteral("Filter blocks reaches every tab and the Fields button"));
+                  QStringLiteral("Filter blocks reaches the active tab and the Fields button"));
             for (QCheckBox* cb : columns)
                 if (!cb->isChecked())
                     cb->click();
@@ -1219,14 +1351,14 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
                       return m->visibleFieldIndexes().size() == all - 1
                           && !m->visibleFieldIndexes().contains(0);
                   }),
-                  QStringLiteral("column choice reaches every tab"));
+                  QStringLiteral("column choice reaches the active tab"));
             columns.first()->click();
             check(everyTab([&](LogModel* m) { return m->visibleFieldIndexes().size() == all; }),
                   QStringLiteral("column choice comes back"));
             fieldsStatus->trigger();
             check(waitAllLoaded(win) && !filterBlocks->isChecked() && !fieldsStatus->isChecked()
                       && everyTab([](LogModel* m) { return !m->fieldDisplayFilterEnabled(); }),
-                  QStringLiteral("Fields button turns Filter blocks off on every tab"));
+                  QStringLiteral("Fields button turns Filter blocks off on the active tab"));
             check(model->rowCount() == allRows, QStringLiteral("Filter blocks keeps the rows"));
             if (wasOn)
                 filterBlocks->click();
@@ -2463,6 +2595,17 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
     // Запасная кодировка по умолчанию зависит от локали машины.
     settings.setFallbackEncodingChoice(TextEncoding::Windows1251);
     settings.save();
+
+    // Схема фикстур в каталоге (сценарий «schema per tab»).
+    {
+        SchemaStore::SchemaEntry smoke;
+        smoke.name = QStringLiteral("Smoke Fields");
+        smoke.schema = testdocs::buildSchema();
+        QDir().mkpath(SchemaStore::patternsDir());
+        QFile file(QDir(SchemaStore::patternsDir()).filePath(QStringLiteral("smoke-fields.json")));
+        if (file.open(QIODevice::WriteOnly))
+            file.write(SchemaStore::fileBytes(smoke));
+    }
 
     int restoredTabs = 0;
     QVector<QSet<QString>> exitBookmarks;

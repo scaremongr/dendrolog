@@ -70,7 +70,10 @@
 #include "appsettings.h"
 #include "bookmarkpanelwidget.h"
 #include "documentstate.h"
+#include "fieldschemacontroller.h"
 #include "filememorystore.h"
+#include "logpattern.h"
+#include "schemastore.h"
 #include "sessioncontroller.h"
 #include "sessionfile.h"
 #include "sessionreportdialog.h"
@@ -94,6 +97,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
@@ -1810,6 +1814,86 @@ static void checkSessionFormat()
     CHECK(SessionState::fromJson(extra).has_value(), QStringLiteral("лишние ключи не мешают"));
 }
 
+// ---------------------------------------------------------------------------
+// Схема на вкладку (F-5, PR 1)
+// ---------------------------------------------------------------------------
+
+static const QString kPlainSchema = QStringLiteral(
+    "{\"blocks\":[{\"name\":\"Msg\",\"type\":\"rest\"}],\"version\":1}");
+
+static void checkSchemasFormat()
+{
+    g_context = QStringLiteral("сессия: схема на вкладку, формат");
+    SessionState golden = goldenSession();
+    golden.tabs[0].view.fields = FieldSettings{ QStringLiteral("Spring Boot"), kGoldenSchema, true,
+                                                { QStringLiteral("Level") } };
+    golden.tabs[1].view.fields = FieldSettings{ QStringLiteral("Plain"), kPlainSchema, false, {} };
+    // Верхний уровень — схема активной вкладки (вторая).
+    golden.schemaName = QStringLiteral("Plain");
+    golden.schema = kPlainSchema;
+    golden.fieldExtraction = false;
+    golden.visibleFields.clear();
+    const QJsonObject json = golden.toJson(goldenSessionPath());
+
+    QFile file(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/session-schemas.json"));
+    CHECK(file.open(QIODevice::ReadOnly), QStringLiteral("эталон открывается"));
+    QByteArray bytes = file.readAll();
+    bytes.replace("@ROOT@", root().toUtf8());
+    const QJsonObject stored = bytesToObject(bytes);
+    CHECK(json == stored, QStringLiteral("сессия со схемами вкладок пишется ровно в эталон"));
+    QString error;
+    const auto parsed = SessionState::fromJson(stored, &error);
+    CHECK(parsed.has_value(), QStringLiteral("эталон читается: ") + error);
+    if (parsed) {
+        CHECK(parsed->tabs.size() == 2 && parsed->tabs[0].view.fields == golden.tabs[0].view.fields
+                  && parsed->tabs[1].view.fields == golden.tabs[1].view.fields,
+              QStringLiteral("схема каждой вкладки"));
+        CHECK(parsed->toJson(goldenSessionPath()) == stored, QStringLiteral("круговой проход — тот же JSON"));
+    }
+
+    // Эталоны версии 1 — без схем вкладок: их получает схема верхнего уровня
+    // (SessionController::open, проверка на живых вкладках ниже).
+    QFile v1(QStringLiteral(DOCUMENT_STATE_TEST_DIR "/session-v1.json"));
+    CHECK(v1.open(QIODevice::ReadOnly), QStringLiteral("эталон версии 1"));
+    QByteArray v1Bytes = v1.readAll();
+    v1Bytes.replace("@ROOT@", root().toUtf8());
+    const auto old = SessionState::fromJson(bytesToObject(v1Bytes), &error);
+    CHECK(old && old->tabs.size() == 2 && !old->tabs[0].view.fields && !old->tabs[1].view.fields,
+          QStringLiteral("вкладки версии 1 без схемы"));
+    if (old) {
+        const FieldSettings top = old->topLevelFields();
+        CHECK(top.schema == kGoldenSchema && top.schemaName == QStringLiteral("Spring Boot") && top.extraction
+                  && top.visibleFields == (QStringList{ QStringLiteral("Level"), QStringLiteral("Message") }),
+              QStringLiteral("схема верхнего уровня"));
+    }
+
+    // ViewState.fields: круговой проход и отказ на битом.
+    g_context = QStringLiteral("ViewState.fields");
+    for (const FieldSettings& f : { FieldSettings{ QStringLiteral("A"), kGoldenSchema, true, { QStringLiteral("Time") } },
+                                    FieldSettings{ QString(), QString(), true, {} },
+                                    FieldSettings{ QString(), QStringLiteral("not json"), false, {} } }) {
+        ViewState v;
+        v.fields = f;
+        const QJsonObject vj = v.toJson();
+        const auto back = ViewState::fromJson(bytesToObject(objectToBytes(vj)), &error);
+        CHECK(back && back->fields == f, QStringLiteral("круговой проход fields: ") + error);
+        CHECK(f.hasSchema() == vj.value("fields").toObject().contains("schema"),
+              QStringLiteral("нет схемы — нет ключа schema"));
+    }
+    CHECK(!ViewState::fromJson(ViewState().toJson()).value_or(ViewState()).fields,
+          QStringLiteral("без поля — nullopt"));
+    const auto refusedView = [&](const QJsonValue& fields, const QString& what) {
+        QJsonObject vj = ViewState().toJson();
+        vj.insert(QStringLiteral("fields"), fields);
+        CHECK(!ViewState::fromJson(vj), QStringLiteral("отказ: ") + what);
+    };
+    refusedView(5, QStringLiteral("fields не объект"));
+    refusedView(QJsonObject{ { "schema", 3 } }, QStringLiteral("schema не объект"));
+    refusedView(QJsonObject{ { "schema", QJsonObject{ { "name", "x" } } } }, QStringLiteral("schema без определения"));
+    refusedView(QJsonObject{ { "extraction", "yes" } }, QStringLiteral("extraction не bool"));
+    refusedView(QJsonObject{ { "visibleFields", QJsonArray{ 1 } } }, QStringLiteral("visibleFields не строки"));
+}
+
 static void checkSessionFile(const QDir& dir)
 {
     g_context = QStringLiteral("сессия: файл");
@@ -2820,6 +2904,190 @@ static void checkForeignMemory(const QDir& dir)
           QStringLiteral("память с чужим путём на месте и цела"));
 }
 
+// Вкладки со схемой от контроллера (как у окна: configureView).
+struct SchemaTabPool {
+    FieldSchemaController* controller = nullptr;
+    std::vector<std::unique_ptr<LogViewWidget>> tabs;
+    LogViewWidget* make()
+    {
+        tabs.push_back(makeTab(QString()));
+        controller->configureView(tabs.back().get());
+        return tabs.back().get();
+    }
+};
+
+static QString columnSchema(const QString& level, const QString& message)
+{
+    PatternDefinition def;
+    def.blocks = {
+        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
+        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Thread"),
+                     QStringLiteral("["), QStringLiteral("]")),
+        patternBlock(PatternBlock::MatchKind::Level, level, QString(), QString(), QStringLiteral("-")),
+        patternBlock(PatternBlock::MatchKind::Remainder, message),
+    };
+    return LogPattern::serializeDefinition(def);
+}
+
+static bool hasFields(LogViewWidget& tab, const QString& schema, const QVector<int>& visible)
+{
+    return tab.parserPattern() == schema && tab.model()->fieldDisplayFilterEnabled()
+        && tab.model()->visibleFieldIndexes() == visible;
+}
+
+static void checkSessionSchemas(const QDir& dir, const QString& name)
+{
+    g_context = name + QStringLiteral(" / сессия: вкладки с разными схемами (F-5)");
+    const QString a = columnSchema(QStringLiteral("Level"), QStringLiteral("Message"));
+    const QString b = columnSchema(QStringLiteral("Severity"), QStringLiteral("Text"));
+    const QString foreign = columnSchema(QStringLiteral("Lvl"), QStringLiteral("Body"));
+    QString error;
+    CHECK(SchemaStore::sync({ { QStringLiteral("A"), a, {}, {} }, { QStringLiteral("B"), b, {}, {} } }, &error),
+          QStringLiteral("каталог схем: ") + error);
+    FieldSchemaController c;
+    {
+        QSettings ini(QDir(AppSettings::configDir()).filePath(QStringLiteral("schemas-%1.ini").arg(name)),
+                      QSettings::IniFormat);
+        ini.beginGroup(QStringLiteral("View"));
+        c.load(ini);
+    }
+    const QString one = writeFile(dir, name + QStringLiteral("-schemas-one.log"), logBytes(300));
+    const QString two = writeFile(dir, name + QStringLiteral("-schemas-two.log"), logBytes(200, 7, "two"));
+    const QString sessionPath = dir.filePath(name + QStringLiteral("-schemas.dlsession"));
+
+    SessionController sessions;
+    {
+        SchemaTabPool pool{ &c, {} };
+        LogViewWidget* t1 = pool.make();
+        LogViewWidget* t2 = pool.make();
+        t1->addLogFile(one);
+        t2->addLogFile(two);
+        c.applyToView(t1, FieldSettings{ QStringLiteral("A"), a, true, { QStringLiteral("Level") } });
+        c.applyToView(t2, FieldSettings{ QStringLiteral("B"), b, true, {} });
+        CHECK(settled(*t1) && settled(*t2), QStringLiteral("вкладки"));
+        CHECK(hasFields(*t1, a, { 2 }) && hasFields(*t2, b, { 0, 1, 2, 3 }),
+              QStringLiteral("у каждой вкладки своя схема"));
+        SessionState session = sessions.capture({ t1, t2 }, t2);
+        CHECK(session.tabs.size() == 2 && session.tabs[0].view.fields && session.tabs[1].view.fields
+                  && session.tabs[0].view.fields->schema == a && session.tabs[1].view.fields->schema == b,
+              QStringLiteral("снята схема каждой вкладки"));
+        session.schemaName = QStringLiteral("B");
+        session.schema = b;
+        CHECK(SessionFile::save(sessionPath, session, &error), QStringLiteral("запись: ") + error);
+
+        // Закрыть и вернуть (Ctrl+Shift+T) — схема вкладки с ней.
+        CHECK(sessions.rememberClosedTab(t1, 0), QStringLiteral("закрытая вкладка запомнена"));
+        SchemaTabPool closed{ &c, {} };
+        const auto reopened = sessions.reopenClosedTab([&closed](int) { return closed.make(); });
+        CHECK(reopened.tabs.size() == 1, QStringLiteral("вкладка возвращена"));
+        if (reopened.tabs.size() == 1) {
+            CHECK(settled(*reopened.tabs[0]) && hasFields(*reopened.tabs[0], a, { 2 }),
+                  QStringLiteral("возвращённая вкладка — со своей схемой и колонками"));
+        }
+    }
+
+    const SessionFile::LoadResult loaded = SessionFile::load(sessionPath);
+    CHECK(loaded.state.has_value(), QStringLiteral("читается: ") + loaded.error);
+    if (!loaded.state)
+        return;
+    {
+        SchemaTabPool pool{ &c, {} };
+        const auto result = sessions.open(*loaded.state, sessionPath, [&pool]() { return pool.make(); });
+        CHECK(result.tabs.size() == 2, QStringLiteral("две вкладки"));
+        if (result.tabs.size() == 2) {
+            CHECK(settled(*result.tabs[0]) && settled(*result.tabs[1]), QStringLiteral("загрузка"));
+            CHECK(hasFields(*result.tabs[0], a, { 2 }) && hasFields(*result.tabs[1], b, { 0, 1, 2, 3 }),
+                  QStringLiteral("открытая сессия — у каждой вкладки своя схема"));
+            CHECK(result.tabs[0]->model()->isIndexedBackend() == (name == QLatin1String("indexed")),
+                  QStringLiteral("бэкенд"));
+        }
+    }
+
+    // Сессия 0.6 — вкладки без своей схемы: все получают схему верхнего уровня.
+    g_context = name + QStringLiteral(" / сессия 0.6: схема верхнего уровня");
+    {
+        SessionState old = *loaded.state;
+        for (TabState& tab : old.tabs)
+            tab.view.fields.reset();
+        old.fieldExtraction = true;
+        old.visibleFields.clear();
+        SchemaTabPool pool{ &c, {} };
+        const auto result = sessions.open(old, sessionPath, [&pool]() { return pool.make(); });
+        CHECK(result.tabs.size() == 2, QStringLiteral("две вкладки"));
+        for (LogViewWidget* t : result.tabs)
+            CHECK(settled(*t) && hasFields(*t, b, { 0, 1, 2, 3 }), QStringLiteral("вкладка — схема сессии"));
+    }
+
+    // Схемы нет в каталоге: сессия добавляет «(from session)» — одну на
+    // одинаковые определения.
+    g_context = name + QStringLiteral(" / сессия: схема не из каталога");
+    {
+        SessionState strange = *loaded.state;
+        for (TabState& tab : strange.tabs)
+            tab.view.fields = FieldSettings{ QStringLiteral("Mine"), foreign, true, {} };
+        const int before = int(c.schemas().size());
+        SchemaTabPool pool{ &c, {} };
+        const auto result = sessions.open(strange, sessionPath, [&pool]() { return pool.make(); });
+        int added = 0;
+        for (const auto& e : c.schemas())
+            added += e.schema == foreign ? 1 : 0;
+        CHECK(int(c.schemas().size()) == before + 1 && added == 1, QStringLiteral("добавлена одна запись"));
+        for (LogViewWidget* t : result.tabs)
+            CHECK(settled(*t) && t->parserPattern() == foreign
+                      && t->fieldSettings().schemaName.contains(QLatin1String("from session")),
+                  QStringLiteral("вкладка — схема «(from session)»"));
+        // Убрать — следующий бэкенд начинает с того же каталога.
+        SchemaStore::sync({ { QStringLiteral("A"), a, {}, {} }, { QStringLiteral("B"), b, {}, {} } });
+        c.reloadCatalogue();
+    }
+
+    // Память файла одно-файловой вкладки — её схема; схемы нет в каталоге —
+    // схема по умолчанию и сообщение, каталог не растёт.
+    g_context = name + QStringLiteral(" / память файла: схема вкладки");
+    {
+        FileMemoryStore store(dir.filePath(name + QStringLiteral("-schemas-memory")));
+        QStringList messages;
+        QObject::connect(&c, &FieldSchemaController::statusMessage,
+                         [&messages](const QString& text) { messages << text; });
+        const auto openTab = [&](SchemaTabPool& pool, const QString& path) {
+            LogViewWidget* tab = pool.make();
+            tab->setFileMemory(&store);
+            tab->addLogFile(path);
+            CHECK(settled(*tab), QStringLiteral("загрузка"));
+            return tab;
+        };
+        {
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* tab = openTab(pool, one);
+            CHECK(!tab->parserPattern().size(), QStringLiteral("памяти нет — схема по умолчанию"));
+            c.applyToView(tab, FieldSettings{ QStringLiteral("B"), b, true, { QStringLiteral("Severity") } });
+            CHECK(settled(*tab), QStringLiteral("схема B"));
+            tab->saveFileMemory();
+        }
+        store.waitForWrites();
+        {
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* tab = openTab(pool, one);
+            CHECK(hasFields(*tab, b, { 2 }), QStringLiteral("память вернула схему и колонки"));
+            // Та же схема, но её больше нет в каталоге.
+            c.applyToView(tab, FieldSettings{ QStringLiteral("Mine"), foreign, true, {} });
+            CHECK(settled(*tab), QStringLiteral("чужая схема"));
+            tab->saveFileMemory();
+        }
+        store.waitForWrites();
+        {
+            const int before = int(c.schemas().size());
+            messages.clear();
+            SchemaTabPool pool{ &c, {} };
+            LogViewWidget* tab = openTab(pool, one);
+            CHECK(tab->parserPattern() == c.defaults().schema && int(c.schemas().size()) == before,
+                  QStringLiteral("схемы нет в каталоге — схема по умолчанию, каталог не растёт"));
+            CHECK(messages.size() == 1 && messages[0].contains(QLatin1String("Mine")),
+                  QStringLiteral("сообщение: ") + messages.join(QStringLiteral(" | ")));
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2829,6 +3097,7 @@ int main(int argc, char** argv)
     checkFormat();
     checkFileMemoryFormat();
     checkSessionFormat();
+    checkSchemasFormat();
     checkSessionSchema();
 
     QTemporaryDir tmp;
@@ -2865,6 +3134,13 @@ int main(int argc, char** argv)
     checkSessionProblems(dir, schema);
     checkSessionStdin(dir, schema);
     checkLastSession(dir, schema);
+    // Схема на вкладку (F-5) — с каталогом схем во временном каталоге настроек.
+    AppSettings::overrideConfigDirForTesting(dir.filePath(QStringLiteral("config")));
+    for (const bool indexed : { false, true }) {
+        settings.setIndexedThresholdMB(indexed ? 0 : 512);
+        checkSessionSchemas(dir, indexed ? QStringLiteral("indexed") : QStringLiteral("resident"));
+    }
+    settings.setIndexedThresholdMB(512);
 
     std::fprintf(failures ? stderr : stdout, "document_state: %d проверок, %d нарушений\n",
                  checks, failures);

@@ -221,6 +221,17 @@ public:
     // Задаёт схему извлечения блоков для парсера (применяется к следующим загрузкам).
     void setParserPattern(const QString& pattern);
     void setExtractionEnabled(bool enabled);
+    // Схема полей вкладки (F-5, PR 1): схема, «Filter blocks» и выбор колонок
+    // — состояние вкладки, у соседних вкладок свои. setFieldSettings только
+    // ставит схему и флаг парсерам и стору и запоминает выбор колонок; поля
+    // уже загруженных записей переизвлекает, показ колонок ставит и правила
+    // перепривязывает FieldSchemaController::applyToView (инвариант 4).
+    FieldSettings fieldSettings() const;
+    void setFieldSettings(const FieldSettings& settings);
+    // Показ колонок включён: «Filter blocks» и у схемы есть колонки.
+    bool fieldDisplayEnabled() const { return m_extractionEnabled; }
+    // Индексы выбранных колонок в схеме вкладки.
+    QVector<int> visibleFieldIndexes() const;
     // Запасная кодировка автоопределения (F-1): однобайтная, которую
     // индексатор и резидентный парсер выбирают, если окно у первого байта
     // ≥ 0x80 не похоже на UTF-8. Действует на проходы, начатые после вызова,
@@ -382,6 +393,10 @@ signals: // Сигналы, которые LogViewWidget будет пробра
     void unpackingFinished(const LogFilePtr& logFile, bool ok);
     // Сообщение для строки состояния (итог применения памяти файла).
     void statusMessage(const QString& text);
+    // applyState нашёл в снимке схему полей вкладки (F-5): её ищет в каталоге
+    // и ставит FieldSchemaController (подписан в configureView) — синхронно,
+    // до привязки правил снимка. fromMemory — снимок из памяти файла.
+    void savedFieldSettingsFound(const FieldSettings& fields, bool fromMemory);
     // Предложение фильтров (applyState(…, Offer)) появилось или ушло.
     void offeredFiltersChanged(bool available);
     // Показ полного лога (R-3) начался или закончился — индикаторы фильтров
@@ -630,8 +645,15 @@ private:
 
     // Индексатор больших файлов (ленивый: создаётся при первом индексном файле).
     LogIndexer* m_indexer = nullptr;
-    // Зеркало флага извлечения полей (для индексатора/индексного store).
+    // Зеркало флага извлечения полей (для индексатора/индексного store):
+    // «Filter blocks» и у схемы есть колонки.
     bool m_extractionEnabled = false;
+    // Схема полей вкладки (F-5): имя схемы в каталоге, «Filter blocks» как
+    // выбрал пользователь, выбранные колонки. Сама схема — у парсера.
+    QString m_schemaName;
+    bool m_extractionFlag = false;
+    QStringList m_visibleFields;
+    void applyExtraction(bool enabled);
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback(); // из AppSettings в конструкторе
 
     // Per-tab auto-reload flag. Defaults to the global AppSettings value at construction.

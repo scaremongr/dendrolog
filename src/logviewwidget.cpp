@@ -275,10 +275,19 @@ LogViewWidget::~LogViewWidget()
 
 void LogViewWidget::setParserPattern(const QString& pattern)
 {
+    if (pattern != parserPattern())
+        m_schemaName.clear(); // имя каталога описывало прежнюю схему
     m_logParser->setPattern(pattern);
     m_reloadParser->setPattern(pattern);
     if (m_indexer)
         m_indexer->setPattern(pattern);
+    // Извлечение действует, только если у схемы есть колонки (одно правило
+    // с setExtractionEnabled и setFieldSettings).
+    m_extractionEnabled = m_extractionFlag && !parserFieldNames().isEmpty();
+    m_logParser->setExtractionEnabled(m_extractionEnabled);
+    m_reloadParser->setExtractionEnabled(m_extractionEnabled);
+    if (m_indexer)
+        m_indexer->setExtractionEnabled(m_extractionEnabled);
     if (auto* store = m_model ? m_model->indexedOrNull() : nullptr)
         store->setFieldPattern(pattern, m_extractionEnabled);
     if (m_model)
@@ -286,6 +295,45 @@ void LogViewWidget::setParserPattern(const QString& pattern)
 }
 
 void LogViewWidget::setExtractionEnabled(bool enabled)
+{
+    m_extractionFlag = enabled;
+    applyExtraction(enabled && !parserFieldNames().isEmpty());
+}
+
+FieldSettings LogViewWidget::fieldSettings() const
+{
+    FieldSettings settings;
+    settings.schema = parserPattern();
+    settings.schemaName = settings.schema.isEmpty() ? QString() : m_schemaName;
+    settings.extraction = m_extractionFlag;
+    settings.visibleFields = m_visibleFields;
+    return settings;
+}
+
+void LogViewWidget::setFieldSettings(const FieldSettings& settings)
+{
+    m_extractionFlag = settings.extraction;
+    if (settings.schema != parserPattern())
+        setParserPattern(settings.schema); // ставит и извлечение по новому флагу
+    m_schemaName = settings.schema.isEmpty() ? QString() : settings.schemaName;
+    m_visibleFields = settings.visibleFields;
+    const bool effective = settings.extraction && !parserFieldNames().isEmpty();
+    if (effective != m_extractionEnabled)
+        applyExtraction(effective);
+}
+
+QVector<int> LogViewWidget::visibleFieldIndexes() const
+{
+    const QStringList names = parserFieldNames();
+    QVector<int> indexes;
+    indexes.reserve(names.size());
+    for (int i = 0; i < names.size(); ++i)
+        if (m_visibleFields.contains(names[i]))
+            indexes.push_back(i);
+    return indexes;
+}
+
+void LogViewWidget::applyExtraction(bool enabled)
 {
     m_extractionEnabled = enabled;
     m_logParser->setExtractionEnabled(enabled);
@@ -2167,6 +2215,7 @@ TabState LogViewWidget::captureState() const
     view.markers = m_model->rowMarkers();
     view.followTail = m_view->followTail();
     view.autoReload = m_autoReload;
+    view.fields = fieldSettings();
     if (!view.followTail && isPositionPending() && m_pendingPosition.record.isValid()
         && m_view->userActionCount() == m_pendingPosition.userActions) {
         // Восстановленная позиция ещё ждёт строку (файл грузится), а
@@ -2211,6 +2260,11 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
     const ViewState& view = state.view;
     if (!m_memoryApplying) // память файла — не снимок: вкладка с её файлом и так не пуста
         m_fromState = true;
+
+    // Схема полей (F-5) — до фильтров: правила привязываются к схеме вкладки.
+    // Ищет её в каталоге и ставит FieldSchemaController (синхронно).
+    if (view.fields)
+        emit savedFieldSettingsFound(*view.fields, m_memoryApplying);
 
     // Закладки — до файлов: строки ищутся по ходу загрузки (RecordLocator).
     // Переписанный источник — отказ (Missing: серая, с фрагментом и

@@ -56,7 +56,36 @@
 //     решение автоматики не хранится: файл решает его заново тем же правилом;
 //   • SessionState (R-5) — массив TabState плюс схема и выбор колонок; формат
 //     вкладки от него не зависит (файл сессии — src/sessionfile.h).
+//   • схема полей вкладки (F-5, PR 1) — необязательное поле ViewState
+//     «fields» (FieldSettings): версия формата не растёт, читатель версии 1
+//     незнакомый ключ пропускает; снимок без поля — схему решает тот, кто
+//     применяет (сессия 0.6 — схема верхнего уровня, иначе схема по умолчанию).
 // ============================================================================
+
+// Схема полей вкладки (F-5, PR 1): схема, «Filter blocks» и выбор колонок.
+// Схема — определением (как SchemaEntry::schema) и именем в каталоге для
+// показа; при применении её ищут в каталоге по определению
+// (SessionController::chooseSchema), имя не важно.
+//   {"schema":{"name":"Spring Boot","definition":{…}},"extraction":true,
+//    "visibleFields":["Level","Message"]}
+// Нет схемы — нет ключа schema; visibleFields пусто — все колонки.
+struct FieldSettings {
+    QString schemaName;          // имя в каталоге; пусто — без имени
+    QString schema;              // определение; пусто — без схемы
+    bool extraction = false;     // «Filter blocks»
+    QStringList visibleFields;   // пусто — все колонки
+
+    bool hasSchema() const { return !schema.isEmpty(); }
+    bool operator==(const FieldSettings& o) const
+    {
+        return schemaName == o.schemaName && schema == o.schema && extraction == o.extraction
+            && visibleFields == o.visibleFields;
+    }
+    bool operator!=(const FieldSettings& o) const { return !(*this == o); }
+
+    QJsonObject toJson() const;
+    static std::optional<FieldSettings> fromJson(const QJsonObject& json, QString* error = nullptr);
+};
 
 struct ViewState {
     static constexpr int kFormatVersion = 1;
@@ -80,6 +109,10 @@ struct ViewState {
 
     bool followTail = false;
     bool autoReload = false;
+
+    // Схема полей вкладки (F-5, PR 1), необязательное поле «fields»; nullopt —
+    // снимок её не несёт (версии до F-5).
+    std::optional<FieldSettings> fields;
 
     bool hasCurrent() const { return currentSource.has_value() && current.isValid(); }
     // Есть ли что применять фильтром (уровни, время, текстовые правила).
@@ -140,6 +173,9 @@ struct TabState {
 // относительному; у чужого пути относительный при записи не строится заново
 // от него самого (см. relativeTargets).
 // Нет схемы — нет ключа schema; visibleFields пусто — все колонки.
+// Схема на вкладку (F-5, PR 1) — у каждой вкладки в view.fields; верхний
+// уровень — схема активной вкладки (её читает 0.6, ею получают схему вкладки
+// без своей — сессии 0.6).
 //
 // Чтение — с явным отказом: чужой format, версия не 1, битые поля и вложенные
 // вкладки — nullopt и причина; большая версия отличается от битых данных
@@ -172,6 +208,13 @@ struct SessionState {
     QHash<QString, QString> relativeTargets;
 
     bool hasSchema() const { return !schema.isEmpty(); }
+    // Схема верхнего уровня как схема вкладки (F-5): её получает вкладка
+    // снимка без своей (сессии 0.6). Верхний уровень пишется по активной
+    // вкладке — его прочитает 0.6.
+    FieldSettings topLevelFields() const
+    {
+        return FieldSettings{ schemaName, schema, fieldExtraction, visibleFields };
+    }
     // Сравнение сохранённых путей — SavedPath::same (путь Windows без учёта
     // регистра на любой ОС, как у SourceIdentity).
     static bool samePath(const QString& a, const QString& b);

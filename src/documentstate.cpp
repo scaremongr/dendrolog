@@ -59,7 +59,91 @@ constexpr LevelName kLevelNames[] = {
     { LogLevel::Fatal, "fatal" },
 };
 
+// Схема определением: объектом (читается глазами); не JSON — строкой как есть.
+QJsonObject schemaToJson(const QString& name, const QString& schema)
+{
+    QJsonObject s;
+    s.insert(QStringLiteral("name"), name);
+    const QJsonDocument doc = QJsonDocument::fromJson(schema.toUtf8());
+    if (doc.isObject())
+        s.insert(QStringLiteral("definition"), doc.object());
+    else
+        s.insert(QStringLiteral("definition"), schema);
+    return s;
+}
+
+bool schemaFromJson(const QJsonValue& schema, QString* name, QString* definition, QString* error)
+{
+    if (!schema.isObject()) {
+        fail(error, QStringLiteral("bad schema"));
+        return false;
+    }
+    const QJsonObject o = schema.toObject();
+    const QJsonValue n = o.value(QLatin1String("name"));
+    const QJsonValue def = o.value(QLatin1String("definition"));
+    if (!n.isString()) {
+        fail(error, QStringLiteral("bad schema name"));
+        return false;
+    }
+    if (def.isObject())
+        *definition = QString::fromUtf8(QJsonDocument(def.toObject()).toJson(QJsonDocument::Compact));
+    else if (def.isString() && !def.toString().isEmpty())
+        *definition = def.toString();
+    else {
+        fail(error, QStringLiteral("bad schema definition"));
+        return false;
+    }
+    *name = n.toString();
+    return true;
+}
+
+bool stringListField(const QJsonObject& json, const char* key, QStringList* out, QString* error)
+{
+    const QJsonValue value = json.value(QLatin1String(key));
+    if (value.isUndefined())
+        return true;
+    if (!value.isArray()) {
+        fail(error, QStringLiteral("bad %1").arg(QLatin1String(key)));
+        return false;
+    }
+    for (const QJsonValue& v : value.toArray()) {
+        if (!v.isString()) {
+            fail(error, QStringLiteral("bad %1").arg(QLatin1String(key)));
+            return false;
+        }
+        out->append(v.toString());
+    }
+    return true;
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// FieldSettings
+// ---------------------------------------------------------------------------
+
+QJsonObject FieldSettings::toJson() const
+{
+    QJsonObject json;
+    if (hasSchema())
+        json.insert(QStringLiteral("schema"), schemaToJson(schemaName, schema));
+    json.insert(QStringLiteral("extraction"), extraction);
+    if (!visibleFields.isEmpty())
+        json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
+    return json;
+}
+
+std::optional<FieldSettings> FieldSettings::fromJson(const QJsonObject& json, QString* error)
+{
+    FieldSettings s;
+    const QJsonValue schema = json.value(QLatin1String("schema"));
+    if (!schema.isUndefined() && !schemaFromJson(schema, &s.schemaName, &s.schema, error))
+        return std::nullopt;
+    if (!boolField(json, "extraction", &s.extraction, error)
+        || !stringListField(json, "visibleFields", &s.visibleFields, error))
+        return std::nullopt;
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // ViewState
@@ -124,6 +208,8 @@ QJsonObject ViewState::toJson() const
     }
     json.insert(QStringLiteral("followTail"), followTail);
     json.insert(QStringLiteral("autoReload"), autoReload);
+    if (fields)
+        json.insert(QStringLiteral("fields"), fields->toJson());
     return json;
 }
 
@@ -195,6 +281,15 @@ std::optional<ViewState> ViewState::fromJson(const QJsonObject& json, QString* e
     if (!boolField(json, "followTail", &s.followTail, error)
         || !boolField(json, "autoReload", &s.autoReload, error))
         return std::nullopt;
+    const QJsonValue fields = json.value(QLatin1String("fields"));
+    if (!fields.isUndefined()) {
+        QString why;
+        const auto f = fields.isObject() ? FieldSettings::fromJson(fields.toObject(), &why)
+                                         : std::nullopt;
+        if (!f)
+            return fail(error, QStringLiteral("fields: ") + (fields.isObject() ? why : QStringLiteral("not an object")));
+        s.fields = *f;
+    }
     return s;
 }
 
@@ -341,17 +436,8 @@ QJsonObject SessionState::toJson(const QString& sessionFilePath) const
     QJsonObject json;
     json.insert(QStringLiteral("format"), QLatin1String(kFormatName));
     json.insert(QStringLiteral("version"), kFormatVersion);
-    if (hasSchema()) {
-        QJsonObject s;
-        s.insert(QStringLiteral("name"), schemaName);
-        const QJsonDocument doc = QJsonDocument::fromJson(schema.toUtf8());
-        // Определение — объектом (читается глазами); не JSON — строкой как есть.
-        if (doc.isObject())
-            s.insert(QStringLiteral("definition"), doc.object());
-        else
-            s.insert(QStringLiteral("definition"), schema);
-        json.insert(QStringLiteral("schema"), s);
-    }
+    if (hasSchema())
+        json.insert(QStringLiteral("schema"), schemaToJson(schemaName, schema));
     json.insert(QStringLiteral("fieldExtraction"), fieldExtraction);
     if (!visibleFields.isEmpty())
         json.insert(QStringLiteral("visibleFields"), QJsonArray::fromStringList(visibleFields));
@@ -410,36 +496,14 @@ std::optional<SessionState> SessionState::fromJson(const QJsonObject& json, QStr
     QString why;
 
     const QJsonValue schema = json.value(QLatin1String("schema"));
-    if (!schema.isUndefined()) {
-        if (!schema.isObject())
-            return fail(error, QStringLiteral("bad schema"));
-        const QJsonObject o = schema.toObject();
-        const QJsonValue name = o.value(QLatin1String("name"));
-        const QJsonValue def = o.value(QLatin1String("definition"));
-        if (!name.isString())
-            return fail(error, QStringLiteral("bad schema name"));
-        if (def.isObject())
-            s.schema = QString::fromUtf8(QJsonDocument(def.toObject()).toJson(QJsonDocument::Compact));
-        else if (def.isString() && !def.toString().isEmpty())
-            s.schema = def.toString();
-        else
-            return fail(error, QStringLiteral("bad schema definition"));
-        s.schemaName = name.toString();
-    }
+    if (!schema.isUndefined() && !schemaFromJson(schema, &s.schemaName, &s.schema, error))
+        return std::nullopt;
 
     if (!boolField(json, "fieldExtraction", &s.fieldExtraction, error))
         return std::nullopt;
 
-    const QJsonValue visible = json.value(QLatin1String("visibleFields"));
-    if (!visible.isUndefined()) {
-        if (!visible.isArray())
-            return fail(error, QStringLiteral("bad visibleFields"));
-        for (const QJsonValue& v : visible.toArray()) {
-            if (!v.isString())
-                return fail(error, QStringLiteral("bad visibleFields"));
-            s.visibleFields.append(v.toString());
-        }
-    }
+    if (!stringListField(json, "visibleFields", &s.visibleFields, error))
+        return std::nullopt;
 
     const QJsonValue tabs = json.value(QLatin1String("tabs"));
     if (!tabs.isArray())

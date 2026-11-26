@@ -89,6 +89,10 @@ SessionController::OpenResult SessionController::openTabs(SessionState state, co
     };
 
     for (int i = 0; i < state.tabs.size(); ++i) {
+        // Схема на вкладку (F-5): вкладка без своей (сессия 0.6) получает
+        // схему верхнего уровня; сессия без схемы — схему по умолчанию.
+        if (!state.tabs[i].view.fields && state.hasSchema())
+            state.tabs[i].view.fields = state.topLevelFields();
         const TabState& tab = state.tabs[i];
         LogViewWidget* view = newTab ? newTab() : nullptr;
         if (!view)

@@ -184,7 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_schemas = new FieldSchemaController(this);
     m_schemas->setWindow({
         [this]() { return logViews(); },
-        [this](bool starting) { stopFieldReaders(starting); } });
+        [this](LogViewWidget* view, bool starting) { stopFieldReaders(view, starting); } });
     setupFieldVisibilityDock();
     // После setupFieldVisibilityDock (нужен m_fieldFilterEnabledCheckBox) и
     // ДО loadSettings — restoreState() должен знать тулбар по objectName.
@@ -409,6 +409,8 @@ MainWindow::MainWindow(QWidget *parent)
     // вставляются перед ПЕРВЫМ сепаратором меню, так что этот блок им не мешает.
     if (ui->menuView) {
         ui->menuView->addSeparator();
+        if (m_applySchemaToAllAction)
+            ui->menuView->addAction(m_applySchemaToAllAction);
         QAction* resetLayout = ui->menuView->addAction(tr("Reset Panel Layout"));
         connect(resetLayout, &QAction::triggered,
                 this, &MainWindow::applyDefaultPanelLayout);
@@ -1462,6 +1464,21 @@ void MainWindow::setupFieldVisibilityDock()
     connect(manageBtn, &QPushButton::clicked,
             this, &MainWindow::onManagePatterns);
     schemaRow->addWidget(manageBtn);
+    // Схема — у каждой вкладки своя (F-5); прежнее «одна на окно» — одним
+    // действием. Оно же — в меню View и в меню кнопки дока.
+    m_applySchemaToAllAction = new QAction(tr("Apply Schema to All Tabs"), this);
+    m_applySchemaToAllAction->setObjectName(QStringLiteral("applySchemaToAllTabs"));
+    m_applySchemaToAllAction->setToolTip(tr("Use this tab's schema, \"Filter blocks\" and visible "
+                                            "blocks in every open tab"));
+    connect(m_applySchemaToAllAction, &QAction::triggered, this, [this]() {
+        m_schemas->applyToAllViews();
+        updateFilterStatusButtons();
+    });
+    auto* allTabsBtn = new QToolButton(contents);
+    allTabsBtn->setObjectName(QStringLiteral("applySchemaToAllTabsButton"));
+    allTabsBtn->setDefaultAction(m_applySchemaToAllAction);
+    allTabsBtn->setText(tr("All Tabs"));
+    schemaRow->addWidget(allTabsBtn);
     rootLayout->addLayout(schemaRow);
     rootLayout->addSpacing(CompactStyle::kSpacing);
 
@@ -1520,15 +1537,24 @@ void MainWindow::setupFieldVisibilityDock()
     connect(m_schemas, &FieldSchemaController::fieldsChanged, this, &MainWindow::syncFieldControls);
     connect(m_schemas, &FieldSchemaController::filtersRebound, this,
             [this](LogViewWidget* view) { refreshMainViewHighlights(view); });
-    connect(m_schemas, &FieldSchemaController::schemaApplied, this, [this]() {
-        // Схема изменилась — список колонок в конструкторе фильтров; поиск,
-        // сброшенный в начале применения, повторяется с правилами, привязанными
-        // к новым полям, если панель результатов на виду (иначе его запустит её
-        // появление).
+    connect(m_schemas, &FieldSchemaController::schemaApplied, this, [this](LogViewWidget* view) {
+        // Схема активной вкладки изменилась — список колонок в конструкторе
+        // фильтров; поиск, сброшенный в начале применения, повторяется с
+        // правилами, привязанными к новым полям, если панель результатов на
+        // виду (иначе его запустит её появление). Схема соседней вкладки
+        // выдачу Search не трогает: она — по активной.
+        if (view != m_activeLogView)
+            return;
         updateFilterPanelFieldNames();
+        // Правила выдачи привязаны к прежней схеме: на виду — поиск заново,
+        // иначе выдача сбрасывается (её повторит появление панели).
         if (searchResultsLive())
             runSearchIntoResults();
+        else
+            clearSearchResults();
     });
+    connect(m_schemas, &FieldSchemaController::statusMessage, this,
+            [this](const QString& text) { statusBar()->showMessage(text, 10000); });
     connect(m_schemas, &FieldSchemaController::reextractionStarted, this, [this](int entries) {
         // Тот же прогресс в строке состояния, что у загрузки файла.
         m_statusLabel->setText(tr("Applying field schema…"));
@@ -1539,6 +1565,8 @@ void MainWindow::setupFieldVisibilityDock()
     connect(m_schemas, &FieldSchemaController::reextractionProgress,
             m_progressBar, &QProgressBar::setValue);
     connect(m_schemas, &FieldSchemaController::reextractionFinished, this, [this]() {
+        if (m_schemas->isReextracting())
+            return; // идёт расчёт другой вкладки («Apply Schema to All Tabs»)
         m_progressBar->hide();
         updateStatusBarDefaultText();
     });
@@ -1699,14 +1727,17 @@ void MainWindow::onManagePatterns()
             tr("Could not save schemas to the patterns folder:\n%1").arg(syncError));
 }
 
-void MainWindow::stopFieldReaders(bool starting)
+void MainWindow::stopFieldReaders(LogViewWidget* view, bool starting)
 {
     // Выдача Search делит записи с источником: clear() ждёт её фильтр.
     // Повторит поиск schemaApplied; посреди фонового расчёта поиск не
-    // запускается (runSearchIntoResults).
-    if (starting)
+    // запускается (runSearchIntoResults). Выдача другой вкладки записей этой
+    // не читает.
+    if (starting && m_searchController && view
+        && (m_searchController->source() == view->model() || view == m_activeLogView))
         clearSearchResults();
-    // A background Save View As reads the fields of resident entries too:
+    // A background Save View As reads the fields of resident entries too
+    // (of whichever tab it exports — it is stopped regardless, cheaply):
     // CSV / JSON Lines always, text only with the blocks shown — and during a
     // background re-extraction they are not (FieldSchemaController), so a
     // text export started then is left to finish.
@@ -2379,12 +2410,12 @@ void MainWindow::updateFilterStatusButtons()
             : tr("File filter is off\nClick a file in the legend above a merged tab to hide it"));
     }
 
-    // Fields (глобальный — действует на все вкладки)
+    // Fields (пер-вкладочный с F-5 — у активной вкладки)
     {
         const bool active = m_schemas->extractionEnabled();
         m_fieldFilterStatusAction->setChecked(active);
         m_fieldFilterStatusAction->setToolTip(active
-            ? tr("Field filtering: %1 of %2 blocks shown (all tabs)\nClick to show full lines")
+            ? tr("Field filtering: %1 of %2 blocks shown (this tab)\nClick to show full lines")
                   .arg(m_schemas->visibleFieldIndexes().size())
                   .arg(m_schemas->fieldNames().size())
             : tr("Field filtering is off\nClick to show only the blocks selected in the Log Fields panel"));
@@ -2435,6 +2466,10 @@ void MainWindow::connectToLogView(LogViewWidget *logView)
         disconnectFromLogView(m_activeLogView);
     }
     m_activeLogView = logView;
+    // Док Log Fields показывает схему этой вкладки (F-5); список колонок
+    // конструкторов фильтров — тоже её.
+    m_schemas->setCurrentView(logView);
+    updateFilterPanelFieldNames();
 
     // Apply current global word wrap setting to the newly active view
     logView->view()->setWordWrap(ui->actionWordWrap->isChecked());
@@ -2610,6 +2645,8 @@ void MainWindow::onCurrentTabChanged(int index)
     else
     {
         m_activeLogView = nullptr;
+        m_schemas->setCurrentView(nullptr); // док — схема по умолчанию
+        updateFilterPanelFieldNames();
         // Вкладок не осталось — очистить счётчик строк, маркер таймлайна
         // и панель деталей (иначе они показывали бы закрытый документ).
         updateLineInfoLabel(-1, 0);
@@ -3587,7 +3624,7 @@ void MainWindow::applyTextFiltersToActiveView()
     // Фильтрация пер-вкладочная: Apply действует только на текущий документ.
     // Остальные документы сохраняют свои (или никакие) фильтры.
     FilterRuleSet rules = m_filterPanel->ruleSet();
-    m_schemas->bindRules(rules);
+    FieldSchemaController::bindRules(m_activeLogView, rules); // к схеме этой вкладки (F-5)
 
     if (m_activeLogView->model())
         m_activeLogView->model()->setFilterRules(rules);
@@ -3675,7 +3712,7 @@ void MainWindow::runSearchIntoResults()
     // Fields are being recomputed for the new schema: rules bound to it would
     // not match the entries' old spans. FieldSchemaController::schemaApplied
     // searches.
-    if (m_schemas->isReextracting())
+    if (m_schemas->isReextracting(m_activeLogView))
         return;
     if (!m_searchRequested || !m_searchQuery || !m_searchController || !m_activeLogView
         || !m_activeLogView->model())
@@ -3686,7 +3723,7 @@ void MainWindow::runSearchIntoResults()
     // всегда попадает точно на строку. Пустой или испорченный запрос контроллер
     // превращает в пустую выдачу с объясняющей подписью.
     FilterRuleSet rules = m_searchQuery->ruleSet();
-    m_schemas->bindRules(rules);
+    FieldSchemaController::bindRules(m_activeLogView, rules);
     m_searchRules = rules;
 
     // Подавляем авто-навигацию: reset модели результатов дёрнет currentRowChanged.
@@ -4012,8 +4049,8 @@ void MainWindow::openSessionFile(const QString& path)
 
 void MainWindow::openSession(const SessionState& session, const QString& path, SessionController::Origin origin)
 {
-    // Схема — до вкладок: правила вкладок привязываются к схеме при применении.
-    applySessionSchema(session);
+    // Схема — у каждой вкладки своя (F-5): её ставит applyState вкладки до
+    // фильтров (FieldSchemaController по savedFieldSettingsFound).
     const SessionController::OpenResult result =
         m_sessionController->open(session, path, [this]() {
             LogViewWidget* view = createLogViewWidget();
@@ -4078,16 +4115,6 @@ void MainWindow::saveSessionAs()
     }
     statusBar()->showMessage(tr("Session saved to %1: %n tab(s).", nullptr, int(session.tabs.size()))
                                  .arg(QDir::toNativeSeparators(path)), 10000);
-}
-
-void MainWindow::applySessionSchema(const SessionState& session)
-{
-    // Сессия без схемы схему окна не трогает (контроллер); не записалась в
-    // каталог — схема всё равно действует, без пункта в списке.
-    const QString error = m_schemas->applySessionSchema(session);
-    if (!error.isEmpty())
-        statusBar()->showMessage(tr("Could not save the session schema: %1").arg(error), 10000);
-    updateFilterStatusButtons();
 }
 
 void MainWindow::openStdinStream(const FileEncoding& initial)
@@ -4420,7 +4447,7 @@ void MainWindow::onViewTextAction(LogListView::TextAction action, const QString&
         } else {
             FilterRuleSet rules = applied;
             rules.rules.append(m_filterPanel->quickRule(text, exclude));
-            m_schemas->bindRules(rules);
+            FieldSchemaController::bindRules(m_activeLogView, rules);
             model->setFilterRules(rules);
             refreshMainViewHighlights(m_activeLogView);
             m_statusLabel->setText(tr("Filter added to this tab. The Text Filters panel "
