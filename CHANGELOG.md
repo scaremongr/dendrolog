@@ -313,6 +313,14 @@ All notable changes to DendroLog are documented here. The format follows
   instead of doing nothing.
 
 ### Fixed
+- **Statistics no longer report pauses that are not there.** On a large
+  log shown in file order whose timestamps go back and forth, *Statistics*
+  measured a "Gap" between neighbouring lines, so a step back in time and the
+  next step forward made a long pause out of a five-minute one. Pauses are now
+  measured between moments that are neighbours in time, so the same file shows
+  the same gaps below and above the large-file threshold. The first occurrence
+  of a message template (its example and the jump to it) is now the earliest
+  one in time as well.
 - **Colored console logs with time-only timestamps past midnight.** In a log
   like `ESC[2m13:55:36 INFO …` (the time behind a color code) the days were
   counted back from the file's modification time without seeing the

@@ -2,6 +2,7 @@
 #include "appsettings.h"
 #include "apptheme.h"
 #include "logmodel.h"
+#include "timegaps.h"
 #include "toggleswitch.h"
 
 #include <QElapsedTimer>
@@ -205,12 +206,11 @@ struct TemplateAgg {
     int      count = 0;
     LogLevel level = LogLevel::Unknown;
     qint64   firstMs = kNoTimestampMs, lastMs = kNoTimestampMs;
-    // Захвачено жадно при вставке шаблона: снапшот (и текст его строк) может
-    // не пережить показ результата, а индексному бэкенду и вовсе нечего
-    // будет разыменовать.
-    QString    example;
+    // Строка самого раннего вхождения; пример и файл читаются по ней после
+    // прохода и только у показываемых шаблонов (снапшот к показу результата
+    // не доживает — DocumentStats несёт копии).
+    qint64     firstRow = 0;
     int        firstEntryId = 0;
-    LogFilePtr firstFile;
 };
 
 DocumentStats collectStats(const LogScanSnapshot& snapshot,
@@ -244,13 +244,13 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
     templates.reserve(4096);
     QHash<const LogFile*, DocumentStats::FileStat> fileStats;
 
-    struct GapInfo { qint64 ms = 0, fromMs = 0, toMs = 0; };
-    GapInfo topGaps[3];
+    // Паузы — между соседними ПО ВРЕМЕНИ метками, а не соседними строками:
+    // одно-файловая индексная вкладка идёт в порядке файла (S-23).
+    TimeGaps gaps(hasTime ? s.tMinMs : 0, hasTime ? s.tMaxMs : 0);
 
     int prevId = 0;
     const LogFile* prevFile = nullptr;
     bool firstRow = true;
-    qint64 prevTsMs = kNoTimestampMs;
     bool scanCancelled = false;
 
     snapshot.forEachLine(0, [&](qint64 i, const LogEntryMeta& m,
@@ -306,23 +306,7 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
                     ++errorBins[b];
             }
 
-            if (hasTimestampMs(prevTsMs)) {
-                const qint64 gap = tsMs - prevTsMs;
-                if (gap > topGaps[2].ms) {
-                    const GapInfo g{gap, prevTsMs, tsMs};
-                    if (g.ms > topGaps[0].ms) {
-                        topGaps[2] = topGaps[1];
-                        topGaps[1] = topGaps[0];
-                        topGaps[0] = g;
-                    } else if (g.ms > topGaps[1].ms) {
-                        topGaps[2] = topGaps[1];
-                        topGaps[1] = g;
-                    } else {
-                        topGaps[2] = g;
-                    }
-                }
-            }
-            prevTsMs = tsMs;
+            gaps.add(tsMs);
         }
 
         const QString key = normalizeMessage(text);
@@ -330,7 +314,15 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
         if (it != templates.end()) {
             ++it->count;
             if (hasTimestampMs(tsMs)) {
-                it->firstMs = hasTimestampMs(it->firstMs) ? qMin(it->firstMs, tsMs) : tsMs;
+                // Первое вхождение — самое раннее по времени, а не по порядку
+                // строк (S-23): в порядке файла раннее бывает ниже. На
+                // упорядоченной вкладке не срабатывает — там раньше некуда.
+                if (!hasTimestampMs(it->firstMs) || tsMs < it->firstMs) {
+                    it->firstMs = tsMs;
+                    it->level = m.level;
+                    it->firstRow = i;
+                    it->firstEntryId = m.logicalEntryId;
+                }
                 it->lastMs = hasTimestampMs(it->lastMs) ? qMax(it->lastMs, tsMs) : tsMs;
             }
         } else if (templates.size() >= kMaxTemplates) {
@@ -340,9 +332,8 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
             agg.count = 1;
             agg.level = m.level;
             agg.firstMs = agg.lastMs = tsMs;
-            agg.example = text.left(kExampleCap).toString();
+            agg.firstRow = i;
             agg.firstEntryId = m.logicalEntryId;
-            agg.firstFile = snapshot.sourceFilePtrAt(i);
             templates.insert(key, agg);
         }
         return true;
@@ -387,16 +378,24 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
     const auto byCountDesc = [](const TemplRef& a, const TemplRef& b) {
         return a.agg->count > b.agg->count;
     };
-    const auto makeTemplate = [](const TemplRef& r) {
+    // Пример — текст строки самого раннего вхождения: точечные чтения, только
+    // у показываемых шаблонов (≤ 17 строк), одним курсором с малым окном.
+    const std::unique_ptr<LogScanSnapshot::LineCursor> exampleCursor =
+        snapshot.lineCursor(64 * 1024);
+    const auto exampleOf = [&exampleCursor](qint64 row) {
+        return exampleCursor ? exampleCursor->lineAt(row).left(kExampleCap).toString()
+                             : QString();
+    };
+    const auto makeTemplate = [&snapshot, &exampleOf](const TemplRef& r) {
         DocumentStats::Template t;
         t.text = *r.key;
         t.count = r.agg->count;
         t.level = r.agg->level;
         t.firstMs = r.agg->firstMs;
         t.lastMs = r.agg->lastMs;
-        t.example = r.agg->example;
+        t.example = exampleOf(r.agg->firstRow);
         t.firstEntryId = r.agg->firstEntryId;
-        t.firstFile = r.agg->firstFile;
+        t.firstFile = snapshot.sourceFilePtrAt(r.agg->firstRow);
         return t;
     };
     {
@@ -509,29 +508,27 @@ DocumentStats collectStats(const LogScanSnapshot& snapshot,
             const QString& tpl = *spam[i].key;
             in.snippet = tpl.mid(displayStart(tpl));
             in.entryId = agg->firstEntryId;
-            in.file = agg->firstFile;
+            in.file = snapshot.sourceFilePtrAt(agg->firstRow);
             in.magnitude = double(agg->count);
             insights.append(in);
         }
     }
 
-    // Паузы: крупнейшие промежутки без записей.
+    // Паузы: крупнейшие промежутки без записей. Порог (от 0,5 % длительности)
+    // всегда выше точной границы TimeGaps (1/1024 длительности) — найденные
+    // паузы те же, что у прохода по отсортированным меткам.
     if (spanMs > 0 && s.recordsWithTs >= 2) {
         const double meanGapMs = double(spanMs) / s.recordsWithTs;
         const qint64 minReport = std::max<qint64>(
             {kGapAbsMinMs, qint64(meanGapMs * kGapMeanK),
-             qint64(double(spanMs) * kGapSpanShare)});
-        int added = 0;
-        for (const GapInfo& g : topGaps) {
-            if (added >= 2 || g.ms < minReport)
-                break;
+             qint64(double(spanMs) * kGapSpanShare), gaps.exactAboveMs() + 1});
+        for (const TimeGaps::Gap& g : gaps.largest(2, minReport)) {
             DocumentStats::Insight in;
             in.kind = DocumentStats::Insight::Gap;
             in.fromMs = g.fromMs;
             in.toMs = g.toMs;
             in.magnitude = double(g.ms);
             insights.append(in);
-            ++added;
         }
     }
 

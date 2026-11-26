@@ -18,6 +18,7 @@
 #include "gotolocation.h"
 #include "statisticspanel.h"
 #include "testdocuments.h"
+#include "timegaps.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -29,7 +30,9 @@
 #include <QTemporaryDir>
 #include <QTimeZone>
 #include <cstdio>
+#include <algorithm>
 #include <limits>
+#include <random>
 
 static int failures = 0;
 #define CHECK(condition, label) do { \
@@ -562,6 +565,186 @@ static void checkPre1970(const QDir& dir, const QString& schema)
     }
 }
 
+// ---- Паузы без порядка строк (S-23) ----------------------------------------
+
+// Эталон: соседние по времени метки, отсортированные целиком.
+static QVector<TimeGaps::Gap> bruteGaps(QVector<qint64> stamps, int count, qint64 minMs)
+{
+    std::sort(stamps.begin(), stamps.end());
+    QVector<TimeGaps::Gap> all;
+    for (int i = 1; i < stamps.size(); ++i)
+        all.append({stamps[i] - stamps[i - 1], stamps[i - 1], stamps[i]});
+    std::stable_sort(all.begin(), all.end(),
+                     [](const TimeGaps::Gap& a, const TimeGaps::Gap& b) { return a.ms > b.ms; });
+    QVector<TimeGaps::Gap> out;
+    for (const TimeGaps::Gap& g : all)
+        if (g.ms >= minMs && out.size() < count)
+            out.append(g);
+    return out;
+}
+
+static void checkTimeGapsCore()
+{
+    std::mt19937 rng(23u);
+    for (int round = 0; round < 300; ++round) {
+        const int n = 2 + int(rng() % 400);
+        const qint64 base = qint64(rng() % 2000000000) - 1000000000;
+        const qint64 spread = 1 + qint64(rng() % 100000000);
+        QVector<qint64> stamps;
+        for (int i = 0; i < n; ++i)
+            stamps.append(base + qint64(rng() % spread));
+        // Несколько настоящих пауз и повторы одной метки.
+        if (round % 3 == 0)
+            for (int i = 0; i < n / 4; ++i)
+                stamps.append(base + spread * 3 + qint64(rng() % 1000));
+        if (round % 5 == 0)
+            stamps.append(stamps.front());
+        const qint64 lo = *std::min_element(stamps.begin(), stamps.end());
+        const qint64 hi = *std::max_element(stamps.begin(), stamps.end());
+        TimeGaps gaps(lo, hi);
+        for (qint64 t : stamps)
+            gaps.add(t);
+        const qint64 minMs = gaps.exactAboveMs() + 1 + qint64(rng() % 3) * gaps.exactAboveMs();
+        const int count = 1 + int(rng() % 4);
+        const QVector<TimeGaps::Gap> got = gaps.largest(count, minMs);
+        const QVector<TimeGaps::Gap> want = bruteGaps(stamps, count, minMs);
+        CHECK(got == want, QStringLiteral("TimeGaps round %1: %2 gaps, expected %3")
+                               .arg(round).arg(got.size()).arg(want.size()));
+    }
+    // Одна метка и все метки равны — пауз нет; края лет 0001 и 9999 без переполнения.
+    TimeGaps single(5, 5);
+    single.add(5);
+    CHECK(single.largest(2, 1).isEmpty(), "TimeGaps: a single stamp has no gaps");
+    const qint64 year1 = QDateTime(QDate(1, 1, 1), QTime(0, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+    const qint64 year9999 =
+        QDateTime(QDate(9999, 12, 31), QTime(23, 59, 59, 999), QTimeZone::UTC).toMSecsSinceEpoch();
+    TimeGaps wide(year1, year9999);
+    wide.add(year9999);
+    wide.add(0);
+    wide.add(year1);
+    const QVector<TimeGaps::Gap> w = wide.largest(2, wide.exactAboveMs() + 1);
+    CHECK(w.size() == 2 && w[0].fromMs == 0 && w[0].toMs == year9999 && w[1].fromMs == year1 && w[1].toMs == 0,
+          "TimeGaps: years 0001 and 9999");
+}
+
+static QByteArray gapLine(qint64 second, const char* level, int n)
+{
+    const QDateTime t = QDateTime(QDate(2026, 3, 5), QTime(10, 0), QTimeZone::UTC).addSecs(second);
+    QByteArray out = t.toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss.zzzZ")).toLatin1()
+                   + " [w] " + level + " - tick " + QByteArray::number(n) + '\n';
+    if (n % 9 == 4)
+        out += "    at frame of " + QByteArray::number(n) + '\n';
+    return out;
+}
+
+// Три серии по 400 записей раз в секунду: 0…399, 1000…1399 (WARN), 1700…2099.
+// Настоящие паузы — 601 с (399 → 1000) и 301 с (1399 → 1700). В файле серии
+// идут не по порядку (вторая, первая, третья), внутри серии соседние записи
+// местами переставлены: по соседним строкам «пауза» вышла бы 1301 с.
+static QByteArray gapSeries(bool ordered, qint64 from, int count, const char* level, int& n)
+{
+    QVector<qint64> seconds;
+    for (int i = 0; i < count; ++i)
+        seconds.append(from + i);
+    if (!ordered)
+        for (int i = 0; i + 1 < seconds.size(); i += 7)
+            std::swap(seconds[i], seconds[i + 1]);
+    QByteArray out;
+    for (qint64 s : seconds)
+        out += gapLine(s, level, n++);
+    return out;
+}
+
+static QByteArray gapFixture(bool ordered)
+{
+    int n = 0;
+    QByteArray out = "=== preamble without a stamp ===\n";
+    const QByteArray a = gapSeries(ordered, 0, 400, "INFO", n);
+    const QByteArray b = gapSeries(ordered, 1000, 400, "WARN", n);
+    const QByteArray c = gapSeries(ordered, 1700, 400, "INFO", n);
+    out += ordered ? a + b + c : b + a + c;
+    out += "free text at the end\n";
+    return out;
+}
+
+struct GapPair { qint64 fromS, toS; };
+
+static QVector<GapPair> reportedGaps(const DocumentStats& stats)
+{
+    const qint64 base = QDateTime(QDate(2026, 3, 5), QTime(10, 0), QTimeZone::UTC).toMSecsSinceEpoch();
+    QVector<GapPair> out;
+    for (const DocumentStats::Insight& in : stats.insights)
+        if (in.kind == DocumentStats::Insight::Gap)
+            out.append({(in.fromMs - base) / 1000, (in.toMs - base) / 1000});
+    return out;
+}
+
+static QString gapsText(const QVector<GapPair>& gaps)
+{
+    QStringList parts;
+    for (const GapPair& g : gaps)
+        parts << QStringLiteral("%1→%2").arg(g.fromS).arg(g.toS);
+    return parts.join(QStringLiteral(", "));
+}
+
+static void checkGaps(const QDir& dir, const QString& schema)
+{
+    checkTimeGapsCore();
+
+    const QString unordered = testdocs::writeFile(dir, "gaps-unordered.log", gapFixture(false));
+    const QString ordered = testdocs::writeFile(dir, "gaps-ordered.log", gapFixture(true));
+    int n = 5000;
+    // Второй файл слитой вкладки: 600…749 — паузы 201, 251 и 301 с.
+    const QString filler = testdocs::writeFile(dir, "gaps-filler.log",
+                                               gapSeries(false, 600, 150, "INFO", n));
+
+    const auto expect = [&](const QString& name, testdocs::Document doc,
+                            const QVector<GapPair>& want, bool hideWarn) {
+        CHECK(doc.errors.isEmpty(), name + ": loads");
+        if (hideWarn) {
+            doc.model->setLogLevelFilter({LogLevel::Info, LogLevel::Error, LogLevel::Fatal,
+                                          LogLevel::Debug, LogLevel::Trace, LogLevel::Unknown});
+            CHECK(testdocs::settle(*doc.model, 0), name + ": filter settles");
+        }
+        const DocumentStats stats = collectDocumentStats(doc.model->scanSnapshot(hideWarn), nullptr, 0);
+        const QVector<GapPair> got = reportedGaps(stats);
+        bool same = got.size() == want.size();
+        for (int i = 0; same && i < got.size(); ++i)
+            same = got[i].fromS == want[i].fromS && got[i].toS == want[i].toS;
+        CHECK(same, QStringLiteral("%1: gaps [%2], expected [%3]")
+                        .arg(name, gapsText(got), gapsText(want)));
+    };
+    // Первое вхождение шаблона — самое раннее по времени на обоих бэкендах:
+    // в файле «tick 1» (секунда 0) ниже серии 1000…1399.
+    for (const QString& path : {unordered, ordered}) {
+        for (const bool indexed : {false, true}) {
+            testdocs::Document doc = indexed ? testdocs::buildIndexed({path}, schema)
+                                             : testdocs::buildResident({path}, schema);
+            const DocumentStats stats = collectDocumentStats(doc.model->scanSnapshot(false), nullptr, 0);
+            const QString name = QStringLiteral("%1 %2").arg(indexed ? "indexed" : "resident",
+                                                             path == unordered ? "unordered" : "ordered");
+            const QByteArray want = path == unordered ? "tick 1" : "tick 0";
+            CHECK(!stats.topMessages.isEmpty()
+                      && stats.topMessages[0].example.endsWith(QString::fromLatin1(want))
+                      && stats.topMessages[0].level == LogLevel::Info,
+                  name + ": first occurrence is the earliest: "
+                      + (stats.topMessages.isEmpty() ? QString() : stats.topMessages[0].example));
+        }
+    }
+    const QVector<GapPair> both = {{399, 1000}, {1399, 1700}};
+    const QVector<GapPair> noWarn = {{399, 1700}};
+    const QVector<GapPair> merged = {{1399, 1700}, {749, 1000}};
+    for (const QString& path : {unordered, ordered}) {
+        const QString kind = path == unordered ? QStringLiteral("unordered") : QStringLiteral("ordered");
+        expect("resident " + kind, testdocs::buildResident({path}, schema), both, false);
+        expect("indexed " + kind, testdocs::buildIndexed({path}, schema), both, false);
+        expect("resident filtered " + kind, testdocs::buildResident({path}, schema), noWarn, true);
+        expect("indexed filtered " + kind, testdocs::buildIndexed({path}, schema), noWarn, true);
+        expect("resident merged " + kind, testdocs::buildResident({path, filler}, schema), merged, false);
+        expect("indexed merged " + kind, testdocs::buildIndexed({path, filler}, schema), merged, false);
+    }
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -572,6 +755,7 @@ int main(int argc, char** argv)
 
     checkParsing();
     checkPre1970(dir, schema);
+    checkGaps(dir, schema);
 
     const QString first = testdocs::writeFile(dir, "first.log", fixture(0, "alpha"));
     // Второй файл начинается позже и пересекается с первым по времени.
