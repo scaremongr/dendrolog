@@ -65,6 +65,13 @@ QString syslogTimestampDetectPattern();
 // "[.,]digits". No zone. Only file readers with date state take it as a
 // timestamp (LineClassifier::ClockDates).
 QString clockTimestampDetectPattern();
+// A timestamp of any form LineClassifier reads (ISO and YYYY/MM/DD, access,
+// DD/MM/YYYY and DD.MM.YYYY, syslog, time without a date) with its fraction
+// and zone — no anchor: match it with AnchorAtOffsetMatchOption; the match
+// length is LineClassifier::timestampLengthAt (shape only, no date check;
+// pinned by tests/lineindex_smoke). The "time" kind of a line template field
+// (F-17, linetemplate.h).
+QString timestampAtDetectPattern();
 // English month abbreviation Jan…Dec, ASCII case folded, no capture.
 QString monthNameRegex();
 // (1) = level word.

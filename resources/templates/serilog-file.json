@@ -1,0 +1,7 @@
+{
+    "name": "Serilog (file, with date)",
+    "description": "Serilog file sink default: yyyy-MM-dd HH:mm:ss.fff zzz [LVL] message, exception on the following lines.",
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} [{Level:level}] {Message}"
+}

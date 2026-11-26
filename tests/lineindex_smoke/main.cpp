@@ -1342,6 +1342,35 @@ static void checkClassifierLine(const LineClassifier& classifier,
     }
 }
 
+// Длина метки и слова уровня с позиции (F-17, виды «time» и «level» поля
+// шаблона строки) против эталонных регексов, поставленных на ту же позицию
+// (AnchorAtOffsetMatchOption): на КАЖДОЙ позиции строки.
+static void checkLengthsAt(const QRegularExpression& tsAt, const QRegularExpression& levelAt,
+                           const QString& line)
+{
+    for (qsizetype pos = 0; pos <= line.size(); ++pos) {
+        const QRegularExpressionMatch m = tsAt.match(line, pos, QRegularExpression::NormalMatch,
+                                                     QRegularExpression::AnchorAtOffsetMatchOption);
+        const qsizetype want = m.hasMatch() ? m.capturedLength(0) : 0;
+        const qsizetype got = LineClassifier::timestampLengthAt(line, pos);
+        CHECK(got == want,
+              qPrintable(QStringLiteral("timestampLengthAt(«%1», %2) = %3, регекс %4")
+                             .arg(line).arg(pos).arg(got).arg(want)));
+        const QRegularExpressionMatch lm = levelAt.match(line, pos, QRegularExpression::NormalMatch,
+                                                         QRegularExpression::AnchorAtOffsetMatchOption);
+        const qsizetype wantLevel = lm.hasMatch() ? lm.capturedLength(0) : 0;
+        LogLevel level = LogLevel::Unknown;
+        const qsizetype gotLevel = LineClassifier::levelLengthAt(line, pos, &level);
+        CHECK(gotLevel == wantLevel,
+              qPrintable(QStringLiteral("levelLengthAt(«%1», %2) = %3, регекс %4")
+                             .arg(line).arg(pos).arg(gotLevel).arg(wantLevel)));
+        if (gotLevel > 0) {
+            CHECK(level == StrToLevel(line.mid(pos, gotLevel)),
+                  qPrintable(QStringLiteral("levelLengthAt(«%1», %2): уровень слова").arg(line).arg(pos)));
+        }
+    }
+}
+
 static void testClassifierRegexEquivalence()
 {
     const LineClassifier classifier;
@@ -1359,8 +1388,13 @@ static void testClassifierRegexEquivalence()
     CHECK(tsRe.iso.isValid() && tsRe.access.isValid() && tsRe.syslog.isValid()
               && tsRe.suffix.isValid() && levelRe.isValid(),
           "reference timestamp and level regexes compile");
+    // F-17: метка и слово уровня С ПОЗИЦИИ — те же формы и словарь.
+    const QRegularExpression tsAtRe(PatternHeuristics::timestampAtDetectPattern());
+    const QRegularExpression levelAtRe(PatternHeuristics::levelDetectPattern());
+    CHECK(tsAtRe.isValid(), "timestampAtDetectPattern compiles");
     const auto check = [&](const QString& line) {
         checkClassifierLine(classifier, tsRe, levelRe, line);
+        checkLengthsAt(tsAtRe, levelAtRe, line);
     };
 
     const QStringList corpus = {

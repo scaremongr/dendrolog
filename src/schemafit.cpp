@@ -6,6 +6,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QSet>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
@@ -151,23 +152,28 @@ double Result::specificity() const
     return acceptedCandidates > 0 ? double(fieldsOnCandidates) / acceptedCandidates : 0.0;
 }
 
-Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& budget,
-                QVector<LineMatchResult>* matches)
+namespace {
+
+// Ядро меры: lineFn(i, text, out, stop) → итог разбора строки i набора.
+// Один проход на обе формы схемы (извлекатель и прежний LogPattern с
+// результатами каскада для редактора).
+template <typename LineFn>
+Result evaluateImpl(const FieldExtractor& schema, bool valid, const Corpus& lines,
+                    const Budget& budget, LineFn&& lineFn)
 {
     Result r;
-    if (matches) {
-        matches->clear();
-        matches->resize(lines.samples.size());
-    }
     r.keyed = schema.isKeyed();
     r.candidates = lines.candidateCount;
-    if (!schema.isValid())
+    if (!valid)
         return r;
 
-    const int columns = int(schema.fieldNames().size());
-    const int tail = schema.tailFieldIndex();
+    const int columns = int(schema.fields().size());
+    const int tail = schema.tailField();
     r.filled.fill(0, columns);
+    r.distinct.fill(0, columns);
+    QVector<QSet<QString>> values(columns);
     QVector<bool> colFilled(columns, false);
+    LogEntryFields fields;
 
     QElapsedTimer timer;
     timer.start();
@@ -195,9 +201,8 @@ Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& bud
         ++r.examined;
         const bool candidate = lines.candidate.value(i);
         const QString& text = lines.samples[i].text;
-        const LineMatchResult match = schema.matchLine(text);
-        if (matches)
-            (*matches)[i] = match;
+        FieldExtractor::Stop stop;
+        const FieldExtractor::Outcome outcome = lineFn(i, text, &fields, &stop);
 
         const auto addMiss = [&](bool partial) {
             if (r.misses.size() >= kMaxMisses)
@@ -206,17 +211,12 @@ Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& bud
             miss.line = lines.samples[i].line;
             miss.text = text;
             miss.partial = partial;
-            if (match.ok && match.skippedFrom >= 0) {
-                miss.afterBlock = match.skippedFrom - 1;
-                miss.stopOffset = qMax(0, match.holeStart);
-            } else if (match.ok) {
-                miss.afterBlock = match.matchedBlockCount - 1;
-                miss.stopOffset = qMax(0, match.unparsedStart);
-            }
+            miss.afterBlock = stop.afterElement;
+            miss.stopOffset = qMax(0, stop.offset);
             r.misses.append(miss);
         };
 
-        if (!match.ok) {
+        if (outcome == FieldExtractor::Outcome::Rejected) {
             if (candidate) {
                 ++r.missed;
                 addMiss(false);
@@ -224,26 +224,16 @@ Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& bud
             continue;
         }
 
-        // Непустые колонки: у ключевой — найденные значения по колонке,
-        // у регексной — поля, как их получит парсер (extractFields).
-        std::fill(colFilled.begin(), colFilled.end(), false);
-        if (r.keyed) {
-            for (const BlockSpan& span : match.spans) {
-                if (span.blockIndex >= 0 && span.blockIndex < columns && span.length > 0)
-                    colFilled[span.blockIndex] = true;
-            }
-        } else {
-            const LogEntryFields fields = schema.fieldsFromMatch(text, match);
-            for (int c = 0; c < columns && c < fields.size(); ++c)
-                colFilled[c] = fields.spans[c].isValid() && fields.spans[c].size() > 0;
-        }
         int nonTail = 0;
         for (int c = 0; c < columns; ++c) {
+            colFilled[c] = c < fields.size() && fields.spans[c].isValid() && fields.spans[c].size() > 0;
             if (!colFilled[c])
                 continue;
             ++r.filled[c];
             if (c != tail)
                 ++nonTail;
+            if (values[c].size() <= kDistinctCap)
+                values[c].insert(fields.value(c, text));
         }
         if (r.keyed && ((columns > 0 && colFilled[0]) || (columns > 1 && colFilled[1])))
             ++r.keyedRoles;
@@ -252,8 +242,7 @@ Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& bud
             ++r.loose;
             continue;
         }
-        const bool partial = !r.keyed && (match.unparsedStart >= 0 || match.skippedFrom >= 0);
-        if (partial) {
+        if (outcome == FieldExtractor::Outcome::Partial) {
             ++r.partial;
             addMiss(true);
         } else {
@@ -267,8 +256,50 @@ Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& bud
         r.cancelled = true;
         return r;
     }
+    for (int c = 0; c < columns; ++c)
+        r.distinct[c] = int(values[c].size());
     r.valid = true;
     return r;
+}
+
+} // namespace
+
+Result evaluate(const FieldExtractor& schema, const Corpus& lines, const Budget& budget)
+{
+    return evaluateImpl(schema, schema.isValid(), lines, budget,
+                        [&schema](int, const QString& text, LogEntryFields* out,
+                                  FieldExtractor::Stop* stop) {
+                            return schema.extract(text, out, -1, stop);
+                        });
+}
+
+Result evaluate(const FieldExtractor& schema, const QStringList& lines, const Budget& budget)
+{
+    return evaluate(schema, corpus(lines), budget);
+}
+
+Result evaluate(const FieldExtractor& schema, const QVector<Sample>& lines, const Budget& budget)
+{
+    return evaluate(schema, corpus(lines), budget);
+}
+
+Result evaluate(const LogPattern& schema, const Corpus& lines, const Budget& budget,
+                QVector<LineMatchResult>* matches)
+{
+    if (matches) {
+        matches->clear();
+        matches->resize(lines.samples.size());
+    }
+    const LegacyPatternExtractor extractor(schema);
+    return evaluateImpl(extractor, schema.isValid(), lines, budget,
+                        [&](int i, const QString& text, LogEntryFields* out, FieldExtractor::Stop* stop) {
+                            LineMatchResult match;
+                            const FieldExtractor::Outcome o =
+                                extractor.extractWithMatch(text, out, matches ? &match : nullptr, stop);
+                            if (matches)
+                                (*matches)[i] = std::move(match);
+                            return o;
+                        });
 }
 
 Result evaluate(const LogPattern& schema, const QStringList& lines, const Budget& budget)
@@ -279,6 +310,12 @@ Result evaluate(const LogPattern& schema, const QStringList& lines, const Budget
 Result evaluate(const LogPattern& schema, const QVector<Sample>& lines, const Budget& budget)
 {
     return evaluate(schema, corpus(lines), budget);
+}
+
+QString Result::distinctText(int column) const
+{
+    const int count = distinct.value(column);
+    return count > kDistinctCap ? QStringLiteral("%1+").arg(kDistinctCap) : QString::number(count);
 }
 
 Verdict verdict(const Result& r)
@@ -332,6 +369,20 @@ bool better(const Result& a, const Result& b)
     return a.partial < b.partial;
 }
 
+QVector<Ranked> rank(const QVector<FieldExtractorPtr>& schemas, const Corpus& lines, const Budget& budget)
+{
+    QVector<Ranked> ranked;
+    ranked.reserve(schemas.size());
+    for (int i = 0; i < schemas.size(); ++i) {
+        if (budget.cancel && budget.cancel->load(std::memory_order_relaxed))
+            break;
+        ranked.append(Ranked{i, schemas[i] ? evaluate(*schemas[i], lines, budget) : Result()});
+    }
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [](const Ranked& a, const Ranked& b) { return better(a.result, b.result); });
+    return ranked;
+}
+
 QVector<Ranked> rank(const QVector<LogPattern>& schemas, const Corpus& lines, const Budget& budget)
 {
     QVector<Ranked> ranked;
@@ -348,88 +399,12 @@ QVector<Ranked> rank(const QVector<LogPattern>& schemas, const Corpus& lines, co
 
 Reason explain(const PatternDefinition& definition, const QString& line, const LineMatchResult& match)
 {
-    Reason reason;
-    if (definition.keyed) {
-        if (!match.ok) {
-            reason.expect = Reason::Expect::Record;
-            reason.found = line.left(24);
-        }
-        return reason;
-    }
-    const bool partial = match.ok && (match.unparsedStart >= 0 || match.skippedFrom >= 0);
-    if (match.ok && !partial)
-        return reason;
+    return LegacyPatternExtractor::explainMatch(definition, line, match);
+}
 
-    if (match.ok && match.skippedFrom >= 0) {
-        reason.afterBlock = match.skippedFrom - 1;
-        reason.stopOffset = qMax(0, match.holeStart);
-    } else if (match.ok) {
-        reason.afterBlock = match.matchedBlockCount - 1;
-        reason.stopOffset = qMax(0, match.unparsedStart);
-    } else {
-        reason.afterBlock = -1;
-        reason.stopOffset = 0;
-    }
-    reason.expectedBlock = reason.afterBlock + 1;
-    reason.found = line.mid(reason.stopOffset, 24);
-
-    const QVector<PatternBlock>& blocks = definition.blocks;
-    if (reason.afterBlock < 0 && !definition.linePrefix.isEmpty()
-            && !line.startsWith(definition.linePrefix)) {
-        reason.expect = Reason::Expect::Literal;
-        reason.literal = definition.linePrefix;
-        return reason;
-    }
-    if (reason.afterBlock >= 0 && reason.afterBlock < blocks.size()) {
-        const PatternBlock& prev = blocks[reason.afterBlock];
-        if (!prev.separator.isEmpty() && !prev.separatorIsRegex
-                && !QStringView(line).mid(reason.stopOffset).trimmed().startsWith(prev.separator.trimmed())) {
-            reason.expect = Reason::Expect::Literal;
-            reason.literal = prev.separator;
-            return reason;
-        }
-    }
-    if (reason.expectedBlock < 0 || reason.expectedBlock >= blocks.size()) {
-        reason.expectedBlock = -1;
-        reason.expect = Reason::Expect::Text;
-        return reason;
-    }
-    const PatternBlock& next = blocks[reason.expectedBlock];
-    if (!next.leadingText.isEmpty()) {
-        reason.expect = Reason::Expect::Literal;
-        reason.literal = next.leadingText;
-        return reason;
-    }
-    using K = PatternBlock::MatchKind;
-    switch (next.matchKind) {
-    case K::ConstantText:
-        reason.expect = Reason::Expect::Literal;
-        reason.literal = next.customRegex;
-        break;
-    case K::Timestamp: reason.expect = Reason::Expect::Timestamp; break;
-    case K::Level: reason.expect = Reason::Expect::Level; break;
-    case K::Integer: reason.expect = Reason::Expect::Number; break;
-    case K::HexText: reason.expect = Reason::Expect::Hex; break;
-    case K::IpAddress: reason.expect = Reason::Expect::Ip; break;
-    case K::FilePath: reason.expect = Reason::Expect::Path; break;
-    case K::CustomRegex: reason.expect = Reason::Expect::Regex; break;
-    case K::TextUntilSeparator:
-    case K::GreedyTextUntilSeparator:
-        // Текст до разделителя: разделителя в остатке строки нет — его и
-        // не хватило.
-        if (!next.separator.isEmpty() && !next.separatorIsRegex
-                && !QStringView(line).mid(reason.stopOffset).contains(next.separator)) {
-            reason.expect = Reason::Expect::Literal;
-            reason.literal = next.separator;
-            break;
-        }
-        reason.expect = Reason::Expect::Text;
-        break;
-    case K::Remainder:
-        reason.expect = Reason::Expect::Text;
-        break;
-    }
-    return reason;
+Reason explain(const FieldExtractor& extractor, const QString& line)
+{
+    return extractor.explain(line);
 }
 
 QString percent(double share)
@@ -503,6 +478,16 @@ void SchemaFitJob::setModel(LogModel* model)
 int SchemaFitJob::start(const QVector<LogPattern>& schemas, const LogFile* file,
                         const SchemaFit::Budget& budget)
 {
+    QVector<FieldExtractorPtr> extractors;
+    extractors.reserve(schemas.size());
+    for (const LogPattern& schema : schemas)
+        extractors.append(std::make_shared<const LegacyPatternExtractor>(schema));
+    return start(extractors, file, budget);
+}
+
+int SchemaFitJob::start(const QVector<FieldExtractorPtr>& schemas, const LogFile* file,
+                        const SchemaFit::Budget& budget)
+{
     cancel();
     const int generation = m_generation;
     auto flag = std::make_shared<std::atomic_bool>(false);
@@ -518,10 +503,11 @@ int SchemaFitJob::start(const QVector<LogPattern>& schemas, const LogFile* file,
         outcome.sampled = int(samples.size());
         const SchemaFit::Corpus lines = SchemaFit::corpus(samples);
         outcome.results.reserve(schemas.size());
-        for (const LogPattern& schema : schemas) {
+        for (const FieldExtractorPtr& schema : schemas) {
             if (flag->load(std::memory_order_relaxed))
                 break;
-            outcome.results.append(SchemaFit::evaluate(schema, lines, workerBudget));
+            outcome.results.append(schema ? SchemaFit::evaluate(*schema, lines, workerBudget)
+                                          : SchemaFit::Result());
         }
         outcome.cancelled = flag->load(std::memory_order_relaxed);
         return outcome;

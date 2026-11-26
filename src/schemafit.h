@@ -1,6 +1,7 @@
 #ifndef SCHEMAFIT_H
 #define SCHEMAFIT_H
 
+#include "fieldextractor.h"
 #include "logpattern.h"
 
 #include <QFutureWatcher>
@@ -51,8 +52,10 @@ class LogScanSnapshot;
 //     ограничена пределом PCRE2 (match limit), так что проверка не опаздывает
 //     больше чем на 32 таких строки.
 //
-// Потоки: функции чистые, без состояния; LogPattern можно разделять между
-// потоками (как FileSchemaPtr у загрузки). SchemaFitJob — на GUI-потоке,
+// Потоки: функции чистые, без состояния; извлекатель (FieldExtractor) и
+// LogPattern можно разделять между потоками (как FileSchemaPtr у загрузки).
+// Шаг 2 F-17: мера считается на интерфейсе FieldExtractor; блочная схема
+// приходит через LegacyPatternExtractor. SchemaFitJob — на GUI-потоке,
 // считает в пуле (QtConcurrent::run + QFutureWatcher).
 // ============================================================================
 
@@ -67,6 +70,7 @@ constexpr double kMinSpecificity = 1.0;        ///< ниже — схема ав
 constexpr double kCandidateFallbackShare = 0.20;
 constexpr double kCoverageStep = 0.02;         ///< better: покрытие округляется до шага
 constexpr int kMaxMisses = 50;
+constexpr int kDistinctCap = 1000;             ///< разных значений по колонке считается точно до…
 constexpr int kBudgetCheckEvery = 32;
 constexpr qint64 kDefaultBudgetMs = 150;
 
@@ -119,6 +123,11 @@ struct Result {
     int loose = 0;
     int keyedRoles = 0;     ///< ключевая схема: принятых строк с Timestamp или Level
     QVector<int> filled;    ///< по колонке: в скольких принятых строках поле не пусто
+    /// По колонке: сколько РАЗНЫХ непустых значений (раскодированных) у
+    /// принятых строк — точно до kDistinctCap, дальше kDistinctCap + 1
+    /// («1000+», distinctText). Неверная граница поля видна сразу: вместо
+    /// шести названий — сотни значений по одному разу (F-17, раздел 2).
+    QVector<int> distinct;
     QVector<Miss> misses;   ///< не больше kMaxMisses, по порядку строк
     qint64 fieldsOnCandidates = 0; ///< сумма непустых полей (кроме хвостового) у принятых кандидатов
     bool keyed = false;
@@ -129,8 +138,15 @@ struct Result {
     double coverage() const;
     double specificity() const;
     int accepted() const { return full + partial + loose; }
+    /// «412» или «1000+».
+    QString distinctText(int column) const;
 };
 
+/// Мера на любом извлекателе (F-17, шаг 2) — основной путь.
+Result evaluate(const FieldExtractor& schema, const Corpus& lines, const Budget& budget = {});
+Result evaluate(const FieldExtractor& schema, const QStringList& lines, const Budget& budget = {});
+Result evaluate(const FieldExtractor& schema, const QVector<Sample>& lines, const Budget& budget = {});
+/// Прежняя блочная схема — через LegacyPatternExtractor (до шага 9).
 /// matches (может быть nullptr) — результат matchLine каждой строки набора
 /// (пустой строки и строк после остановки по бюджету — пустой): редактор
 /// красит по ним предпросмотр без второго прохода.
@@ -156,24 +172,18 @@ struct Ranked {
 /// порядке списка); timedOut — в конце.
 QVector<Ranked> rank(const QVector<LogPattern>& schemas, const Corpus& lines,
                      const Budget& budget = {});
+QVector<Ranked> rank(const QVector<FieldExtractorPtr>& schemas, const Corpus& lines,
+                     const Budget& budget = {});
 
-/// Причина промаха — данными; слова подставляет интерфейс.
-struct Reason {
-    enum class Expect {
-        Nothing,      ///< строка принята целиком
-        Literal,      ///< ожидался текст literal (обёртка, разделитель, константа)
-        Timestamp, Level, Number, Hex, Ip, Path, Text, Regex,
-        Record        ///< ключевая схема: строка не JSON / logfmt с ключом роли
-    };
-    int afterBlock = -1;    ///< последний сошедшийся блок, -1 — ни одного
-    int expectedBlock = -1; ///< блок, на котором разбор остановился
-    Expect expect = Expect::Nothing;
-    QString literal;
-    int stopOffset = 0;
-    QString found;          ///< текст строки с места остановки (до 24 символов)
-};
+/// Причина промаха — данными; слова подставляет интерфейс (MatchReport,
+/// fieldextractor.h: у шаблона — номер элемента шаблона, у блочной схемы —
+/// блока).
+using Reason = MatchReport;
+/// Прежняя блочная схема по готовому результату каскада.
 Reason explain(const PatternDefinition& definition, const QString& line,
                const LineMatchResult& match);
+/// Любой извлекатель (одна строка, не горячий путь).
+Reason explain(const FieldExtractor& extractor, const QString& line);
 
 /// Подпись для интерфейса: «Parsed 99.6% of 2300 record lines · 3 did not
 /// match». Пустая — схема невалидна.
@@ -216,6 +226,8 @@ public:
     /// Запуск на снапшоте модели; идущий расчёт отменяется. file — файл,
     /// чьи строки берутся (nullptr — файл первой строки). Номер поколения.
     int start(const QVector<LogPattern>& schemas, const LogFile* file = nullptr,
+              const SchemaFit::Budget& budget = {});
+    int start(const QVector<FieldExtractorPtr>& schemas, const LogFile* file = nullptr,
               const SchemaFit::Budget& budget = {});
     void cancel(bool wait = false);
     bool isRunning() const;

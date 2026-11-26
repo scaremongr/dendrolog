@@ -1,0 +1,7 @@
+{
+    "name": "Spring Boot",
+    "description": "Spring Boot default console/file format: timestamp, level, PID --- [app] [thread] logger : message (Boot 2.x and 3.x).",
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} {Level:level} {PID:int} --- {?[{_}] ?}[{Thread}] {Logger:word} : {Message}"
+}

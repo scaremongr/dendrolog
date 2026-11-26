@@ -132,6 +132,12 @@ set(DENDROLOG_CORE_SOURCES
     src/patternheuristics.cpp
     src/schemafit.h
     src/schemafit.cpp
+    src/fieldextractor.h
+    src/fieldextractor.cpp
+    src/linetemplate.h
+    src/linetemplate.cpp
+    src/schemaconverter.h
+    src/schemaconverter.cpp
     src/filterruleset.h
     src/filterruleset.cpp
     src/textmatchhighlighter.h

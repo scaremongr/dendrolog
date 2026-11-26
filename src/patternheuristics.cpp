@@ -204,6 +204,25 @@ QString clockTimestampDetectPattern()
     return QStringLiteral(R"(^\[?(\d{2}):(\d{2}):(\d{2})(?![\d:])([.,]\d+)?)");
 }
 
+QString timestampAtDetectPattern()
+{
+    // Формы — по порядку; ни две из них не начинаются одинаково (у ISO
+    // третий символ — цифра, у access и фолбэк-форм — «/» или «.», у
+    // времени без даты — «:», у syslog — буква), поэтому порядок альтернатив
+    // не меняет совпадения.
+    static const QString re = QStringLiteral(
+        R"((?:\d{4}(?:-\d{2}-\d{2}|/\d{2}/\d{2})[ T]\d{2}:\d{2}:\d{2})")
+        + timestampSuffixDetectPattern()
+        + QStringLiteral(R"(|\d{2}/)") + monthNameRegex()
+        + QStringLiteral(R"(/\d{4}:\d{2}:\d{2}:\d{2})") + timestampSuffixDetectPattern()
+        + QStringLiteral(R"(|\d{2}(?:/\d{2}/|\.\d{2}\.)\d{4} \d{2}:\d{2}:\d{2})")
+        + timestampSuffixDetectPattern()
+        + QStringLiteral(R"(|)") + monthNameRegex()
+        + QStringLiteral(R"( (?: ?\d|\d{2}) \d{2}:\d{2}:\d{2})") + timestampSuffixDetectPattern()
+        + QStringLiteral(R"(|\d{2}:\d{2}:\d{2}(?![\d:])(?:[.,]\d+)?))");
+    return re;
+}
+
 QString levelDetectPattern()
 {
     return QStringLiteral(R"(\b()") + levelAlternation() + QStringLiteral(R"()\b)");

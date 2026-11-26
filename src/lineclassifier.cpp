@@ -540,6 +540,64 @@ bool scanFallbackFormats(QStringView line, const QStringList& formats,
     return false;
 }
 
+// ---- Длина метки с позиции (F-17, вид поля шаблона «time») ----
+// ТОЛЬКО форма, без проверки даты и диапазона зоны — бит-в-бит регекс
+// PatternHeuristics::timestampAtDetectPattern() (закреплено в
+// tests/lineindex_smoke). Конец дробной части и зоны после секунд с pos —
+// по раскладке timestampSuffixDetectPattern(), с её откатами.
+qsizetype suffixEnd(const QChar* d, qsizetype n, qsizetype pos)
+{
+    if (pos + 1 < n && (d[pos] == QLatin1Char('.') || d[pos] == QLatin1Char(','))
+        && isAsciiDigit(d[pos + 1].unicode())) {
+        pos += 2;
+        while (pos < n && isAsciiDigit(d[pos].unicode()))
+            ++pos;
+    }
+    if (pos >= n)
+        return pos;
+    const char16_t ch = d[pos].unicode();
+    if (ch == u'Z' || ch == u'z')
+        return (pos + 1 < n && isWordChar(d[pos + 1].unicode())) ? pos : pos + 1;
+    if (ch == u'+' || ch == u'-') {
+        // ([+-]\d{2})(?::?(\d{2}))?(?!\d)
+        if (!digitAt(d, n, pos + 1) || !digitAt(d, n, pos + 2))
+            return pos;
+        const qsizetype a = pos + 3;
+        const qsizetype m = (a < n && d[a] == QLatin1Char(':')) ? a + 1 : a;
+        if (digitAt(d, n, m) && digitAt(d, n, m + 1) && !digitAt(d, n, m + 2))
+            return m + 2;
+        return digitAt(d, n, a) ? pos : a;
+    }
+    if (ch == u' ' && pos + 1 < n) {
+        const char16_t next = d[pos + 1].unicode();
+        if (next == u'+' || next == u'-') {
+            // ([+-]\d{2}):?(\d{2})(?!\d) через пробел
+            if (!digitAt(d, n, pos + 2) || !digitAt(d, n, pos + 3))
+                return pos;
+            const qsizetype a = pos + 4;
+            const qsizetype m = (a < n && d[a] == QLatin1Char(':')) ? a + 1 : a;
+            if (digitAt(d, n, m) && digitAt(d, n, m + 1) && !digitAt(d, n, m + 2))
+                return m + 2;
+            return pos;
+        }
+        if (pos + 4 <= n) {
+            const char16_t b = d[pos + 2].unicode(), e = d[pos + 3].unicode();
+            const bool utc = next == u'U' && b == u'T' && e == u'C';
+            const bool gmt = next == u'G' && b == u'M' && e == u'T';
+            if (utc || gmt) {
+                const qsizetype after = pos + 4;
+                if (after < n) {
+                    const char16_t x = d[after].unicode();
+                    if (isWordChar(x) || x == u'+' || x == u'-')
+                        return pos;
+                }
+                return after;
+            }
+        }
+    }
+    return pos;
+}
+
 } // namespace
 
 static_assert(LogFile::kNoClockState == ClockDateState{}.packed(),
@@ -677,6 +735,65 @@ ClockRun LineClassifier::clockRunInFile(const QString& filePath, qint64 offset,
     return run;
 }
 
+qsizetype LineClassifier::timestampLengthAt(QStringView line, qsizetype pos)
+{
+    const QChar* d = line.constData();
+    const qsizetype n = line.size();
+    if (pos < 0 || pos >= n)
+        return 0;
+    const QChar* p = d + pos;
+    const qsizetype m = n - pos;   // символов от pos
+    // ISO: dddd-dd-dd или dddd/dd/dd, [ T], dd:dd:dd.
+    if (m >= 19) {
+        const char16_t s4 = p[4].unicode();
+        if ((s4 == u'-' || s4 == u'/') && p[7].unicode() == s4
+            && (p[10] == QLatin1Char(' ') || p[10] == QLatin1Char('T'))
+            && p[13] == QLatin1Char(':') && p[16] == QLatin1Char(':')
+            && digitsAt(p, 0, { 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18 }))
+            return suffixEnd(d, n, pos + 19) - pos;
+        // Фолбэк-формы: dd/dd/dddd или dd.dd.dddd, пробел, dd:dd:dd.
+        const char16_t s2 = p[2].unicode();
+        if ((s2 == u'/' || s2 == u'.') && p[5].unicode() == s2 && p[10] == QLatin1Char(' ')
+            && p[13] == QLatin1Char(':') && p[16] == QLatin1Char(':')
+            && digitsAt(p, 0, { 0, 1, 3, 4, 6, 7, 8, 9, 11, 12, 14, 15, 17, 18 }))
+            return suffixEnd(d, n, pos + 19) - pos;
+    }
+    // access: dd/Mmm/dddd:dd:dd:dd.
+    if (m >= 20 && p[2] == QLatin1Char('/') && p[6] == QLatin1Char('/')
+        && p[11] == QLatin1Char(':') && p[14] == QLatin1Char(':') && p[17] == QLatin1Char(':')
+        && digitsAt(p, 0, { 0, 1, 7, 8, 9, 10, 12, 13, 15, 16, 18, 19 })
+        && monthAt(d, n, pos + 3) != 0)
+        return suffixEnd(d, n, pos + 20) - pos;
+    // syslog: Mmm, пробел, « d» / «d» / «dd», пробел, dd:dd:dd.
+    if (m >= 14 && p[3] == QLatin1Char(' ') && monthAt(d, n, pos) != 0) {
+        qsizetype t = -1;
+        if (p[4] == QLatin1Char(' ') && isAsciiDigit(p[5].unicode()) && p[6] == QLatin1Char(' '))
+            t = 7;
+        else if (isAsciiDigit(p[4].unicode()) && isAsciiDigit(p[5].unicode()) && p[6] == QLatin1Char(' '))
+            t = 7;
+        else if (isAsciiDigit(p[4].unicode()) && p[5] == QLatin1Char(' '))
+            t = 6;
+        if (t > 0 && t + 8 <= m && p[t + 2] == QLatin1Char(':') && p[t + 5] == QLatin1Char(':')
+            && digitsAt(p, t, { 0, 1, 3, 4, 6, 7 }))
+            return suffixEnd(d, n, pos + t + 8) - pos;
+    }
+    // Время без даты: dd:dd:dd, за ним не цифра и не «:», дробь — без зоны.
+    if (m >= 8 && p[2] == QLatin1Char(':') && p[5] == QLatin1Char(':')
+        && digitsAt(p, 0, { 0, 1, 3, 4, 6, 7 })) {
+        if (m > 8 && (isAsciiDigit(p[8].unicode()) || p[8] == QLatin1Char(':')))
+            return 0;
+        qsizetype e = pos + 8;
+        if (e + 1 < n && (d[e] == QLatin1Char('.') || d[e] == QLatin1Char(','))
+            && isAsciiDigit(d[e + 1].unicode())) {
+            e += 2;
+            while (e < n && isAsciiDigit(d[e].unicode()))
+                ++e;
+        }
+        return e - pos;
+    }
+    return 0;
+}
+
 bool LineClassifier::detectTimestamp(QStringView line, QDateTime &ts,
                                      const YearReference& year, bool* leading,
                                      ClockDates* clock) const
@@ -751,16 +868,89 @@ bool LineClassifier::detectTimestampMs(QStringView line, qint64 &msecs,
     return true;
 }
 
+namespace {
+
+// Уровень по целому слову w[0..len) — словарь kLevelWords (logentry.h),
+// повторённый вручную: разбор по длине слова, затем по первой букве — на
+// слово текста обычно приходится одно сравнение длины и одно — буквы.
+// Совпадение со словарём закреплено в tests/lineindex_smoke.
+LogLevel levelOfWord(const QChar* w, qsizetype len)
+{
+    LogLevel found = LogLevel::Unknown;
+    if (len >= 3 && len <= 8) {
+        // Хвост слова (со второй буквы) против kw; длины равны.
+        const auto rest = [w, len](const char16_t* kw) {
+            for (qsizetype k = 1; k < len; ++k)
+                if (toUpperAscii(w[k].unicode()) != kw[k])
+                    return false;
+            return true;
+        };
+        const char16_t first = toUpperAscii(w[0].unicode());
+        switch (len) {
+        case 3:
+            switch (first) {
+            case u'E': if (rest(u"ERR")) found = LogLevel::Error; break;
+            case u'W': if (rest(u"WRN")) found = LogLevel::Warn;  break;
+            case u'I': if (rest(u"INF")) found = LogLevel::Info;  break;
+            case u'D': if (rest(u"DBG")) found = LogLevel::Debug; break;
+            case u'V': if (rest(u"VRB")) found = LogLevel::Trace; break;
+            case u'F': if (rest(u"FTL")) found = LogLevel::Fatal; break;
+            default: break;
+            }
+            break;
+        case 4:
+            switch (first) {
+            case u'I': if (rest(u"INFO")) found = LogLevel::Info;  break;
+            case u'W': if (rest(u"WARN")) found = LogLevel::Warn;  break;
+            case u'C': if (rest(u"CRIT")) found = LogLevel::Fatal; break;
+            default: break;
+            }
+            break;
+        case 5:
+            switch (first) {
+            case u'E':
+                if (rest(u"ERROR"))      found = LogLevel::Error;
+                else if (rest(u"EMERG")) found = LogLevel::Fatal;
+                break;
+            case u'D': if (rest(u"DEBUG")) found = LogLevel::Debug; break;
+            case u'T': if (rest(u"TRACE")) found = LogLevel::Trace; break;
+            case u'F': if (rest(u"FATAL")) found = LogLevel::Fatal; break;
+            default: break;
+            }
+            break;
+        case 6:
+            switch (first) {
+            case u'S': if (rest(u"SEVERE")) found = LogLevel::Fatal; break;
+            case u'N': if (rest(u"NOTICE")) found = LogLevel::Info;  break;
+            default: break;
+            }
+            break;
+        case 7:
+            switch (first) {
+            case u'W': if (rest(u"WARNING")) found = LogLevel::Warn;  break;
+            case u'V': if (rest(u"VERBOSE")) found = LogLevel::Trace; break;
+            default: break;
+            }
+            break;
+        case 8:
+            if (first == u'C' && rest(u"CRITICAL")) found = LogLevel::Fatal;
+            break;
+        default:
+            break;
+        }
+    }
+    return found;
+}
+
+} // namespace
+
 bool LineClassifier::detectLogLevel(QStringView line, LogLevel &level) const
 {
     const QChar* d = line.constData();
     const qsizetype n = line.size();
 
     // Самое левое ЦЕЛОЕ слово (границы — не-\w символы), равное одному из
-    // слов словаря kLevelWords (logentry.h). Словарь повторён здесь вручную:
-    // разбор по длине слова, затем по первой букве — на слово текста обычно
-    // приходится одно сравнение длины и одно — буквы. Совпадение со словарём
-    // закреплено в tests/lineindex_smoke.
+    // слов словаря kLevelWords (logentry.h) — levelOfWord.
     qsizetype i = 0;
     while (i < n) {
         if (!isWordChar(d[i].unicode())) {
@@ -770,72 +960,7 @@ bool LineClassifier::detectLogLevel(QStringView line, LogLevel &level) const
         qsizetype j = i + 1;
         while (j < n && isWordChar(d[j].unicode()))
             ++j;
-        const qsizetype len = j - i;
-
-        LogLevel found = LogLevel::Unknown;
-        if (len >= 3 && len <= 8) {
-            const QChar* w = d + i;
-            // Хвост слова (со второй буквы) против kw; длины равны.
-            const auto rest = [w, len](const char16_t* kw) {
-                for (qsizetype k = 1; k < len; ++k)
-                    if (toUpperAscii(w[k].unicode()) != kw[k])
-                        return false;
-                return true;
-            };
-            const char16_t first = toUpperAscii(w[0].unicode());
-            switch (len) {
-            case 3:
-                switch (first) {
-                case u'E': if (rest(u"ERR")) found = LogLevel::Error; break;
-                case u'W': if (rest(u"WRN")) found = LogLevel::Warn;  break;
-                case u'I': if (rest(u"INF")) found = LogLevel::Info;  break;
-                case u'D': if (rest(u"DBG")) found = LogLevel::Debug; break;
-                case u'V': if (rest(u"VRB")) found = LogLevel::Trace; break;
-                case u'F': if (rest(u"FTL")) found = LogLevel::Fatal; break;
-                default: break;
-                }
-                break;
-            case 4:
-                switch (first) {
-                case u'I': if (rest(u"INFO")) found = LogLevel::Info;  break;
-                case u'W': if (rest(u"WARN")) found = LogLevel::Warn;  break;
-                case u'C': if (rest(u"CRIT")) found = LogLevel::Fatal; break;
-                default: break;
-                }
-                break;
-            case 5:
-                switch (first) {
-                case u'E':
-                    if (rest(u"ERROR"))      found = LogLevel::Error;
-                    else if (rest(u"EMERG")) found = LogLevel::Fatal;
-                    break;
-                case u'D': if (rest(u"DEBUG")) found = LogLevel::Debug; break;
-                case u'T': if (rest(u"TRACE")) found = LogLevel::Trace; break;
-                case u'F': if (rest(u"FATAL")) found = LogLevel::Fatal; break;
-                default: break;
-                }
-                break;
-            case 6:
-                switch (first) {
-                case u'S': if (rest(u"SEVERE")) found = LogLevel::Fatal; break;
-                case u'N': if (rest(u"NOTICE")) found = LogLevel::Info;  break;
-                default: break;
-                }
-                break;
-            case 7:
-                switch (first) {
-                case u'W': if (rest(u"WARNING")) found = LogLevel::Warn;  break;
-                case u'V': if (rest(u"VERBOSE")) found = LogLevel::Trace; break;
-                default: break;
-                }
-                break;
-            case 8:
-                if (first == u'C' && rest(u"CRITICAL")) found = LogLevel::Fatal;
-                break;
-            default:
-                break;
-            }
-        }
+        const LogLevel found = levelOfWord(d + i, j - i);
         if (found != LogLevel::Unknown) {
             level = found;
             return true;
@@ -843,6 +968,24 @@ bool LineClassifier::detectLogLevel(QStringView line, LogLevel &level) const
         i = j;
     }
     return false;
+}
+
+qsizetype LineClassifier::levelLengthAt(QStringView line, qsizetype pos, LogLevel* level)
+{
+    const QChar* d = line.constData();
+    const qsizetype n = line.size();
+    if (pos < 0 || pos >= n || !isWordChar(d[pos].unicode())
+            || (pos > 0 && isWordChar(d[pos - 1].unicode())))
+        return 0;
+    qsizetype j = pos + 1;
+    while (j < n && isWordChar(d[j].unicode()))
+        ++j;
+    const LogLevel found = levelOfWord(d + pos, j - pos);
+    if (found == LogLevel::Unknown)
+        return 0;
+    if (level)
+        *level = found;
+    return j - pos;
 }
 
 // ============================================================================

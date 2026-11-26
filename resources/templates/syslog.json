@@ -1,0 +1,7 @@
+{
+    "name": "Syslog",
+    "description": "Classic syslog file (/var/log/syslog, messages, auth.log: Mmm dd hh:mm:ss) and syslog with an ISO 8601 timestamp (rsyslog RFC 3339, journalctl -o short-iso / short-iso-precise): timestamp host program[pid]: message.",
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} {Host:word} {Program:word}{?[{PID:int}]?}: {Message}"
+}

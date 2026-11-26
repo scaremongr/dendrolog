@@ -1,0 +1,7 @@
+{
+    "name": "nginx / Apache access (combined)",
+    "description": "HTTP access log, combined format: client - user [time] \"request\" status bytes \"referer\" \"user agent\". The common format (without referer and user agent) is read too.",
+    "version": 4,
+    "type": "line-template",
+    "template": "{Client:ip} {_:word} {User:word} [{Time:time}] {Request:quoted} {Status:int} {Bytes:word}{? {Referer:quoted} {User agent:quoted}?}"
+}

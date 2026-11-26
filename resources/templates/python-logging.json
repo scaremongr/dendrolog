@@ -1,0 +1,7 @@
+{
+    "name": "Python logging",
+    "description": "Python logging: %(asctime)s - %(name)s - %(levelname)s - %(message)s; tracebacks stay in their record.",
+    "version": 4,
+    "type": "line-template",
+    "template": "{Timestamp:time} - {Logger} - {Level:level} - {Message}"
+}

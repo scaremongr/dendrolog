@@ -172,6 +172,17 @@ public:
     bool detectTimestampMs(QStringView line, qint64& msecs,
                            const YearReference& year = YearReference(),
                            bool* leading = nullptr, ClockDates* clock = nullptr) const;
+    // ---- Сканеры видов поля шаблона строки (F-17, linetemplate.h) ----
+    // Длина метки, НАЧИНАЮЩЕЙСЯ ровно с pos, 0 — метки нет. Формы — все,
+    // что читает detectTimestampMs (ISO и dddd/dd/dd, access, фолбэк-формы
+    // dd/MM/yyyy и dd.MM.yyyy, syslog, время без даты), где угодно в строке,
+    // с дробью и зоной после секунд. Только ФОРМА: дата и диапазон зоны не
+    // проверяются (эталон — регекс PatternHeuristics::
+    // timestampAtDetectPattern(), закреплено в tests/lineindex_smoke).
+    static qsizetype timestampLengthAt(QStringView line, qsizetype pos);
+    // Длина слова уровня (kLevelWords), начинающегося ровно с pos: целое
+    // слово (\b с обеих сторон), регистр сворачивается для ASCII. 0 — нет.
+    static qsizetype levelLengthAt(QStringView line, qsizetype pos, LogLevel* level = nullptr);
     // Распознать уровень логирования (словом). true — level заполнен.
     bool detectLogLevel(QStringView line, LogLevel& level) const;
 

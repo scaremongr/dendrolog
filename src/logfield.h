@@ -21,19 +21,36 @@ qsizetype unescapedSize(QStringView escaped, bool keepControls);
 struct FieldSpan {
     int start  = -1; ///< Offset in QChars; -1 = field not present
     /// Length in QChars; the top bit marks an ESCAPED value (F-4: a JSON or
-    /// logfmt string with backslash sequences, kept as in the file). Read
+    /// logfmt string with backslash sequences, kept as in the file); the next
+    /// bit — a QUOTED value of a line template (F-17: «"…"» of a plain log
+    /// line, only \" and \\ are escapes — «C:\temp» stays as is). Read
     /// through size()/isEscaped(), write through set().
     int length =  0;
 
     static constexpr quint32 kEscapedBit = 0x80000000u;
+    static constexpr quint32 kQuotedBit = 0x40000000u;
+    static constexpr quint32 kFlagBits = kEscapedBit | kQuotedBit;
+
+    enum class Escape { None, Json, Quoted };
 
     bool isValid() const noexcept { return start >= 0; }
-    int size() const noexcept { return int(quint32(length) & ~kEscapedBit); }
-    bool isEscaped() const noexcept { return (quint32(length) & kEscapedBit) != 0; }
+    int size() const noexcept { return int(quint32(length) & ~kFlagBits); }
+    bool isEscaped() const noexcept { return (quint32(length) & kFlagBits) != 0; }
+    Escape escape() const noexcept
+    {
+        return (quint32(length) & kEscapedBit) ? Escape::Json
+             : (quint32(length) & kQuotedBit) ? Escape::Quoted : Escape::None;
+    }
     void set(int offset, int size, bool escaped = false) noexcept
     {
         start = offset;
         length = int(quint32(size) | (escaped ? kEscapedBit : 0u));
+    }
+    void set(int offset, int size, Escape escape) noexcept
+    {
+        start = offset;
+        length = int(quint32(size) | (escape == Escape::Json ? kEscapedBit
+                                      : escape == Escape::Quoted ? kQuotedBit : 0u));
     }
 
     /// Returns a zero-copy view into \a msg — the RAW text (escape
@@ -92,8 +109,39 @@ struct LogEntryFields {
     {
         if (i < 0 || i >= spans.size() || !spans[i].isValid())
             return 0;
-        return spans[i].isEscaped() ? KeyedLine::unescapedSize(spans[i].view(msg), displayLine)
-                                    : spans[i].size();
+        switch (spans[i].escape()) {
+        case FieldSpan::Escape::Json:
+            return KeyedLine::unescapedSize(spans[i].view(msg), displayLine);
+        case FieldSpan::Escape::Quoted:
+            return unquotedSize(spans[i].view(msg));
+        case FieldSpan::Escape::None:
+            break;
+        }
+        return spans[i].size();
+    }
+    /// «"…"» строки лога (шаблон, вид quoted): \" → ", \\ → \, прочие «\» —
+    /// как в строке.
+    static QString unquote(QStringView raw)
+    {
+        QString out;
+        out.reserve(raw.size());
+        for (qsizetype k = 0; k < raw.size(); ++k) {
+            if (raw[k] == QLatin1Char('\\') && k + 1 < raw.size()
+                && (raw[k + 1] == QLatin1Char('"') || raw[k + 1] == QLatin1Char('\\')))
+                ++k;
+            out += raw[k];
+        }
+        return out;
+    }
+    static qsizetype unquotedSize(QStringView raw)
+    {
+        qsizetype n = 0;
+        for (qsizetype k = 0; k < raw.size(); ++k, ++n) {
+            if (raw[k] == QLatin1Char('\\') && k + 1 < raw.size()
+                && (raw[k + 1] == QLatin1Char('"') || raw[k + 1] == QLatin1Char('\\')))
+                ++k;
+        }
+        return n;
     }
     /// True when field \a i holds an escaped value.
     bool isEscaped(int i) const noexcept {
@@ -117,8 +165,15 @@ inline QString LogEntryFields::value(int i, QStringView msg, bool displayLine) c
     if (i < 0 || i >= spans.size() || !spans[i].isValid())
         return QString();
     const FieldSpan& span = spans[i];
-    return span.isEscaped() ? KeyedLine::unescape(span.view(msg), displayLine)
-                            : span.view(msg).toString();
+    switch (span.escape()) {
+    case FieldSpan::Escape::Json:
+        return KeyedLine::unescape(span.view(msg), displayLine);
+    case FieldSpan::Escape::Quoted:
+        return unquote(span.view(msg));
+    case FieldSpan::Escape::None:
+        break;
+    }
+    return span.view(msg).toString();
 }
 
 #endif // LOGFIELD_H
