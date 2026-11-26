@@ -1,7 +1,9 @@
 // ============================================================================
 // field_reextraction — фоновое переизвлечение полей при смене схемы не пишет
 // в записи до apply(): фоновые фильтры, запущенные в это время, читают старые
-// поля без гонки, а отмена оставляет записи целиком в старой схеме.
+// поля без гонки, а отмена оставляет записи целиком в старой схеме. Схема —
+// на запись (F-5, PR 2): слитая вкладка переизвлекает каждый файл своей
+// схемой, поля — в колонках вкладки.
 // ============================================================================
 
 #include "fieldreextraction.h"
@@ -24,6 +26,15 @@ static bool sameFields(const LogEntryFields& a, const LogEntryFields& b)
             return false;
     }
     return true;
+}
+
+// Одна схема на всё — как вкладка с одной схемой (колонки тождественны).
+static FileSchemaSet onlySchema(const LogPattern& pattern)
+{
+    FieldLayout layout;
+    FileSchemaSet set;
+    set.fallback = layout.schemaFor(pattern);
+    return set;
 }
 
 // Поля каждой записи совпадают с ожидаемыми.
@@ -84,7 +95,7 @@ int main(int argc, char** argv)
     // 1. Пока задание идёт, записи не меняются: фоновый фильтр, запущенный в
     //    это время, видит старые поля и считает правильно.
     {
-        FieldReextraction extraction(entries, patternB);
+        FieldReextraction extraction(entries, onlySchema(*patternB));
         bool finished = false;
         QObject::connect(&extraction, &FieldReextraction::finished, [&] { finished = true; });
         CHECK(!extraction.isReady(), "not ready before start");
@@ -112,7 +123,7 @@ int main(int argc, char** argv)
 
     // 3. Отмена оставляет записи целиком в прежней схеме — не наполовину.
     {
-        FieldReextraction extraction(entries, patternA);
+        FieldReextraction extraction(entries, onlySchema(*patternA));
         bool finished = false;
         QObject::connect(&extraction, &FieldReextraction::finished, [&] { finished = true; });
         extraction.start();
@@ -126,7 +137,7 @@ int main(int argc, char** argv)
 
     // 4. Уничтожение идущего задания тоже безопасно и записи не трогает.
     {
-        auto extraction = std::make_unique<FieldReextraction>(entries, patternA);
+        auto extraction = std::make_unique<FieldReextraction>(entries, onlySchema(*patternA));
         extraction->start();
         extraction.reset();
         CHECK(allFields(entries, byB), "destroyed extraction leaves entries intact");
@@ -135,7 +146,7 @@ int main(int argc, char** argv)
     // 5. Фильтр после apply и перепривязки правил видит новые поля: в схеме B
     //    поля Thread нет, правило по нему непригодно, а по Rest — работает.
     {
-        FieldReextraction extraction(entries, patternA);
+        FieldReextraction extraction(entries, onlySchema(*patternA));
         bool finished = false;
         QObject::connect(&extraction, &FieldReextraction::finished, [&] { finished = true; });
         extraction.start();
@@ -146,6 +157,88 @@ int main(int argc, char** argv)
         doc.model->setFilterRules(threadRule);
         CHECK(testdocs::settle(*doc.model), "filter settles after apply");
         CHECK(doc.model->rowCount() == kLines / 2, "filter over re-extracted fields is correct");
+    }
+
+    // 6. Схема на запись (F-5): слитая вкладка из трёх файлов — схема A, схема
+    //    B (Timestamp, Rest) и без схемы. Каждая запись переизвлекается схемой
+    //    своего файла в колонки вкладки (Rest — пятая, после колонок A), у
+    //    файла без схемы поля снимаются; до apply() записи не тронуты.
+    {
+        constexpr int kOther = 6000; // всего больше порога асинхронного фильтра
+        QByteArray other;
+        QByteArray plain;
+        for (int i = 0; i < kOther; ++i) {
+            other += "2026-03-05 10:00:01.000 rest " + QByteArray::number(i) + " [worker-1]\n";
+            plain += "2026-03-05 10:00:02.000 [worker-1] INFO - plain " + QByteArray::number(i) + '\n';
+        }
+        const QString otherPath = testdocs::writeFile(dir, "other.log", other);
+        const QString plainPath = testdocs::writeFile(dir, "plain.log", plain);
+        testdocs::Document merged;
+        merged.model = std::make_unique<LogModel>();
+        testdocs::addResidentFiles(merged, {path}, schemaA);
+        testdocs::addResidentFiles(merged, {otherPath}, LogPattern::serializeDefinition(definitionB));
+        testdocs::addResidentFiles(merged, {plainPath}, QString());
+        CHECK(merged.errors.isEmpty(), "load merged fixture");
+        CHECK(merged.layout.columns
+                  == QStringList({"Timestamp", "Thread", "Level", "Message", "Rest"}),
+              "tab columns: union by name in schema order");
+        const FileSchemaSet schemas = merged.model->fileSchemas();
+        const FileSchemaPtr schemaOfA = schemas.forPath(path);
+        const FileSchemaPtr schemaOfB = schemas.forPath(otherPath);
+        CHECK(schemaOfA && schemaOfA->identity && schemaOfB && !schemaOfB->identity
+                  && !schemas.forPath(plainPath),
+              "file schemas: A identity, B mapped, plain none");
+        const auto byFile = [&](const LogEntry& e) {
+            const FileSchema* schema = schemas.forFile(e.sourceFile().get());
+            return schema ? schema->extractFields(e.message()) : LogEntryFields();
+        };
+        const QVector<std::shared_ptr<LogEntry>> all = merged.model->residentEntriesForFieldMutation();
+        CHECK(all.size() == kLines + 2 * kOther, "merged lines loaded");
+        CHECK(allFields(all, byFile), "load put every file's fields in tab columns");
+        // B: Timestamp — колонка 0, Rest — колонка 4, остальных нет.
+        bool mappedB = true;
+        for (const auto& e : all) {
+            if (e->sourceFile()->filePath != otherPath)
+                continue;
+            mappedB = mappedB && e->fields().has(0) && e->fields().has(4) && !e->fields().has(1)
+                && e->fields().get(4, e->message()).startsWith(QStringLiteral("rest "));
+        }
+        CHECK(mappedB, "schema B fields land in Timestamp and Rest columns");
+
+        // Сбить поля всем записям схемой A, затем вернуть пофайловые.
+        for (const auto& e : all)
+            e->setFields(schemaOfA->extractFields(e->message()));
+        FieldReextraction extraction(all, schemas);
+        bool finished = false;
+        QObject::connect(&extraction, &FieldReextraction::finished, [&] { finished = true; });
+        extraction.start();
+        CHECK(testdocs::waitFor([&] { return finished; }), "per-record extraction finishes");
+        const auto byA = [&](const LogEntry& e) { return schemaOfA->extractFields(e.message()); };
+        CHECK(allFields(all, byA), "per-record workers never write to the entries");
+        merged.model->cancelPendingFilter(true);
+        extraction.apply();
+        CHECK(allFields(all, byFile), "apply installs each file's own schema fields");
+
+        // Правило по колонке Rest (только у B) — «не содержит» на строках A и
+        // файла без схемы; по Thread (только у A) — «не содержит» на B.
+        FilterRuleSet restRule;
+        FilterRule r;
+        r.text = QStringLiteral("rest");
+        r.fieldName = QStringLiteral("Rest");
+        restRule.rules.append(r);
+        restRule.bindFields(merged.layout.columns, true);
+        merged.model->setFilterRules(restRule);
+        CHECK(testdocs::settle(*merged.model), "Rest filter settles");
+        CHECK(merged.model->rowCount() == kOther, "Rest rule keeps only schema B lines");
+        FilterRuleSet threadOnly;
+        r.text = QStringLiteral("worker-1");
+        r.fieldName = QStringLiteral("Thread");
+        threadOnly.rules = {r};
+        threadOnly.bindFields(merged.layout.columns, true);
+        merged.model->setFilterRules(threadOnly);
+        CHECK(testdocs::settle(*merged.model), "Thread filter settles");
+        CHECK(merged.model->rowCount() == kLines / 2,
+              "Thread rule: schema A worker-1 only (B has worker-1 in Rest, plain has no fields)");
     }
 
     std::fprintf(stdout, "Field re-extraction: %d failure(s)\n", failures);

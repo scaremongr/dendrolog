@@ -817,21 +817,14 @@ static void compareAll(const Document& res, const Document& idx)
 // Прогон одной фикстуры
 // ---------------------------------------------------------------------------
 
-static void runFixture(const QString& fixtureName, const QStringList& paths,
-                       const QString& schema, const QStringList& fieldNames,
-                       IndexedLoad mode = IndexedLoad::Sequential)
+// Прогон загруженной пары документов во всех конфигурациях фильтров (плюс
+// extra); afterEach — дополнительные проверки после каждой конфигурации.
+static void runLoaded(const QString& fixtureName, Document& res, Document& idx,
+                      const QStringList& fieldNames, const QVector<FilterConfig>& extra = {},
+                      const std::function<void(const FilterConfig&)>& afterEach = {})
 {
-    g_context = fixtureName + QStringLiteral(" / загрузка");
-    g_contextFailures = 0;
-
-    QElapsedTimer loadTimer;
-    loadTimer.start();
-    Document res = loadResident(paths, schema);
-    Document idx = loadIndexed(paths, schema, mode);
-    g_timing.load += loadTimer.elapsed();
-
     std::fprintf(stdout, "фикстура «%s»: %d файл(ов), %d строк(и)\n",
-                 U8(fixtureName), int(paths.size()), res.model->rowCount());
+                 U8(fixtureName), int(res.files.size()), res.model->rowCount());
     std::fflush(stdout);
 
     CHECK(res.model->rowCount() > 0, QStringLiteral("резидентная модель пуста"));
@@ -853,6 +846,7 @@ static void runFixture(const QString& fixtureName, const QStringList& paths,
 
     QVector<FilterConfig> configs = namedConfigs(range.first, range.second);
     configs += randomConfigs(kRandomConfigCount, kRandomConfigSeed, range.first, range.second);
+    configs += extra;
 
     for (const FilterConfig& cfg : configs) {
         g_context = fixtureName + QStringLiteral(" / ") + cfg.name;
@@ -869,9 +863,30 @@ static void runFixture(const QString& fixtureName, const QStringList& paths,
         t.restart();
         compareRecordKeys(res, idx, resAll, idxAll, /*sameOrder=*/true);
         g_timing.keys += t.elapsed();
+        if (afterEach)
+            afterEach(cfg);
     }
 
     printTiming(fixtureName);
+}
+
+static void runFixture(const QString& fixtureName, const QStringList& paths,
+                       const QString& schema, const QStringList& fieldNames,
+                       IndexedLoad mode = IndexedLoad::Sequential)
+{
+    g_context = fixtureName + QStringLiteral(" / загрузка");
+    g_contextFailures = 0;
+
+    QElapsedTimer loadTimer;
+    loadTimer.start();
+    Document res = loadResident(paths, schema);
+    Document idx = loadIndexed(paths, schema, mode);
+    g_timing.load += loadTimer.elapsed();
+    // Одна схема на всё: колонки вкладки — колонки схемы, columnOf
+    // тождественен (F-5) — результат прежний.
+    CHECK_EQ(res.layout.columns, fieldNames, QStringLiteral("колонки вкладки = колонки схемы"));
+    CHECK_EQ(idx.layout.columns, fieldNames, QStringLiteral("колонки индексной = колонки схемы"));
+    runLoaded(fixtureName, res, idx, fieldNames);
 }
 
 // ---------------------------------------------------------------------------
@@ -2193,6 +2208,220 @@ static void testKeyedSchemas(const QDir& dir)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Схема на файл (F-5, PR 2): слитая вкладка из двух файлов с разными схемами —
+// регексной (Timestamp, Worker, Level, Message) и ключевой JSON Lines F-4
+// (Timestamp, Level, Message, Thread). Колонки вкладки — объединение по
+// имени в порядке схем файлов; общие — Timestamp, Level, Message, своя у
+// каждого — Worker и Thread. Бэкенды согласны во всём API во всех
+// конфигурациях фильтров, в обоих сценариях подключения индексной вкладки и
+// в обоих порядках файлов (первая схема — тождественная, вторая — с
+// переносом колонок). Сверх сравнения бэкендов — заданные значения:
+//   • выбор колонок, задевающий только один файл, — у строк другого сырой
+//     текст, у своих — значение колонки;
+//   • правило по колонке одного файла — «не содержит» на строках другого;
+//     по общей колонке — строки обоих; по колонке, которой нет во вкладке, —
+//     нейтрально;
+//   • моменты, уровни, записи и Message ключевого файла — как в фикстуре.
+// ---------------------------------------------------------------------------
+static QString workerSchema()
+{
+    PatternDefinition def;
+    def.blocks = {
+        patternBlock(PatternBlock::MatchKind::Timestamp, QStringLiteral("Timestamp")),
+        patternBlock(PatternBlock::MatchKind::TextUntilSeparator, QStringLiteral("Worker"),
+                     QStringLiteral("["), QStringLiteral("]")),
+        patternBlock(PatternBlock::MatchKind::Level, QStringLiteral("Level"), QString(),
+                     QString(), QStringLiteral("-")),
+        patternBlock(PatternBlock::MatchKind::Remainder, QStringLiteral("Message")),
+    };
+    return LogPattern::serializeDefinition(def);
+}
+
+// Конфигурации, которых нет среди общих: колонка одного файла, общая,
+// отсутствующая, выбор колонок одного файла.
+static QVector<FilterConfig> mixedSchemaConfigs()
+{
+    QVector<FilterConfig> cfgs;
+    const auto ruleCfg = [&](const QString& name, FilterRule::Action action, const QString& text,
+                             const QString& field) {
+        FilterConfig c;
+        c.name = name;
+        c.fieldScopeActive = true;
+        c.rules.rules << rule(action, text, FilterRule::Connector::And, field);
+        cfgs << c;
+    };
+    ruleCfg(QStringLiteral("схемы: Worker (только регексная) содержит worker-1"),
+            FilterRule::Action::Include, QStringLiteral("worker-1"), QStringLiteral("Worker"));
+    ruleCfg(QStringLiteral("схемы: Thread (только ключевая) содержит worker"),
+            FilterRule::Action::Include, QStringLiteral("worker"), QStringLiteral("Thread"));
+    ruleCfg(QStringLiteral("схемы: Exclude Thread содержит worker-2"),
+            FilterRule::Action::Exclude, QStringLiteral("worker-2"), QStringLiteral("Thread"));
+    ruleCfg(QStringLiteral("схемы: общая Level содержит ERROR"),
+            FilterRule::Action::Include, QStringLiteral("ERROR"), QStringLiteral("Level"));
+    ruleCfg(QStringLiteral("схемы: колонки Span нет во вкладке — нейтрально"),
+            FilterRule::Action::Include, QStringLiteral("zzz"), QStringLiteral("Span"));
+    const auto shown = [&](const QString& name, const QStringList& columns) {
+        FilterConfig c;
+        c.name = name;
+        c.fieldFilterEnabled = true;
+        c.visibleFields.clear();
+        // Индексы — по именам при прогоне (порядок колонок зависит от порядка
+        // файлов): имена кладутся в name после «:», см. visibleByName.
+        c.name += QStringLiteral(" [") + columns.join(u',') + u']';
+        cfgs << c;
+    };
+    shown(QStringLiteral("схемы: показана только Worker"), {QStringLiteral("Worker")});
+    shown(QStringLiteral("схемы: показана только Thread"), {QStringLiteral("Thread")});
+    shown(QStringLiteral("схемы: показаны Thread и Message"),
+          {QStringLiteral("Thread"), QStringLiteral("Message")});
+    // Сняты все галочки: строка с полями пуста, как у вкладки с одной схемой
+    // (правило сырого текста — только при непустом выборе).
+    shown(QStringLiteral("схемы: выбор колонок пуст"), {});
+    return cfgs;
+}
+
+// Колонки «показаны» из имени конфигурации (mixedSchemaConfigs) → индексы.
+static QStringList shownColumnNames(const FilterConfig& cfg)
+{
+    const qsizetype open = cfg.name.lastIndexOf(u'[');
+    if (!cfg.fieldFilterEnabled || open < 0 || !cfg.name.endsWith(u']')
+        || cfg.name.endsWith(QStringLiteral("[]")))
+        return {};
+    return cfg.name.mid(open + 1, cfg.name.size() - open - 2).split(u',');
+}
+
+// Заданные значения на одной модели после конфигурации cfg.
+static void checkMixedSchemaRows(const QString& what, const LogModel& m, const FilterConfig& cfg,
+                                 const QString& keyedPath, int unfilteredRows,
+                                 const QStringList& columns)
+{
+    const QStringList shownNames = shownColumnNames(cfg);
+    const bool emptySelection = cfg.fieldFilterEnabled && cfg.name.endsWith(QStringLiteral("[]"));
+    const QString onlyField = cfg.fieldScopeActive && cfg.rules.rules.size() == 1
+        ? cfg.rules.rules.first().fieldName : QString();
+    bool sawKeyed = false, sawRegex = false;
+    for (int row = 0; row < m.rowCount(); ++row) {
+        if (g_contextFailures > kFailuresPerContext)
+            return;
+        const std::shared_ptr<LogEntry> e = m.entryAt(row);
+        if (!e)
+            continue;
+        const bool keyed = e->sourceFile()->filePath == keyedPath;
+        (keyed ? sawKeyed : sawRegex) = true;
+        const QString at = what + QStringLiteral(": строка %1 (%2:%3)")
+                                      .arg(row).arg(keyed ? "ключевой" : "регексный")
+                                      .arg(e->originalLineNumber());
+        if (emptySelection && !e->fields().isEmpty()) {
+            const QString got = m.data(m.index(row, 0), Qt::DisplayRole).toString();
+            CHECK(got.isEmpty(), at + QStringLiteral(": пустой выбор колонок — показ %1, ожидается пусто")
+                                      .arg(describe(got)));
+        }
+        if (!shownNames.isEmpty() && !emptySelection && !e->fields().isEmpty()) {
+            // Своя колонка у файла есть — значение; нет ни одной — сырой текст.
+            QStringList parts;
+            bool schemaHasShown = false;
+            for (const QString& name : shownNames) {
+                const int column = int(columns.indexOf(name));
+                const bool own = keyed ? name != QStringLiteral("Worker")
+                                       : name != QStringLiteral("Thread");
+                schemaHasShown = schemaHasShown || own;
+                const QString v = e->fields().value(column, e->message(), true);
+                if (own && !v.isEmpty())
+                    parts << v;
+            }
+            const QString expected = schemaHasShown ? parts.join(u' ') : e->message();
+            const QString got = m.data(m.index(row, 0), Qt::DisplayRole).toString();
+            CHECK(got == expected, at + QStringLiteral(": показ %1, ожидается %2")
+                                        .arg(describe(got), describe(expected)));
+        }
+        if (onlyField == QStringLiteral("Worker") || onlyField == QStringLiteral("Thread")) {
+            const bool own = keyed == (onlyField == QStringLiteral("Thread"));
+            const bool include = cfg.rules.rules.first().action == FilterRule::Action::Include;
+            // Include по чужой колонке не пропускает ни одной строки файла.
+            if (include)
+                CHECK(own, at + QStringLiteral(": правило по колонке ") + onlyField
+                               + QStringLiteral(" пропустило строку файла без неё"));
+        }
+    }
+    if (onlyField == QStringLiteral("Span"))
+        CHECK(m.rowCount() == unfilteredRows,
+              what + QStringLiteral(": правило по отсутствующей колонке не нейтрально (%1 из %2)")
+                         .arg(m.rowCount()).arg(unfilteredRows));
+    if (onlyField == QStringLiteral("Level"))
+        CHECK(sawKeyed && sawRegex, what + QStringLiteral(": общая колонка Level — строки обоих файлов"));
+    if (onlyField == QStringLiteral("Thread")
+        && cfg.rules.rules.first().action == FilterRule::Action::Exclude)
+        CHECK(sawRegex, what + QStringLiteral(": Exclude по чужой колонке оставляет строки файла без неё"));
+}
+
+static void testMixedSchemas(const QDir& dir)
+{
+    const QString regexSchema = workerSchema();
+    const QString keyedSchema = keyedfx::schema(KeyedDefinition::Format::JsonObject);
+    const keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 120);
+    const QString keyedPath = writeFile(dir, QStringLiteral("mixed-keyed.jsonl"), fx.bytes);
+    // Регексный лог в те же минуты: строки обоих файлов перемежаются.
+    const QString regexPath = writeFile(
+        dir, QStringLiteral("mixed-regex.log"),
+        makeLogBytes(200, 21u, "\n", QDateTime::fromMSecsSinceEpoch(keyedfx::baseMs()),
+                     /*withPreamble*/ true, /*trailingNewline*/ true, /*monotonic*/ false));
+    const QVector<KeyedFile> keyedFiles = {{keyedPath, fx}};
+
+    struct Order { QString name; QStringList paths; QStringList schemas; };
+    const QVector<Order> orders = {
+        {QStringLiteral("регексная, затем ключевая"), {regexPath, keyedPath}, {regexSchema, keyedSchema}},
+        {QStringLiteral("ключевая, затем регексная"), {keyedPath, regexPath}, {keyedSchema, regexSchema}},
+    };
+    for (const Order& order : orders) {
+        for (const IndexedLoad mode : {IndexedLoad::Sequential, IndexedLoad::Concurrent}) {
+            const QString fixtureName = QStringLiteral("схема на файл, ") + order.name
+                                      + QStringLiteral(", ") + describe(mode);
+            g_context = fixtureName + QStringLiteral(" / загрузка");
+            g_contextFailures = 0;
+            // Резидентная: файлы дописываются во вкладку по одному, каждый
+            // своей схемой; индексная — по одному или разом.
+            Document res;
+            res.model = std::make_unique<LogModel>();
+            for (int i = 0; i < order.paths.size(); ++i)
+                addResidentFiles(res, {order.paths[i]}, order.schemas[i]);
+            reportLoadErrors(res);
+            CHECK(settle(*res.model), QStringLiteral("резидентная модель не пришла в покой"));
+            Document idx;
+            idx.model = std::make_unique<LogModel>();
+            addIndexedFiles(idx, order.paths, QString(), mode, order.schemas);
+            reportLoadErrors(idx);
+            CHECK(settle(*idx.model), QStringLiteral("индексная модель не пришла в покой"));
+
+            const QStringList columns = res.layout.columns;
+            CHECK_EQ(columns, idx.layout.columns, QStringLiteral("колонки вкладки"));
+            const QStringList expectedColumns = order.paths.first() == regexPath
+                ? QStringList{"Timestamp", "Worker", "Level", "Message", "Thread"}
+                : QStringList{"Timestamp", "Level", "Message", "Thread", "Worker"};
+            CHECK_EQ(columns, expectedColumns, QStringLiteral("объединение колонок по имени"));
+            const FileSchemaPtr first = res.model->fileSchemaFor(order.paths.first());
+            const FileSchemaPtr second = res.model->fileSchemaFor(order.paths.last());
+            CHECK(first && first->identity && second && !second->identity,
+                  QStringLiteral("первая схема тождественна, вторая — с переносом колонок"));
+
+            compareKeyedUnfiltered(fixtureName + QStringLiteral(" / заданные значения"), res, idx,
+                                   keyedFiles, columns);
+            const int unfiltered = res.model->rowCount();
+
+            QVector<FilterConfig> extra = mixedSchemaConfigs();
+            for (FilterConfig& c : extra)
+                for (const QString& name : shownColumnNames(c))
+                    c.visibleFields << int(columns.indexOf(name));
+            runLoaded(fixtureName, res, idx, columns, extra, [&](const FilterConfig& cfg) {
+                checkMixedSchemaRows(g_context + QStringLiteral(" / резидентный"), *res.model, cfg,
+                                     keyedPath, unfiltered, columns);
+                checkMixedSchemaRows(g_context + QStringLiteral(" / индексный"), *idx.model, cfg,
+                                     keyedPath, unfiltered, columns);
+            });
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -2273,6 +2502,7 @@ int main(int argc, char** argv)
     }
 
     if (qEnvironmentVariableIsSet("EQ_ONLY_KEYED")) { testKeyedSchemas(dir); return g_failures ? 1 : 0; }
+    if (qEnvironmentVariableIsSet("EQ_ONLY_MIXED")) { testMixedSchemas(dir); return g_failures ? 1 : 0; }
     if (qEnvironmentVariableIsSet("EQ_ONLY_PROV")) { testProvisionalEncodings(dir, schema, fieldNames); return g_failures ? 1 : 0; }
     runFixture(QStringLiteral("один файл (LF)"), { fileA }, schema, fieldNames);
     runFixture(QStringLiteral("один файл (CRLF, без \\n в конце)"), { fileB }, schema, fieldNames);
@@ -2308,6 +2538,7 @@ int main(int argc, char** argv)
     testResidentEncodings(dir, schema, fieldNames);
     testProvisionalEncodings(dir, schema, fieldNames);
     testKeyedSchemas(dir);
+    testMixedSchemas(dir);
 
     g_context = QStringLiteral("итог");
     printTiming(QStringLiteral("итого"));

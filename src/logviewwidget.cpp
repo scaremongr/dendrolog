@@ -277,21 +277,42 @@ void LogViewWidget::setParserPattern(const QString& pattern)
 {
     if (pattern != parserPattern())
         m_schemaName.clear(); // имя каталога описывало прежнюю схему
-    m_logParser->setPattern(pattern);
-    m_reloadParser->setPattern(pattern);
-    if (m_indexer)
-        m_indexer->setPattern(pattern);
+    m_pattern.setPattern(pattern);
+    rebuildFieldLayout();
     // Извлечение действует, только если у схемы есть колонки (одно правило
     // с setExtractionEnabled и setFieldSettings).
     m_extractionEnabled = m_extractionFlag && !parserFieldNames().isEmpty();
-    m_logParser->setExtractionEnabled(m_extractionEnabled);
-    m_reloadParser->setExtractionEnabled(m_extractionEnabled);
-    if (m_indexer)
-        m_indexer->setExtractionEnabled(m_extractionEnabled);
-    if (auto* store = m_model ? m_model->indexedOrNull() : nullptr)
-        store->setFieldPattern(pattern, m_extractionEnabled);
+    applySchemaToModel();
     if (m_model)
-        m_model->setAvailableFields(m_logParser->pattern().fieldNames());
+        m_model->setAvailableFields(m_fieldLayout.columns);
+}
+
+void LogViewWidget::rebuildFieldLayout()
+{
+    // Смена схемы пользователем — раскладка заново (поля вкладки
+    // переизвлекает контроллер). Одна схема на вкладку: колонки — её поля.
+    // Та же схема — та же раскладка и тот же указатель (модель сравнивает
+    // наборы схем по указателям).
+    if (m_tabSchema && m_tabSchema->pattern.patternString() == m_pattern.patternString())
+        return;
+    m_fieldLayout.clear();
+    m_tabSchema = m_fieldLayout.schemaFor(m_pattern);
+}
+
+void LogViewWidget::applySchemaToModel()
+{
+    if (!m_model)
+        return;
+    // Схема файла — схема вкладки, пока извлечение включено; nullptr —
+    // файлы читаются без схемы.
+    FileSchemaSet schemas;
+    schemas.fallback = m_extractionEnabled ? m_tabSchema : FileSchemaPtr();
+    m_model->setFileSchemas(schemas);
+}
+
+FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
+{
+    return m_model ? m_model->fileSchemaFor(filePath) : FileSchemaPtr();
 }
 
 void LogViewWidget::setExtractionEnabled(bool enabled)
@@ -336,12 +357,7 @@ QVector<int> LogViewWidget::visibleFieldIndexes() const
 void LogViewWidget::applyExtraction(bool enabled)
 {
     m_extractionEnabled = enabled;
-    m_logParser->setExtractionEnabled(enabled);
-    m_reloadParser->setExtractionEnabled(enabled);
-    if (m_indexer)
-        m_indexer->setExtractionEnabled(enabled);
-    if (auto* store = m_model ? m_model->indexedOrNull() : nullptr)
-        store->setFieldPattern(m_logParser->pattern().patternString(), enabled);
+    applySchemaToModel();
 }
 
 void LogViewWidget::setFallbackEncoding(TextEncoding encoding)
@@ -511,10 +527,9 @@ void LogViewWidget::startReencode(const LogFilePtr& logFile)
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st.loadInFlight = true;
     m_reencodeBuffers[logFile->filePath].clear();
-    m_reencodeParser->setPattern(m_logParser->pattern().patternString());
-    m_reencodeParser->setExtractionEnabled(m_extractionEnabled);
     m_reencodeParser->setFallbackEncoding(m_fallbackEncoding);
-    m_reencodeParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath));
+    m_reencodeParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
+                                   passSchema(logFile->filePath));
     updateLoadingState();
 }
 
@@ -630,12 +645,13 @@ void LogViewWidget::captureEncodingsFromIndexed()
 
 QString LogViewWidget::parserPattern() const
 {
-    return m_logParser->pattern().patternString();
+    return m_pattern.patternString();
 }
 
 QStringList LogViewWidget::parserFieldNames() const
 {
-    return m_logParser->pattern().fieldNames();
+    // Колонки вкладки (F-5): объединение колонок схем её файлов.
+    return m_fieldLayout.columns;
 }
 
 void LogViewWidget::addLogFile(const QString &filePath)
@@ -981,7 +997,7 @@ void LogViewWidget::startLoad(const LogFilePtr& logFile, const FileEncoding& ini
     st.loadInFlight = true;
     if (initial.decided())
         m_fileEncodings.insert(filePath, initial);
-    m_logParser->startParsing(logFile, m_fileEncodings.value(filePath));
+    m_logParser->startParsing(logFile, m_fileEncodings.value(filePath), passSchema(filePath));
     updateLoadingState();
     // UI может показать сообщение "Загрузка файла..." или индикатор прогресса
     qDebug() << "LogViewWidget: Started parsing for" << filePath;
@@ -1391,7 +1407,8 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
         st.loadInFlight = true;
         // resetFileIndex вернул автоматике «не решено», выбор пользователя
         // оставил — с ним и перечитываем.
-        m_indexer->startIndexing(logFile, fresh, store->fileEncoding(logFile));
+        m_indexer->startIndexing(logFile, fresh, store->fileEncoding(logFile),
+                                 passSchema(logFile->filePath));
         updateLoadingState();
         emit fileEncodingChanged(logFile);
         return;
@@ -1405,7 +1422,8 @@ void LogViewWidget::startFullReload(const LogFilePtr& logFile)
     // Содержимое новое — решение автоматики к нему не относится; выбор
     // пользователя остаётся (с ним и перечитываем после setFileEncoding).
     forgetAutoEncoding(logFile->filePath);
-    m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath));
+    m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
+                              passSchema(logFile->filePath));
     updateLoadingState();
     emit fileEncodingChanged(logFile);
 }
@@ -1415,8 +1433,6 @@ void LogViewWidget::ensureIndexer()
     if (m_indexer)
         return;
     m_indexer = new LogIndexer(this);
-    m_indexer->setPattern(m_logParser->pattern().patternString());
-    m_indexer->setExtractionEnabled(m_extractionEnabled);
     m_indexer->setFallbackEncoding(m_fallbackEncoding);
     connect(m_indexer, &LogIndexer::indexingStarted, this,
             [this](const LogFilePtr& f) { emit fileParsingStarted(f); });
@@ -1447,7 +1463,6 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile, FileEncoding enc
     auto* store = m_model->indexedOrNull();
     if (!store || !logFile)
         return;
-    store->setFieldPattern(m_logParser->pattern().patternString(), m_extractionEnabled);
     auto index = std::make_shared<LineIndex>();
     store->attachFile(logFile, index);
     // Кодировка, решённая резидентным путём до перехода порога: стор читает
@@ -1462,7 +1477,7 @@ void LogViewWidget::startIndexedLoad(const LogFilePtr& logFile, FileEncoding enc
     FileReloadState& st = m_fileReloadStates[logFile->filePath];
     st = FileReloadState{};
     st.loadInFlight = true;
-    m_indexer->startIndexing(logFile, index, encoding);
+    m_indexer->startIndexing(logFile, index, encoding, passSchema(logFile->filePath));
     updateLoadingState();
 }
 
@@ -1551,7 +1566,8 @@ void LogViewWidget::handleResidentFallback(const LogFilePtr& logFile,
         m_residentOnlyFiles.insert(logFile->filePath);
         st = FileReloadState{};
         st.loadInFlight = true;
-        m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath));
+        m_logParser->startParsing(logFile, m_fileEncodings.value(logFile->filePath),
+                                  passSchema(logFile->filePath));
         return;
     }
     // Отката нет: помечаем файл неподдерживаемым, чтобы авто-обновление не
@@ -1780,7 +1796,8 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                     // индексатор продолжит проверять новые байты.
                     m_indexer->startIndexingFrom(logFile, index,
                                                  index->lastLineProvisional(),
-                                                 indexedStore->fileEncoding(logFile));
+                                                 indexedStore->fileEncoding(logFile),
+                                                 passSchema(logFile->filePath));
                     // Re-anchor: следующий тик поллинга не должен снова
                     // классифицировать этот же диапазон как дозапись.
                     const qint64 newSize = QFileInfo(logFile->filePath).size();
@@ -1823,14 +1840,14 @@ bool LogViewWidget::reloadChangedFiles(bool force)
                 from = st.lastLineStart;
             }
             st.lastLinePartial = false;
-            m_reloadParser->setPattern(m_logParser->pattern().patternString());
             st.loadInFlight = true;
             // Якорь сдвинется по концу прочитанного (tailState); повторный
             // опрос этот диапазон не возьмёт — по файлу загрузка в полёте.
             // Кодировка хвоста (F-1): поток — как читалось начало (UTF-16/32),
             // байты — состоянием файла; «не решено» решит не-ASCII строка хвоста.
             m_reloadParser->startParsingFrom(logFile, from, context, st.encoding,
-                                             m_fileEncodings.value(logFile->filePath));
+                                             m_fileEncodings.value(logFile->filePath),
+                                             passSchema(logFile->filePath));
             anyChanged = true;
             break;
         }

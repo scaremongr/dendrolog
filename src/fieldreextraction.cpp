@@ -1,20 +1,33 @@
 #include "fieldreextraction.h"
+#include "logfile.h"
 #include "logpattern.h"
 
 #include <QtConcurrent/QtConcurrentMap>
 #include <QtConcurrent/QtConcurrentRun>
 
 FieldReextraction::FieldReextraction(QVector<std::shared_ptr<LogEntry>> entries,
-                                     std::shared_ptr<const LogPattern> pattern,
-                                     QObject* parent)
+                                     FileSchemaSet schemas, QObject* parent)
     : QObject(parent)
     , m_jobs(std::make_shared<QVector<Job>>())
-    , m_pattern(std::move(pattern))
+    , m_schemas(std::make_shared<const FileSchemaSet>(std::move(schemas)))
 {
     m_jobs->reserve(entries.size());
+    // Схема записи — по её файлу; записи одного файла идут подряд не всегда,
+    // поэтому последний файл запоминается (слитая вкладка — лишний поиск
+    // только на смене файла).
+    const LogFile* lastFile = nullptr;
+    const FileSchema* lastSchema = nullptr;
     for (auto& entry : entries) {
-        if (entry)
-            m_jobs->append({std::move(entry), LogEntryFields()});
+        if (!entry)
+            continue;
+        const LogFile* file = entry->sourceFile().get();
+        if (file != lastFile || !lastFile) {
+            lastFile = file;
+            lastSchema = m_schemas->forFile(file);
+            if (lastSchema && !lastSchema->isValid())
+                lastSchema = nullptr;
+        }
+        m_jobs->append({std::move(entry), lastSchema, LogEntryFields()});
     }
     connect(&m_watcher, &QFutureWatcher<void>::progressRangeChanged,
             this, &FieldReextraction::progressRangeChanged);
@@ -34,12 +47,17 @@ void FieldReextraction::start()
     if (m_started || !m_jobs)
         return;
     m_started = true;
-    // QRegularExpression компилируется лениво — прогреваем на этом потоке,
-    // чтобы воркеры не компилировали его наперегонки.
-    m_pattern->extractFields(QString());
-    const std::shared_ptr<const LogPattern> pattern = m_pattern;
-    m_watcher.setFuture(QtConcurrent::map(*m_jobs, [pattern](Job& job) {
-        job.fields = pattern->extractFields(job.entry->message());
+    // QRegularExpression компилируется лениво — прогреваем каждую схему на
+    // этом потоке, чтобы воркеры не компилировали его наперегонки.
+    if (m_schemas->fallback)
+        m_schemas->fallback->pattern.extractFields(QString());
+    for (const FileSchemaPtr& schema : std::as_const(m_schemas->byPath))
+        if (schema)
+            schema->pattern.extractFields(QString());
+    // Схемы заданий живут в m_schemas: деструктор и cancel() ждут воркеров.
+    m_watcher.setFuture(QtConcurrent::map(*m_jobs, [](Job& job) {
+        job.fields = job.schema ? job.schema->extractFields(job.entry->message())
+                                : LogEntryFields();
     }));
 }
 

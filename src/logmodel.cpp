@@ -339,6 +339,8 @@ void LogModel::searchVisible(const LogModel& source, const FilterRuleSet& rules)
     // before dropping the old request so later schema changes cannot race it.
     cancelPendingFilter(!isIndexedBackend());
     beginResetModel();
+    // Схемы файлов — до стора: индексный берёт схему файла у модели.
+    m_fileSchemas = source.m_fileSchemas;
     if (auto* indexed = source.indexedOrNull())
         m_store = std::make_unique<IndexedLogStore>(*this, *indexed);
     else
@@ -384,8 +386,13 @@ bool LogModel::appendSearchRows(const LogModel& source, int first, int last)
         return false;
     IndexedLogStore* indexed = indexedOrNull();
     IndexedLogStore* sourceIndexed = source.indexedOrNull();
-    if (indexed && sourceIndexed)
+    // Схемы файлов — как у источника (новые файлы стор копирует вместе с их
+    // схемами, у прежних обновляет указатели).
+    m_fileSchemas = source.m_fileSchemas;
+    if (indexed && sourceIndexed) {
+        indexed->refreshFileSchemas();
         return indexed->appendSearchRows(*sourceIndexed, first, last);
+    }
     if (!indexed && !sourceIndexed)
         return resident()->appendSearchRows(*source.resident(), first, last);
     return false; // источник сменил бэкенд
@@ -674,6 +681,25 @@ void LogModel::refreshDisplay()
     notifyDisplayChanged();
 }
 
+void LogModel::setFileSchemas(const FileSchemaSet& schemas)
+{
+    if (m_fileSchemas == schemas)
+        return;
+    m_fileSchemas = schemas;
+    if (auto* indexed = indexedOrNull())
+        indexed->refreshFileSchemas();
+}
+
+void LogModel::setFileSchema(const QString& filePath, FileSchemaPtr schema)
+{
+    if (schema)
+        m_fileSchemas.byPath.insert(filePath, std::move(schema));
+    else
+        m_fileSchemas.byPath.remove(filePath);
+    if (auto* indexed = indexedOrNull())
+        indexed->refreshFileSchemas();
+}
+
 // ---------------------------------------------------------------------------
 // formatDisplayMessage — returns the text to show for a single entry row.
 //
@@ -685,16 +711,24 @@ void LogModel::refreshDisplay()
 
 QString LogModel::formatDisplayMessage(const LogEntry& entry) const
 {
+    if (!m_fieldFilterEnabled || entry.fields().isEmpty())
+        return entry.message();
     return formatDisplayText(entry.message(), entry.fields(), m_fieldFilterEnabled,
-                             m_visibleFieldIndexes);
+                             m_visibleFieldIndexes, m_fileSchemas.forFile(entry.sourceFile().get()));
 }
 
 QString LogModel::formatDisplayText(const QString& message, const LogEntryFields& fields,
-                                    bool fieldsShown, const QVector<int>& visibleIndexes)
+                                    bool fieldsShown, const QVector<int>& visibleIndexes,
+                                    const FileSchema* schema)
 {
     // Lines that did not match the schema at all (continuation lines, junk)
     // have no fields — show their raw text so nothing silently disappears.
     if (!fieldsShown || fields.isEmpty())
+        return message;
+    // Слитая вкладка (F-5): у схемы файла нет ни одной выбранной колонки —
+    // строка сырым текстом, а не пустой. Пустой выбор (сняты все галочки) —
+    // пустая строка, как прежде.
+    if (schema && !visibleIndexes.isEmpty() && !schema->hasAnyOf(visibleIndexes))
         return message;
 
     QString result;
@@ -741,6 +775,9 @@ int LogModel::displayTextLength(int row) const
     const LogEntry& entry = *entryPtr;
 
     if (entry.fields().isEmpty())
+        return int(entry.message().length());
+    if (const FileSchema* schema = m_fileSchemas.forFile(entry.sourceFile().get());
+        schema && !m_visibleFieldIndexes.isEmpty() && !schema->hasAnyOf(m_visibleFieldIndexes))
         return int(entry.message().length());
 
     int length = 0;

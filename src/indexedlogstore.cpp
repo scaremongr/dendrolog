@@ -82,8 +82,6 @@ IndexedLogStore::~IndexedLogStore()
 IndexedLogStore::IndexedLogStore(LogModel& model, const IndexedLogStore& source)
     : IndexedLogStore(model)
 {
-    m_fieldPattern = source.m_fieldPattern;
-    m_extractionEnabled = source.m_extractionEnabled;
     m_shownAllCount = source.m_shownAllCount;
     m_explicitBase = source.m_explicitBase || !source.m_identityVisible;
     m_allRefs = source.m_identityVisible ? source.m_allRefs : source.m_visibleRefs;
@@ -250,6 +248,7 @@ int IndexedLogStore::attachFile(const LogFilePtr& logFile, std::shared_ptr<LineI
     f.logFile = logFile;
     f.index = std::move(index);
     f.cacheFileId = m_textCache.addFile(logFile->filePath, f.encoding.decoder);
+    f.schema = m_model.fileSchemaFor(logFile->filePath);
     m_files.append(std::move(f));
 
     if (reorder)
@@ -580,10 +579,10 @@ void IndexedLogStore::rereadWithNewDecoder()
         emit m_model.modelFiltered(visibleCount());
 }
 
-void IndexedLogStore::setFieldPattern(const QString& patternString, bool extractionEnabled)
+void IndexedLogStore::refreshFileSchemas()
 {
-    m_fieldPattern.setPattern(patternString);
-    m_extractionEnabled = extractionEnabled;
+    for (IndexedFile& f : m_files)
+        f.schema = m_model.fileSchemaFor(f.logFile->filePath);
 }
 
 void IndexedLogStore::setTextCacheBudget(qint64 bytes)
@@ -720,8 +719,8 @@ std::shared_ptr<LogEntry> IndexedLogStore::materializeEntry(RowRef ref) const
                                             index.level(line), text, f.logFile);
     // Поля извлекаются по требованию — в индексе спаны не хранятся. Только
     // primary-строки: у continuation полей нет и в резидентном пути.
-    if (m_extractionEnabled && m_fieldPattern.isValid() && index.isPrimary(line))
-        entry->setFields(m_fieldPattern.extractFields(entry->message()));
+    if (f.schema && f.schema->isValid() && index.isPrimary(line))
+        entry->setFields(f.schema->extractFields(entry->message()));
     return entry;
 }
 
@@ -1117,6 +1116,7 @@ public:
         QString path;
         LogFilePtr logFile;
         TextDecoder decoder; // кодировка на момент снапшота (F-1)
+        FileSchemaPtr schema; // схема файла на момент снапшота (F-5)
     };
 
     QStringList paths() const
@@ -1277,18 +1277,16 @@ public:
 
     LogEntryFields fieldsAt(qint64 row, const QString& text) const override
     {
-        // Как materializeEntry: поля — только у первичных строк.
-        if (!extraction || !pattern.isValid() || row < 0 || row >= rowCount())
+        // Как materializeEntry: поля — только у первичных строк, схемой
+        // файла, в колонках вкладки.
+        if (row < 0 || row >= rowCount())
             return LogEntryFields();
         int fileId; qint64 line;
         resolve(row, fileId, line);
-        return files[fileId].index.isPrimary(line) ? pattern.extractFields(text)
-                                                   : LogEntryFields();
+        const FileSnap& f = files[fileId];
+        return (f.schema && f.schema->isValid() && f.index.isPrimary(line))
+            ? f.schema->extractFields(text) : LogEntryFields();
     }
-
-    // Схема полей на момент снапшота (копия: воркер не делит её со store).
-    LogPattern pattern;
-    bool extraction = false;
 
 private:
     void resolve(qint64 row, int& fileId, qint64& line) const
@@ -1312,9 +1310,7 @@ LogScanSnapshot IndexedLogStore::scanSnapshot(bool filteredOnly) const
     impl->files.reserve(m_files.size());
     for (const auto& f : m_files)
         impl->files.append({f.index->snapshot(), f.logFile->filePath, f.logFile,
-                            f.encoding.decoder});
-    impl->pattern = m_fieldPattern;
-    impl->extraction = m_extractionEnabled;
+                            f.encoding.decoder, f.schema});
 
     if (filteredOnly && !m_identityVisible) {
         impl->refs = m_visibleRefs;
@@ -1362,8 +1358,8 @@ bool IndexedLogStore::refPassesFiltersNow(RowRef ref) const
                                                   index.lineStartOffset(line),
                                                   index.lineByteLength(line));
         LogEntryFields fields;
-        if (m_extractionEnabled && m_fieldPattern.isValid() && index.isPrimary(line))
-            fields = m_fieldPattern.extractFields(text);
+        if (f.schema && f.schema->isValid() && index.isPrimary(line))
+            fields = f.schema->extractFields(text);
         if (!rules.matchesLine(QStringView(text), fields))
             return false;
     }
@@ -1416,12 +1412,14 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
         QString path;
         TextDecoder decoder; // копия: смена кодировки отменяет джоб поколением
         bool hidden = false; // файл скрыт фильтром по файлу (U-23)
+        FileSchemaPtr schema; // схема файла (F-5); поля — в колонках вкладки
     };
     auto filesIn = std::make_shared<QVector<FileInput>>();
     const QSet<QString>& hiddenPaths = m_model.hiddenFiles();
     for (const auto& f : m_files)
         filesIn->append({f.index->snapshot(), f.logFile->filePath, f.encoding.decoder,
-                         hiddenPaths.contains(f.logFile->filePath)});
+                         hiddenPaths.contains(f.logFile->filePath),
+                         (f.schema && f.schema->isValid()) ? f.schema : FileSchemaPtr()});
 
     // Диапазон работы: весь документ, свежий батч одного файла или явный
     // список новых строк поисковой базы.
@@ -1450,13 +1448,11 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                                            : std::numeric_limits<qint64>::max();
     const bool endValid = endTime.isValid();
     const FilterRuleSet rules = m_model.filterRules();
-    const LogPattern pattern = m_fieldPattern;
-    const bool extraction = m_extractionEnabled;
     auto progress = m_filterProgress;
 
     QFuture<QVector<RowRef>> future = QtConcurrent::run(
         [filesIn, workRefs, identityCount, levels, startValid, startMs, endValid,
-         endMs, rules, pattern, extraction, cancel, progress]() -> QVector<RowRef> {
+         endMs, rules, cancel, progress]() -> QVector<RowRef> {
             QVector<RowRef> passing;
             const qint64 n = workRefs.isEmpty() ? identityCount : workRefs.size();
             passing.reserve(int(qMin<qint64>(n, 4096)));
@@ -1502,8 +1498,8 @@ void IndexedLogStore::startFilterJob(bool fullRescan, const PendingRange* range)
                     const QString& text = readers.lineAt(
                         fileId, index.lineStartOffset(line), index.lineByteLength(line));
                     LogEntryFields fields;
-                    if (extraction && pattern.isValid() && index.isPrimary(line))
-                        fields = pattern.extractFields(text);
+                    if (input.schema && index.isPrimary(line))
+                        fields = input.schema->extractFields(text);
                     if (!rules.matchesLine(QStringView(text), fields))
                         continue;
                 }

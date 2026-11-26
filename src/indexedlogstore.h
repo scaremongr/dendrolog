@@ -2,6 +2,7 @@
 #define INDEXEDLOGSTORE_H
 
 #include "lineindex.h"
+#include "fieldlayout.h"
 #include "logpattern.h"
 #include "logstore.h"
 #include "textchunkcache.h"
@@ -103,8 +104,12 @@ public:
     // только что подключённого — без reset.
     void setFileEncodingState(const LogFilePtr& logFile, const FileEncoding& encoding);
 
-    // Схема полей: для отображения/фильтрации извлекается по требованию.
-    void setFieldPattern(const QString& patternString, bool extractionEnabled);
+    // Схемы файлов (F-5, PR 2) — у модели (LogModel::fileSchemas): стор
+    // держит копию указателя в записи файла рядом с декодером и раздаёт её
+    // читателям полей (точечный доступ, снапшоты, фильтр-воркер, поисковая
+    // база). Поля извлекаются по требованию схемой файла и кладутся сразу в
+    // колонки вкладки. Модель зовёт это при смене схем.
+    void refreshFileSchemas();
     void setTextCacheBudget(qint64 bytes);
 
     // ---- Виртуальный интерфейс LogStore ---------------------------------------
@@ -144,6 +149,7 @@ private:
         std::shared_ptr<LineIndex> index;
         int cacheFileId = -1;
         FileEncoding encoding; // decoder — копией во все читатели текста
+        FileSchemaPtr schema;  // схема файла (F-5), nullptr — без полей
         qint64 shownLines = 0; // строк файла, показанных модели (U-23, fileLineCounts)
     };
 
@@ -224,9 +230,6 @@ private:
     bool m_identityVisible = true; // нет активного фильтра — видно всё
 
     QSet<RowRef> m_newRefs;        // строки последнего tail-батча (IsNewRole)
-
-    LogPattern m_fieldPattern;
-    bool m_extractionEnabled = false;
 
     // ---- Асинхронная фильтрация (поколение/cancel — как у резидентного) ------
     // Диапазон строк одного файла либо (refs не пуст) явный список строк в

@@ -491,8 +491,11 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
         emit fieldsChanged();
     }
 
-    auto pattern = std::make_shared<LogPattern>(settings.schema);
-    const bool doExtract = view->fieldDisplayEnabled() && pattern->isValid();
+    // Схема записи — схема её файла у модели вкладки (F-5): setFieldSettings
+    // уже поставил их; nullptr — извлечение выключено, поля снимаются.
+    const FileSchemaSet schemas = view->model() ? view->model()->fileSchemas() : FileSchemaSet();
+    const bool doExtract = view->fieldDisplayEnabled()
+        && (schemas.fallback || !schemas.byPath.isEmpty());
     if (!doExtract) {
         for (const auto& entry : entries)
             entry->setFields(LogEntryFields());
@@ -503,8 +506,11 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
     // thread — no worker, no progress bar, no display flicker.
     constexpr int kAsyncThreshold = 4000;
     if (!doExtract || entries.size() < kAsyncThreshold) {
-        for (const auto& entry : entries)
-            entry->setFields(pattern->extractFields(entry->message()));
+        for (const auto& entry : entries) {
+            const FileSchema* schema = schemas.forFile(entry->sourceFile().get());
+            entry->setFields((schema && schema->isValid()) ? schema->extractFields(entry->message())
+                                                           : LogEntryFields());
+        }
         finishApplication(view);
         return;
     }
@@ -514,7 +520,7 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
     // display of the tab is OFF for the duration (applyFieldVisibility): the
     // column list already describes the new schema, while the entries still
     // carry spans of the old one.
-    auto* job = new FieldReextraction(std::move(entries), pattern, this);
+    auto* job = new FieldReextraction(std::move(entries), schemas, this);
     m_jobs.insert(view, job);
     applyFieldVisibility(view);
     // Прогресс окна — сумма расчётов («Apply Schema to All Tabs» запускает

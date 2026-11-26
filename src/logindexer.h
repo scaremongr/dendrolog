@@ -4,6 +4,7 @@
 #include "lineclassifier.h"
 #include "lineindex.h"
 #include "logfile.h"
+#include "fieldlayout.h"
 #include "logpattern.h"
 #include "textencoding.h"
 #include <QObject>
@@ -55,24 +56,24 @@ public:
     explicit LogIndexer(QObject* parent = nullptr);
     ~LogIndexer() override;
 
-    // Схема полей: используется ТОЛЬКО для решения primary/continuation
-    // (спаны полей в индексе не сохраняются — извлекаются по требованию).
-    void setPattern(const QString& schemaString);
-    void setExtractionEnabled(bool enabled) { m_extractionEnabled = enabled; }
     // Запасная однобайтная кодировка автоопределения (F-1): её выбирает
     // decide, если окно не похоже на UTF-8. Умолчание — по локали системы;
     // настройка пользователя — шаг 4 F-1.
     void setFallbackEncoding(TextEncoding encoding) { m_fallbackEncoding = encoding; }
     TextEncoding fallbackEncoding() const { return m_fallbackEncoding; }
-    const LogPattern& pattern() const noexcept { return m_pattern; }
 
 public slots:
     // Полная индексация с нуля; index должен быть свежесозданным (пустым).
     // encoding — кодировка файла на старте (обычно «не решена»; выбор
     // пользователя переживает перечитывание переписанного файла).
+    // schema (F-5) — схема файла на этот проход (параметр, не член объекта);
+    // нужна ТОЛЬКО для решения primary/continuation и (ключевая, F-4) метки
+    // и уровня: спаны полей в индексе не сохраняются — их извлекает стор по
+    // требованию. nullptr — без схемы (извлечение полей выключено).
     void startIndexing(const LogFilePtr& logFile,
                        const std::shared_ptr<LineIndex>& index,
-                       FileEncoding encoding = FileEncoding());
+                       FileEncoding encoding = FileEncoding(),
+                       FileSchemaPtr schema = {});
     // Дозапись хвоста с index->endOffset(). reindexProvisionalTail — сначала
     // переиндексировать последнюю строку, если она была без '\n'
     // (truncateFrom + чтение с её начала); store обязан согласованно убрать
@@ -82,7 +83,8 @@ public slots:
     void startIndexingFrom(const LogFilePtr& logFile,
                            const std::shared_ptr<LineIndex>& index,
                            bool reindexProvisionalTail,
-                           FileEncoding encoding = FileEncoding());
+                           FileEncoding encoding = FileEncoding(),
+                           FileSchemaPtr schema = {});
 
 signals:
     void indexingStarted(const LogFilePtr& logFile);
@@ -101,13 +103,11 @@ signals:
 
 private:
     void doIndex(const LogFilePtr& logFile, std::shared_ptr<LineIndex> index,
-                 const LogPattern& pattern, bool extraction,
+                 const FileSchema* schema,
                  bool initial, bool reindexProvisionalTail,
                  FileEncoding encoding, TextEncoding fallback);
 
     const LineClassifier m_classifier;
-    LogPattern m_pattern;
-    bool m_extractionEnabled = false;
     TextEncoding m_fallbackEncoding = TextEncodings::systemFallback();
 
     // Задачи индексации живут в приватном пуле; деструктор ждёт их завершения,

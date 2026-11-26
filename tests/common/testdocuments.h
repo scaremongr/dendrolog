@@ -371,7 +371,28 @@ struct Document {
     // Резидентный путь: кодировка файла (ключ — путь), как её держит вкладка
     // (LogViewWidget::m_fileEncodings) — для дозаписи. У индексного — в сторе.
     QHash<QString, FileEncoding> encodings;
+    // Колонки вкладки (F-5): схема каждого файла дописывает свои колонки,
+    // поля записей — в этих индексах (FieldLayout::schemaFor).
+    FieldLayout layout;
 };
+
+// Схема файла документа (F-5, PR 2) — как у вкладки: файл читается схемой,
+// поставленной ему в модели (LogModel::setFileSchema); первая схема файла
+// дописывает недостающие колонки в раскладку документа. Пустая строка —
+// без схемы (извлечение выключено).
+inline FileSchemaPtr fileSchema(Document& doc, const QString& path, const QString& schema)
+{
+    if (FileSchemaPtr known = doc.model->fileSchemas().byPath.value(path))
+        if (known->pattern.patternString() == schema)
+            return known;
+    if (schema.isEmpty()) {
+        doc.model->setFileSchema(path, nullptr);
+        return nullptr;
+    }
+    FileSchemaPtr made = doc.layout.schemaFor(schema);
+    doc.model->setFileSchema(path, made);
+    return made;
+}
 
 // Решение парсера → состояние документа, как LogViewWidget::
 // handleEncodingDecided (FileEncoding::adopt): выбор пользователя хранит
@@ -394,8 +415,6 @@ inline QVector<std::shared_ptr<LogEntry>> parseResidentWhole(Document& doc, cons
     QVector<std::shared_ptr<LogEntry>> entries;
     for (int pass = 0; pass < 16; ++pass) {
         LogParser parser;
-        parser.setPattern(schema);
-        parser.setExtractionEnabled(true);
         parser.setFallbackEncoding(kTestFallbackEncoding);
         entries.clear();
         bool done = false;
@@ -412,7 +431,8 @@ inline QVector<std::shared_ptr<LogEntry>> parseResidentWhole(Document& doc, cons
                          [&](int, const LogFilePtr&) { done = true; });
         QObject::connect(&parser, &LogParser::parsingFailed, &relay,
                          [&](const LogFilePtr&) { done = true; });
-        parser.startParsing(logFile, doc.encodings.value(logFile->filePath));
+        parser.startParsing(logFile, doc.encodings.value(logFile->filePath),
+                            fileSchema(doc, logFile->filePath, schema));
         if (!waitFor([&done] { return done; })) {
             doc.errors << QStringLiteral("резидентный парсинг %1 не завершился").arg(logFile->filePath);
             break;
@@ -493,13 +513,11 @@ inline QString describe(IndexedLoad mode)
                                            : QStringLiteral("разом");
 }
 
-// Индексатор в тестах: схема, извлечение полей и запасная кодировка — как
-// у вкладки, плюс решение о кодировке → стор (LogViewWidget::ensureIndexer).
-inline void configureIndexer(LogIndexer& indexer, IndexedLogStore* store,
-                             const QString& schema, QObject* context)
+// Индексатор в тестах: запасная кодировка — как у вкладки, плюс решение о
+// кодировке → стор (LogViewWidget::ensureIndexer). Схема — параметр прохода
+// (F-5): fileSchema документа.
+inline void configureIndexer(LogIndexer& indexer, IndexedLogStore* store, QObject* context)
 {
-    indexer.setPattern(schema);
-    indexer.setExtractionEnabled(true);
     indexer.setFallbackEncoding(kTestFallbackEncoding);
     QObject::connect(&indexer, &LogIndexer::encodingDecided, context,
                      [store](const LogFilePtr& lf, const FileEncoding& encoding) {
@@ -511,19 +529,21 @@ inline void configureIndexer(LogIndexer& indexer, IndexedLogStore* store,
 // LogViewWidget::startIndexedLoad + handleIndexBatchReady. Сигналы индексатора
 // приходят из воркера очередью — порядок «батчи, затем finished» сохраняется.
 // Модель документа переводится на индексный бэкенд, если ещё не переведена.
+// schemas (F-5) — своя схема каждому файлу (по порядку paths) вместо schema:
+// слитая вкладка из файлов с разными схемами.
 inline void addIndexedFiles(Document& doc, const QStringList& paths, const QString& schema,
-                            IndexedLoad mode = IndexedLoad::Sequential)
+                            IndexedLoad mode = IndexedLoad::Sequential,
+                            const QStringList& schemas = {})
 {
     IndexedLogStore* store = doc.model->indexedOrNull();
-    if (!store) {
+    if (!store)
         store = doc.model->convertToIndexedBackend();
-        store->setFieldPattern(schema, true);
-    }
 
     struct Job {
         LogFilePtr                  logFile;
         std::shared_ptr<LineIndex>  index;
         std::unique_ptr<LogIndexer> indexer;
+        FileSchemaPtr               schema;
         bool                        done = false;
         bool                        fallback = false;
     };
@@ -535,8 +555,11 @@ inline void addIndexedFiles(Document& doc, const QStringList& paths, const QStri
         job->logFile = std::make_shared<LogFile>(path);
         job->index = std::make_shared<LineIndex>();
         job->indexer = std::make_unique<LogIndexer>();
-        configureIndexer(*job->indexer, store, schema, &relay);
+        configureIndexer(*job->indexer, store, &relay);
         doc.files.append(job->logFile);
+        // Схема файла — у модели до подключения: стор берёт её при attach.
+        const int at = int(paths.indexOf(path));
+        job->schema = fileSchema(doc, path, schemas.isEmpty() ? schema : schemas.value(at));
         store->attachFile(job->logFile, job->index);
 
         Job* raw = job.get();
@@ -565,14 +588,14 @@ inline void addIndexedFiles(Document& doc, const QStringList& paths, const QStri
     if (mode == IndexedLoad::Sequential) {
         for (const QString& path : paths) {
             Job& job = prepare(path);
-            job.indexer->startIndexing(job.logFile, job.index);
+            job.indexer->startIndexing(job.logFile, job.index, FileEncoding(), job.schema);
             waitFor([&job] { return job.done; });
         }
     } else {
         for (const QString& path : paths)
             prepare(path);
         for (auto& job : jobs)
-            job->indexer->startIndexing(job->logFile, job->index);
+            job->indexer->startIndexing(job->logFile, job->index, FileEncoding(), job->schema);
         waitFor([&jobs] {
             for (const auto& job : jobs)
                 if (!job->done)
@@ -631,7 +654,7 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
     bool done = false;
     bool ok = true;
     QObject relay;
-    configureIndexer(indexer, store, schema, &relay);
+    configureIndexer(indexer, store, &relay);
     LogModel* model = doc.model.get();
     QObject::connect(&indexer, &LogIndexer::indexBatchReady, &relay,
                      [store, model, markNew](const LogFilePtr& lf, qint64 first, qint64 count) {
@@ -646,7 +669,8 @@ inline bool appendIndexedTail(Document& doc, int fileIndex, const QByteArray& by
     QObject::connect(&indexer, &LogIndexer::indexingFailed, &relay,
                      [&](const LogFilePtr&) { ok = false; done = true; });
     indexer.startIndexingFrom(logFile, index, index->lastLineProvisional(),
-                              store->fileEncoding(logFile));
+                              store->fileEncoding(logFile),
+                              fileSchema(doc, logFile->filePath, schema));
     return waitFor([&done] { return done; }) && ok;
 }
 
@@ -683,8 +707,6 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
     }
 
     LogParser parser;
-    parser.setPattern(schema);
-    parser.setExtractionEnabled(true);
     parser.setFallbackEncoding(kTestFallbackEncoding);
     QVector<QVector<std::shared_ptr<LogEntry>>> batches;
     bool done = false;
@@ -704,7 +726,8 @@ inline bool appendResidentTail(Document& doc, int fileIndex, const QByteArray& b
                      [&done](const LogFilePtr&) { done = true; });
     // Кодировка хвоста (F-1) — состояние файла: «не решено» решит хвост.
     parser.startParsingFrom(logFile, oldSize, context, TextEncoding::Utf8,
-                            doc.encodings.value(logFile->filePath));
+                            doc.encodings.value(logFile->filePath),
+                            fileSchema(doc, logFile->filePath, schema));
     if (!waitFor([&done] { return done; }))
         return false;
     for (const auto& batch : batches) {

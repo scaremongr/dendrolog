@@ -649,7 +649,18 @@ private:
     // «Filter blocks» и у схемы есть колонки.
     bool m_extractionEnabled = false;
     // Схема полей вкладки (F-5): имя схемы в каталоге, «Filter blocks» как
-    // выбрал пользователь, выбранные колонки. Сама схема — у парсера.
+    // выбрал пользователь, выбранные колонки, сама схема и раскладка колонок
+    // вкладки (PR 2: одна схема на все файлы — columnOf тождественен; схема
+    // на файл — PR 3). Схемы файлов, которыми читают парсеры, индексатор и
+    // стор, — у модели (LogModel::fileSchemas), отсюда их ставит
+    // applySchemaToModel; парсеры получают схему файла на старте прохода
+    // (passSchema).
+    LogPattern m_pattern;
+    FieldLayout m_fieldLayout;
+    FileSchemaPtr m_tabSchema;
+    void rebuildFieldLayout();
+    void applySchemaToModel();
+    FileSchemaPtr passSchema(const QString& filePath) const;
     QString m_schemaName;
     bool m_extractionFlag = false;
     QStringList m_visibleFields;

@@ -421,6 +421,9 @@ bool ViewExportJob::start(const LogModel& model, const QString& destination,
     const LogScanSnapshot snapshot = model.scanSnapshot(/*filteredOnly=*/true);
     const bool fieldsShown = model.fieldDisplayFilterEnabled();
     const QVector<int> visibleIndexes = model.visibleFieldIndexes();
+    // Схемы файлов (F-5): строка, в схеме файла которой нет ни одной
+    // выбранной колонки, — сырым текстом, как во view.
+    const FileSchemaSet schemas = model.fileSchemas();
     const qint64 rows = snapshot.rowCount();
     // Таблица (F-9): колонки и имена файлов — здесь, на GUI-потоке.
     const bool table = format != ViewExport::Format::Text;
@@ -450,14 +453,15 @@ bool ViewExportJob::start(const LogModel& model, const QString& destination,
         };
         const ViewExport::RowSource text = [&](const ViewExport::RowSink& sink) {
             qint64 done = 0;
-            snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta&, QStringView text) {
+            snapshot.forEachLine(0, [&](qint64 row, const LogEntryMeta& meta, QStringView text) {
                 tick(done);
                 if (!fieldsShown)
                     return sink(text);
                 // Текст строки валиден только внутри колбэка — без копии.
                 const QString raw = QString::fromRawData(text.data(), text.size());
                 return sink(LogModel::formatDisplayText(raw, snapshot.fieldsAt(row, raw),
-                                                        true, visibleIndexes));
+                                                        true, visibleIndexes,
+                                                        schemas.forFile(meta.sourceFile)));
             });
         };
         const bool csv = format == ViewExport::Format::Csv;
