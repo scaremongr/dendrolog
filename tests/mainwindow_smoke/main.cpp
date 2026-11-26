@@ -101,6 +101,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -2869,6 +2870,123 @@ void scenarioKeyedSchema(MainWindow& win, const Fixtures& fx)
     check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("the JSON Lines tab closes"));
 }
 
+
+// Схема файла слитой вкладки (F-5, PR 3): «Applies to» в доке Log Fields —
+// только у вкладки из нескольких файлов; выбор файла — комбобокс меняет его
+// схему (JSON Lines у файла JSON Lines, регексная — у обычного лога), «All
+// files» при разных схемах — «(mixed)»; выбор схемы всем файлам снимает свои.
+void scenarioFileSchemas(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("schema per file in a merged tab"));
+    auto* fieldsDock = win.findChild<QDockWidget*>(QStringLiteral("fieldVisibilityDockWidget"));
+    auto* combo = fieldsDock ? fieldsDock->findChild<QComboBox*>() : nullptr;
+    auto* target = fieldsDock ? fieldsDock->findChild<QComboBox*>(QStringLiteral("schemaTargetCombo"))
+                              : nullptr;
+    auto* scanner = win.findChild<DirectoryScanner*>();
+    const int jsonLines = combo ? combo->findText(QStringLiteral("JSON Lines")) : -1;
+    const int smoke = combo ? combo->findText(QStringLiteral("Smoke Fields")) : -1;
+    check(combo && target && jsonLines >= 0 && smoke >= 0 && scanner,
+          QStringLiteral("Log Fields has the schema and Applies to combos"));
+    if (!combo || !target || jsonLines < 0 || smoke < 0 || !scanner)
+        return;
+    const auto setFilterBlocks = [&](bool on) {
+        for (QCheckBox* cb : fieldsDock->findChildren<QCheckBox*>())
+            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != on)
+                cb->click();
+    };
+
+    const int before = tabs(win)->count();
+    // Своя вкладка: копия обычного лога (вкладки alpha и beta нужны дальше).
+    const QString plain = QFileInfo(fx.a).dir().filePath(QStringLiteral("file-schemas.log"));
+    QFile::remove(plain);
+    check(QFile::copy(fx.a, plain), QStringLiteral("a copy of the plain log"));
+    emit scanner->fileActivated(plain);
+    check(waitFor([&]() { return tabIndexForFile(win, plain) >= 0; }) && waitAllLoaded(win),
+          QStringLiteral("a plain log opens in a tab"));
+    const int ip = tabIndexForFile(win, plain);
+    LogViewWidget* t = ip >= 0 ? tabAt(win, ip) : nullptr;
+    if (!t)
+        return;
+    tabs(win)->setCurrentIndex(ip);
+    combo->setCurrentIndex(smoke);
+    setFilterBlocks(true);
+    check(waitAllLoaded(win), QStringLiteral("the plain tab settles with the smoke schema"));
+    check(!target->isVisibleTo(fieldsDock), QStringLiteral("a one-file tab has no Applies to"));
+
+    // JSON Lines уже открывался (его память файла принесла бы свою схему —
+    // это проверяет document_state): начать с чистого.
+    QFile::remove(QDir(AppSettings::configDir()).filePath(
+        QStringLiteral("memory/") + FileMemoryStore::fileNameForPath(fx.jsonl)));
+    t->addLogFile(fx.jsonl);
+    check(waitAllLoaded(win) && t->fileCount() == 2, QStringLiteral("the JSON Lines file joins the tab"));
+    check(target->isVisibleTo(fieldsDock) && target->count() == 3
+              && target->currentText() == QStringLiteral("All files"),
+          QStringLiteral("Applies to: All files and each file (%1 items)").arg(target->count()));
+    LogFilePtr jsonFile, plainFile;
+    for (const LogFilePtr& f : t->loadedFiles()) {
+        if (f && LogViewWidget::samePath(f->filePath, fx.jsonl))
+            jsonFile = f;
+        else if (f)
+            plainFile = f;
+    }
+    if (!jsonFile || !plainFile)
+        return;
+    LogModel* m = t->model();
+    // Запись 2 фикстуры JSON Lines (строка 3): эпоха в мс, pino 50.
+    const qint64 keyMoment = keyedfx::baseMs() + 2000;
+    const auto momentOfEpoch = [&]() {
+        for (int row = 0; row < m->rowCount(); ++row) {
+            const RecordKey key = m->keyAt(row);
+            if (key.line == 3 && key.file == jsonFile) {
+                const QDateTime ts = m->visibleTimestampAt(row);
+                return ts.isValid() ? ts.toMSecsSinceEpoch() : kNoTimestampMs;
+            }
+        }
+        return std::numeric_limits<qint64>::max(); // строки нет
+    };
+    check(momentOfEpoch() != keyMoment, QStringLiteral("the JSON Lines file reads with the tab's regex schema"));
+
+    target->setCurrentIndex(target->findData(jsonFile->filePath));
+    check(combo->currentIndex() == smoke, QStringLiteral("the combo shows the file's schema (the tab's)"));
+    combo->setCurrentIndex(jsonLines);
+    check(waitAllLoaded(win), QStringLiteral("the tab settles after the file's schema"));
+    check(t->fileSchema(jsonFile).schemaName == QStringLiteral("JSON Lines")
+              && t->fileSchema(plainFile).schemaName == QStringLiteral("Smoke Fields")
+              && t->fieldSettings().schemaName == QStringLiteral("Smoke Fields"),
+          QStringLiteral("each file has its own schema"));
+    check(momentOfEpoch() == keyMoment, QStringLiteral("the JSON Lines file: moments from the keys"));
+    check(m->availableFields().contains(QStringLiteral("Thread")) && m->availableFields().contains(QStringLiteral("Level")),
+          QStringLiteral("the tab's columns are the union (%1)").arg(m->availableFields().join(',')));
+
+    target->setCurrentIndex(target->findData(plainFile->filePath));
+    check(combo->currentIndex() == smoke, QStringLiteral("the combo shows the plain file's schema"));
+    target->setCurrentIndex(0);
+    check(combo->currentIndex() == -1 && combo->placeholderText() == QStringLiteral("(mixed)"),
+          QStringLiteral("All files with different schemas — (mixed): %1").arg(combo->currentText()));
+
+    // Соседняя вкладка и обратно: цель — снова все файлы.
+    target->setCurrentIndex(target->findData(jsonFile->filePath));
+    const int other = ip == 0 ? 1 : 0;
+    if (other < tabs(win)->count()) {
+        tabs(win)->setCurrentIndex(other);
+        check(!target->isVisibleTo(fieldsDock) || tabAt(win, other)->fileCount() > 1,
+              QStringLiteral("Applies to follows the active tab"));
+        tabs(win)->setCurrentIndex(ip);
+        check(target->currentIndex() == 0, QStringLiteral("back on the merged tab: All files"));
+    }
+
+    // Схема всем файлам — свои снимаются.
+    target->setCurrentIndex(0);
+    combo->setCurrentIndex(smoke);
+    check(waitAllLoaded(win) && !t->hasFileSchemas() && combo->currentIndex() == smoke
+              && momentOfEpoch() != keyMoment,
+          QStringLiteral("a schema for All files drops the files' own schemas"));
+
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, plain));
+    pressCommand(win, QStringLiteral("closeTab"));
+    check(waitFor([&]() { return tabs(win)->count() == before; }), QStringLiteral("the merged tab closes"));
+}
+
 // Контекстное меню лога над выделенным текстом (U-…): найти, Find All,
 // оставить / скрыть строки с ним, маркер.
 void scenarioTextActions(MainWindow& win, const Fixtures& fx)
@@ -3879,6 +3997,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioAutoReload(win, dir);
         scenarioTar(win, fx); // после сценариев, которым нужен alpha в Recent Files
         scenarioKeyedSchema(win, fx);
+        scenarioFileSchemas(win, fx);
         section(QStringLiteral("shortcuts: every one fires"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars shown"));
         checkEveryShortcutFires(win, QStringLiteral("toolbars hidden"), /*hideToolBars=*/true);

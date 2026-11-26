@@ -10,6 +10,7 @@
 
 #include <QSettings>
 
+#include <algorithm>
 #include <memory>
 
 FieldSchemaController::FieldSchemaController(QObject* parent)
@@ -159,12 +160,16 @@ QString FieldSchemaController::replaceCatalogue(const SchemaStore::SchemaList& l
         syncError.clear();
 
     if (!chosen.isEmpty()) {
-        FieldSettings settings = shownSettings();
+        FieldSettings settings = tabSettings();
         settings.schema = chosen;
         settings.schemaName = chosenIndex >= 0 && chosenIndex < m_list.size()
                 && m_list[chosenIndex].schema == chosen
             ? m_list[chosenIndex].name : QString();
-        chooseShown(settings);
+        if (const LogFilePtr file = targetLogFile()) {
+            applyToFile(m_current, file, settings);
+            return syncError;
+        }
+        chooseShown(settings, /*clearFiles=*/true);
         return syncError;
     }
     // Без «Use Selected» схема вкладки остаётся и уже применена; её пункт —
@@ -183,19 +188,60 @@ void FieldSchemaController::setCurrentView(LogViewWidget* view)
     if (m_current == view)
         return;
     m_current = view;
+    m_targetFile.clear();
     emit catalogueChanged();
     emit fieldsChanged();
 }
 
-FieldSettings FieldSchemaController::shownSettings() const
+FieldSettings FieldSchemaController::tabSettings() const
 {
     return m_current ? m_current->fieldSettings() : m_defaults;
 }
 
+FieldSettings FieldSchemaController::shownSettings() const
+{
+    FieldSettings shown = tabSettings();
+    if (const LogFilePtr file = targetLogFile()) {
+        const FieldSettings own = m_current->fileSchema(file);
+        shown.schema = own.schema;
+        shown.schemaName = own.schemaName;
+    }
+    return shown;
+}
+
+LogFilePtr FieldSchemaController::targetLogFile() const
+{
+    if (!m_current || m_targetFile.isEmpty())
+        return nullptr;
+    for (const LogFilePtr& f : m_current->loadedFiles())
+        if (f && f->filePath == m_targetFile)
+            return f;
+    return nullptr;
+}
+
+void FieldSchemaController::setTargetFile(const QString& filePath)
+{
+    if (m_targetFile == filePath)
+        return;
+    m_targetFile = filePath;
+    emit catalogueChanged();
+    emit fieldsChanged();
+}
+
+QString FieldSchemaController::targetFile() const
+{
+    return targetLogFile() ? m_targetFile : QString();
+}
+
+bool FieldSchemaController::isMixed() const
+{
+    return m_current && !targetLogFile() && m_current->hasFileSchemas();
+}
+
 QString FieldSchemaController::activeSchemaName() const
 {
-    const FieldSettings shown = shownSettings();
-    return SessionController::schemaNameFor(m_list, indexOf(shown), shown.schema);
+    const FieldSettings tab = tabSettings();
+    return SessionController::schemaNameFor(m_list, indexOf(tab), tab.schema);
 }
 
 QStringList FieldSchemaController::fieldNames() const
@@ -225,13 +271,15 @@ QStringList FieldSchemaController::keptColumns(const QStringList& visible, const
     return kept.isEmpty() ? fieldNames : kept;
 }
 
-void FieldSchemaController::chooseShown(const FieldSettings& settings)
+void FieldSchemaController::chooseShown(const FieldSettings& settings, bool clearFiles)
 {
     FieldSettings chosen = settings;
     if (chosen.schema.isEmpty())
         chosen.schemaName.clear();
     if (m_current) {
-        applyToView(m_current, chosen); // шлёт catalogueChanged / fieldsChanged
+        const QHash<QString, FieldSettings> none;
+        // шлёт catalogueChanged / fieldsChanged
+        applyToView(m_current, chosen, clearFiles ? &none : nullptr);
         m_defaults = m_current ? m_current->fieldSettings() : chosen;
         return;
     }
@@ -245,7 +293,7 @@ void FieldSchemaController::chooseShown(const FieldSettings& settings)
 
 void FieldSchemaController::selectSchema(int index)
 {
-    FieldSettings settings = shownSettings();
+    FieldSettings settings = tabSettings();
     if (index >= 0 && index < m_list.size()) {
         settings.schema = m_list[index].schema;
         settings.schemaName = m_list[index].name;
@@ -253,12 +301,31 @@ void FieldSchemaController::selectSchema(int index)
         settings.schema.clear();
         settings.schemaName.clear();
     }
-    chooseShown(settings);
+    // «Applies to» — файл: своя схема файла, схемой по умолчанию не становится.
+    if (const LogFilePtr file = targetLogFile()) {
+        applyToFile(m_current, file, settings);
+        return;
+    }
+    // Все файлы: схема вкладки, свои схемы файлов снимаются.
+    chooseShown(settings, /*clearFiles=*/true);
+}
+
+void FieldSchemaController::applyToFile(LogViewWidget* view, const LogFilePtr& file,
+                                        const FieldSettings& ref)
+{
+    if (!view || !file)
+        return;
+    QHash<QString, FieldSettings> files = view->fileSchemas();
+    FieldSettings own;
+    own.schema = ref.schema;
+    own.schemaName = ref.hasSchema() ? ref.schemaName : QString();
+    files.insert(file->filePath, own);
+    applyToView(view, view->fieldSettings(), &files);
 }
 
 void FieldSchemaController::setExtractionEnabled(bool enabled)
 {
-    FieldSettings settings = shownSettings();
+    FieldSettings settings = tabSettings();
     if (settings.extraction == enabled)
         return;
     // Включает/выключает извлечение полей, переизвлекает поля уже загруженных
@@ -270,7 +337,7 @@ void FieldSchemaController::setExtractionEnabled(bool enabled)
 
 void FieldSchemaController::setVisibleFieldNames(const QStringList& names)
 {
-    FieldSettings settings = shownSettings();
+    FieldSettings settings = tabSettings();
     settings.visibleFields.clear();
     for (const QString& name : fieldNames())
         if (names.contains(name))
@@ -331,6 +398,59 @@ std::optional<FieldSettings> FieldSchemaController::resolveSaved(const FieldSett
     return resolved;
 }
 
+void FieldSchemaController::onSavedFileSchema(LogViewWidget* view, const QString& sourceKey,
+                                              const FieldSettings& saved, bool fromMemory)
+{
+    if (!view)
+        return;
+    FieldSettings ref;
+    ref.schemaName = saved.schemaName;
+    ref.schema = saved.schema;
+    QString error;
+    // Как у схемы вкладки: сессия добавляет схему не из каталога, память
+    // файла — нет (файл остаётся со схемой вкладки).
+    const std::optional<FieldSettings> resolved = resolveSaved(ref, !fromMemory, &error);
+    if (!resolved) {
+        emit statusMessage(tr("Remembered schema %1 is not in the catalogue; the file uses the "
+                              "tab's schema.")
+                               .arg(saved.schemaName.isEmpty() ? tr("(unnamed)") : saved.schemaName));
+        return;
+    }
+    if (!error.isEmpty())
+        emit statusMessage(tr("Could not save the session schema: %1").arg(error));
+    // Файл уже читается — смена схемы (переизвлечение, инвариант 4); ещё без
+    // строк (не открыт, сжатый ждёт распаковки) — схема ждёт его и только
+    // растит раскладку.
+    const LogFilePtr file = view->fileForSourceKey(sourceKey);
+    if (file && view->fileHasRows(file)) {
+        applyToFile(view, file, *resolved);
+        return;
+    }
+    view->setPendingFileSchema(sourceKey, *resolved);
+}
+
+void FieldSchemaController::onLayoutGrown(LogViewWidget* view)
+{
+    // Файл со своей схемой дописал колонки вкладки: поля загруженных записей
+    // те же, показ колонок и привязка правил — по новой раскладке.
+    if (!view)
+        return;
+    applyFieldVisibility(view);
+    if (view->model()) {
+        FilterRuleSet rules = view->model()->filterRules();
+        if (rules.isActive()) {
+            bindRules(view, rules);
+            view->model()->setFilterRules(rules);
+            emit filtersRebound(view);
+        }
+    }
+    if (view == m_current) {
+        emit catalogueChanged();
+        emit fieldsChanged();
+    }
+    emit schemaApplied(view);
+}
+
 void FieldSchemaController::onSavedFieldSettings(LogViewWidget* view, const FieldSettings& saved,
                                                  bool fromMemory)
 {
@@ -373,6 +493,17 @@ void FieldSchemaController::configureView(LogViewWidget* view)
             [this, view](const FieldSettings& saved, bool fromMemory) {
                 onSavedFieldSettings(view, saved, fromMemory);
             });
+    connect(view, &LogViewWidget::savedFileSchemaFound, this,
+            [this, view](const QString& sourceKey, const FieldSettings& saved, bool fromMemory) {
+                onSavedFileSchema(view, sourceKey, saved, fromMemory);
+            });
+    connect(view, &LogViewWidget::fieldLayoutGrown, this, [this, view]() { onLayoutGrown(view); });
+    // Файлы вкладки дока изменились — список «Applies to».
+    if (view->model())
+        connect(view->model(), &LogModel::fileSetChanged, this, [this, view]() {
+            if (view == m_current)
+                emit catalogueChanged();
+        });
     // Вкладка закрыта посреди расчёта: воркеры держат записи сами
     // (shared_ptr), расчёт просто отменяется.
     connect(view, &QObject::destroyed, this, [this, view]() { cancelReextraction(view); });
@@ -416,17 +547,48 @@ void FieldSchemaController::cancelReextraction()
 
 void FieldSchemaController::applyToAllViews()
 {
-    const FieldSettings shown = shownSettings();
+    // Схема вкладки дока (не цели «Applies to») на все вкладки и все их
+    // файлы: свои схемы файлов снимаются.
+    const FieldSettings shown = tabSettings();
+    const QHash<QString, FieldSettings> none;
     const QList<LogViewWidget*> tabs = views();
     for (LogViewWidget* lv : tabs)
         if (lv)
-            applyToView(lv, shown);
+            applyToView(lv, shown, &none);
+    m_targetFile.clear();
     m_defaults = shown;
     emit catalogueChanged();
     emit fieldsChanged();
 }
 
-void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings& requested)
+// Определения своих схем файлов (без имён) — то, что решает поля записей.
+static QHash<QString, QString> definitionsOf(const QHash<QString, FieldSettings>& files,
+                                             const QString& tabSchema)
+{
+    QHash<QString, QString> out;
+    for (auto it = files.cbegin(); it != files.cend(); ++it)
+        if (it->schema != tabSchema)
+            out.insert(it.key(), it->schema);
+    return out;
+}
+
+// Колонки вкладки при схеме tabSchema и своих схемах файлов (объединение по
+// имени в порядке файлов — как LogViewWidget::rebuildFieldLayout).
+static QStringList columnsFor(const LogViewWidget* view, const QString& tabSchema,
+                              const QHash<QString, QString>& files)
+{
+    FieldLayout layout;
+    layout.schemaFor(tabSchema);
+    for (const LogFilePtr& f : view->loadedFiles()) {
+        const auto it = f ? files.constFind(f->filePath) : files.constEnd();
+        if (it != files.constEnd() && !it->isEmpty())
+            layout.schemaFor(*it);
+    }
+    return layout.columns;
+}
+
+void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings& requested,
+                                        const QHash<QString, FieldSettings>* files)
 {
     if (!view)
         return;
@@ -434,11 +596,22 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
     FieldSettings settings = requested;
     if (settings.schema.isEmpty())
         settings.schemaName.clear();
-    const QStringList newNames = settings.schema == before.schema
-        ? view->parserFieldNames() : LogPattern(settings.schema).fieldNames();
+    const QHash<QString, FieldSettings> newFiles = files ? *files : view->fileSchemas();
+    const QHash<QString, QString> beforeDefs = definitionsOf(view->fileSchemas(), before.schema);
+    const QHash<QString, QString> newDefs = definitionsOf(newFiles, settings.schema);
+    const bool schemasChanged = settings.schema != before.schema || newDefs != beforeDefs;
+    const QStringList oldNames = view->parserFieldNames();
+    const QStringList newNames = schemasChanged ? columnsFor(view, settings.schema, newDefs)
+                                                : oldNames;
     // Новая схема: выбранные имена, которые в ней есть, иначе все колонки;
-    // та же — выбор как есть (снятые все галочки — пустой выбор).
-    if (settings.schema != before.schema) {
+    // та же — выбор как есть (снятые все галочки — пустой выбор). Сменились
+    // только схемы файлов при всех выбранных колонках — новые тоже видны.
+    const bool allShown = !oldNames.isEmpty()
+        && std::all_of(oldNames.cbegin(), oldNames.cend(),
+                       [&settings](const QString& n) { return settings.visibleFields.contains(n); });
+    if (schemasChanged && settings.schema == before.schema && allShown) {
+        settings.visibleFields = newNames;
+    } else if (schemasChanged) {
         settings.visibleFields = keptColumns(settings.visibleFields, newNames);
     } else {
         QStringList kept;
@@ -448,12 +621,12 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
         settings.visibleFields = kept;
     }
 
-    const bool reextract = settings.schema != before.schema
+    const bool reextract = schemasChanged
         || (settings.extraction && !newNames.isEmpty()) != view->fieldDisplayEnabled();
     if (!reextract) {
         // Те же схема и флаг: поля записей не меняются — только выбор колонок
-        // (и имя пункта каталога).
-        view->setFieldSettings(settings);
+        // (и имена пунктов каталога).
+        view->setFieldSettings(settings, newFiles);
         applyFieldVisibility(view);
         if (view == m_current) {
             emit catalogueChanged();
@@ -484,7 +657,7 @@ void FieldSchemaController::applyToView(LogViewWidget* view, const FieldSettings
 
     // Point the tab's parsers at the new schema up-front so newly loaded
     // lines are parsed correctly even while the back-fill runs.
-    view->setFieldSettings(settings);
+    view->setFieldSettings(settings, newFiles);
     applyFieldVisibility(view);
     if (view == m_current) {
         emit catalogueChanged();

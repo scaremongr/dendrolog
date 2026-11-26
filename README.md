@@ -46,7 +46,9 @@
   from a sample line or import a **Grok** expression. **JSON Lines** and
   **logfmt** logs take time, level and message from keys (epoch numbers and
   pino levels included) with decoded values; build your own key-based schema
-  in the editor or let auto-detect propose it.
+  in the editor or let auto-detect propose it. Each tab has its own schema,
+  and in a merged tab each file can have its own (**Applies to**) — an app
+  log and an access log, or a log and a JSON Lines file, side by side.
 - **Filtering** — log level, time range, and an Include/Exclude rule builder
   with AND/OR, regex, per-field binding. Select text in the log and right-click
   to show only, hide, highlight or find lines with it. **Show in Full Log**

@@ -303,6 +303,11 @@ QJsonObject TabSource::toJson() const
     json.insert(QStringLiteral("source"), source.toJson());
     if (userEncoding)
         json.insert(QStringLiteral("encoding"), TextEncodings::displayName(*userEncoding));
+    if (schema) {
+        json.insert(QStringLiteral("schema"), schema->hasSchema()
+                        ? QJsonValue(schemaToJson(schema->schemaName, schema->schema))
+                        : QJsonValue(QJsonValue::Null));
+    }
     return json;
 }
 
@@ -321,6 +326,16 @@ std::optional<TabSource> TabSource::fromJson(const QJsonObject& json, QString* e
         if (!e)
             return fail(error, QStringLiteral("unknown encoding %1").arg(encoding.toString()));
         s.userEncoding = *e;
+    }
+    // Своя схема файла (F-5, PR 3): null — файл без схемы.
+    const QJsonValue schema = json.value(QLatin1String("schema"));
+    if (schema.isNull()) {
+        s.schema = FieldSettings();
+    } else if (!schema.isUndefined()) {
+        FieldSettings f;
+        if (!schemaFromJson(schema, &f.schemaName, &f.schema, error))
+            return std::nullopt;
+        s.schema = f;
     }
     return s;
 }

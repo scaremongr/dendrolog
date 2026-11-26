@@ -364,6 +364,10 @@ private:
     QWidget* m_fieldFilterControlsWidget = nullptr;
     QVBoxLayout* m_fieldCheckboxLayout = nullptr;
     QComboBox* m_conversionPatternCombo = nullptr;
+    // «Applies to» (F-5, PR 3): все файлы вкладки или один — только у вкладки
+    // из нескольких файлов.
+    QWidget* m_schemaTargetRow = nullptr;
+    QComboBox* m_schemaTargetCombo = nullptr;
     // Колонки, по которым построены чекбоксы (перестройка — только при их смене).
     QStringList m_shownFieldNames;
     bool m_fieldControlsBuilt = false;

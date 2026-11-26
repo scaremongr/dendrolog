@@ -34,6 +34,24 @@ All notable changes to DendroLog are documented here. The format follows
   schema** offers first the schemas of the list that parse the open log (or
   the preview lines) best, with their share of parsed lines; then the draft
   built from the sample lines, as before.
+- **A field schema per file in a merged tab.** A tab with several files gets
+  an **Applies to** line under the schema list of *Log Fields*: **All files**
+  or one of the tab's files. Pick a file and the schema list shows and changes
+  the schema of that file only — an application log and an nginx access log,
+  or a regular log and a JSON Lines file, are each read with their own schema
+  in one merged tab. The tab's columns are the union of the files' columns by
+  name; a line whose file has none of the shown columns is shown as the raw
+  line, and a column rule on a column the line's file does not have does not
+  match that line. When the files have different schemas, **All files** shows
+  **(mixed)**; picking a schema for **All files** gives it to every file of
+  the tab. Changing the schema of one file rereads only that file when
+  timestamps, levels or record boundaries come from its keys (JSON Lines,
+  logfmt); bookmarks and the current line stay where they were. Merging tabs
+  keeps each file's schema, and so does a tab that switches to the indexed
+  backend. Sessions, `last-session.json` and **Reopen Closed Tab** keep the
+  schema of each file; file memory remembers the schema of a file of a
+  merged tab — a file added to a tab gets its remembered schema, a file
+  opened alone gets it as the tab's schema.
 - **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
   as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name
   the file `.csv` / `.jsonl`). Columns are the field columns the view shows
