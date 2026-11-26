@@ -2737,7 +2737,7 @@ static void checkFileFormats(const QDir& dir, const QString& name, const QString
               what + ": the current line is kept");
         // Место на экране у слитой индексной вкладки после переиндексации
         // соседнего файла в Plain не держится (строка уходит ниже экрана;
-        // обратно в JSON — возвращается): задача S-29 в docs/roadmap.md.
+        // обратно в JSON — возвращается): задача S-30 в docs/roadmap.md.
         if (!model.isIndexedBackend())
             CHECK(cur.isValid() && view.visualRect(cur).top() == top,
                   what + ": the current row stays at its place on screen");
