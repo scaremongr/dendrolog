@@ -552,9 +552,6 @@ private:
     QString readingSignature() const;
     // setParserPattern без проверки подписи (её делает вызывающий setter).
     void applyParserPattern(const QString& pattern);
-    // Подпись сменилась: позиция снимается, файлы перечитываются (в полёте —
-    // по окончании прохода, schemaRereadPending).
-    void rereadAfterSchemaChange();
     // Один файл: резидентный — startReencode(rekey), индексный — полная
     // переиндексация (startFullReload).
     void rereadForSchema(const LogFilePtr& logFile);
@@ -573,6 +570,12 @@ private:
         quint64 userActions = 0;
     };
     std::optional<RereadPosition> m_rereadPosition;
+    // Строка и её место на экране ДО смены схемы (смена схемы в модели
+    // успевает сдвинуть вид); follow-tail — nullopt.
+    std::optional<RereadPosition> captureRereadPosition() const;
+    // Подпись сменилась: файлы перечитываются (в полёте — по окончании
+    // прохода, schemaRereadPending), позиция — снятая до смены.
+    void rereadAfterSchemaChange(const std::optional<RereadPosition>& position);
     void requestRereadPosition(const LogFilePtr& logFile);
     // Загрузка файла закончилась — закладки его строк сверяются (fullLoad —
     // файл прочитан с нуля).

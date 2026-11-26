@@ -62,6 +62,7 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QWheelEvent>
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -2344,7 +2345,15 @@ static void checkKeyedSchemaSwitch(const QDir& dir, const QString& name, const Q
     plainDef.blocks = {testdocs::patternBlock(PatternBlock::MatchKind::Remainder,
                                               QStringLiteral("Message"))};
     const QString plain = LogPattern::serializeDefinition(plainDef);
-    const keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 160);
+    // Только ASCII: на Windows кириллица рисуется запасным шрифтом другой
+    // высоты, и смена показанного текста (колонки вместо сырой строки)
+    // меняет высоты строк над экраном — место строки сдвигается и без
+    // перечитывания (S-22). Здесь проверяется перечитывание.
+    keyedfx::Fixture fx = keyedfx::make(KeyedDefinition::Format::JsonObject, 160);
+    fx.bytes.replace("Запрос", "Request").replace("\\u041a\\u044d\\u0448", "Cache");
+    CHECK(!fx.bytes.contains("\\u04") && std::all_of(fx.bytes.cbegin(), fx.bytes.cend(),
+                                                     [](char c) { return uchar(c) < 0x80; }),
+          name + ": the switch fixture is ASCII");
     const QString path = testdocs::writeFile(dir, name + "-switch.jsonl", fx.bytes);
 
     LogViewWidget tab;

@@ -277,9 +277,10 @@ LogViewWidget::~LogViewWidget()
 void LogViewWidget::setParserPattern(const QString& pattern)
 {
     const QString before = readingSignature();
+    const auto position = captureRereadPosition();
     applyParserPattern(pattern);
     if (readingSignature() != before)
-        rereadAfterSchemaChange();
+        rereadAfterSchemaChange(position);
 }
 
 void LogViewWidget::applyParserPattern(const QString& pattern)
@@ -327,10 +328,11 @@ FileSchemaPtr LogViewWidget::passSchema(const QString& filePath) const
 void LogViewWidget::setExtractionEnabled(bool enabled)
 {
     const QString before = readingSignature();
+    const auto position = captureRereadPosition();
     m_extractionFlag = enabled;
     applyExtraction(enabled && !parserFieldNames().isEmpty());
     if (readingSignature() != before)
-        rereadAfterSchemaChange();
+        rereadAfterSchemaChange(position);
 }
 
 FieldSettings LogViewWidget::fieldSettings() const
@@ -346,6 +348,8 @@ FieldSettings LogViewWidget::fieldSettings() const
 void LogViewWidget::setFieldSettings(const FieldSettings& settings)
 {
     const QString before = readingSignature();
+    // Позиция — до того, как новая схема дойдёт до модели и вида.
+    const auto position = captureRereadPosition();
     m_extractionFlag = settings.extraction;
     if (settings.schema != parserPattern())
         applyParserPattern(settings.schema); // ставит и извлечение по новому флагу
@@ -355,7 +359,7 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings)
     if (effective != m_extractionEnabled)
         applyExtraction(effective);
     if (readingSignature() != before)
-        rereadAfterSchemaChange();
+        rereadAfterSchemaChange(position);
 }
 
 // =============================================================================
@@ -376,11 +380,29 @@ QString LogViewWidget::readingSignature() const
     return LogPattern::serializeDefinition(def);
 }
 
-void LogViewWidget::rereadAfterSchemaChange()
+std::optional<LogViewWidget::RereadPosition> LogViewWidget::captureRereadPosition() const
 {
-    // Позиция: строка и её место на экране; follow-tail — вид у хвоста.
-    // Восстановленная позиция, которая ещё ждёт строку (applyState), ищется
-    // заново после сброса строк: ключ, найденный в старых строках, пропадёт.
+    // Строка и её место на экране; follow-tail — вид у хвоста, места нет.
+    if (m_view->followTail() || m_loadedFiles.isEmpty())
+        return std::nullopt;
+    const LogListView::ViewAnchor anchor = m_view->viewAnchor();
+    const RecordKey key = anchor.isValid() ? m_model->keyAt(anchor.row) : RecordKey();
+    if (!key.isValid())
+        return std::nullopt;
+    RecordLocator& locator = m_model->recordLocator();
+    const auto source = locator.sourceFor(key.file);
+    if (!source)
+        return std::nullopt;
+    return RereadPosition{ RecordLocator::sourceKey(*key.file), *source,
+                           locator.idFor(key, m_model->messageAt(anchor.row)),
+                           anchor.offset, anchor.selected, m_view->userActionCount() };
+}
+
+void LogViewWidget::rereadAfterSchemaChange(const std::optional<RereadPosition>& position)
+{
+    // Позиция снята до смены схемы (captureRereadPosition). Восстановленная
+    // позиция, которая ещё ждёт строку (applyState), ищется заново после
+    // сброса строк: ключ, найденный в старых строках, пропадёт.
     m_rereadPosition.reset();
     const auto rereadsSource = [this](const QString& sourceKey) {
         for (const LogFilePtr& f : std::as_const(m_loadedFiles)) {
@@ -405,18 +427,8 @@ void LogViewWidget::rereadAfterSchemaChange()
                 m_model->recordLocator().cancel(m_pendingPosition.token);
             m_pendingPosition = {};
         }
-    } else if (!m_view->followTail()) {
-        const LogListView::ViewAnchor anchor = m_view->viewAnchor();
-        const RecordKey key = anchor.isValid() ? m_model->keyAt(anchor.row) : RecordKey();
-        if (key.isValid()) {
-            RecordLocator& locator = m_model->recordLocator();
-            if (const auto source = locator.sourceFor(key.file)) {
-                m_rereadPosition = RereadPosition{ RecordLocator::sourceKey(*key.file), *source,
-                                                   locator.idFor(key, m_model->messageAt(anchor.row)),
-                                                   anchor.offset, anchor.selected,
-                                                   m_view->userActionCount() };
-            }
-        }
+    } else {
+        m_rereadPosition = position;
     }
     for (const LogFilePtr& logFile : std::as_const(m_loadedFiles)) {
         if (!logFile)
