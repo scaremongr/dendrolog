@@ -39,6 +39,11 @@ public:
     std::shared_ptr<SpoolItem> spool() const { return m_spool; }
     void requestStop() { m_stop.store(true); }
 
+    // Шов для теста окна (P-9): читать не stdin (дескриптор 0), а этот
+    // дескриптор — конец пайпа теста. Программа его не вызывает; задаётся до
+    // startSpooling(), значение берёт поток при запуске. -1 — снова stdin.
+    static void setInputDescriptorForTesting(int fd);
+
 signals:
     // В файл дописаны данные (не чаще ~3 раз в секунду). Приёмник дёргает
     // reloadChangedFiles() вкладки — сверх обычного таймера auto-reload.

@@ -22,6 +22,10 @@
 //   future-race — два НЕСВЯЗАННЫХ QFuture в двух потоках и настоящая гонка
 //                 между этими потоками; отчёт ОБЯЗАН появиться (общий на все
 //                 QFuture мьютекс в прежней версии слоя его прятал).
+// Четвёртая — ребро QThread::wait (поток проекта, StdinSpooler):
+//   thread      — поток пишет до своего последнего emit, главный читает и
+//                 удаляет объект потока после wait(); отчётов быть НЕ должно;
+//   thread-race — поток пишет ПОСЛЕ последнего emit; отчёт ОБЯЗАН появиться.
 //
 // Как режимы race проверяют отчёт. Не по тексту: какой из двух доступов TSan
 // назовёт первым (и, значит, в строке SUMMARY), решает планировщик, а под
@@ -42,6 +46,7 @@
 #include <QFutureWatcher>
 #include <QList>
 #include <QObject>
+#include <QDeadlineTimer>
 #include <QThread>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentMap>
@@ -444,6 +449,94 @@ static int runFutureRace()
     return printCanaryReports("future-race");
 }
 
+// Четвёртая пара — ребро QThread::wait в tsan_qt_sync.cpp (StdinSpooler):
+// поток проекта заканчивает run() своими emit, wait() его ждёт.
+__attribute__((noinline)) static void racyThreadWrite(int& value, int v)
+{
+    value = v;
+}
+
+__attribute__((noinline)) static int racyThreadRead(const int& value)
+{
+    return value;
+}
+
+class EmittingThread : public QThread {
+    Q_OBJECT
+public:
+    int* cell = nullptr;
+    int value = 0;
+    bool writeAfterEmit = false; // режим thread-race
+    bool blind = false;
+    std::atomic_bool stop{false}; // как m_stop спулера: читает поток, объект удаляет GUI
+signals:
+    void progress(int total);
+    void done(int total);
+
+protected:
+    void run() override
+    {
+        // Члены — до последнего emit, как у спулера: после него объект
+        // может удалить тот, кто дождался wait().
+        int* const target = cell;
+        const int v = value;
+        const bool after = writeAfterEmit;
+        const bool underMutex = blind;
+        for (int i = 0; i < 3 && !stop.load(std::memory_order_relaxed); ++i)
+            emit progress(i);
+        if (!after)
+            racyThreadWrite(*target, v);
+        emit done(v);
+        if (after) // после последнего emit — ребра нет
+            maybeBlind(underMutex, [&] { racyThreadWrite(*target, v); });
+    }
+};
+
+// thread — запись до последнего emit, чтение и удаление объекта после
+// wait(); отчётов быть НЕ должно.
+static int runThread()
+{
+    int failures = 0;
+    auto cell = std::make_unique<RacyInt>();
+    for (int round = 0; round < 20; ++round) {
+        auto thread = std::make_unique<EmittingThread>();
+        thread->cell = &cell->value;
+        thread->value = round + 1;
+        thread->start();
+        if (!thread->wait(QDeadlineTimer(30000)))
+            ++failures;
+        if (racyThreadRead(cell->value) != round + 1)
+            ++failures;
+        thread->stop.store(true);
+        thread.reset(); // объект, чей stop читал поток
+    }
+    std::fprintf(stderr, "tsan_canary thread: %d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}
+
+// thread-race — запись ПОСЛЕ последнего emit потока, чтение после wait();
+// отчёт ОБЯЗАН появиться: ребро wait() не должно упорядочивать всё подряд.
+static int runThreadRace()
+{
+    const bool blind = blinded();
+    auto cell = std::make_unique<RacyInt>();
+    int& racy = cell->value;
+    watchCanaryData(&racy, sizeof racy);
+    long long sum = 0;
+    for (int round = 0; round < 20; ++round) {
+        EmittingThread thread;
+        thread.cell = &racy;
+        thread.value = round;
+        thread.writeAfterEmit = true;
+        thread.blind = blind;
+        thread.start();
+        thread.wait();
+        sum += maybeBlind(blind, [&] { return racyThreadRead(racy); });
+    }
+    std::fprintf(stderr, "tsan_canary thread-race: sum %lld\n", sum);
+    return printCanaryReports("thread-race");
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -454,12 +547,13 @@ int main(int argc, char** argv)
     static const Mode modes[] = {
         {"clean", runClean},   {"race", runRace},     {"cow", runCow},
         {"cow-race", runCowRace}, {"future", runFuture}, {"future-race", runFutureRace},
+        {"thread", runThread}, {"thread-race", runThreadRace},
     };
     if (argc == 2)
         for (const Mode& mode : modes)
             if (std::strcmp(argv[1], mode.name) == 0)
                 return mode.run();
-    std::fprintf(stderr, "usage: tsan_canary clean|race|cow|cow-race|future|future-race\n");
+    std::fprintf(stderr, "usage: tsan_canary clean|race|cow|cow-race|future|future-race|thread|thread-race\n");
     return 2;
 }
 

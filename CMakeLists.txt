@@ -328,6 +328,7 @@ if(DENDROLOG_SANITIZER STREQUAL "thread")
         _ZN20QFutureInterfaceBaseD1Ev                          # QFutureInterfaceBase::~QFutureInterfaceBase
         _ZN20QFutureInterfaceBaseD2Ev                          # (базовый деструктор, из ~QFutureInterface<T>)
         _ZN18QFutureWatcherBase15waitForFinishedEv             # QFutureWatcherBase::waitForFinished
+        _ZN7QThread4waitE14QDeadlineTimer                      # QThread::wait
     )
     foreach(_symbol IN LISTS _tsan_wrapped_symbols)
         target_link_options(dendrolog_core PUBLIC "LINKER:--wrap=${_symbol}")

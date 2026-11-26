@@ -45,7 +45,8 @@
 //     (QFutureInterfaceBase::operator=) Qt разрушает внутри себя, мимо
 //     обёртки; перемещающее присваивание встроено в наш код и её проходит;
 //   • покрыты только пути, которыми пользуется проект: сигналы, postEvent,
-//     QtConcurrent::run/map/mapped, QFuture/QFutureWatcher. Голый QRunnable,
+//     QtConcurrent::run/map/mapped, QFuture/QFutureWatcher, QThread::wait
+//     после последнего emit потока. Голый QRunnable,
 //     QThreadPool::start(std::function), queued invokeMethod из воркера рёбер
 //     не получат и дадут ложные отчёты — слой нужно дополнить;
 //   • манглинг символов — Qt 6.8 без пространства имён (проверка версии — в
@@ -66,6 +67,7 @@
 #include <QMetaObject>
 #include <QObject>
 #include <QRunnable>
+#include <QThread>
 #include <QThreadPool>
 #include <QtConcurrent/qtconcurrentthreadengine.h>
 
@@ -469,6 +471,23 @@ bool __wrap__ZN11QThreadPool11waitForDoneE14QDeadlineTimer(QThreadPool* pool,
     if (done)
         takes(g_future);
     return done;
+}
+
+// QThread::wait(QDeadlineTimer): свой поток (StdinSpooler) вышел из run().
+// Qt создаёт потоки отсоединёнными и ждёт их конца на своём мьютексе, ребра
+// pthread_join у TSan нет. Поток проекта заканчивает run() своими emit
+// (bytesAppended, streamFinished) — их обёртка activate отдаёт g_eventQueue;
+// wait, вернувший true, его принимает. Упорядочено то, что поток сделал до
+// последнего emit; записанное после него ребра не получает (режимы
+// thread / thread-race канарейки). Начало потока TSan видит сам: pthread_create
+// он перехватывает и в неинструментированном Qt.
+bool __real__ZN7QThread4waitE14QDeadlineTimer(QThread*, QDeadlineTimer);
+bool __wrap__ZN7QThread4waitE14QDeadlineTimer(QThread* thread, QDeadlineTimer deadline)
+{
+    const bool finished = __real__ZN7QThread4waitE14QDeadlineTimer(thread, deadline);
+    if (finished)
+        takes(g_eventQueue);
+    return finished;
 }
 
 } // extern "C"
