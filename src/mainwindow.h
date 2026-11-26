@@ -182,7 +182,7 @@ private slots:
     void showGoToDialog();
     void onViewExportFinished(const ViewExport::Result& result);
     // Save View As of the active tab into fileName, in the background.
-    void startViewExport(const QString& fileName);
+    void startViewExport(const QString& fileName, ViewExport::Format format);
 
     // Reload slot (manual button + auto-timer)
     void onReloadFileTriggered();

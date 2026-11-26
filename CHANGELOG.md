@@ -7,6 +7,19 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
+  as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name
+  the file `.csv` / `.jsonl`). Columns are the field columns the view shows
+  (all schema columns when it shows the raw line), plus `_time` (the row's
+  moment in ISO 8601 with the local offset) and, in a tab with several files,
+  `_file`. A line without recognised fields (a stack trace line) goes to the
+  **Message** column as raw text, and so does a line the schema matched
+  only in part, without its message. Values of JSON Lines and logfmt schemas are
+  written decoded. CSV follows RFC 4180 (comma, quotes only where needed, CRLF,
+  UTF-8 with a BOM so Excel reads it correctly); JSON Lines is one object per
+  line, UTF-8 without a BOM. The export runs in the background like before:
+  it can be cancelled, writes the view as it was at the start, and never
+  overwrites an open log.
 - **JSON Lines and logfmt.** New built-in field schemas **JSON Lines** (one
   JSON object per line: pino, Bunyan, Serilog CLEF, structlog, zap, ECS) and
   **logfmt** (`key=value` pairs: logrus, Go slog, Loki, Prometheus). With

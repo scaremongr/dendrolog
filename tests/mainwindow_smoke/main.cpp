@@ -1105,6 +1105,37 @@ void scenarioGlue(MainWindow& win, const Fixtures& fx, const QDir& dir)
         bytes = out.readAll();
     check(bytes.count('\n') == visible || bytes.count('\n') + 1 == visible,
           QStringLiteral("Save View As writes the %1 visible lines (file has %2)").arg(visible).arg(bytes.count('\n')));
+    // F-9: имя .csv — CSV тем же заданием: BOM, заголовок, запись на строку.
+    {
+        const QString csv = dir.filePath(QStringLiteral("exported.csv"));
+        QFile::remove(csv);
+        bool csvAsked = false;
+        g_driver->expect([&](QWidget* w) {
+            csvAsked = true;
+            if (auto* dialog = qobject_cast<QFileDialog*>(w))
+                typeFileName(dialog, csv);
+            else
+                DialogDriver::close(w);
+        });
+        bool csvDone = false;
+        ViewExport::Result csvResult;
+        const auto conn = QObject::connect(exportJob, &ViewExportJob::finished, &win,
+                                           [&](const ViewExport::Result& r) { csvDone = true; csvResult = r; });
+        pressCommand(win, QStringLiteral("saveAs"));
+        check(waitFor([&]() { return csvAsked; }, 5000), QStringLiteral("Save View As asks for a CSV file"));
+        check(waitFor([&]() { return csvDone; }, 60000) && csvResult.ok(),
+              QStringLiteral("CSV Save View As finishes without error"));
+        QObject::disconnect(conn);
+        check(exportJob->format() == ViewExport::Format::Csv, QStringLiteral("a .csv name exports CSV"));
+        QFile csvFile(csv);
+        QByteArray csvBytes;
+        if (csvFile.open(QIODevice::ReadOnly))
+            csvBytes = csvFile.readAll();
+        check(csvBytes.startsWith("\xEF\xBB\xBF_time,"),
+              QStringLiteral("CSV starts with a BOM and the header: %1").arg(QString::fromUtf8(csvBytes.left(60))));
+        check(csvBytes.count("\r\n") >= visible + 1,
+              QStringLiteral("CSV has a record per visible line (%1 CRLF, %2 lines)").arg(csvBytes.count("\r\n")).arg(visible));
+    }
     pressCommand(win, QStringLiteral("levelAll"));
     check(testdocs::settle(*model), QStringLiteral("show all settles"));
 

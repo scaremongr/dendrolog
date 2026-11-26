@@ -1007,8 +1007,8 @@ QString MainWindow::logFileDialogFilter(bool forOpen) const
     if (patterns.isEmpty())
         patterns << QStringLiteral("*.log") << QStringLiteral("*.txt");
     // Сжатые логи (F-2) открываются вкладкой, zip и tar — в Directory
-    // Scanner (`*.tar.gz` покрыт `*.gz`). Save View As пишет текст:
-    // сохранённый под именем архива открывался бы как архив.
+    // Scanner (`*.tar.gz` покрыт `*.gz`). Save View As пишет текст, CSV
+    // или JSON Lines: сохранённый под именем архива открывался бы как архив.
     if (forOpen)
         patterns << QStringLiteral("*.gz") << QStringLiteral("*.zip") << QStringLiteral("*.tar")
                  << QStringLiteral("*.tgz");
@@ -3164,18 +3164,40 @@ void MainWindow::on_actionSaveAs_triggered()
         return;
     }
 
-    const QString fileName = QFileDialog::getSaveFileName(
+    // Формат (F-9): по расширению имени, иначе по выбранному фильтру диалога;
+    // имя без расширения под фильтром CSV / JSON Lines его получает.
+    const QString csvFilter = tr("CSV (*.csv)");
+    const QString jsonFilter = tr("JSON Lines (*.jsonl *.ndjson)");
+    QStringList filters = logFileDialogFilter(/*forOpen=*/false).split(QStringLiteral(";;"));
+    filters.insert(1, csvFilter);
+    filters.insert(2, jsonFilter);
+    QString selectedFilter;
+    QString fileName = QFileDialog::getSaveFileName(
         this,
         tr("Save view as"),
         m_lastOpenDir,
-        logFileDialogFilter(/*forOpen=*/false));
+        filters.join(QStringLiteral(";;")),
+        &selectedFilter);
 
     if (fileName.isEmpty())
         return;
-    startViewExport(fileName);
+    const ViewExport::Format byFilter = selectedFilter == csvFilter ? ViewExport::Format::Csv
+                                      : selectedFilter == jsonFilter ? ViewExport::Format::JsonLines
+                                                                     : ViewExport::Format::Text;
+    if (byFilter != ViewExport::Format::Text && QFileInfo(fileName).suffix().isEmpty()) {
+        fileName += QLatin1Char('.') + ViewExport::defaultSuffix(byFilter);
+        // Диалог спрашивал о перезаписи имени без расширения — спросить заново.
+        if (QFileInfo::exists(fileName)
+            && QMessageBox::question(this, tr("Save View As"),
+                                     tr("%1 already exists.\nDo you want to replace it?")
+                                         .arg(QFileInfo(fileName).fileName()))
+                   != QMessageBox::Yes)
+            return;
+    }
+    startViewExport(fileName, ViewExport::formatForFileName(fileName, byFilter));
 }
 
-void MainWindow::startViewExport(const QString& fileName)
+void MainWindow::startViewExport(const QString& fileName, ViewExport::Format format)
 {
     if (!m_activeLogView || !m_activeLogView->model())
         return;
@@ -3194,7 +3216,8 @@ void MainWindow::startViewExport(const QString& fileName)
     // (already filtered + merged across all documents in this tab) with the
     // display text, so the active Log Fields selection is honoured too. The
     // rows are snapshotted now and written in the background.
-    if (!m_exportJob->start(*m_activeLogView->model(), fileName, sourcePaths)) {
+    // CSV / JSON Lines (F-9) — те же снимок и задание, колонки — выбор Log Fields.
+    if (!m_exportJob->start(*m_activeLogView->model(), fileName, sourcePaths, format)) {
         QMessageBox::information(this, tr("Save View As"),
             tr("The view is still being saved. Wait for it to finish or cancel it."));
         return;
