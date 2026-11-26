@@ -9,3 +9,4 @@
 third_party/miniz/miniz.c -text
 third_party/miniz/miniz.h -text
 third_party/miniz/LICENSE -text
+resources/ai/*.txt text eol=lf
