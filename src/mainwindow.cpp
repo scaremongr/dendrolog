@@ -14,6 +14,7 @@
 #include "appsettings.h"
 #include "shortcutmanager.h"
 #include "settingsdialog.h"
+#include "schemacandidateswindow.h"
 #include "filterpanelwidget.h"
 #include "markerpanelwidget.h"
 #include "timelinehistogramwidget.h"
@@ -399,6 +400,11 @@ MainWindow::MainWindow(QWidget *parent)
     QMenu* menuTools = menuBar()->addMenu(tr("&Tools"));
     QAction* schemasAction = menuTools->addAction(tr("Field &Schemas..."));
     connect(schemasAction, &QAction::triggered, this, &MainWindow::onManagePatterns);
+    QAction* findSchemaAction = menuTools->addAction(tr("&Find a Schema..."));
+    findSchemaAction->setObjectName(QStringLiteral("findSchemaAction"));
+    findSchemaAction->setToolTip(tr("Variants of field schemas for the lines of this tab: your schemas, "
+                                    "the structure of the lines, AI"));
+    connect(findSchemaAction, &QAction::triggered, this, &MainWindow::openSchemaCandidates);
     menuTools->addSeparator();
     QAction* settingsAction = menuTools->addAction(tr("Settings..."));
     connect(settingsAction, &QAction::triggered, this, &MainWindow::onSettingsTriggered);
@@ -1536,6 +1542,14 @@ void MainWindow::setupFieldVisibilityDock()
     connect(manageBtn, &QPushButton::clicked,
             this, &MainWindow::onManagePatterns);
     schemaRow->addWidget(manageBtn);
+    // «Find a Schema» (F-17, шаг 5) — то же, что Tools → Find a Schema.
+    auto* findBtn = new QToolButton(contents);
+    findBtn->setObjectName(QStringLiteral("findSchemaButton"));
+    findBtn->setText(tr("Find..."));
+    findBtn->setToolTip(tr("Find a schema for the lines of this tab: your schemas, the structure of the "
+                           "lines, AI"));
+    connect(findBtn, &QToolButton::clicked, this, &MainWindow::openSchemaCandidates);
+    schemaRow->addWidget(findBtn);
     // Схема — у каждой вкладки своя (F-5); прежнее «одна на окно» — одним
     // действием. Оно же — в меню View и в меню кнопки дока.
     m_applySchemaToAllAction = new QAction(tr("Apply Schema to All Tabs"), this);
@@ -4054,9 +4068,38 @@ void MainWindow::onConfigureScanExtensionsClicked()
 
 void MainWindow::onSettingsTriggered()
 {
+    openSettings(false);
+}
+
+void MainWindow::openSettings(bool aiPage)
+{
     SettingsDialog dlg(this);
     dlg.setFileMemory(m_fileMemory.get());
+    if (aiPage)
+        dlg.showAiPage();
     dlg.exec();
+}
+
+void MainWindow::openSchemaCandidates()
+{
+    // Одно окно на окно программы: повторный вызов — для активной вкладки.
+    if (!m_schemaCandidates) {
+        m_schemaCandidates = new SchemaCandidatesWindow(m_schemas, this);
+        m_schemaCandidates->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_schemaCandidates, &SchemaCandidatesWindow::settingsRequested, this,
+                [this]() { openSettings(/*aiPage=*/true); });
+        connect(m_schemaCandidates, &SchemaCandidatesWindow::schemaSaved, this, [this](const QString& name) {
+            m_schemas->reloadCatalogue();
+            statusBar()->showMessage(tr("Schema \"%1\" saved to your schemas").arg(name), 10000);
+        });
+        connect(m_schemaCandidates, &SchemaCandidatesWindow::schemaUsed, this, [this](LogViewWidget*) {
+            updateFilterStatusButtons();
+        });
+    }
+    m_schemaCandidates->setView(qobject_cast<LogViewWidget*>(ui->tabWidget->currentWidget()));
+    m_schemaCandidates->show();
+    m_schemaCandidates->raise();
+    m_schemaCandidates->activateWindow();
 }
 
 void MainWindow::toggleTextFilterDock()

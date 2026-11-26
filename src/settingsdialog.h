@@ -42,6 +42,8 @@ public:
     // Хранилище памяти файлов окна: «Clear Memory» чистит через него
     // (дожидается записей, сбрасывает перечень). Без него — каталог напрямую.
     void setFileMemory(class FileMemoryStore* store) { m_fileMemory = store; }
+    // Открыть на вкладке AI (окно «Find a Schema» → «Set Up AI…»).
+    void showAiPage();
 
 protected:
     void accept() override;
@@ -82,6 +84,9 @@ private:
     // Память файлов (R-4): «помнить состояние файлов» и «Clear Memory».
     void buildFileMemoryControls();
     void resetShortcutsToDefaults();
+    // Нейро-подсказчик (F-17, шаг 5): включение, модель, ключ (SecretStore).
+    void buildAiTab();
+    void updateAiKeyStatus();
 
     // ---- Init / finalise ---------------------------------------------------
     void loadFromSettings();
@@ -102,4 +107,12 @@ private:
     class QCheckBox* m_rememberFileStateCheckBox = nullptr;
     class QCheckBox* m_restoreSessionCheckBox = nullptr;
     class FileMemoryStore* m_fileMemory = nullptr;
+
+    // ---- AI (F-17, шаг 5; создаются в коде) --------------------------------
+    QWidget* m_aiTab = nullptr;
+    class QCheckBox* m_aiEnabledCheckBox = nullptr;
+    QComboBox* m_aiModelCombo = nullptr;
+    class QLineEdit* m_aiKeyEdit = nullptr;
+    QLabel* m_aiKeyStatus = nullptr;
+    QPushButton* m_aiRemoveKeyButton = nullptr;
 };

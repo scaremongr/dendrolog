@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/ai">
+        <file>schema-system.txt</file>
+    </qresource>
+</RCC>

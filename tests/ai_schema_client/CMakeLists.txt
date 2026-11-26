@@ -1,0 +1,1 @@
+dendrolog_add_test(ai_schema_client LIBRARIES dendrolog_app TIMEOUT 120)

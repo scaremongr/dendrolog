@@ -66,6 +66,8 @@ public:
     // ShortcutManager) остаётся — после смены каталога звать load().
     // Программа его не вызывает: для пользователя поведение не меняется.
     static void overrideConfigDirForTesting(const QString& dir);
+    // Каталог настроек подменён тестом (overrideConfigDirForTesting).
+    static bool isConfigDirOverridden();
     // Корень временных файлов распаковки (F-2, SpoolDir): кэш приложения
     // (SpoolDir::defaultRoot) — и в portable-режиме; при подмене каталога
     // настроек тестом — <configDir>/spool, настоящий кэш тест не трогает.
@@ -206,6 +208,15 @@ public:
     // Последняя сессия окна: <configDir>/last-session.json.
     static QString lastSessionFile();
 
+    // ---- Нейро-подсказчик (F-17, шаг 5) ----------------------------------- //
+    // Выключен по умолчанию; в ini — [AI] enabled и model (модель — строка,
+    // по умолчанию SchemaProposal::kDefaultModel). КЛЮЧА в ini нет никогда:
+    // он в SecretStore (или переменной окружения ANTHROPIC_API_KEY).
+    bool aiEnabled() const { return m_aiEnabled; }
+    void setAiEnabled(bool enabled);
+    QString aiModel() const;
+    void setAiModel(const QString& model);
+
     // ---- Быстрый поиск (поле в тулбаре) ----------------------------------- //
 
     // Переключатели «Aa», «слово целиком», «.*» и история запросов; в ini —
@@ -268,6 +279,8 @@ private:
     int         m_textCacheBudgetMB { 256 };
     bool        m_rememberFileState { true };
     bool        m_restoreSessionOnStartup { false };
+    bool        m_aiEnabled { false };
+    QString     m_aiModel;
     bool        m_quickSearchMatchCase { false };
     bool        m_quickSearchWholeWord { false };
     bool        m_quickSearchRegex { false };

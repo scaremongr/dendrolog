@@ -34,3 +34,14 @@ called_from_lib:libQt6Widgets.so
 # и для Qt, отключены перехватчики, вызванные изнутри самой libc, — её
 # собственные выделения памяти под её же блокировками.
 called_from_lib:libc.so.6
+
+# Qt Network (F-17, шаг 5: AiSchemaClient на QNetworkAccessManager) ведёт HTTP
+# в своём внутреннем потоке (QHttpThreadDelegate) с циклом событий glib.
+# Будит его GUI-поток записью в eventfd контекста glib (g_wakeup_signal), а
+# eventfd создан тем потоком (g_wakeup_new): TSan считает дескриптор общей
+# памятью и видит «гонку» write после eventfd — порядок им даёт мьютекс
+# QThread/glib, невидимый неинструментированным библиотекам. Ни данных, ни
+# кода src/ в этих кадрах нет; выделения памяти внутри Qt Network — та же
+# история, что у libQt6Core выше.
+called_from_lib:libglib-2.0.so
+called_from_lib:libQt6Network.so

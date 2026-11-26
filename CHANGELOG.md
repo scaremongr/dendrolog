@@ -22,6 +22,31 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **Find a Schema.** `Tools → Find a Schema…` (and **Find…** in the *Log
+  Fields* panel) offers ways to split the lines of the active tab into fields,
+  each with the share of record lines it parses: the best schemas from your
+  list, line templates worked out from the lines themselves (offline), and —
+  if you turn it on — a suggestion by AI. A table shows real lines of the tab
+  split into the fields of the selected variant, the number of different
+  values per column and the lines that did not match, with the reason in
+  words. **Use for This Tab** sets a schema from your list on the tab without
+  reading the file again; **Save to My Schemas…** saves a template to the
+  `patterns` folder (templates become usable on a tab in a later version).
+- **AI suggestions of field schemas (Claude).** Off by default
+  (`Settings → AI`: on/off, model — `claude-opus-5-5` by default, API key).
+  **Ask AI…** sends up to 40 lines that start records to `api.anthropic.com`
+  and gets back a line template, which is checked on the lines of the tab
+  before it is shown (one follow-up request when it does not compile or
+  parses fewer than 90% of the lines; too long, too many fields or too slow —
+  refused with the reason). **Every request is shown in full in a
+  confirmation window first**: host, model, number of lines and characters,
+  the exact text; values are masked by default (digits, hex, UUIDs, e-mail
+  and IP addresses; timestamps and level words are kept) and lines are cut to
+  300 characters. Nothing is sent when a log is opened or in the background;
+  the file name, its folder, user and computer names are never sent. The key
+  is not stored in the ini file: Windows — encrypted with DPAPI; Linux — a
+  file readable only by your user outside the settings folder (not saved in
+  portable mode); `ANTHROPIC_API_KEY` takes precedence.
 - **Time delta.** `View → Time Delta` (off by default, `[View] timeDelta`)
   adds a column after the line numbers with the time from the previous shown
   line with a timestamp: `+250 ms`, `+1.234 s`, `+2 m 03 s`, `+5 h 07 m`,

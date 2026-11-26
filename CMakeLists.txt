@@ -140,6 +140,11 @@ set(DENDROLOG_CORE_SOURCES
     src/schemaconverter.cpp
     src/schemainference.h
     src/schemainference.cpp
+    src/schemaproposal.h
+    src/schemaproposal.cpp
+    # Системный текст нейро-подсказчика (F-17, шаг 5): ресурс ядра,
+    # Q_INIT_RESOURCE(ai) — в schemaproposal.cpp.
+    resources/ai/ai.qrc
     src/filterruleset.h
     src/filterruleset.cpp
     src/textmatchhighlighter.h
@@ -292,6 +297,18 @@ set(DENDROLOG_APP_SOURCES
     src/singleinstance.cpp
     src/updatechecker.h
     src/updatechecker.cpp
+
+    # Нейро-подсказчик и окно подбора схемы (F-17, шаг 5).
+    src/aischemaclient.h
+    src/aischemaclient.cpp
+    src/secretstore.h
+    src/secretstore.cpp
+    src/schemacandidates.h
+    src/schemacandidates.cpp
+    src/schemacandidateswindow.h
+    src/schemacandidateswindow.cpp
+    src/aiconsentdialog.h
+    src/aiconsentdialog.cpp
 )
 
 # В exe — только точка входа и ресурсы.
@@ -371,6 +388,10 @@ target_link_libraries(dendrolog_app
     PRIVATE
         Qt6::Svg
 )
+if(WIN32)
+    # SecretStore: ключ нейро-подсказчика под DPAPI (CryptProtectData).
+    target_link_libraries(dendrolog_app PRIVATE crypt32)
+endif()
 
 # Иконка и метаданные версии для проводника Windows. Версия подставляется
 # из project(VERSION), поэтому .rc генерируется при конфигурации.

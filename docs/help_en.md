@@ -187,6 +187,24 @@ The **Profile** combo + **⋯** button save named rule sets (**Save**, **Save as
 - The time filter, the timeline and the merge of several files use the moment read from the line itself, by the rules in *How line times are read* above — with or without a schema. A time without a date (Serilog console `[13:55:36 INF]`, Logback `13:55:40.016`) gets its date by the rule given there.
 - Tick **Filter blocks** to show only selected blocks; the selection is reflected in **Save View As** and in field-bound text filters.
 
+## Find a schema (variants and AI)
+
+`Tools → Find a Schema…` (or the **Find…** button next to **Manage…** in the *Log Fields* panel) opens a window that offers ways to split the lines of the active tab into fields, each with the share of record lines it parses — counted on the same lines of the tab's file (its start and lines spread over it):
+
+- **Your schemas** — up to three schemas from your list that parse these lines best.
+- **From the structure of the lines** — line templates worked out from the lines themselves, offline: the full one and a cautious one (it stops at the first field whose end is not certain). A note says where text was left in `Message` because no stable boundary was found.
+- **AI** — **Ask AI…** asks Claude for a template (see below).
+
+The right side shows the template (`{Timestamp:time} [{Thread}] {Level:level} {Message}`: literal text stays as in the line, `{Name:kind}` is a field), the share of parsed lines, a table of real lines of the tab split into the fields (the header shows how many different values a column has — an unexpected hundred values usually means a wrong boundary) and the lines that did not match, with the reason in words. **Use for This Tab** sets a schema from your list on the tab the window was opened for (the file is not read again). **Save to My Schemas…** saves a template as a schema file in the `patterns` folder; templates become usable on a tab and in the schema list in a later version of DendroLog.
+
+### AI suggestions: what is sent and when
+
+AI suggestions are **off** by default. To use them, open `Settings → AI`, turn on **Suggest field schemas with AI (Claude)**, and enter an API key of the Claude API (console.anthropic.com); requests are billed to that key, a few cents each with the default model. The key is not stored in `DendroLog.ini`, sessions or logs: on Windows it is encrypted for your Windows account (DPAPI) in the settings folder; on Linux it is a file readable only by your user in `~/.local/share/…` (not encrypted — the settings page says so); in portable mode on Linux it is not saved at all. The `ANTHROPIC_API_KEY` environment variable takes precedence. **Remove Key** deletes the saved key.
+
+Nothing is ever sent when a log is opened or in the background — only when you click **Ask AI…**, and only after a confirmation window shows exactly what will be sent: the host (`api.anthropic.com`), the model, the number of lines and characters and the full text of the request. By default **Mask values** is on (digits become `0`, long hex values and UUIDs become `a`, e-mail addresses become `user@example.com`, IP addresses become documentation addresses; timestamps and level words are kept) and **Cut lines to 300 characters** is on. Masking reduces what leaves your computer but does not remove everything: words, names and paths inside the lines are sent as shown. The file name, its folder, your user name and computer name are not sent. Up to 40 lines that start records are sent, together with fixed instructions (the template grammar and examples; **Instructions sent with every request** shows them). There is no "don't ask again".
+
+The answer is checked before it is shown: a template that does not compile, or parses fewer than 90% of the record lines, leads to one follow-up request — again only after the same confirmation window, now with the previous template, the problem and up to 10 lines it did not parse; a template that is too long, has more than 32 fields or is too slow on these lines is refused with the reason. A template with a `/regular expression/` is marked as slower. Nothing is applied by itself: the suggestion appears in the list like the other variants.
+
 ## Quick find (toolbar)
 
 - The toolbar search box is a one-off text find (not to be confused with the **Text Filters** panel above). `Ctrl+F` focuses it (and shows the Find toolbar if it was hidden; the find shortcuts below work and bring it back too); `Enter` / `F3` finds next, `Shift+F3` finds previous (also the arrow buttons next to it). Three toggles next to the box refine it (see below). The search starts from the selected line (from its place if a filter hides it; with nothing selected, from the top, or from the end for `Shift+F3`) and wraps around. The match row expands, becomes the selected one and the term is highlighted; Follow tail is switched off, so a growing log does not pull the view back to its end. The search runs in the background, so the window stays responsive even on a huge log without matches: a long search shows its progress in the status bar, `Esc` in the search box cancels it, and a term that is not found turns the box red and is reported in the status bar.
@@ -322,6 +340,7 @@ A session is a snapshot of the whole window in a `*.dlsession` file: open it lat
   - **General** — scan extensions, auto-reload interval, large files, fallback encoding, file memory (see *File memory*).
   - **Appearance** — window theme, monospaced font family and size (live preview), default word wrap.
   - **Colors** — log-level, syntax, selection and UI colours.
+  - **AI** — AI suggestions of field schemas: on or off (off by default), the model, the API key (see *Find a schema*).
   - **Shortcuts** — rebind any command; the ⊗ button in a field removes its shortcut, **Restore Defaults** brings them back. A combination given to two commands is marked red, and OK waits until the clash is resolved.
 - **Theme** (**Settings → Appearance → Theme**): **Same as system** follows the light or dark theme of the operating system and switches with it (the default); **Light** and **Dark** keep the window that way whatever the system uses. The choice applies at once, without a restart, and is remembered. The colours of the **Colors** tab are one set shared by both themes.
 

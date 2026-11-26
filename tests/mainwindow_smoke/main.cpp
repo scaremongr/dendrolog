@@ -38,6 +38,9 @@
 #include "viewexport.h"
 #include "openrouting.h"
 #include "schemastore.h"
+#include "schemacandidateswindow.h"
+#include "secretstore.h"
+#include "linetemplate.h"
 #include "sessionreportdialog.h"
 #include "shortcutmanager.h"
 #include "singleinstance.h"
@@ -90,6 +93,14 @@
 #include <QDateTimeEdit>
 #include <QInputDialog>
 #include <QKeySequenceEdit>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QListWidget>
+#include <QPlainTextEdit>
+#include <QTableWidget>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QScrollBar>
@@ -2311,6 +2322,9 @@ void scenarioMenuSweep(MainWindow& win)
         testdocs::pump(20);
         check(waitFor([]() { return !QApplication::activeModalWidget() && !QApplication::activePopupWidget(); }, 10000),
               QStringLiteral("menu item %1 leaves no dialog open").arg(name));
+        // Немодальное окно «Find a Schema» — закрыть: сочетания дальше идут в окно программы.
+        if (auto* finder = win.findChild<SchemaCandidatesWindow*>())
+            finder->close();
         if (!guard)
             continue;
         // Тогл — вернуть как было.
@@ -3547,6 +3561,232 @@ void scenarioFieldSchemasDialog(MainWindow& win, const Fixtures& fx)
     check(waitAllLoaded(win) && tab->fieldSettings().schemaName == before, QStringLiteral("the tab returns to %1").arg(before));
 }
 
+// «Find a Schema» (F-17, шаг 5): Tools → Find a Schema… — варианты каталога и
+// вывода структуры на строках вкладки; Use for This Tab ставит схему
+// каталога вкладке без перечитывания (ни одного прохода загрузчика); Save to
+// My Schemas… пишет шаблон файлом версии 4; «Set Up AI…» открывает Settings
+// на вкладке AI; подсказчик целиком на локальном сервере: окно согласия
+// (точный текст, маска по умолчанию) → запрос → вариант AI в списке. Наружу —
+// ни одного запроса (адрес сервера — шов окна).
+void scenarioFindSchema(MainWindow& win, const Fixtures& fx)
+{
+    section(QStringLiteral("find a schema"));
+    const int ia = tabIndexForFile(win, fx.a);
+    tabs(win)->setCurrentIndex(ia);
+    LogViewWidget* tab = currentTab(win);
+    LogModel* model = tab->model();
+    const int allRows = model->rowCount();
+    tab->view()->goToRow(5);
+    if (QAction* item = menuAction(win, QStringLiteral("Find a Schema")))
+        item->trigger();
+    auto* window = win.findChild<SchemaCandidatesWindow*>();
+    check(window && window->isVisible(), QStringLiteral("Find a Schema opens its window"));
+    if (!window)
+        return;
+    SchemaCandidates* candidates = window->candidates();
+    check(window->view() == tab, QStringLiteral("the window works for the active tab"));
+    check(waitFor([&]() { return !candidates->isComputing() && !candidates->variants().isEmpty(); }, 30000),
+          QStringLiteral("variants are computed (%1)").arg(candidates->statusText()));
+    int catalogueVariant = -1;
+    int inferredVariant = -1;
+    const auto& variants = candidates->variants();
+    for (int i = 0; i < variants.size(); ++i) {
+        if (variants[i].source == SchemaCandidates::Variant::Source::Catalogue && catalogueVariant < 0
+            && variants[i].entry.name != tab->fieldSettings().schemaName)
+            catalogueVariant = i;
+        if (variants[i].source == SchemaCandidates::Variant::Source::Inferred && inferredVariant < 0)
+            inferredVariant = i;
+    }
+    check(inferredVariant >= 0 && LineTemplate(variants.value(inferredVariant).templateText).isValid(),
+          QStringLiteral("a variant inferred from the lines compiles"));
+    check(catalogueVariant >= 0, QStringLiteral("a catalogue schema other than the tab's is offered"));
+
+    auto* list = window->findChild<QListWidget*>(QStringLiteral("schemaVariantList"));
+    auto* table = window->findChild<QTableWidget*>(QStringLiteral("schemaSamplesTable"));
+    auto* use = window->findChild<QPushButton*>(QStringLiteral("useSchemaForTabButton"));
+    auto* save = window->findChild<QPushButton*>(QStringLiteral("saveSchemaButton"));
+    auto* askAi = window->findChild<QPushButton*>(QStringLiteral("askAiButton"));
+    check(list && table && use && save && askAi, QStringLiteral("the window has its controls"));
+    if (!list || !table || !use || !save || !askAi)
+        return;
+
+    // Каталог: таблица образцов, Use for This Tab — без перечитывания.
+    if (catalogueVariant >= 0) {
+        const QString name = variants[catalogueVariant].entry.name;
+        window->selectVariant(catalogueVariant);
+        check(window->currentVariant() == catalogueVariant && table->rowCount() > 0
+                  && table->columnCount() == candidates->columns(catalogueVariant).size() + 1,
+              QStringLiteral("the sample table shows the fields of %1").arg(name));
+        check(use->isEnabled() && !save->isEnabled(), QStringLiteral("a catalogue schema: Use yes, Save no"));
+        const QString before = tab->fieldSettings().schemaName;
+        const bool extractionBefore = tab->fieldSettings().extraction;
+        int passes = 0;
+        QObject spy;
+        QObject::connect(tab, &LogViewWidget::fileParsingStarted, &spy, [&passes]() { ++passes; });
+        use->click();
+        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == name,
+              QStringLiteral("Use for This Tab sets %1 on the tab (%2)").arg(name, tab->fieldSettings().schemaName));
+        check(passes == 0 && model->rowCount() == allRows,
+              QStringLiteral("the tab is not read again (%1 passes)").arg(passes));
+        auto* combo = dock(win, "fieldVisibilityDockWidget")->findChild<QComboBox*>();
+        check(combo && combo->currentText() == name, QStringLiteral("Log Fields shows the schema used"));
+        check(tab->fieldSettings().extraction, QStringLiteral("Use for This Tab shows the fields"));
+        if (combo && combo->findText(before) >= 0)
+            combo->setCurrentIndex(combo->findText(before));
+        // Как было: и «Filter blocks» (схема по умолчанию следующих вкладок).
+        for (QCheckBox* cb : dock(win, "fieldVisibilityDockWidget")->findChildren<QCheckBox*>())
+            if (cb->text() == QLatin1String("Filter blocks") && cb->isChecked() != extractionBefore)
+                cb->click();
+        check(waitAllLoaded(win) && tab->fieldSettings().schemaName == before
+                  && tab->fieldSettings().extraction == extractionBefore,
+              QStringLiteral("the tab returns to %1").arg(before));
+    }
+
+    // Вывод структуры: Save to My Schemas… — файл версии 4.
+    if (inferredVariant >= 0) {
+        window->selectVariant(inferredVariant);
+        check(!use->isEnabled() && save->isEnabled(), QStringLiteral("an inferred template: Save yes"));
+        const QString name = QStringLiteral("Smoke Inferred");
+        g_driver->expect([&](QWidget* w) {
+            auto* dialog = qobject_cast<QInputDialog*>(w);
+            if (!dialog) {
+                DialogDriver::close(w);
+                return;
+            }
+            dialog->setTextValue(name);
+            dialog->accept();
+        });
+        save->click();
+        g_driver->dropExpectations();
+        bool saved = false;
+        for (const QString& f : QDir(SchemaStore::patternsDir()).entryList({QStringLiteral("*.json")}, QDir::Files)) {
+            QFile file(QDir(SchemaStore::patternsDir()).filePath(f));
+            if (!file.open(QIODevice::ReadOnly))
+                continue;
+            LineTemplateSchema schema;
+            if (LineTemplateSchema::read(file.readAll(), &schema) && schema.name == name)
+                saved = schema.templateText == variants[inferredVariant].templateText;
+        }
+        check(saved, QStringLiteral("Save to My Schemas writes a version 4 file"));
+    }
+
+    // AI выключен: «Set Up AI…» — Settings на вкладке AI.
+    AppSettings& settings = AppSettings::instance();
+    settings.setAiEnabled(false);
+    check(askAi->text().contains(QStringLiteral("Set Up")), QStringLiteral("AI off: Set Up AI…"));
+    QString page;
+    g_driver->expect([&](QWidget* w) {
+        auto* tabsWidget = w->findChild<QTabWidget*>(QStringLiteral("tabWidget"));
+        page = tabsWidget && tabsWidget->currentWidget() ? tabsWidget->currentWidget()->objectName() : QString();
+        DialogDriver::close(w);
+    });
+    askAi->click();
+    check(waitFor([&]() { return !page.isEmpty() && !QApplication::activeModalWidget(); }, 10000) && page == QLatin1String("aiTab"),
+          QStringLiteral("Set Up AI opens Settings → AI (%1)").arg(page));
+    g_driver->dropExpectations();
+
+    // AI на локальном сервере: согласие → запрос → вариант.
+    QTcpServer server;
+    server.listen(QHostAddress::LocalHost, 0);
+    QByteArray request;
+    int connections = 0;
+    QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+        while (QTcpSocket* socket = server.nextPendingConnection()) {
+            ++connections;
+            QObject::connect(socket, &QTcpSocket::readyRead, socket, [&, socket]() {
+                request += socket->readAll();
+                const qsizetype end = request.indexOf("\r\n\r\n");
+                if (end < 0)
+                    return;
+                const QRegularExpression lengthRe(QStringLiteral("content-length:\\s*(\\d+)"),
+                                                  QRegularExpression::CaseInsensitiveOption);
+                const int length = lengthRe.match(QString::fromLatin1(request.left(end))).captured(1).toInt();
+                if (request.size() < end + 4 + length)
+                    return;
+                const QByteArray inner = QJsonDocument(QJsonObject{
+                    {QStringLiteral("template"), variants.value(inferredVariant).templateText},
+                    {QStringLiteral("comment"), QStringLiteral("smoke")}}).toJson(QJsonDocument::Compact);
+                const QByteArray body = QJsonDocument(QJsonObject{
+                    {QStringLiteral("model"), QStringLiteral("claude-opus-5-5")},
+                    {QStringLiteral("stop_reason"), QStringLiteral("end_turn")},
+                    {QStringLiteral("content"), QJsonArray{QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                                                                       {QStringLiteral("text"), QString::fromUtf8(inner)}}}}})
+                                            .toJson(QJsonDocument::Compact);
+                socket->write("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: "
+                              + QByteArray::number(body.size()) + "\r\nconnection: close\r\n\r\n" + body);
+                socket->disconnectFromHost();
+            });
+        }
+    });
+    SchemaCandidatesWindow::setAiEndpointForTesting(
+        QUrl(QStringLiteral("http://127.0.0.1:%1/v1/messages").arg(server.serverPort())));
+    // Первая настройка так, как её делает пользователь: «Set Up AI…» →
+    // включить, вставить ключ, OK — открытое окно сразу видит ключ.
+    bool configured = false;
+    g_driver->expect([&](QWidget* w) {
+        auto* enable = w->findChild<QCheckBox*>(QStringLiteral("aiEnabledCheckBox"));
+        auto* key = w->findChild<QLineEdit*>(QStringLiteral("aiKeyEdit"));
+        auto* dialog = qobject_cast<QDialog*>(w);
+        if (!enable || !key || !dialog) {
+            DialogDriver::close(w);
+            return;
+        }
+        enable->setChecked(true);
+        key->setText(QStringLiteral("sk-ant-smoke"));
+        configured = true;
+        dialog->accept();
+    });
+    askAi->click();
+    check(waitFor([&]() { return configured && !QApplication::activeModalWidget(); }, 10000),
+          QStringLiteral("Settings → AI: on and a key"));
+    g_driver->dropExpectations();
+    {
+        QFile ini(AppSettings::iniFilePath());
+        check(ini.open(QIODevice::ReadOnly) && !ini.readAll().contains("sk-ant-smoke"),
+              QStringLiteral("the key is not in the ini file"));
+    }
+    check(waitFor([&]() { return askAi->text().contains(QStringLiteral("Ask AI")) && askAi->isEnabled(); }, 5000),
+          QStringLiteral("AI on with a key: the open window offers Ask AI… (%1)").arg(askAi->text()));
+    // Отказ в окне согласия — ни одного соединения.
+    QString consentText;
+    g_driver->expect([&](QWidget* w) {
+        auto* text = w->findChild<QPlainTextEdit*>(QStringLiteral("aiConsentText"));
+        consentText = text ? text->toPlainText() : QString();
+        DialogDriver::close(w);
+    });
+    askAi->click();
+    check(waitFor([&]() { return !consentText.isEmpty() && !QApplication::activeModalWidget(); }, 10000),
+          QStringLiteral("the consent window shows the request"));
+    testdocs::pump(50);
+    check(connections == 0 && candidates->aiVariants().isEmpty(),
+          QStringLiteral("Cancel in the consent window sends nothing"));
+    check(consentText.contains(QStringLiteral("<lines>")) && !consentText.contains(QStringLiteral(".log")),
+          QStringLiteral("the consent window shows the lines, not the file name"));
+    // Согласие — запрос уходит, вариант AI появляется.
+    g_driver->expect([&](QWidget* w) {
+        auto* send = w->findChild<QPushButton*>(QStringLiteral("aiConsentSendButton"));
+        if (send)
+            send->click();
+        else
+            DialogDriver::close(w);
+    });
+    askAi->click();
+    check(waitFor([&]() { return !candidates->aiVariants().isEmpty(); }, 30000),
+          QStringLiteral("the AI suggestion is in the list (%1)").arg(candidates->aiMessage()));
+    g_driver->dropExpectations();
+    check(connections == 1 && request.contains("x-api-key: sk-ant-smoke") && request.contains("/v1/messages"),
+          QStringLiteral("one request to the local server with the key"));
+    check(!request.contains(QFileInfo(fx.a).fileName().toUtf8()), QStringLiteral("the request has no file name"));
+    settings.setAiEnabled(false);
+    SecretStore::forApplication().removeKey();
+    SecretStore::setSessionKey(QString());
+    SchemaCandidatesWindow::setAiEndpointForTesting(QUrl());
+
+    window->close();
+    check(waitFor([&]() { return !win.findChild<SchemaCandidatesWindow*>(); }, 5000),
+          QStringLiteral("the window closes"));
+}
+
 // Settings с изменёнными значениями: шрифт, порог индексного бэкенда, тема,
 // сочетание (конфликт — предупреждение, OK не закрывает), затем Clear
 // Memory… (No / Yes) и сброс сочетаний.
@@ -4144,6 +4384,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioPanels(win, fx);
         scenarioScannerPanel(win, fx);
         scenarioFieldSchemasDialog(win, fx);
+        scenarioFindSchema(win, fx);
         scenarioBookmarkNote(win, fx);
         scenarioTimeDelta(win, fx);
         scenarioSearchFollowsTab(win, fx);

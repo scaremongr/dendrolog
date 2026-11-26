@@ -1,4 +1,5 @@
 #include "appsettings.h"
+#include "schemaproposal.h"
 #include "spooldir.h"
 #include "apptheme.h"
 
@@ -121,6 +122,13 @@ void AppSettings::load()
         s.endGroup();
     }
 
+    s.beginGroup(QStringLiteral("AI"));
+    m_aiEnabled = s.value(QStringLiteral("enabled"), false).toBool();
+    m_aiModel = s.value(QStringLiteral("model")).toString().trimmed();
+    if (m_aiModel.isEmpty())
+        m_aiModel = QString::fromLatin1(SchemaProposal::kDefaultModel);
+    s.endGroup();
+
     s.beginGroup(QStringLiteral("View"));
     m_fileLabelMode = FileLabels::modeFromName(s.value(QStringLiteral("fileLabels")).toString());
     m_lineNumbers = s.value(QStringLiteral("lineNumbers"), false).toBool();
@@ -182,6 +190,11 @@ void AppSettings::save()
     s.setValue(QStringLiteral("fallbackEncoding"),       fallbackEncodingToString(m_fallbackEncoding));
     s.setValue(QStringLiteral("rememberFileState"),      m_rememberFileState);
     s.setValue(QStringLiteral("restoreSessionOnStartup"), m_restoreSessionOnStartup);
+    s.endGroup();
+
+    s.beginGroup(QStringLiteral("AI"));
+    s.setValue(QStringLiteral("enabled"), m_aiEnabled);
+    s.setValue(QStringLiteral("model"), m_aiModel);
     s.endGroup();
 
     s.beginGroup(QStringLiteral("View"));
@@ -442,6 +455,34 @@ void AppSettings::setRememberFileState(bool enabled)
 QString AppSettings::fileMemoryDir()
 {
     return configDir() + QStringLiteral("/memory");
+}
+
+void AppSettings::setAiEnabled(bool enabled)
+{
+    if (m_aiEnabled == enabled)
+        return;
+    m_aiEnabled = enabled;
+    emit settingsChanged();
+}
+
+void AppSettings::setAiModel(const QString& model)
+{
+    const QString value = model.trimmed().isEmpty() ? QString::fromLatin1(SchemaProposal::kDefaultModel)
+                                                    : model.trimmed();
+    if (m_aiModel == value)
+        return;
+    m_aiModel = value;
+    emit settingsChanged();
+}
+
+QString AppSettings::aiModel() const
+{
+    return m_aiModel.isEmpty() ? QString::fromLatin1(SchemaProposal::kDefaultModel) : m_aiModel;
+}
+
+bool AppSettings::isConfigDirOverridden()
+{
+    return !configDirOverride().isEmpty();
 }
 
 void AppSettings::setRestoreSessionOnStartup(bool enabled)

@@ -2,7 +2,10 @@
 #include "ui_settingsdialog.h"
 #include "appsettings.h"
 #include "apptheme.h"
+#include "cardframe.h"
 #include "filememorystore.h"
+#include "schemaproposal.h"
+#include "secretstore.h"
 #include "shortcutmanager.h"
 
 #include <QCheckBox>
@@ -11,6 +14,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
+#include <QLineEdit>
 #include <QBoxLayout>
 #include <QHash>
 #include <QLabel>
@@ -39,6 +43,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     buildShortcutsTab();
     buildPerformanceControls();
     buildFileMemoryControls();
+    buildAiTab();
     loadFromSettings();
 
     // Live font preview.
@@ -398,6 +403,102 @@ void SettingsDialog::buildFileMemoryControls()
 }
 
 // ---------------------------------------------------------------------------
+// AI (F-17, шаг 5): подсказчик схем полей. Ключ — в SecretStore, не в ini.
+// ---------------------------------------------------------------------------
+void SettingsDialog::buildAiTab()
+{
+    m_aiTab = new QWidget(this);
+    m_aiTab->setObjectName(QStringLiteral("aiTab"));
+    auto* layout = new QVBoxLayout(m_aiTab);
+
+    m_aiEnabledCheckBox = new QCheckBox(tr("Suggest field schemas with AI (Claude)"), m_aiTab);
+    m_aiEnabledCheckBox->setObjectName(QStringLiteral("aiEnabledCheckBox"));
+    layout->addWidget(m_aiEnabledCheckBox);
+
+    auto* about = new MutedLabel(
+        tr("Find a Schema → Ask AI sends a few dozen sample lines of the open log to Anthropic "
+           "(api.anthropic.com) and gets back a line template. Every request is shown to you in full "
+           "before it is sent, with values masked by default; nothing is sent when a log is opened "
+           "or in the background. Requests are billed to your API key."),
+        m_aiTab);
+    about->setWordWrap(true);
+    layout->addWidget(about);
+
+    auto* form = new QFormLayout();
+    m_aiModelCombo = new QComboBox(m_aiTab);
+    m_aiModelCombo->setObjectName(QStringLiteral("aiModelCombo"));
+    m_aiModelCombo->setEditable(true);
+    m_aiModelCombo->addItems({QString::fromLatin1(SchemaProposal::kDefaultModel), QStringLiteral("claude-sonnet-5-5"),
+                              QStringLiteral("claude-haiku-5-5")});
+    m_aiModelCombo->setToolTip(tr("Model id of the Claude API"));
+    form->addRow(tr("Model:"), m_aiModelCombo);
+
+    auto* keyRow = new QHBoxLayout();
+    m_aiKeyEdit = new QLineEdit(m_aiTab);
+    m_aiKeyEdit->setObjectName(QStringLiteral("aiKeyEdit"));
+    m_aiKeyEdit->setEchoMode(QLineEdit::Password);
+    m_aiKeyEdit->setPlaceholderText(tr("sk-ant-… (leave empty to keep the current key)"));
+    keyRow->addWidget(m_aiKeyEdit, 1);
+    m_aiRemoveKeyButton = new QPushButton(tr("Remove Key"), m_aiTab);
+    m_aiRemoveKeyButton->setObjectName(QStringLiteral("aiRemoveKeyButton"));
+    keyRow->addWidget(m_aiRemoveKeyButton);
+    form->addRow(tr("API key:"), keyRow);
+    layout->addLayout(form);
+
+    m_aiKeyStatus = new MutedLabel(QString(), m_aiTab);
+    m_aiKeyStatus->setObjectName(QStringLiteral("aiKeyStatus"));
+    m_aiKeyStatus->setWordWrap(true);
+    layout->addWidget(m_aiKeyStatus);
+    layout->addStretch(1);
+
+    connect(m_aiRemoveKeyButton, &QPushButton::clicked, this, [this]() {
+        SecretStore store = SecretStore::forApplication();
+        QString error;
+        if (!store.removeKey(&error))
+            QMessageBox::warning(this, tr("Settings"), error);
+        SecretStore::setSessionKey(QString());
+        m_aiKeyEdit->clear();
+        updateAiKeyStatus();
+        emit AppSettings::instance().settingsChanged();
+    });
+    ui->tabWidget->addTab(m_aiTab, tr("AI"));
+    updateAiKeyStatus();
+}
+
+void SettingsDialog::updateAiKeyStatus()
+{
+    if (!m_aiKeyStatus)
+        return;
+    const SecretStore store = SecretStore::forApplication();
+    SecretStore::Source source = SecretStore::Source::None;
+    SecretStore::effectiveKey(store, &source);
+    QString text;
+    switch (source) {
+    case SecretStore::Source::Environment:
+        text = tr("The key comes from the ANTHROPIC_API_KEY environment variable.");
+        break;
+    case SecretStore::Source::Stored:
+        text = tr("A key is saved.");
+        break;
+    case SecretStore::Source::Session:
+        text = tr("A key is set for this session only.");
+        break;
+    case SecretStore::Source::None:
+        text = tr("No key is set.");
+        break;
+    }
+    text += QLatin1Char(' ') + store.description();
+    m_aiKeyStatus->setText(text);
+    m_aiRemoveKeyButton->setEnabled(source == SecretStore::Source::Stored || source == SecretStore::Source::Session);
+}
+
+void SettingsDialog::showAiPage()
+{
+    if (m_aiTab)
+        ui->tabWidget->setCurrentWidget(m_aiTab);
+}
+
+// ---------------------------------------------------------------------------
 void SettingsDialog::resetShortcutsToDefaults()
 {
     const ShortcutManager& mgr = ShortcutManager::instance();
@@ -443,6 +544,10 @@ void SettingsDialog::loadFromSettings()
         m_rememberFileStateCheckBox->setChecked(s.rememberFileState());
     if (m_restoreSessionCheckBox)
         m_restoreSessionCheckBox->setChecked(s.restoreSessionOnStartup());
+    if (m_aiEnabledCheckBox) {
+        m_aiEnabledCheckBox->setChecked(s.aiEnabled());
+        m_aiModelCombo->setCurrentText(s.aiModel());
+    }
     if (m_fallbackEncodingCombo) {
         const auto choice = s.fallbackEncodingChoice();
         m_fallbackEncodingCombo->setCurrentIndex(
@@ -508,6 +613,38 @@ void SettingsDialog::applyToSettings()
         const int data = m_fallbackEncodingCombo->currentData().toInt();
         s.setFallbackEncodingChoice(data < 0 ? std::nullopt
                                              : std::optional<TextEncoding>(TextEncoding(data)));
+    }
+
+    // ---- AI: ключ — в SecretStore (или на этот запуск), не в ini ---------- //
+    // Ключ — ДО флага и модели: их сеттеры шлют settingsChanged, и окно
+    // «Find a Schema» должно увидеть уже новый ключ.
+    if (m_aiEnabledCheckBox) {
+        const QString key = m_aiKeyEdit->text().trimmed();
+        bool keyChanged = false;
+        if (!key.isEmpty()) {
+            SecretStore store = SecretStore::forApplication();
+            QString error;
+            if (!store.isAvailable()) {
+                SecretStore::setSessionKey(key);
+            } else if (store.writeKey(key, &error)) {
+                SecretStore::setSessionKey(QString());
+            } else {
+                // Сохранённый ключ главнее ключа на этот запуск: прежний
+                // убирается, иначе запросы шли бы со старым.
+                store.removeKey();
+                SecretStore::setSessionKey(key);
+                QMessageBox::warning(this, tr("Settings"),
+                                     tr("%1 The new key is used for this session only.").arg(error));
+            }
+            m_aiKeyEdit->clear();
+            keyChanged = true;
+        }
+        const bool enabledBefore = s.aiEnabled();
+        const QString modelBefore = s.aiModel();
+        s.setAiEnabled(m_aiEnabledCheckBox->isChecked());
+        s.setAiModel(m_aiModelCombo->currentText());
+        if (keyChanged && enabledBefore == s.aiEnabled() && modelBefore == s.aiModel())
+            emit s.settingsChanged();
     }
 
     // ---- Shortcuts tab ---------------------------------------------------- //

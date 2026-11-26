@@ -23,6 +23,7 @@
 
 #include "LogListView.h"
 #include "appsettings.h"
+#include "schemacandidateswindow.h"
 #include "apptheme.h"
 #include "cardframe.h"
 #include "colorschemecontroller.h"
@@ -752,6 +753,14 @@ static void checkOpenPanels(const QDir& dir)
             auto legend = std::make_unique<FileLegend>();
             legend->setModel(doc->model.get());
             return legend;
+        });
+        // Окно «Find a Schema» (F-17, шаг 5): варианты посчитаны, таблица образцов.
+        checkRepaintsOnThemeChange("Find a Schema", [doc]() -> std::unique_ptr<QWidget> {
+            auto window = std::make_unique<SchemaCandidatesWindow>(nullptr);
+            window->setSourceModel(doc->model.get(), nullptr);
+            SchemaCandidates* candidates = window->candidates();
+            testdocs::waitFor([candidates]() { return !candidates->isComputing(); }, 30000);
+            return window;
         });
     }
 

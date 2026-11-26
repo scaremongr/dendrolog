@@ -196,6 +196,9 @@ private slots:
     void onFieldVisibilityChanged();
     void onPatternComboChanged(int index);
     void onManagePatterns();
+    // «Find a Schema» (F-17, шаг 5): окно подбора схемы для активной вкладки.
+    void openSchemaCandidates();
+    void openSettings(bool aiPage);
 
 public:
     // Приём потокового ввода (`program | DendroLog -`): спулит stdin во
@@ -342,6 +345,7 @@ private:
     // диалоги, схема окна и ссылка на отчёт в строке состояния.
     SessionController* m_sessionController = nullptr;
     QPointer<SessionReportDialog> m_sessionReport;
+    QPointer<class SchemaCandidatesWindow> m_schemaCandidates;
     QLabel* m_sessionReportLink = nullptr;
     void saveSessionAs();
     void openSession(const SessionState& session, const QString& path, SessionController::Origin origin);
