@@ -3957,6 +3957,124 @@ void scenarioSettingsValues(MainWindow& win, const Fixtures& fx, bool indexed)
     check(testdocs::idleViews() && waitAllLoaded(win), QStringLiteral("tabs settle after Settings"));
 }
 
+// U-20: сочетание по умолчанию одной команды пользователь раньше отдал
+// другой (ini прежней версии: «Go to» на Alt+← до появления «назад»).
+// Клавиша остаётся у «Go to», у «назад» пусто, и Settings это показывают:
+// подпись под полем, «↺» с подсказкой о второй команде; возврат меняет
+// местами обе, OK применяет — неоднозначности нет ни до, ни после.
+void scenarioYieldedShortcut(MainWindow& win)
+{
+    section(QStringLiteral("settings: yielded default shortcut"));
+    ShortcutManager& sm = ShortcutManager::instance();
+    const QString back = QStringLiteral("navigateBack");
+    const QString goTo = QStringLiteral("goTo");
+    const QKeySequence altLeft(Qt::ALT | Qt::Key_Left);
+    const QKeySequence goToKeys = sm.defaultSequence(goTo);
+    // Любой исход — умолчания обратно: дальше сценарии ждут их.
+    struct Restore {
+        ShortcutManager& sm;
+        ~Restore() {
+            for (const ShortcutManager::Command& c : sm.commands())
+                sm.setSequence(c.id, c.defaultSeq);
+            sm.save();
+        }
+    } restoreDefaults { sm };
+    // История переходов, чтобы «назад» было доступно.
+    if (tabs(win)->count() && currentTab(win)->model()->rowCount() > 2) {
+        currentTab(win)->view()->goToRow(0);
+        currentTab(win)->view()->goToRow(currentTab(win)->model()->rowCount() - 1);
+    }
+    sm.setSequence(goTo, altLeft);
+    check(command(win, goTo)->shortcut() == altLeft && command(win, back)->shortcut().isEmpty(),
+          QStringLiteral("the user's Alt+← stays with Go to, Navigate back has none"));
+    checkShortcutAmbiguity(win, QStringLiteral("yielded"));
+    if (tabs(win)->count())
+        currentTab(win)->view()->setFocus(Qt::MouseFocusReason);
+    bool goToShown = false;
+    g_driver->expect([&](QWidget* w) {
+        goToShown = w->windowTitle().startsWith(QStringLiteral("Go to"));
+        DialogDriver::close(w);
+    });
+    press(win, altLeft);
+    check(waitFor([&]() { return goToShown; }, 5000), QStringLiteral("Alt+← opens Go to"));
+    g_driver->dropExpectations();
+
+    bool shown = false;
+    g_driver->expect([&](QWidget* w) {
+        shown = true;
+        auto* backEdit = w->findChild<QKeySequenceEdit*>(QStringLiteral("shortcut_navigateBack"));
+        auto* goToEdit = w->findChild<QKeySequenceEdit*>(QStringLiteral("shortcut_goTo"));
+        auto* note = w->findChild<QLabel*>(QStringLiteral("shortcutNote_navigateBack"));
+        auto* goToNote = w->findChild<QLabel*>(QStringLiteral("shortcutNote_goTo"));
+        auto* restore = w->findChild<QToolButton*>(QStringLiteral("restoreShortcut_navigateBack"));
+        auto* openRestore = w->findChild<QToolButton*>(QStringLiteral("restoreShortcut_open"));
+        auto* box = w->findChild<QDialogButtonBox*>();
+        if (!backEdit || !goToEdit || !note || !goToNote || !restore || !openRestore || !box) {
+            check(false, QStringLiteral("Settings has the shortcut rows"));
+            DialogDriver::close(w);
+            return;
+        }
+        check(backEdit->keySequence().isEmpty() && goToEdit->keySequence() == altLeft,
+              QStringLiteral("the fields show Alt+← at Go to, Navigate back empty"));
+        const QString keys = altLeft.toString(QKeySequence::NativeText);
+        check(!note->isHidden() && note->text().contains(keys) && note->text().contains(QStringLiteral("Go to line or time"))
+                  && backEdit->toolTip() == note->text(),
+              QStringLiteral("Navigate back says who has its default: %1").arg(note->text()));
+        check(goToNote->isHidden() && openRestore->isHidden(),
+              QStringLiteral("other rows have no note, a default row no ↺"));
+        check(!restore->isHidden() && restore->toolTip().contains(keys)
+                  && restore->toolTip().contains(QStringLiteral("Go to line or time"))
+                  && restore->toolTip().contains(goToKeys.toString(QKeySequence::NativeText)),
+              QStringLiteral("↺ tells what happens to Go to: %1").arg(restore->toolTip()));
+        // «↺» держателя: Go to — к своему умолчанию, поле Navigate back
+        // получает освобождённое Alt+← (как после OK), а не остаётся пустым.
+        auto* goToRestore = w->findChild<QToolButton*>(QStringLiteral("restoreShortcut_goTo"));
+        check(goToRestore && !goToRestore->isHidden()
+                  && goToRestore->toolTip().contains(QStringLiteral("Navigate back")),
+              QStringLiteral("Go to's ↺ tells Navigate back gets Alt+← back: %1")
+                  .arg(goToRestore ? goToRestore->toolTip() : QString()));
+        if (goToRestore)
+            goToRestore->click();
+        check(backEdit->keySequence() == altLeft && goToEdit->keySequence() == goToKeys && note->isHidden(),
+              QStringLiteral("Go to's ↺ gives the freed key to Navigate back in the field"));
+        goToEdit->setKeySequence(altLeft);   // как при открытии, но уже не «уступка»: конфликт
+        backEdit->clear();
+        check(note->isHidden() == false, QStringLiteral("the note is back when Go to takes Alt+← again"));
+        restore->click();
+        check(backEdit->keySequence() == altLeft && goToEdit->keySequence() == goToKeys,
+              QStringLiteral("↺ swaps them back: Navigate back Alt+←, Go to its default"));
+        check(note->isHidden() && restore->isHidden(), QStringLiteral("after ↺ the note and ↺ are gone"));
+        box->button(QDialogButtonBox::Ok)->click();
+    });
+    pressCommand(win, QStringLiteral("settings"));
+    check(waitFor([&]() { return shown && !QApplication::activeModalWidget(); }, 10000),
+          QStringLiteral("Settings opens and OK closes it (no conflict)"));
+    g_driver->dropExpectations();
+    check(command(win, back)->shortcut() == altLeft && command(win, goTo)->shortcut() == goToKeys
+              && sm.sequence(back) == altLeft && sm.sequence(goTo) == goToKeys,
+          QStringLiteral("OK applies both: Navigate back Alt+←, Go to %1").arg(command(win, goTo)->shortcut().toString()));
+    checkShortcutAmbiguity(win, QStringLiteral("restored"));
+    int backFired = 0;
+    const QMetaObject::Connection c = QObject::connect(command(win, back), &QAction::triggered,
+                                                       [&]() { ++backFired; });
+    goToShown = false;
+    g_driver->expect([&](QWidget* w) {
+        goToShown = w->windowTitle().startsWith(QStringLiteral("Go to"));
+        DialogDriver::close(w);
+    });
+    if (tabs(win)->count())
+        currentTab(win)->view()->setFocus(Qt::MouseFocusReason);
+    press(win, goToKeys);
+    check(waitFor([&]() { return goToShown; }, 5000), QStringLiteral("Go to works with its default again"));
+    g_driver->dropExpectations();
+    check(command(win, back)->isEnabled(), QStringLiteral("Navigate back is enabled (history made)"));
+    if (tabs(win)->count())
+        currentTab(win)->view()->setFocus(Qt::MouseFocusReason);
+    press(win, altLeft);
+    check(backFired == 1, QStringLiteral("Alt+← drives Navigate back (%1)").arg(backFired));
+    QObject::disconnect(c);
+}
+
 // Заметка закладки (QInputDialog): «Add Bookmark with Note…» с текстом и
 // отменой, «Edit Bookmark Note…», заметка — в карточке панели.
 void scenarioBookmarkNote(MainWindow& win, const Fixtures& fx)
@@ -4422,6 +4540,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioEncoding(win, fx);
         scenarioFileMemory(win, fx);
         scenarioSettingsValues(win, fx, indexed);
+        scenarioYieldedShortcut(win);
         scenarioMerge(win, fx);
         scenarioSession(win, fx);
         scenarioDocks(win);

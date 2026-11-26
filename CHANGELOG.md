@@ -7,6 +7,15 @@ All notable changes to DendroLog are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Settings show a default shortcut you gave to another command.** When a
+  command's default shortcut is already yours for another command (for
+  example, a key you assigned before the command existed), the key stays with
+  your command and the field of the new one is empty with a note under it:
+  "Default Alt+Left is assigned to “Go to line or time…”". A ↺ button next to
+  any field that differs from its default restores that one default; its
+  tooltip says what happens to the command that had the key (it gets its own
+  default back, or is left without a shortcut if that one is taken too).
+  **Restore Defaults** still resets them all.
 - **Field filters decide for the whole record.** A text-filter or search rule
   bound to a *Log Fields* column now takes the field from the first line of
   the record, and the record's other lines follow it: `Thread contains main`
