@@ -67,7 +67,9 @@ void SchemaCandidates::setSource(LogModel* model, const LogFile* file)
 
 bool SchemaCandidates::isComputing() const
 {
-    return m_watcher->isRunning() || m_resetTimer->isActive();
+    // Не m_watcher->isRunning(): тот гаснет с концом воркера, когда finished
+    // ещё в очереди GUI-потока и варианты прежние.
+    return m_running || m_resetTimer->isActive();
 }
 
 void SchemaCandidates::recompute()
@@ -92,6 +94,7 @@ void SchemaCandidates::recompute()
     const QVector<FieldExtractorPtr> extractors = m_catalogueExtractors;
     const LogFile* file = m_file;
     // Файл живёт, пока он во вкладке; снапшот держит свои ссылки на файлы.
+    m_running = true;
     m_watcher->setFuture(QtConcurrent::run([snapshot = std::move(snapshot), extractors, file, flag, generation]() {
         Output out;
         out.generation = generation;
@@ -111,9 +114,12 @@ void SchemaCandidates::recompute()
 
 void SchemaCandidates::onComputed()
 {
+    m_running = false;
     const Output out = m_watcher->result();
-    if (out.generation != m_generation || out.cancelled)
+    if (out.generation != m_generation || out.cancelled) {
+        emit computingChanged();
         return;
+    }
     m_samples = out.samples;
     m_ranked = out.catalogue;
     m_inference = out.inference;

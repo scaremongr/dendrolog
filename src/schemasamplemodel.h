@@ -119,6 +119,7 @@ private:
     std::shared_ptr<std::atomic_bool> m_cancel;
     QFutureWatcher<Output>* m_watcher = nullptr;
     bool m_pending = false;   ///< расчёт запрошен, пока шёл прежний
+    bool m_running = false;   ///< от setFuture до доставки finished (не конец воркера)
 };
 
 #endif // SCHEMASAMPLEMODEL_H

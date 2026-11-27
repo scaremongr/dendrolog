@@ -192,6 +192,7 @@ private:
     QString m_status;
 
     QFutureWatcher<Output>* m_watcher = nullptr;
+    bool m_running = false;   ///< от setFuture до доставки finished (не конец воркера)
     std::shared_ptr<std::atomic_bool> m_cancel;
     int m_generation = 0;
     QTimer* m_resetTimer = nullptr;

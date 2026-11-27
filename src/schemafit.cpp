@@ -437,6 +437,7 @@ int SchemaFitJob::start(const QVector<FieldExtractorPtr>& schemas, const LogFile
                                              : LogScanSnapshot();
     SchemaFit::Budget workerBudget = budget;
     workerBudget.cancel = flag.get();
+    m_inFlight = true;
     m_watcher->setFuture(QtConcurrent::run([snapshot, schemas, file, workerBudget, flag, generation]() {
         Outcome outcome;
         outcome.generation = generation;
@@ -469,11 +470,16 @@ void SchemaFitJob::cancel(bool wait)
 
 bool SchemaFitJob::isRunning() const
 {
-    return m_watcher->isRunning();
+    // Не m_watcher->isRunning(): тот гаснет, когда воркер вышел, а finished
+    // ещё в очереди GUI-потока — ожидающий «не идёт» видел бы прежний итог.
+    // setFuture снимает недоставленные события прежнего будущего, так что
+    // finished приходит ровно один раз на последний setFuture.
+    return m_inFlight;
 }
 
 void SchemaFitJob::onWatcherFinished()
 {
+    m_inFlight = false;
     const QFuture<Outcome> future = m_watcher->future();
     if (future.resultCount() == 0)
         return;

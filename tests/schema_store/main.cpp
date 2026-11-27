@@ -41,6 +41,7 @@
 #include "logmodel.h"
 #include "logviewwidget.h"
 #include "LogListView.h"
+#include "schemacandidates.h"
 #include "schemacandidateswindow.h"
 #include "schemaconverter.h"
 #include "schemaeditorwindow.h"
@@ -66,6 +67,7 @@
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <QTimer>
 #include <QKeyEvent>
 #include <QSettings>
@@ -936,6 +938,70 @@ void testKeyedSchema()
 
 } // namespace
 
+// Задание «идёт» до доставки итога, а не до конца воркера (как ViewExportJob,
+// Q-25). Ожидание `!isComputing()` в тестах окна и редактора иначе видело
+// прежний (пустой) итог: воркер вышел, finished ещё в очереди GUI-потока —
+// так падал «the column header shows the number of values» под санитайзером.
+// Воркеры ждутся пулом без обработки событий: окно между концом воркера и
+// доставкой здесь — всегда.
+void testBusyUntilDelivered(const QDir& tmp)
+{
+    const QString tpl = QStringLiteral("{Timestamp:time} {Level:level} {Message}");
+    const FieldExtractorPtr extractor = std::make_shared<const TemplateExtractor>(tpl);
+
+    SchemaSampleModel samples;
+    QVector<SchemaFit::Sample> lines;
+    for (int i = 0; i < 40; ++i)
+        lines.append(SchemaFit::Sample{i + 1, QStringLiteral("2026-03-05 10:00:%1.000 INFO message %2")
+                                                  .arg(i % 60, 2, 10, QLatin1Char('0')).arg(i)});
+    samples.setLines(lines);
+    check(waitFor([&] { return !samples.isComputing(); }) && samples.columns().isEmpty(),
+          "busy: the sample table without a schema is empty");
+    // Один перезапуск — одно задание в полёте, m_pending ни при чём.
+    samples.setExtractor(extractor);
+    QThreadPool::globalInstance()->waitForDone();
+    check(samples.isComputing() && samples.columns().isEmpty(),
+          "busy: the sample table computes until its result is delivered");
+    check(waitFor([&] { return !samples.isComputing(); }) && samples.columns().size() == 3
+              && samples.acceptedRows() == lines.size(),
+          "busy: the sample table is filled when it stops computing");
+
+    QByteArray bytes;
+    for (int i = 0; i < 200; ++i)
+        bytes += QStringLiteral("2026-03-05 10:%1:%2.000 INFO message %3\n")
+                     .arg(i / 60, 2, 10, QLatin1Char('0')).arg(i % 60, 2, 10, QLatin1Char('0')).arg(i).toUtf8();
+    const QString logPath = tmp.filePath(QStringLiteral("busy.log"));
+    writeBytes(logPath, bytes);
+    LogViewWidget tab;
+    tab.addLogFile(logPath);
+    check(waitFor([&] { return !tab.isLoading() && tab.model()->rowCount() == 200 && !tab.model()->isFiltering(); }),
+          "busy: the tab loads");
+
+    SchemaFitJob job;
+    job.setModel(tab.model());
+    int delivered = 0;
+    QObject::connect(&job, &SchemaFitJob::finished, [&delivered]() { ++delivered; });
+    job.start({extractor});
+    QThreadPool::globalInstance()->waitForDone();
+    check(job.isRunning() && delivered == 0 && !job.hasOutcome(),
+          "busy: the fit job runs until finished is delivered");
+    check(waitFor([&] { return !job.isRunning(); }) && delivered == 1 && job.hasOutcome(),
+          "busy: the fit job has its outcome when it stops running");
+    // Отменённое: «идёт», пока не пришёл его (недоставляемый) конец.
+    job.start({extractor});
+    job.cancel();
+    check(waitFor([&] { return !job.isRunning(); }) && delivered == 1,
+          "busy: a cancelled fit job stops running without an outcome");
+
+    SchemaCandidates candidates;
+    candidates.setSource(tab.model(), nullptr);
+    QThreadPool::globalInstance()->waitForDone();
+    check(candidates.isComputing() && candidates.variants().isEmpty(),
+          "busy: Find a Schema computes until its result is delivered");
+    check(waitFor([&] { return !candidates.isComputing(); }) && !candidates.variants().isEmpty(),
+          "busy: Find a Schema has its variants when it stops computing");
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -967,6 +1033,7 @@ int main(int argc, char** argv)
     testMigration();
     testBuiltinsFromV3();
     testEditor(tmp);
+    testBusyUntilDelivered(tmp);
     testKeyedSchema();
 
     clearPatterns();

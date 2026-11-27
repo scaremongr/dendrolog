@@ -43,7 +43,10 @@ void SchemaSampleModel::setMissLines(const QVector<SchemaFit::Miss>& misses)
 
 bool SchemaSampleModel::isComputing() const
 {
-    return m_watcher->isRunning() || m_pending;
+    // Не m_watcher->isRunning(): тот гаснет с концом воркера, когда finished
+    // ещё в очереди GUI-потока, — таблица в этот миг прежняя (пустая), а тест
+    // и окно считали бы расчёт законченным.
+    return m_running || m_pending;
 }
 
 void SchemaSampleModel::restart()
@@ -51,7 +54,7 @@ void SchemaSampleModel::restart()
     ++m_generation;
     if (m_cancel)
         m_cancel->store(true, std::memory_order_relaxed);
-    if (m_watcher->isRunning()) {
+    if (m_running) {
         // Прежний расчёт отменён; новый — по его концу (один в полёте).
         m_pending = true;
         return;
@@ -63,6 +66,7 @@ void SchemaSampleModel::restart()
     const QVector<SchemaFit::Sample> lines = m_lines;
     const QVector<SchemaFit::Miss> missLines = m_missLines;
     const FieldExtractorPtr extractor = m_extractor;
+    m_running = true;
     m_watcher->setFuture(QtConcurrent::run([generation, lines, missLines, extractor, cancel]() {
         Output out;
         out.generation = generation;
@@ -148,6 +152,7 @@ void SchemaSampleModel::restart()
 
 void SchemaSampleModel::onFinished()
 {
+    m_running = false;
     const Output out = m_watcher->result();
     if (m_pending) {
         restart();

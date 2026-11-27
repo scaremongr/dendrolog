@@ -242,6 +242,9 @@ private:
     int m_generation = 0;
     Outcome m_outcome;
     bool m_hasOutcome = false;
+    /// От start() до доставки finished наблюдателя, а не до конца воркера
+    /// (как ViewExportJob, Q-25): иначе «не идёт» наступает раньше итога.
+    bool m_inFlight = false;
 };
 
 #endif // SCHEMAFIT_H
