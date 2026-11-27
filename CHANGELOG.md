@@ -6,127 +6,20 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-- **Edit a schema on a sample line.** In the schema editor, double-click a cell
-  of the sample table (or press `F2`), select part of its value and press
-  **Make Field** (`Ctrl+M`): the selection becomes a field. Where it ends is
-  decided by the lines, not guessed — the text right after it, its own form
-  (a number, an IP, a time…), a form that follows, a wide gap, a fixed column,
-  the same number of words or a closed set of values; the variant that parses
-  the most lines with the fewest different values wins, **Other Variant**
-  (`Ctrl+Shift+M`) shows the next one. When nothing in the lines tells where
-  the field ends, the editor says so and makes it a list of the selected value
-  (more values — **Add Value…**). The menu of a column header (also `Shift+F10`)
-  has **Ends at** with the result of every choice on the sample lines
-  ("after 2 words — words(2): 14 values · 100%"), **Rename…**, **Add Value…**,
-  **Merge with Next**, **Hide** and **Remove**; every edit is one undo step and
-  the template always stays valid.
+## [0.7.0] — 2026-11-27
 
-### Changed
-- **Field schemas are line templates, edited in a new schema editor.** A
-  schema is one line that looks like the log line:
-  `{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}` — text
-  stands as in the line, a field says where it ends by its kind (`time`,
-  `level`, `int`, `ip`, `quoted`, `word`, `of(a|b)`, `padded`, `width(N)`,
-  `words(N)`, `rest`, `/regex/`…); a template whose field end is not defined is
-  refused with an explanation. `Tools → Field Schemas…` opens a non-modal
-  editor: the template line with its error underlined in place, real lines of
-  the tab split into fields (each column header shows how many different
-  values it has, the tooltip the most frequent ones), the lines of the file
-  that did not match with the reason in words, the share of the file parsed,
-  *Find a Schema* as a panel, **Apply to Tab**, **Save**, **Save As…**, undo
-  and redo (`Ctrl+Z`), a question before closing with unsaved edits, and an
-  offer to rename a field in the filter rules and profiles that use it.
-  **New ▾** starts an empty schema, one from the sample lines, from a pasted
-  template or from a **Grok** expression. The built-in schemas are templates
-  (the two Syslog schemas are one now) and parse a line several times faster.
-- **Your schemas are converted on the first start.** Each schema file of the
-  earlier (block) format becomes a template under the same file name, with its
-  description and unknown keys; the original is kept in
-  `patterns/converted-from-v3/`. Untouched built-in schemas are replaced by the
-  new templates, ones you changed are converted like your own. Schemas saved in
-  sessions, file memory and `last-session.json` are read through the same
-  conversion, so a tab gets the same fields; the presets of the old editor
-  become schemas of the list. Column names stay the same, so filter rules on
-  them keep working. On lines a schema does not describe the result may differ
-  from before: a template stops at the first mismatch and gives the rest of the
-  line to the last field.
-- **JSON Lines and logfmt are a line format, not a schema.** The format of a
-  file's lines is detected when it is opened, like its encoding: a JSON Lines
-  or logfmt log opens with time, level and message taken from its keys and its
-  keys as fields — no schema to pick, whatever schema the tab has. The status
-  bar shows the format next to the encoding ("JSON Lines (auto)"); click it to
-  choose Plain text, JSON Lines, logfmt or your own keys (**Keys…**) — the
-  choice rereads the file, keeps the current line in place and is remembered
-  with the file, in sessions and by `Ctrl+Shift+T`. The *Directory Scanner*
-  counts JSON and logfmt files the same way. A file with fewer than 20 lines
-  is read as plain text until it grows (then it is read again once).
-- **Logs without timestamps split at the level word.** In a plain log almost
-  without timestamps where most lines start with a level word
-  (`WARNING:root:…`, `[INFO] …`), such a line starts a record, so a Python
-  traceback stays with its entry — without a schema. A line like
-  `ERROR: detail` in the middle of an entry of a log with timestamps still
-  does not break it.
-- **A field schema no longer changes how a file is read.** Record boundaries,
-  timestamps and levels come from the line format only; picking or changing a
-  schema never rereads a file. A schema that recognised record starts no
-  timestamp or level word could find (a rare custom format) no longer does.
-
-### Removed
-- The block schema editor (block cards and separators), schema presets in the
-  INI file and the draft schema from a single line (**Suggest schema**): use
-  **New ▾ → From Sample Lines** or *Find a Schema*.
-- The built-in **JSON Lines** and **logfmt** schemas and the **Format** mode
-  of the schema editor. An untouched built-in copy is removed on upgrade; one
-  you edited stays and reads the whole line as `Message`; a tab, session or
-  file memory saved with such a schema opens without a schema (the file reads
-  its keys by its line format).
-
-- **Slow field schemas no longer slow down the log.** The fields of a line
-  template with a `/regular expression/` are computed in the background: lines
-  show in full at once and switch to the selected columns as soon as their
-  fields are ready, scrolling and selecting never wait, and *Entry Details*
-  says "Computing fields…" meanwhile. A field filter with such a schema always
-  runs in the background, on small logs too. The selected line stays where it
-  is on screen when the fields arrive.
-- **Settings show a default shortcut you gave to another command.** When a
-  command's default shortcut is already yours for another command (for
-  example, a key you assigned before the command existed), the key stays with
-  your command and the field of the new one is empty with a note under it:
-  "Default Alt+Left is assigned to “Go to line or time…”". A ↺ button next to
-  any field that differs from its default restores that one default; its
-  tooltip says what happens to the command that had the key (it gets its own
-  default back, or is left without a shortcut if that one is taken too).
-  **Restore Defaults** still resets them all.
-- **Field filters decide for the whole record.** A text-filter or search rule
-  bound to a *Log Fields* column now takes the field from the first line of
-  the record, and the record's other lines follow it: `Thread contains main`
-  keeps the stack traces of `main` records instead of hiding them, and an
-  **Exclude** rule hides a stack trace together with its record instead of
-  leaving it on screen. Rules on the entire row still work line by line.
-- **"Filter blocks" is now "Show selected fields only"** and is only about the
-  display. A rule bound to a column searches that field with the check box on
-  or off (before, with it off, such a rule quietly searched the whole row); a
-  rule on a column the tab's schema does not have is ignored and its card says
-  so. Saved sessions and tab states keep the old setting.
-- **Switching the field schema is instant on any log.** Fields are no longer
-  stored with every line: they are taken from the line text when a line is
-  shown, filtered, searched or exported. Picking another schema no longer
-  re-extracts fields of a large tab in the background (no "Applying field
-  schema…" progress), and a resident tab uses less memory.
-- **A field schema per tab.** The schema, **Show selected fields only** and the column
-  selection of the *Log Fields* panel now belong to the active tab: picking
-  "nginx access" for one tab no longer takes the columns away from the Spring
-  log next to it, and the panel follows the tab you switch to. A new tab gets
-  the schema chosen last. **Apply Schema to All Tabs** (the **All Tabs**
-  button next to **Manage…** and the **View** menu) does what changing the
-  schema used to do — the active tab's schema, check box and columns on every
-  tab. Text Filters and Search bind column rules to the schema of the tab they
-  are applied to. Sessions, `last-session.json` and **Reopen Closed Tab**
-  keep each tab's schema; file memory keeps the schema of a file that was
-  alone in its tab (applied when the file is opened again, if the schema is
-  still in the catalogue). Sessions of 0.6 open with their single schema on
-  every tab, and 0.6 reads new sessions with the active tab's schema.
+**A log splits into fields without setting anything up.** JSON Lines and
+logfmt logs are read by their keys as soon as they are opened, a field schema
+is picked for other logs from their lines, and a schema is now one line that
+looks like the log line — written by hand, worked out from the lines, found
+by *Find a Schema* (offline, or with an AI suggestion if you turn it on) and
+edited right on a sample line. Compressed logs and archives open directly,
+ANSI colour codes are drawn as colours instead of garbage, a command's output
+can be followed as a log, and merged tabs get file labels, a legend and a file
+filter. Before updating, see *Changed*: your field schemas are converted to
+line templates on the first start (the originals are kept), a schema is picked
+automatically when a log is opened, and `Ctrl+Shift+D` and `Space` are new
+default shortcuts.
 
 ### Added
 - **A field schema is picked when a log is opened.** After the first lines of
@@ -139,21 +32,27 @@ All notable changes to DendroLog are documented here. The format follows
   The saved state of a file and your own choice — “(none)” included — are
   never replaced. `Settings → General`: “Pick a field schema automatically
   when a log is opened” (on by default).
-- **Log Fields panel, reworked.** The schema list shows the share of the
-  tab's lines each schema parses, fitting schemas first, and a line
-  “Parsed 99.6% of 2300 record lines · 3 did not match”; **Edit…** opens the
-  schema editor, **⋯** holds Detect for This Tab, Apply Schema to All Tabs,
-  Find a Schema… and Manage Schemas…; “Show in the log: Whole line /
-  Selected fields” replaces the “Show selected fields only” check box. For a
-  JSON Lines or logfmt file the panel shows “JSON Lines · keys” with the keys
-  of the start of the file as check boxes (a checked key is a field) and
-  **Add Key…**; the file is not read again.
-- **Bookmarks in the Search panel.** A result line shows the ribbon of its
-  bookmark in the tab, its context menu has **Add Bookmark / Remove Bookmark**
-  and **Add Bookmark with Note… / Edit Bookmark Note…**, and `Ctrl+F2` with
-  the results focused bookmarks the tab line of the selected result. The
-  bookmark is the tab's: the log and the Bookmarks panel show it at once, and
-  a bookmark set or removed there shows in the results at once.
+- **JSON Lines and logfmt logs are understood when opened.** The format of a
+  file's lines is detected like its encoding: a log of JSON objects, one per
+  line (pino, Bunyan, Serilog CLEF, structlog, zap, ECS), or of `key=value`
+  pairs (logrus, Go slog, Loki, Prometheus) opens with the time, level and
+  message taken from its keys in any order and its keys as fields — no schema
+  to set up, whatever schema the tab has. The time may be a timestamp string
+  or an epoch number (seconds to nanoseconds, picked by size), the level a
+  word or a number (syslog 0–7, pino / Bunyan 10–60). They drive the level
+  buttons, the time filter, the timeline and the merge order of several
+  files, on both storage paths and in the *Directory Scanner*. Values are
+  shown, filtered and exported decoded (`\"`, `\\`, `\uXXXX`); a line that
+  is not a JSON object or logfmt pairs (a stack trace, indented pretty JSON)
+  continues the record above it; *Entry Details* lists every top-level key
+  under **Keys**. The status bar shows the format next to the encoding
+  ("JSON Lines (auto)"); click it to choose Plain text, JSON Lines, logfmt or
+  your own keys (**Keys…**) — the choice rereads the file, keeps the current
+  line in place and is remembered with the file, in sessions and by
+  `Ctrl+Shift+T`. In *Log Fields* such a file shows its keys as check boxes
+  (**Add Key…**). A file with fewer than 20 lines is read as plain text until
+  it grows (then it is read again once). Indexing a large JSON Lines or
+  logfmt file costs about the same as a plain log.
 - **Find a Schema.** `Tools → Find a Schema…` (and **Find…** in the *Log
   Fields* panel) offers ways to split the lines of the active tab into fields,
   each with the share of record lines it parses: the best schemas from your
@@ -179,120 +78,36 @@ All notable changes to DendroLog are documented here. The format follows
   is not stored in the ini file: Windows — encrypted with DPAPI; Linux — a
   file readable only by your user outside the settings folder (not saved in
   portable mode); `ANTHROPIC_API_KEY` takes precedence.
-- **Time delta.** `View → Time Delta` (off by default, `[View] timeDelta`)
-  adds a column after the line numbers with the time from the previous shown
-  line with a timestamp: `+250 ms`, `+1.234 s`, `+2 m 03 s`, `+5 h 07 m`,
-  `+3 d 04 h`. Under a filter it is measured between the shown lines; the
-  lines of a multi-line entry share its time, so only its first shown line
-  has a delta; a line earlier than the one above it gets `−`. **Set as Time
-  Zero** in a line's context menu (or `Ctrl+Shift+D`,
-  `View → Set / Clear Time Zero`) makes the column count from that line
-  instead — the same command on it clears it. The zero survives filters (a
-  hidden zero still counts), tail updates, reloads and the switch to the
-  large-file mode. **Entry Details** shows both deltas of the selected line.
-  Only the lines on screen are computed, from line metadata, so the column
-  costs nothing on a huge log.
-- **ANSI escape codes are hidden, their colors shown.** Logs written by
-  programs with a colored console — `docker logs`, `kubectl logs`, the output
-  of a command tab, Spring Boot, Serilog console, pino-pretty, npm — no longer
-  show `\x1b[31m`-style garbage. The codes are removed when a line is read,
-  on both storage paths and in the Directory Scanner, so quick search, Find
-  All, Text Filters, highlighters, field schemas, Entry Details, copying and
-  **Save View As** all see the plain text: `ERROR foo` finds a line where
-  `ERROR` is red, and a colored level word or a timestamp behind a color code
-  is recognized. The file on disk is not changed. The colors themselves
-  (16 and 256 colors, 24-bit, bold, italic, underline, dim, inverse) are
-  drawn in the log view, readable in the light and the dark theme; the
-  ordinary token coloring fills the uncolored parts. **View → ANSI Colors**
-  and **Settings → Appearance → Show ANSI colors** turn the colors off (the
-  codes stay hidden). Bookmarks and saved positions on lines that contain
-  escape codes, saved by an earlier version, are reported as not found.
-- **How many lines a field schema parses.** The schema editor (`Tools →
-  Field Schemas…`) shows under the preview the share of the sample lines the
-  edited schema parses — "Parsed 92% of 12 record lines · 1 did not match"
-  — and, when a log is open, the same on lines of the tab's file (its start
-  and lines spread over the whole file), recounted after each edit. Only
-  lines that start a record count: stack traces and other continuation lines
-  are not misses. A schema with a too heavy regular expression is reported as
-  too slow instead of freezing the window.
-- **A fitting schema from the list.** The **▾** arrow next to **Suggest
-  schema** offers first the schemas of the list that parse the open log (or
-  the preview lines) best, with their share of parsed lines; then the draft
-  built from the sample lines, as before.
+- **Edit a schema on a sample line.** In the schema editor, double-click a cell
+  of the sample table (or press `F2`), select part of its value and press
+  **Make Field** (`Ctrl+M`): the selection becomes a field. Where it ends is
+  decided by the lines, not guessed — the text right after it, its own form
+  (a number, an IP, a time…), a form that follows, a wide gap, a fixed column,
+  the same number of words or a closed set of values; the variant that parses
+  the most lines with the fewest different values wins, **Other Variant**
+  (`Ctrl+Shift+M`) shows the next one. When nothing in the lines tells where
+  the field ends, the editor says so and makes it a list of the selected value
+  (more values — **Add Value…**). The menu of a column header (also `Shift+F10`)
+  has **Ends at** with the result of every choice on the sample lines
+  ("after 2 words — words(2): 14 values · 100%"), **Rename…**, **Add Value…**,
+  **Merge with Next**, **Hide** and **Remove**; every edit is one undo step and
+  the template always stays valid.
 - **A field schema per file in a merged tab.** A tab with several files gets
   an **Applies to** line under the schema list of *Log Fields*: **All files**
   or one of the tab's files. Pick a file and the schema list shows and changes
-  the schema of that file only — an application log and an nginx access log,
-  or a regular log and a JSON Lines file, are each read with their own schema
-  in one merged tab. The tab's columns are the union of the files' columns by
+  the schema of that file only — an application log and an nginx access log
+  are each split with their own schema in one merged tab (a JSON Lines or
+  logfmt file keeps its keys). The tab's columns are the union of the files' columns by
   name; a line whose file has none of the shown columns is shown as the raw
   line, and a column rule on a column the line's file does not have does not
   match that line. When the files have different schemas, **All files** shows
   **(mixed)**; picking a schema for **All files** gives it to every file of
-  the tab. Changing the schema of one file rereads only that file when
-  timestamps, levels or record boundaries come from its keys (JSON Lines,
-  logfmt); bookmarks and the current line stay where they were. Merging tabs
+  the tab. Merging tabs
   keeps each file's schema, and so does a tab that switches to the indexed
   backend. Sessions, `last-session.json` and **Reopen Closed Tab** keep the
   schema of each file; file memory remembers the schema of a file of a
   merged tab — a file added to a tab gets its remembered schema, a file
   opened alone gets it as the tab's schema.
-- **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
-  as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name
-  the file `.csv` / `.jsonl`). Columns are the field columns the view shows
-  (all schema columns when it shows the raw line), plus `_time` (the row's
-  moment in ISO 8601 with the local offset) and, in a tab with several files,
-  `_file`. A line without recognised fields (a stack trace line) goes to the
-  **Message** column as raw text, and so does a line the schema matched
-  only in part, without its message. Values of JSON Lines and logfmt schemas are
-  written decoded. CSV follows RFC 4180 (comma, quotes only where needed, CRLF,
-  UTF-8 with a BOM so Excel reads it correctly); JSON Lines is one object per
-  line, UTF-8 without a BOM. The export runs in the background like before:
-  it can be cancelled, writes the view as it was at the start, and never
-  overwrites an open log.
-- **JSON Lines and logfmt.** New built-in field schemas **JSON Lines** (one
-  JSON object per line: pino, Bunyan, Serilog CLEF, structlog, zap, ECS) and
-  **logfmt** (`key=value` pairs: logrus, Go slog, Loki, Prometheus). With
-  such a schema the time, level and message come from keys in any
-  order: the time as a timestamp string or an epoch number (seconds to
-  nanoseconds, picked by size), the level as a word or a number (syslog 0–7,
-  pino / Bunyan 10–60, Python on request). They drive the level buttons, the
-  time filter, the timeline and the merge order of several files, on both
-  storage paths. Field values are shown and filtered decoded (`\"`, `\\`,
-  `\uXXXX`); a line that is not a JSON object or logfmt pairs (a stack trace,
-  indented pretty JSON) continues the record above it. The schema editor gets
-  a **Format** switch — `Blocks`, `JSON`, `logfmt` — with the time, level and
-  message keys, extra columns (**Add keys from sample**), the epoch unit and
-  the numeric level scale, previewed live on the sample lines; **Suggest
-  schema** proposes a key-based schema for JSON or logfmt lines. Schema files
-  stay at format version 3 (older versions read such a schema as a single
-  `Message` column and keep its key part when saving it). Picking a
-  key-based schema on a tab that is already open (or leaving one) rereads the
-  tab's files: the order,
-  moments, levels and records become what opening the file with that schema
-  gives, while the current line keeps its place on screen and bookmarks and
-  navigation history find their lines again. Entry Details lists every
-  top-level key of the line under **Keys**, not only the schema's columns.
-  Indexing a large JSON Lines or logfmt file with the schema costs about the
-  same as without it (within 10 %): a line is read only up to its time and
-  level keys. A bare logfmt timestamp (`ts=2026-11-18T10:00:00Z`) is read
-  from its key, not taken from the leftmost timestamp in the line.
-- **Command output as a growing log.** **File → Open Command Output…** runs
-  a command (`kubectl logs -f deploy/api`, `journalctl -f`, `adb logcat`) and
-  opens its output — stdout and stderr together, as in a terminal — in a tab
-  that follows the tail. The dialog takes the command line, the working
-  folder and keeps the recent commands. By default no shell is involved: one
-  program is started, arguments are split at spaces, double quotes group
-  them; **Run through the shell** (`/bin/sh -c`, `cmd.exe /c`) is needed for
-  pipes and redirection. A bar above the log shows the command and its state
-  (running with its PID, the exit code, or why it could not start) with
-  **Stop** and **Restart** (the new run is appended below); a finished
-  command is marked `■` in the tab name. The lines stay after the process
-  exits. Closing the tab stops the process — politely, then forcibly after a
-  few seconds, children of a shell pipeline included — and removes its
-  temporary output file. A command never runs by itself: a command tab is
-  not saved in sessions, the previous session, the file memory or the
-  closed-tab list.
 - **Compressed logs.** A `.gz` file opens in a tab like any log — from the
   Open dialog, a drop, the command line, Recent Files or the Directory
   Scanner; gzip is recognised
@@ -336,6 +151,57 @@ All notable changes to DendroLog are documented here. The format follows
   still opens in a tab. Links, devices and names that would leave the
   extraction folder are skipped, a damaged archive is reported and leaves no
   files; free disk space is checked before and while extracting.
+- **Compressed logs in the Directory Scanner.** `app.log.gz`, `app.log.1.gz`
+  and other `.gz` files whose name without `.gz` is a log are listed in the
+  tree. Entry counts, W/E/F, From / To and the content filter read them
+  decompressed on the fly (nothing is written to disk) and give the same
+  results as the uncompressed file, in every encoding; the content filter's
+  progress counts compressed bytes, Size shows the size on disk, a damaged
+  archive shows “Parse Failed”.
+- **ANSI escape codes are hidden, their colors shown.** Logs written by
+  programs with a colored console — `docker logs`, `kubectl logs`, the output
+  of a command tab, Spring Boot, Serilog console, pino-pretty, npm — no longer
+  show `\x1b[31m`-style garbage. The codes are removed when a line is read,
+  on both storage paths and in the Directory Scanner, so quick search, Find
+  All, Text Filters, highlighters, field schemas, Entry Details, copying and
+  **Save View As** all see the plain text: `ERROR foo` finds a line where
+  `ERROR` is red, and a colored level word or a timestamp behind a color code
+  is recognized. The file on disk is not changed. The colors themselves
+  (16 and 256 colors, 24-bit, bold, italic, underline, dim, inverse) are
+  drawn in the log view, readable in the light and the dark theme; the
+  ordinary token coloring fills the uncolored parts. **View → ANSI Colors**
+  and **Settings → Appearance → Show ANSI colors** turn the colors off (the
+  codes stay hidden). Bookmarks and saved positions on lines that contain
+  escape codes, saved by an earlier version, are reported as not found.
+- **Command output as a growing log.** **File → Open Command Output…** runs
+  a command (`kubectl logs -f deploy/api`, `journalctl -f`, `adb logcat`) and
+  opens its output — stdout and stderr together, as in a terminal — in a tab
+  that follows the tail. The dialog takes the command line, the working
+  folder and keeps the recent commands. By default no shell is involved: one
+  program is started, arguments are split at spaces, double quotes group
+  them; **Run through the shell** (`/bin/sh -c`, `cmd.exe /c`) is needed for
+  pipes and redirection. A bar above the log shows the command and its state
+  (running with its PID, the exit code, or why it could not start) with
+  **Stop** and **Restart** (the new run is appended below); a finished
+  command is marked `■` in the tab name. The lines stay after the process
+  exits. Closing the tab stops the process — politely, then forcibly after a
+  few seconds, children of a shell pipeline included — and removes its
+  temporary output file. A command never runs by itself: a command tab is
+  not saved in sessions, the previous session, the file memory or the
+  closed-tab list.
+- **Time delta.** `View → Time Delta` (off by default, `[View] timeDelta`)
+  adds a column after the line numbers with the time from the previous shown
+  line with a timestamp: `+250 ms`, `+1.234 s`, `+2 m 03 s`, `+5 h 07 m`,
+  `+3 d 04 h`. Under a filter it is measured between the shown lines; the
+  lines of a multi-line entry share its time, so only its first shown line
+  has a delta; a line earlier than the one above it gets `−`. **Set as Time
+  Zero** in a line's context menu (or `Ctrl+Shift+D`,
+  `View → Set / Clear Time Zero`) makes the column count from that line
+  instead — the same command on it clears it. The zero survives filters (a
+  hidden zero still counts), tail updates, reloads and the switch to the
+  large-file mode. **Entry Details** shows both deltas of the selected line.
+  Only the lines on screen are computed, from line metadata, so the column
+  costs nothing on a huge log.
 - **Time without a date.** Lines that start with a time only —
   `13:55:40.016 [main] INFO …` (Logback) and `[13:55:36 INF] …` (Serilog
   console) — now get a moment: they are ordered, filtered by time, drawn on
@@ -354,6 +220,9 @@ All notable changes to DendroLog are documented here. The format follows
   (double-click — default width); the width is remembered. On a tall wrapped
   line the name stays at the top of the screen. `View → File Labels`
   switches between Name, Color Only and Hidden.
+- **File legend** above a tab with several files: colour, name and line
+  count of each file; its context menu goes to the next / previous line of
+  the file, copies the path or shows the file in its folder.
 - **File filter.** Click a chip of the file legend to hide that file's lines
   and click again to bring them back; `Ctrl`+click shows only that file
   (again — all files). The last shown file cannot be hidden. A hidden file's
@@ -368,21 +237,140 @@ All notable changes to DendroLog are documented here. The format follows
   `Go to Line` takes; under a filter the numbers skip. On a tall wrapped
   line the number stays at the top of the screen; numbers are not selected
   or copied with the text.
-- **File legend** above a tab with several files: colour, name and line
-  count of each file; its context menu goes to the next / previous line of
-  the file, copies the path or shows the file in its folder.
 - **Wrap / Unwrap Current Line** in the `View` menu (`Space` while the log
   has the focus, can be reassigned in Settings). In a field or on a panel
   button `Space` keeps its usual meaning.
-- **Compressed logs in the Directory Scanner.** `app.log.gz`, `app.log.1.gz`
-  and other `.gz` files whose name without `.gz` is a log are listed in the
-  tree. Entry counts, W/E/F, From / To and the content filter read them
-  decompressed on the fly (nothing is written to disk) and give the same
-  results as the uncompressed file, in every encoding; the content filter's
-  progress counts compressed bytes, Size shows the size on disk, a damaged
-  archive shows “Parse Failed”.
+- **Bookmarks in the Search panel.** A result line shows the ribbon of its
+  bookmark in the tab, its context menu has **Add Bookmark / Remove Bookmark**
+  and **Add Bookmark with Note… / Edit Bookmark Note…**, and `Ctrl+F2` with
+  the results focused bookmarks the tab line of the selected result. The
+  bookmark is the tab's: the log and the Bookmarks panel show it at once, and
+  a bookmark set or removed there shows in the results at once.
+- **Export to CSV and JSON Lines.** **Save View As** writes the visible rows
+  as a table too: pick **CSV** or **JSON Lines** in the file dialog (or name
+  the file `.csv` / `.jsonl`). Columns are the field columns the view shows
+  (all schema columns when it shows the raw line), plus `_time` (the row's
+  moment in ISO 8601 with the local offset) and, in a tab with several files,
+  `_file`. A line without recognised fields (a stack trace line) goes to the
+  **Message** column as raw text, and so does a line the schema matched
+  only in part, without its message. Values of JSON Lines and logfmt files are
+  written decoded. CSV follows RFC 4180 (comma, quotes only where needed, CRLF,
+  UTF-8 with a BOM so Excel reads it correctly); JSON Lines is one object per
+  line, UTF-8 without a BOM. The export runs in the background like before:
+  it can be cancelled, writes the view as it was at the start, and never
+  overwrites an open log.
 
 ### Changed
+- **Field schemas are line templates, edited in a new schema editor.** A
+  schema is one line that looks like the log line:
+  `{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}` — text
+  stands as in the line, a field says where it ends by its kind (`time`,
+  `level`, `int`, `ip`, `quoted`, `word`, `of(a|b)`, `padded`, `width(N)`,
+  `words(N)`, `rest`, `/regex/`…); a template whose field end is not defined is
+  refused with an explanation. `Tools → Field Schemas…` opens a non-modal
+  editor: the template line with its error underlined in place, real lines of
+  the tab split into fields (each column header shows how many different
+  values it has, the tooltip the most frequent ones), the lines of the file
+  that did not match with the reason in words, the share of the file parsed,
+  *Find a Schema* as a panel, **Apply to Tab**, **Save**, **Save As…**, undo
+  and redo (`Ctrl+Z`), a question before closing with unsaved edits, and an
+  offer to rename a field in the filter rules and profiles that use it.
+  **New ▾** starts an empty schema, one from the sample lines, from a pasted
+  template or from a **Grok** expression. The built-in schemas are templates
+  (the two Syslog schemas are one now) and parse a line several times faster.
+- **Your schemas are converted on the first start.** Each schema file of the
+  earlier (block) format becomes a template under the same file name, with its
+  description and unknown keys; the original is kept in
+  `patterns/converted-from-v3/`. Untouched built-in schemas are replaced by the
+  new templates, ones you changed are converted like your own. Schemas saved in
+  sessions, file memory and `last-session.json` are read through the same
+  conversion, so a tab gets the same fields; the presets of the old editor
+  become schemas of the list. The two built-in Syslog schemas (ISO and
+  RFC 3164) are one schema, **Syslog**, now; a tab that used either gets it. Column names stay the same, so filter rules on
+  them keep working. On lines a schema does not describe the result may differ
+  from before: a template stops at the first mismatch and gives the rest of the
+  line to the last field.
+- **Opening a log may set its field schema.** The automatic pick (see
+  *Added*) is on by default. It only acts on a tab whose schema is still the
+  default one: a schema you chose, “(none)” included, and one restored from a
+  session, `last-session.json`, file memory or **Reopen Closed Tab** stays.
+  Turn it off in `Settings → General`.
+- **Log Fields panel, reworked.** The schema list shows the share of the
+  tab's lines each schema parses, fitting schemas first, and a line
+  “Parsed 99.6% of 2300 record lines · 3 did not match”; **Edit…** opens the
+  schema editor, **⋯** holds Detect for This Tab, Apply Schema to All Tabs,
+  Find a Schema… and Manage Schemas…; “Show in the log: Whole line /
+  Selected fields” replaces the **Filter blocks** check box and is only about
+  the display: a rule bound to a column searches that field either way
+  (before, with the box off, such a rule quietly searched the whole row), and
+  a rule on a column the tab's schema does not have is ignored and its card
+  says so. For a
+  JSON Lines or logfmt file the panel shows “JSON Lines · keys” with the keys
+  of the start of the file as check boxes (a checked key is a field) and
+  **Add Key…**; the file is not read again.
+- **A field schema per tab.** The schema, **Show in the log** and the column
+  selection of the *Log Fields* panel now belong to the active tab: picking
+  "nginx access" for one tab no longer takes the columns away from the Spring
+  log next to it, and the panel follows the tab you switch to. A new tab gets
+  the schema chosen last. **Apply Schema to All Tabs** (the **All Tabs**
+  button next to **Manage…** and the **View** menu) does what changing the
+  schema used to do — the active tab's schema, display and columns on every
+  tab. Text Filters and Search bind column rules to the schema of the tab they
+  are applied to. Sessions, `last-session.json` and **Reopen Closed Tab**
+  keep each tab's schema; file memory keeps the schema of a file that was
+  alone in its tab (applied when the file is opened again, if the schema is
+  still in the catalogue). Sessions of 0.6 open with their single schema on
+  every tab, and 0.6 reads new sessions with the active tab's schema.
+- **Switching the field schema is instant on any log.** Fields are no longer
+  stored with every line: they are taken from the line text when a line is
+  shown, filtered, searched or exported. Picking another schema no longer
+  re-extracts fields of a large tab in the background (no "Applying field
+  schema…" progress), and a resident tab uses less memory.
+- **A field schema no longer changes how a file is read.** Record boundaries,
+  timestamps and levels come from the line format only; picking or changing a
+  schema never rereads a file. A schema that recognised record starts no
+  timestamp or level word could find (a rare custom format) no longer does.
+- **Field filters decide for the whole record.** A text-filter or search rule
+  bound to a *Log Fields* column now takes the field from the first line of
+  the record, and the record's other lines follow it: `Thread contains main`
+  keeps the stack traces of `main` records instead of hiding them, and an
+  **Exclude** rule hides a stack trace together with its record instead of
+  leaving it on screen. Rules on the entire row still work line by line.
+- **Logs without timestamps split at the level word.** In a plain log almost
+  without timestamps where most lines start with a level word
+  (`WARNING:root:…`, `[INFO] …`), such a line starts a record, so a Python
+  traceback stays with its entry — without a schema. A line like
+  `ERROR: detail` in the middle of an entry of a log with timestamps still
+  does not break it.
+- **Slow field schemas no longer slow down the log.** The fields of a line
+  template with a `/regular expression/` are computed in the background: lines
+  show in full at once and switch to the selected columns as soon as their
+  fields are ready, scrolling and selecting never wait, and *Entry Details*
+  says "Computing fields…" meanwhile. A field filter with such a schema always
+  runs in the background, on small logs too. The selected line stays where it
+  is on screen when the fields arrive.
+- **New default shortcuts:** `Ctrl+Shift+D` — Set / Clear Time Zero,
+  `Space` — Wrap / Unwrap Current Line (only while the log has the focus); in
+  the schema editor `F2`, `Ctrl+M`, `Ctrl+Shift+M` and `Shift+F10`. **Your
+  shortcut stays yours:** a key you had already given to another command
+  stays with it, and the new command gets no shortcut.
+- **Settings show a default shortcut you gave to another command.** When a
+  command's default shortcut is already yours for another command (for
+  example, a key you assigned before the command existed), the key stays with
+  your command and the field of the new one is empty with a note under it:
+  "Default Alt+Left is assigned to “Go to line or time…”". A ↺ button next to
+  any field that differs from its default restores that one default; its
+  tooltip says what happens to the command that had the key (it gets its own
+  default back, or is left without a shortcut if that one is taken too).
+  **Restore Defaults** still resets them all.
+- **New settings in `DendroLog.ini`:** `[App] autoPickSchema`,
+  `[SchemaByName] entries` (the schema you chose for a file name),
+  `[View] ansiColors`, `timeDelta`, `lineNumbers`, `fileLabels`,
+  `fileColumnChars`, `[AI] enabled`, `[AI] model` and `[Commands] recent`
+  (recent commands); the API key is never stored there. `[PatternPresets]`
+  is moved to the schema list and removed. Going back to 0.6.0: it ignores
+  the new keys but does not read template schemas — the originals of your
+  schemas are in `patterns/converted-from-v3/`.
 - The spool of standard input (`program | DendroLog -`) lives in the same
   temporary folder as unpacked archives, so files left behind by a crash are
   removed at the next start; merging a stdin tab into another tab keeps it
@@ -406,6 +394,13 @@ All notable changes to DendroLog are documented here. The format follows
   select the line and show its full text in the **Entry Details** panel
   instead of doing nothing.
 
+### Removed
+- The block schema editor (*Manage Field Schemas* with block cards and
+  separators), schema presets in the INI file and the draft schema from a
+  single line (**Suggest schema** and its **▾** list of fitting schemas): use
+  **New ▾ → From Sample Lines**, *Find a Schema* or the schema picked when a
+  log is opened.
+
 ### Fixed
 - **Grey captions follow a theme change.** In a window left open while
   switching between the light and dark theme (for example *Find a Schema*),
@@ -419,12 +414,6 @@ All notable changes to DendroLog are documented here. The format follows
   the same gaps below and above the large-file threshold. The first occurrence
   of a message template (its example and the jump to it) is now the earliest
   one in time as well.
-- **Colored console logs with time-only timestamps past midnight.** In a log
-  like `ESC[2m13:55:36 INFO …` (the time behind a color code) the days were
-  counted back from the file's modification time without seeing the
-  midnights, so every line could get the wrong date. The colored log now gets
-  the same dates as the same log without colors, on any file size and after
-  an append.
 - **Timeline and Statistics on a large file whose timestamps go back and
   forth.** A file opened alone above the index threshold (512 MB) is shown in
   file order, and the time scale used to run from its first to its last
@@ -437,25 +426,10 @@ All notable changes to DendroLog are documented here. The format follows
   The first and last time of a file in *Statistics* are its earliest and
   latest timestamps too. A time filter set far outside years 1–9999 no longer
   breaks the timeline scale.
-- **Go to Next / Previous Line of This File** (right-click a chip of the
-  file legend) no longer freezes the window on a huge merged tab when the
-  file is small or its next line is far away: above a million shown lines
-  the line is looked for in the background, like **F8** (progress in the
-  status bar). If the tab changes while it looks (a filter, a reload, the
-  next portion of a loading file), the search starts over by itself; a line
-  you pick yourself meanwhile wins. The search results of a merged tab
-  show the same file labels and colours as the tab, even when all matches
-  come from one file.
 - Standard input (`program | DendroLog -`): lines that arrived in one burst
   after which the program went quiet did not show up until it wrote more
   (or exited) — they waited in a write buffer of the spool file. They now
   reach the spool at once and show up with the tab's next refresh.
-- While a new field schema was being applied to a large tab in the
-  background, ticking a block in **Log Fields** showed the new columns over
-  the old fields (and Save View As started then could read the fields while
-  they were replaced); the blocks now come back when the schema is applied.
-- The progress bar of a schema being applied stayed on screen when
-  **Filter blocks** was turned off before it finished.
 - File colours were missing (all grey) on a merged tab of large files.
 - Lines over 10 000 hidden characters lost a few characters at the edge
   that `+N` did not count.

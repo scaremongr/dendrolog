@@ -20,6 +20,9 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "builtinschemas.h"
+#include "fieldlayout.h"
+#include "fieldschemacontroller.h"
 #include "builtinsamples.h"
 #include "apptheme.h"
 #include "commandspooler.h"
@@ -53,6 +56,7 @@
 #include "gzipbytes.h"
 #include "tarbytes.h"
 #include "zipbytes.h"
+#include "v3schema.h"
 #include "directoryscannerpanel.h"
 #include "archiveregistry.h"
 #include "updatechecker.h"
@@ -2685,6 +2689,351 @@ void scenarioUpgradeFrom050(const QDir& root)
 }
 
 // ---------------------------------------------------------------------------
+// Обновление с 0.6.0 (F-17, шаг 9 — главный риск выпуска 0.7.0): каталог
+// настроек, каким его оставила 0.6.0. В patterns/ — встроенные блочные схемы
+// 0.6.0 с их манифестом и своя блочная схема версии 3; в ini она выбрана,
+// там же свои сочетания (Ctrl+Shift+D и Space, ставшие в 0.7 умолчаниями
+// новых команд), тёмная тема, недавние файлы и восстановление сеанса; в
+// memory/ — закладки файла; last-session.json — вкладка с этой блочной схемой.
+// Память и сеанс пишет нынешняя версия, затем они приводятся к виду 0.6.0:
+// без ключей, которых 0.6.0 не знала, со схемой сеанса версии 3.
+// Ожидания: окно без диалога, каталог переведён (оригиналы — в
+// converted-from-v3/), выбранная схема выбрана шаблоном и даёт те же поля,
+// сеанс восстановлен с ними, закладки памяти на своих строках, сочетания
+// пользователя у его команд и без неоднозначностей, подбор при открытии
+// схему сохранённого состояния не оспаривает, выход пишет ini без потерь.
+
+// Поля строк вкладки против разбора строк фикстуры (Timestamp [Thread] Level -
+// Message) — то, что давала блочная схема 0.6.0 (v3schema::fixtureDefinition).
+bool fixtureFieldsAsBefore(LogViewWidget* tab, QString* why)
+{
+    static const QRegularExpression re(
+        QStringLiteral(R"(^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) \[([^\]]*)\] (\w+) - (.*)$)"));
+    static const QStringList names = {QStringLiteral("Timestamp"), QStringLiteral("Thread"),
+                                      QStringLiteral("Level"), QStringLiteral("Message")};
+    LogModel* model = tab->model();
+    const QStringList columns = model->availableFields();
+    int checked = 0;
+    for (int row = 0; row < model->rowCount() && checked < 200; ++row) {
+        const std::shared_ptr<LogEntry> e = model->entryAt(row);
+        const QRegularExpressionMatch m = e ? re.match(e->message()) : QRegularExpressionMatch();
+        if (!m.hasMatch())
+            continue;
+        const LogEntryFields fields = model->fieldsOf(*e);
+        for (int i = 0; i < names.size(); ++i) {
+            const int c = int(columns.indexOf(names[i]));
+            const QString got = c >= 0 ? fields.value(c, e->message()) : QStringLiteral("<no column>");
+            if (got != m.captured(i + 1)) {
+                *why = QStringLiteral("line %1, %2: \"%3\", expected \"%4\" (columns %5)")
+                           .arg(e->originalLineNumber()).arg(names[i], got, m.captured(i + 1),
+                                                              columns.join(QLatin1Char(',')));
+                return false;
+            }
+        }
+        ++checked;
+    }
+    *why = QStringLiteral("%1 lines checked").arg(checked);
+    return checked > 0;
+}
+
+// Ключи, которых 0.6.0 не писала (F-5, F-17, U-23), — прочь; вложенная
+// схема (схема файла вкладки) — тоже: в 0.6.0 схема была одна на окно.
+void stripTo060(QJsonObject& o, int depth = 0)
+{
+    for (const char* key : {"fields", "origin", "hiddenFiles", "lineFormat"})
+        o.remove(QLatin1String(key));
+    if (depth > 0)
+        o.remove(QStringLiteral("schema"));
+    for (auto it = o.begin(); it != o.end(); ++it) {
+        if (it->isObject()) {
+            QJsonObject child = it->toObject();
+            stripTo060(child, depth + 1);
+            *it = child;
+        } else if (it->isArray()) {
+            QJsonArray array = it->toArray();
+            for (int i = 0; i < array.size(); ++i) {
+                if (!array[i].isObject())
+                    continue;
+                QJsonObject child = array[i].toObject();
+                stripTo060(child, depth + 1);
+                array[i] = child;
+            }
+            *it = array;
+        }
+    }
+}
+
+bool rewriteJson(const QString& from, const QString& to, const std::function<void(QJsonObject&)>& edit)
+{
+    QFile in(from);
+    if (!in.open(QIODevice::ReadOnly))
+        return false;
+    QJsonObject o = QJsonDocument::fromJson(in.readAll()).object();
+    if (o.isEmpty())
+        return false;
+    edit(o);
+    QFile out(to);
+    return out.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        && out.write(QJsonDocument(o).toJson()) > 0;
+}
+
+void scenarioUpgradeFrom060(const QDir& root)
+{
+    section(QStringLiteral("upgrade from 0.6.0"));
+    const QDir dir(root.filePath(QStringLiteral("upgrade-060")));
+    QDir().mkpath(dir.absolutePath());
+    const QString logA = testdocs::writeFile(dir, QStringLiteral("app.log"),
+        testdocs::makeLogBytes(300, 61, "\n", testdocs::fixtureBaseTime(), false, true, true));
+    const QString logB = testdocs::writeFile(dir, QStringLiteral("worker.log"),
+        testdocs::makeLogBytes(300, 62, "\n", testdocs::fixtureBaseTime(), false, true, true));
+    const QString mySchemaName = QStringLiteral("My App");
+    const QJsonObject mySchema = v3schema::object({
+        {QStringLiteral("timestamp"), QStringLiteral("Timestamp")},
+        {QStringLiteral("text"), QStringLiteral("Thread"), QStringLiteral("["), QStringLiteral("]")},
+        {QStringLiteral("level"), QStringLiteral("Level"), QString(), QString(), QStringLiteral("-")},
+        {QStringLiteral("remainder"), QStringLiteral("Message")},
+    });
+    const QString myDefinition = QString::fromUtf8(QJsonDocument(mySchema).toJson(QJsonDocument::Compact));
+
+    // Память файла и сеанс: закладки на строке 40 у обоих файлов; вкладка
+    // worker.log закрыта до выхода — сеанс несёт только app.log.
+    std::map<QString, qint64> bookmarkLine;
+    const QString probe = dir.filePath(QStringLiteral("probe-config"));
+    {
+        AppSettings::overrideConfigDirForTesting(probe);
+        AppSettings::instance().load();
+        MainWindow win;
+        showWindow(win);
+        win.startUp(OpenRouting::parseCommandLine({}), /*primary=*/true); // первичное пишет сеанс
+        win.openCommandLine(OpenRouting::parseCommandLine({logA}));
+        win.openCommandLine(OpenRouting::parseCommandLine({logB}));
+        check(waitFor([&]() { return tabs(win)->count() == 2; }) && waitAllLoaded(win),
+              QStringLiteral("0.6.0 state: two logs open (%1)").arg(describeTabs(win)));
+        for (int i = 0; i < tabs(win)->count(); ++i) {
+            tabs(win)->setCurrentIndex(i);
+            LogViewWidget* tab = tabAt(win, i);
+            tab->view()->goToRow(tab->model()->rowCount() / 3);
+            pressCommand(win, QStringLiteral("toggleBookmark"));
+            check(waitFor([&]() { return tab->bookmarks().count() == 1; }, 5000),
+                  QStringLiteral("0.6.0 state: bookmark %1").arg(i));
+            if (tab->bookmarks().count() == 1)
+                bookmarkLine[QFileInfo(tab->bookmarks().bookmarks().first().filePath).fileName()] =
+                    tab->bookmarks().bookmarks().first().line;
+        }
+        tabs(win)->setCurrentIndex(1);
+        pressCommand(win, QStringLiteral("closeTab"));
+        check(waitFor([&]() { return tabs(win)->count() == 1; }), QStringLiteral("0.6.0 state: worker.log closed"));
+        pressCommand(win, QStringLiteral("quit"));
+        check(waitFor([&]() { return !win.isVisible(); }, 10000), QStringLiteral("0.6.0 state: window closes"));
+    }
+    check(bookmarkLine.size() == 2, QStringLiteral("0.6.0 state: bookmarks on both files"));
+
+    const QString config = dir.filePath(QStringLiteral("config"));
+    AppSettings::overrideConfigDirForTesting(config);
+    const QDir configDir(config);
+    const QString patterns = configDir.filePath(QStringLiteral("patterns"));
+    QDir().mkpath(configDir.filePath(QStringLiteral("memory")));
+    {
+        const QDir probeMemory(QDir(probe).filePath(QStringLiteral("memory")));
+        const QStringList memories = probeMemory.entryList({QStringLiteral("*.json")}, QDir::Files);
+        check(memories.size() == 2, QStringLiteral("0.6.0 state: two file memories (%1)").arg(memories.join(' ')));
+        for (const QString& m : memories)
+            check(rewriteJson(probeMemory.filePath(m), configDir.filePath(QStringLiteral("memory/") + m),
+                              [](QJsonObject& o) { stripTo060(o); }),
+                  QStringLiteral("0.6.0 file memory %1 is written").arg(m));
+        check(rewriteJson(QDir(probe).filePath(QStringLiteral("last-session.json")), AppSettings::lastSessionFile(),
+                          [&](QJsonObject& o) {
+                              stripTo060(o);
+                              QJsonObject schema;
+                              schema.insert(QStringLiteral("name"), mySchemaName);
+                              schema.insert(QStringLiteral("definition"), mySchema);
+                              o.insert(QStringLiteral("schema"), schema);
+                              o.insert(QStringLiteral("fieldExtraction"), true);
+                          }),
+              QStringLiteral("0.6.0 last-session.json is written"));
+    }
+    // patterns/: встроенные 0.6.0 со своим манифестом и своя блочная схема.
+    {
+        const BuiltinSchemas::InstallReport r =
+            BuiltinSchemas::install(QStringLiteral(DENDROLOG_V3_PATTERNS_DIR), patterns);
+        check(r.errors.isEmpty() && r.installed.size() == 10, QStringLiteral("0.6.0 built-in schemas are installed"));
+        QJsonObject file = mySchema;
+        file.insert(QStringLiteral("name"), mySchemaName);
+        QFile f(QDir(patterns).filePath(QStringLiteral("my-app.json")));
+        check(f.open(QIODevice::WriteOnly) && f.write(QJsonDocument(file).toJson()) > 0,
+              QStringLiteral("0.6.0 own schema file is written"));
+    }
+    const QByteArray myFileBytes = [&] {
+        QFile f(QDir(patterns).filePath(QStringLiteral("my-app.json")));
+        return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+    }();
+    {
+        // Ключи, которые писала 0.6.0 (AppSettings::save, MainWindow::saveSettings).
+        QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("App"));
+        s.setValue(QStringLiteral("theme"), QStringLiteral("dark"));
+        s.setValue(QStringLiteral("fontSize"), 11);
+        s.setValue(QStringLiteral("rememberFileState"), true);
+        s.setValue(QStringLiteral("restoreSessionOnStartup"), true);
+        s.setValue(QStringLiteral("fallbackEncoding"), QStringLiteral("Windows-1251"));
+        s.endGroup();
+        s.beginGroup(QStringLiteral("View"));
+        s.setValue(QStringLiteral("conversionPattern"), myDefinition);
+        s.setValue(QStringLiteral("schemaOrder"), QStringList{mySchemaName, QStringLiteral("Logback / Log4j")});
+        s.setValue(QStringLiteral("fieldFilterEnabled"), true);
+        s.setValue(QStringLiteral("fieldVisibleNames"), QStringList{QStringLiteral("Level"), QStringLiteral("Message")});
+        s.endGroup();
+        s.beginGroup(QStringLiteral("RecentFiles"));
+        s.setValue(QStringLiteral("files"), QStringList{logA, logB});
+        s.endGroup();
+        // Клавиши, которые пользователь 0.6.0 отдал своим командам и которые
+        // в 0.7 стали умолчаниями новых: Ctrl+Shift+D (time zero), Space
+        // (перенос текущей строки).
+        s.beginGroup(QStringLiteral("Shortcuts"));
+        s.setValue(QStringLiteral("goTo"), QStringLiteral("Ctrl+Shift+D"));
+        s.setValue(QStringLiteral("followTail"), QStringLiteral("Space"));
+        s.endGroup();
+    }
+    AppSettings::instance().load();
+    check(AppSettings::instance().themeMode() == ThemeMode::Dark, QStringLiteral("0.6.0 theme choice is kept"));
+    check(AppSettings::instance().restoreSessionOnStartup(), QStringLiteral("0.6.0 restore on startup is kept"));
+
+    const int dialogsBefore = g_driver->closedByDefault().size();
+    {
+        MainWindow win;
+        showWindow(win);
+        win.startUp(OpenRouting::parseCommandLine({}), /*primary=*/true);
+        check(g_driver->closedByDefault().size() == dialogsBefore,
+              QStringLiteral("0.6.0 settings open without a dialog: %1")
+                  .arg(g_driver->closedByDefault().mid(dialogsBefore).join(QStringLiteral("; "))));
+
+        // Каталог переведён: свои схемы — шаблоны, оригинал — в converted-from-v3/.
+        const QDir converted(QDir(patterns).filePath(QStringLiteral("converted-from-v3")));
+        QFile original(converted.filePath(QStringLiteral("my-app.json")));
+        check(original.open(QIODevice::ReadOnly) && original.readAll() == myFileBytes,
+              QStringLiteral("the 0.6.0 schema file is kept byte for byte in converted-from-v3/"));
+        bool myConverted = false, logbackTemplate = false, syslogOne = false;
+        for (const SchemaStore::SchemaEntry& e : SchemaStore::loadAll()) {
+            if (e.name == mySchemaName)
+                myConverted = FieldLayout::isTemplateDefinition(e.schema);
+            if (e.fileName == QLatin1String("logback.json"))
+                logbackTemplate = FieldLayout::isTemplateDefinition(e.schema);
+            if (e.fileName == QLatin1String("syslog.json"))
+                syslogOne = true;
+        }
+        check(myConverted, QStringLiteral("the own schema is a line template"));
+        check(logbackTemplate, QStringLiteral("an untouched built-in schema is the new template"));
+        check(syslogOne && !QFile::exists(QDir(patterns).filePath(QStringLiteral("syslog-iso.json")))
+                  && !QFile::exists(QDir(patterns).filePath(QStringLiteral("syslog-rfc3164.json"))),
+              QStringLiteral("the two 0.6.0 syslog schemas are one now"));
+        check(converted.entryList({QStringLiteral("*.json")}, QDir::Files).size() == 1,
+              QStringLiteral("only the own schema needed a conversion copy: %1")
+                  .arg(converted.entryList({QStringLiteral("*.json")}, QDir::Files).join(' ')));
+
+        // Сеанс восстановлен: вкладка app.log с выбранной схемой, теми же полями
+        // и своей закладкой.
+        check(waitFor([&]() { return tabs(win)->count() == 1; }) && waitAllLoaded(win),
+              QStringLiteral("the 0.6.0 session is restored (%1)").arg(describeTabs(win)));
+        LogViewWidget* restored = tabs(win)->count() > 0 ? tabAt(win, 0) : nullptr;
+        if (restored) {
+            const FieldSettings fs = restored->fieldSettings();
+            check(fs.schemaName == mySchemaName && FieldLayout::isTemplateDefinition(fs.schema) && fs.showFields,
+                  QStringLiteral("the restored tab has the 0.6.0 schema as a template (%1, show %2)")
+                      .arg(fs.schemaName).arg(fs.showFields));
+            QString why;
+            check(fixtureFieldsAsBefore(restored, &why),
+                  QStringLiteral("the restored tab gives the 0.6.0 fields: %1").arg(why));
+            check(tabBookmarks(win).value(0).contains(
+                      QStringLiteral("app.log:%1").arg(bookmarkLine[QStringLiteral("app.log")])),
+                  QStringLiteral("the session bookmark is on its line: %1").arg(describeTabs(win)));
+        }
+        check(!statusText(win).contains(QLatin1String("rror")),
+              QStringLiteral("no error in the status bar: %1").arg(statusText(win)));
+
+        // Схема по умолчанию в доке — своя, выбрана.
+        bool schemaSelected = false;
+        for (QComboBox* combo : win.findChildren<QComboBox*>())
+            if (combo->findText(mySchemaName) >= 0)
+                schemaSelected = combo->currentText() == mySchemaName;
+        check(schemaSelected, QStringLiteral("the 0.6.0 schema is listed and still selected"));
+
+        // Память файла: worker.log открывается с закладкой на своей строке.
+        win.openCommandLine(OpenRouting::parseCommandLine({logB}));
+        check(waitFor([&]() { return tabs(win)->count() == 2; }) && waitAllLoaded(win),
+              QStringLiteral("worker.log opens after the upgrade"));
+        const qint64 workerLine = bookmarkLine[QStringLiteral("worker.log")];
+        check(waitFor([&]() {
+                  const QVector<QSet<QString>> marks = tabBookmarks(win);
+                  return marks.size() == 2 && marks[1].contains(QStringLiteral("worker.log:%1").arg(workerLine));
+              }, 10000),
+              QStringLiteral("the file memory bookmark is on its line (%1): %2").arg(workerLine).arg(describeTabs(win)));
+        // Подбор при открытии не оспаривает схему сохранённого состояния.
+        auto* controller = win.findChild<FieldSchemaController*>();
+        check(controller != nullptr, QStringLiteral("the window has a schema controller"));
+        if (controller && restored) {
+            // Задание подбора стоит в очереди после первой порции: ждать его
+            // итога (покрытие вкладки известно), а не только «не идёт».
+            check(waitFor([&]() {
+                      return tabs(win)->count() == 2 && controller->coverageOf(restored)
+                          && controller->coverageOf(tabAt(win, 1)) && !controller->isPicking(restored)
+                          && !controller->isPicking(tabAt(win, 1));
+                  }),
+                  QStringLiteral("auto pick settles"));
+            testdocs::settleIdle(*restored->model(), [&]() { return controller->isPicking(restored); });
+            check(restored->fieldSettings().schemaName == mySchemaName
+                      && restored->fieldSettings().origin == FieldSettings::Origin::User,
+                  QStringLiteral("auto pick keeps the schema of the saved state (%1)")
+                      .arg(restored->fieldSettings().schemaName));
+        }
+        if (tabs(win)->count() == 2) {
+            QString why;
+            check(fixtureFieldsAsBefore(tabAt(win, 1), &why),
+                  QStringLiteral("a log opened after the upgrade gets the fields (%1): %2")
+                      .arg(tabAt(win, 1)->fieldSettings().schemaName, why));
+        }
+
+        // Сочетания: свои — у своих команд, новые команды без клавиши.
+        const auto keyOf = [&](const char* id) {
+            QAction* a = command(win, QString::fromLatin1(id));
+            return a ? a->shortcut().toString(QKeySequence::PortableText) : QStringLiteral("<no action>");
+        };
+        const std::pair<const char*, const char*> expected[] = {
+            {"goTo", "Ctrl+Shift+D"}, {"timeZero", ""},
+            {"followTail", "Space"}, {"toggleLineWrap", ""},
+            {"toggleBookmark", "Ctrl+F2"}, {"reopenTab", "Ctrl+Shift+T"},
+        };
+        for (const auto& [id, key] : expected)
+            check(keyOf(id) == QLatin1String(key), QStringLiteral("after the upgrade %1 is \"%2\" (got \"%3\")")
+                                                     .arg(QLatin1String(id), QLatin1String(key), keyOf(id)));
+        checkShortcutAmbiguity(win, QStringLiteral("upgrade from 0.6.0"));
+
+        pressCommand(win, QStringLiteral("quit"));
+        check(waitFor([&]() { return !win.isVisible(); }, 10000), QStringLiteral("window closes"));
+    }
+    QSettings s(AppSettings::iniFilePath(), QSettings::IniFormat);
+    check(s.value(QStringLiteral("Shortcuts/goTo")).toString() == QLatin1String("Ctrl+Shift+D")
+              && s.value(QStringLiteral("Shortcuts/followTail")).toString() == QLatin1String("Space")
+              && !s.contains(QStringLiteral("Shortcuts/timeZero"))
+              && !s.contains(QStringLiteral("Shortcuts/toggleLineWrap")),
+          QStringLiteral("the user's shortcuts are saved back unchanged"));
+    check(s.value(QStringLiteral("App/theme")).toString() == QLatin1String("dark")
+              && s.value(QStringLiteral("App/fontSize")).toInt() == 11
+              && s.value(QStringLiteral("App/restoreSessionOnStartup")).toBool()
+              && s.value(QStringLiteral("App/fallbackEncoding")).toString() == QLatin1String("Windows-1251"),
+          QStringLiteral("0.6.0 [App] values are saved back unchanged"));
+    const QString savedDefault = s.value(QStringLiteral("View/conversionPattern")).toString();
+    check(FieldLayout::isTemplateDefinition(savedDefault)
+              && s.value(QStringLiteral("View/schemaOrder")).toStringList().contains(mySchemaName)
+              && s.value(QStringLiteral("View/fieldVisibleNames")).toStringList()
+                     == QStringList({QStringLiteral("Level"), QStringLiteral("Message")}),
+          QStringLiteral("the default schema is saved back as a template with its columns: %1").arg(savedDefault));
+    check(s.value(QStringLiteral("RecentFiles/files")).toStringList().contains(logA),
+          QStringLiteral("0.6.0 recent files are kept"));
+    check(QFile::exists(QDir(patterns).filePath(QStringLiteral("converted-from-v3/my-app.json"))),
+          QStringLiteral("the conversion copy stays after exit"));
+}
+
+// ---------------------------------------------------------------------------
 // Вывод команды (F-7): File → Open Command Output…, диалог, вкладка-поток,
 // код возврата на плашке и в имени вкладки, недавние команды, закрытие
 // вкладки завершает процесс и убирает спул. Команда — сам этот exe в режиме
@@ -5179,6 +5528,8 @@ int main(int argc, char** argv)
             runBackend(QDir(root.path()), indexed, instanceKey);
     if (only.isEmpty() || only == QLatin1String("upgrade"))
         scenarioUpgradeFrom050(QDir(root.path()));
+    if (only.isEmpty() || only == QLatin1String("upgrade"))
+        scenarioUpgradeFrom060(QDir(root.path()));
     if (only.isEmpty() || only == QLatin1String("separate"))
         scenarioSeparateWindowFirst(QDir(root.path()), instanceKey);
     for (const bool indexed : {false, true})

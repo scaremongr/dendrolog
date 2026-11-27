@@ -1903,6 +1903,9 @@ static void checkSchemasFormat()
         CHECK(top.schema == kGoldenSchema && top.schemaName == QStringLiteral("Spring Boot") && top.showFields
                   && top.visibleFields == (QStringList{ QStringLiteral("Level"), QStringLiteral("Message") }),
               QStringLiteral("схема верхнего уровня"));
+        // Схема сессии 0.6 — выбор пользователя: подбор при открытии (F-17,
+        // шаг 8) её не оспаривает (найдено в сценарии обновления с 0.6.0).
+        CHECK(top.origin == FieldSettings::Origin::User, QStringLiteral("схема верхнего уровня — выбор пользователя"));
     }
 
     // ViewState.fields: круговой проход и отказ на битом.

@@ -5,8 +5,9 @@
 <h1 align="center">DendroLog</h1>
 
 <p align="center">
-  <b>A fast desktop viewer for log files</b> — multi-file tabs, structured field
-  extraction, filtering, highlighting, live reload, bookmarks and sessions.
+  <b>A fast desktop viewer for log files</b> — multi-file tabs, fields without
+  setup (line templates, JSON Lines, logfmt), compressed logs and archives,
+  filtering, highlighting, live reload, bookmarks and sessions.
   For Windows and Linux.
 </p>
 
@@ -25,7 +26,9 @@
 - **Multi-file tabs** — open several files into one tab, merged by timestamp.
   ISO, syslog, nginx / Apache access and nginx error timestamps are read with
   their time zone; a line that opens with a timestamp starts a new entry, so
-  plain logs split into entries without any setup.
+  plain logs split into entries without any setup. Each line shows its file
+  as a coloured stripe and label; the legend above the log counts lines per
+  file and hides or shows a file with one click.
 - **Huge files** — multi-gigabyte logs open without being loaded into RAM: a
   compact line index (~10 bytes per line) keeps scrolling, filtering and
   search responsive while the text stays on disk.

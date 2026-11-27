@@ -235,10 +235,14 @@ struct SessionState {
     bool hasSchema() const { return !schema.isEmpty(); }
     // Схема верхнего уровня как схема вкладки (F-5): её получает вкладка
     // снимка без своей (сессии 0.6). Верхний уровень пишется по активной
-    // вкладке — его прочитает 0.6.
+    // вкладке — его прочитает 0.6. Схема снимка — выбор пользователя
+    // (F-17, шаг 8): подбор при открытии её не оспаривает, как и схему
+    // вкладки без ключа origin.
     FieldSettings topLevelFields() const
     {
-        return FieldSettings{ schemaName, schema, showFields, visibleFields };
+        FieldSettings fields{ schemaName, schema, showFields, visibleFields };
+        fields.origin = fields.hasSchema() ? FieldSettings::Origin::User : FieldSettings::Origin::Default;
+        return fields;
     }
     // Сравнение сохранённых путей — SavedPath::same (путь Windows без учёта
     // регистра на любой ОС, как у SourceIdentity).
