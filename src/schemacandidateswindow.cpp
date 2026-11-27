@@ -479,6 +479,7 @@ void SchemaCandidatesWindow::useForTab()
     }
     settings.showFields = true;
     settings.visibleFields.clear();
+    settings.origin = FieldSettings::Origin::User;   // подбор при открытии её не оспаривает
     m_schemas->applyToView(m_view, settings);
     emit schemaUsed(m_view);
 }

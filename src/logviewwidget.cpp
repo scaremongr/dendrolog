@@ -517,6 +517,7 @@ FieldSettings LogViewWidget::fieldSettings() const
     settings.schemaName = settings.schema.isEmpty() ? QString() : m_schemaName;
     settings.showFields = m_showFieldsFlag;
     settings.visibleFields = m_visibleFields;
+    settings.origin = m_schemaOrigin;
     return settings;
 }
 
@@ -536,6 +537,7 @@ void LogViewWidget::setFieldSettings(const FieldSettings& settings,
     m_fileSchemas = normalizedFileSchemas(files);
     m_schemaName = settings.schema.isEmpty() ? QString() : settings.schemaName;
     m_visibleFields = settings.visibleFields;
+    m_schemaOrigin = settings.origin;
     refreshSchemas();
     endSchemaChange(change);
 }
@@ -2945,6 +2947,9 @@ LogViewWidget::StateApplyReport LogViewWidget::applyState(const TabState& state,
         FieldSettings f = fields.value_or(fieldSettings());
         f.schemaName = state.sources[0].schema->schemaName;
         f.schema = state.sources[0].schema->schema;
+        // Сохранённая схема — решение, подбор при открытии её не оспаривает.
+        if (f.hasSchema() && f.origin == FieldSettings::Origin::Default)
+            f.origin = FieldSettings::Origin::User;
         fields = f;
     }
     if (fields)
@@ -3284,6 +3289,9 @@ bool LogViewWidget::applyFileMemory(const QString& filePath, const FileEncoding&
                     FieldSettings tab = fieldSettings();
                     tab.schemaName = schema->schemaName;
                     tab.schema = schema->schema;
+                    // Происхождение (F-17, шаг 8): как сохранено во ViewState;
+                    // своя схема файла — выбор пользователя.
+                    tab.origin = memory.source.schema ? FieldSettings::Origin::User : schema->origin;
                     emit savedFieldSettingsFound(tab, true);
                 } else {
                     FieldSettings ref;

@@ -36,6 +36,9 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "fieldschemacontroller.h"
+#include "linetemplate.h"
+#include "schemastore.h"
 #include "filememorystore.h"
 #include "logviewwidget.h"
 #include "sessioncontroller.h"
@@ -56,6 +59,7 @@
 #include <QDateTime>
 #include <QFocusEvent>
 #include <QPointer>
+#include <QSettings>
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QStringEncoder>
@@ -2821,6 +2825,131 @@ static void checkFormatThreshold(const QDir& dir, const QString& regexSchema)
           "format threshold: rows equal an indexed tab opened with these formats");
 }
 
+
+// Подбор схемы при открытии (F-17, шаг 8) на живой вкладке: задание одно и
+// после первой порции, проход загрузчика один на файл, дозапись подбор не
+// повторяет, слитая вкладка (индексная — reset на порцию) решает один раз;
+// схема выбрана — файл не перечитывается.
+static void checkAutoPickLive(const QDir& dir, const QString& name)
+{
+    AppSettings& settings = AppSettings::instance();
+    const QString config = dir.filePath(QStringLiteral("autopick-config-") + name);
+    AppSettings::overrideConfigDirForTesting(config);
+    const QString fixture = testdocs::buildSchema();
+    SchemaStore::sync({ {QStringLiteral("Rest"), LineTemplateSchema::definition(QStringLiteral("{When:time} {Rest}")), {}, {}},
+                        {QStringLiteral("Fixture"), fixture, {}, {}} });
+    settings.setAutoPickSchema(true);
+    FieldSchemaController c;
+    std::vector<std::unique_ptr<LogViewWidget>> tabs;
+    c.setWindow({ [&]() {
+        QList<LogViewWidget*> list;
+        for (const auto& t : tabs)
+            list << t.get();
+        return list;
+    } });
+    SchemaFit::Budget unlimited;
+    unlimited.maxMs = 0;
+    c.setFitBudget(unlimited);
+    {
+        QSettings s(config + QStringLiteral("/DendroLog.ini"), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("View"));
+        c.load(s);
+        s.endGroup();
+    }
+
+    QByteArray head;
+    for (int i = 0; i < 40; ++i)
+        head += record(i, i % 9 == 4 ? "ERROR" : "INFO", "head " + QByteArray::number(i));
+    const auto open = [&](const QStringList& paths, int* passes, int* jobsAtFirstRows) {
+        tabs.push_back(std::make_unique<LogViewWidget>());
+        LogViewWidget* tab = tabs.back().get();
+        c.configureView(tab);
+        QObject::connect(tab, &LogViewWidget::fileParsingStarted, tab, [passes]() { ++*passes; });
+        const auto first = [&c, jobsAtFirstRows, tab]() {
+            if (*jobsAtFirstRows < 0 && tab->model()->rowCount() > 0)
+                *jobsAtFirstRows = c.pickJobsStarted();
+        };
+        QObject::connect(tab->model(), &QAbstractItemModel::rowsInserted, tab, first);
+        QObject::connect(tab->model(), &QAbstractItemModel::modelReset, tab, first);
+        for (const QString& p : paths)
+            tab->addLogFile(p);
+        CHECK(settled(*tab), name + ": auto pick tab settles");
+        testdocs::waitFor([&] { return !c.isPicking(tab) && c.coverageOf(tab); }, 30000);
+        CHECK(settled(*tab), name + ": settles after the pick");
+        return tab;
+    };
+
+    // Одна вкладка, растущий файл.
+    {
+        const QString path = testdocs::writeFile(dir, name + "-autopick.log", head);
+        int passes = 0, jobsAtFirst = -1;
+        const int jobsBefore = c.pickJobsStarted();
+        LogViewWidget* tab = open({path}, &passes, &jobsAtFirst);
+        CHECK(tab->fieldSettings().schemaName == QLatin1String("Fixture")
+                  && tab->fieldSettings().origin == FieldSettings::Origin::Auto,
+              name + ": the fitting schema is picked: " + tab->fieldSettings().schemaName);
+        CHECK(jobsAtFirst == jobsBefore && c.pickJobsStarted() == jobsBefore + 1,
+              QStringLiteral("%1: one pick job, after the first rows (%2 → %3)")
+                  .arg(name).arg(jobsAtFirst).arg(c.pickJobsStarted()));
+        CHECK(passes == 1, QStringLiteral("%1: one loader pass (%2)").arg(name).arg(passes));
+        const int rowsBefore = tab->model()->rowCount();
+        for (int part = 0; part < 3; ++part) {
+            QByteArray more;
+            for (int i = 0; i < 10; ++i)
+                more += record(100 + part * 10 + i, "WARN", "tail");
+            CHECK(testdocs::appendToFile(path, more), name + ": append");
+            tab->reloadChangedFiles(/*force=*/true);
+            CHECK(settled(*tab), name + ": append settles");
+        }
+        CHECK(tab->model()->rowCount() == rowsBefore + 30 && c.pickJobsStarted() == jobsBefore + 1
+                  && tab->fieldSettings().schemaName == QLatin1String("Fixture"),
+              name + ": appending does not pick again");
+    }
+
+    // Слитая вкладка из двух файлов: решение одно, по проходу на файл.
+    {
+        QByteArray other;
+        for (int i = 0; i < 40; ++i)
+            other += record(20 + i, "INFO", "other " + QByteArray::number(i));
+        const QString a = testdocs::writeFile(dir, name + "-autopick-a.log", head);
+        const QString b = testdocs::writeFile(dir, name + "-autopick-b.log", other);
+        int passes = 0, jobsAtFirst = -1;
+        LogViewWidget* tab = open({a, b}, &passes, &jobsAtFirst);
+        CHECK(tab->fieldSettings().schemaName == QLatin1String("Fixture"),
+              name + ": merged tab — the schema is picked");
+        CHECK(passes == 2, QStringLiteral("%1: merged — one pass per file (%2)").arg(name).arg(passes));
+    }
+
+    // Незнакомый формат — без схемы, файл не перечитан.
+    {
+        QByteArray prose;
+        for (int i = 0; i < 40; ++i)
+            prose += "nothing to see here, line " + QByteArray::number(i % 3) + " of a story\n";
+        int passes = 0, jobsAtFirst = -1;
+        LogViewWidget* tab = open({testdocs::writeFile(dir, name + "-prose.txt", prose)}, &passes, &jobsAtFirst);
+        CHECK(!tab->fieldSettings().hasSchema() && passes == 1, name + ": unknown format — no schema");
+    }
+
+    // Настройка выключена — заданий нет.
+    {
+        settings.setAutoPickSchema(false);
+        const int jobsBefore = c.pickJobsStarted();
+        int passes = 0, jobsAtFirst = -1;
+        tabs.push_back(std::make_unique<LogViewWidget>());
+        LogViewWidget* tab = tabs.back().get();
+        c.configureView(tab);
+        tab->addLogFile(testdocs::writeFile(dir, name + "-autopick-off.log", head));
+        CHECK(settled(*tab), name + ": settles with the setting off");
+        testdocs::pump(100);
+        CHECK(c.pickJobsStarted() == jobsBefore && !tab->fieldSettings().hasSchema(),
+              name + ": setting off — no pick jobs");
+        (void)passes;
+        (void)jobsAtFirst;
+    }
+    tabs.clear();
+    settings.setAutoPickSchema(false);
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -2942,6 +3071,11 @@ int main(int argc, char** argv)
                 std::fprintf(stdout, "note: load finished before closing (threshold %d)\n", threshold);
         }
     }
+
+    settings.setIndexedThresholdMB(512);
+    checkAutoPickLive(dir, QStringLiteral("resident"));
+    settings.setIndexedThresholdMB(0);
+    checkAutoPickLive(dir, QStringLiteral("indexed"));
 
     std::fprintf(stdout, "LogViewWidget lifecycle: %d failure(s)\n", failures);
     return failures ? 1 : 0;

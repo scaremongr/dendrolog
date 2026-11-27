@@ -129,6 +129,25 @@ All notable changes to DendroLog are documented here. The format follows
   every tab, and 0.6 reads new sessions with the active tab's schema.
 
 ### Added
+- **A field schema is picked when a log is opened.** After the first lines of
+  a new tab, in the background (the file is not read again and opening does
+  not wait): the schema you chose before for a file with this name (rotation
+  tails and digits do not matter), if it parses at least half of the lines;
+  else the best schema of the catalogue that fits the lines; else the default
+  schema if it parses at least half; else none. The status bar says
+  “Schema: Logback / Log4j (auto)”, the *Log Fields* list marks it **auto**.
+  The saved state of a file and your own choice — “(none)” included — are
+  never replaced. `Settings → General`: “Pick a field schema automatically
+  when a log is opened” (on by default).
+- **Log Fields panel, reworked.** The schema list shows the share of the
+  tab's lines each schema parses, fitting schemas first, and a line
+  “Parsed 99.6% of 2300 record lines · 3 did not match”; **Edit…** opens the
+  schema editor, **⋯** holds Detect for This Tab, Apply Schema to All Tabs,
+  Find a Schema… and Manage Schemas…; “Show in the log: Whole line /
+  Selected fields” replaces the “Show selected fields only” check box. For a
+  JSON Lines or logfmt file the panel shows “JSON Lines · keys” with the keys
+  of the start of the file as check boxes (a checked key is a field) and
+  **Add Key…**; the file is not read again.
 - **Bookmarks in the Search panel.** A result line shows the ribbon of its
   bookmark in the tab, its context menu has **Add Bookmark / Remove Bookmark**
   and **Add Bookmark with Note… / Edit Bookmark Note…**, and `Ctrl+F2` with

@@ -53,7 +53,9 @@
   values), and each column's **Ends at** menu shows what every choice gives on
   the sample lines. Each tab has its
   own schema, and in a merged tab each file can have its own (**Applies to**) —
-  an app log and an access log side by side.
+  an app log and an access log side by side. **The schema is picked by
+  itself** when a log is opened — the one you chose before for files with
+  that name, else the best fitting one — without reading the file again.
 - **JSON Lines and logfmt without setup** — the line format of a file is
   detected like its encoding: JSON Lines and logfmt logs open with time, level
   and message taken from keys (epoch numbers and pino levels included) and the

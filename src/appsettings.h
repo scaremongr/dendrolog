@@ -208,6 +208,14 @@ public:
     // Последняя сессия окна: <configDir>/last-session.json.
     static QString lastSessionFile();
 
+    // ---- Подбор схемы полей при открытии (F-17, шаг 8) -------------------- //
+    // «Pick a field schema automatically when a log is opened»: после первых
+    // строк вкладки схема подбирается по имени файла и содержимому
+    // (FieldSchemaController). Выключено — подбор не запускается. В ini —
+    // [App] autoPickSchema, по умолчанию true.
+    bool autoPickSchema() const { return m_autoPickSchema; }
+    void setAutoPickSchema(bool enabled);
+
     // ---- Нейро-подсказчик (F-17, шаг 5) ----------------------------------- //
     // Выключен по умолчанию; в ini — [AI] enabled и model (модель — строка,
     // по умолчанию SchemaProposal::kDefaultModel). КЛЮЧА в ini нет никогда:
@@ -279,6 +287,7 @@ private:
     int         m_textCacheBudgetMB { 256 };
     bool        m_rememberFileState { true };
     bool        m_restoreSessionOnStartup { false };
+    bool        m_autoPickSchema { true };
     bool        m_aiEnabled { false };
     QString     m_aiModel;
     bool        m_quickSearchMatchCase { false };

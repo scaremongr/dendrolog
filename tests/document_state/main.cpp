@@ -1853,6 +1853,29 @@ static void checkSchemasFormat()
               QStringLiteral("схема каждой вкладки"));
         CHECK(parsed->toJson(goldenSessionPath()) == stored, QStringLiteral("круговой проход — тот же JSON"));
     }
+    // Происхождение схемы (F-17, шаг 8): круговой проход; снимок до шага 8
+    // (без «origin») — схема читается выбором пользователя, «без схемы» — нет.
+    {
+        for (const FieldSettings::Origin origin : {FieldSettings::Origin::Default, FieldSettings::Origin::Auto,
+                                                   FieldSettings::Origin::User}) {
+            FieldSettings f{ QStringLiteral("Plain"), kPlainSchema, false, {} };
+            f.origin = origin;
+            const auto back = FieldSettings::fromJson(f.toJson());
+            CHECK(back && back->origin == origin, QStringLiteral("origin: круговой проход"));
+        }
+        QJsonObject old = FieldSettings{ QStringLiteral("Plain"), kPlainSchema, false, {} }.toJson();
+        old.remove(QStringLiteral("origin"));
+        const auto legacy = FieldSettings::fromJson(old);
+        CHECK(legacy && legacy->origin == FieldSettings::Origin::User,
+              QStringLiteral("снимок до шага 8: схема — выбор пользователя"));
+        const auto none = FieldSettings::fromJson(QJsonObject{ {QStringLiteral("showFields"), false} });
+        CHECK(none && none->origin == FieldSettings::Origin::Default
+                  && !none->toJson().contains(QStringLiteral("origin")),
+              QStringLiteral("«без схемы» по умолчанию — без ключа origin"));
+        QJsonObject bad = old;
+        bad.insert(QStringLiteral("origin"), QStringLiteral("robot"));
+        CHECK(!FieldSettings::fromJson(bad), QStringLiteral("неизвестное origin — отказ"));
+    }
     // Снимки до F-17, шаг 3: «extraction» («Filter blocks») читается как
     // showFields («Show selected fields only»).
     {
@@ -3474,6 +3497,9 @@ int main(int argc, char** argv)
     if (!goldenOut.isEmpty())
         return writeCrossOsGoldens(QString::fromLocal8Bit(goldenOut), dir, schema);
     AppSettings& settings = AppSettings::instance();
+    // Подбор схемы при открытии (F-17, шаг 8) проверяют field_schema и
+    // logview_lifecycle: здесь схемы вкладок задают сами проверки.
+    settings.setAutoPickSchema(false);
     for (const bool indexed : { false, true }) {
         const QString name = indexed ? QStringLiteral("indexed") : QStringLiteral("resident");
         settings.setIndexedThresholdMB(indexed ? 0 : 512);

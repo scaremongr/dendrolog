@@ -21,6 +21,8 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "builtinsamples.h"
+#include "schemapick.h"
 #include "documentstate.h"
 #include "fieldschemacontroller.h"
 #include "filterruleset.h"
@@ -34,6 +36,7 @@
 #include "testdocuments.h"
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -623,12 +626,380 @@ static void checkLazySchemaSwitch(const QDir& dir)
           "the neighbour tab keeps its schema");
 }
 
+
+// ---------------------------------------------------------------------------
+// Подбор при открытии (F-17, шаг 8)
+// ---------------------------------------------------------------------------
+
+// Мера с заданным покрытием и специфичностью (rules — без файлов).
+static SchemaFit::Result fitResult(int candidates, int full, int partial, int fieldsPerLine = 3)
+{
+    SchemaFit::Result r;
+    r.valid = true;
+    r.examined = candidates;
+    r.candidates = candidates;
+    r.full = full;
+    r.partial = partial;
+    r.missed = candidates - full - partial;
+    r.fieldsOnCandidates = qint64(full + partial) * fieldsPerLine;
+    r.keyedRoles = full + partial;
+    return r;
+}
+
+static void checkPickRules()
+{
+    using namespace SchemaPick;
+    CHECK(nameKey(QStringLiteral("App-2026-11-26.log.3.gz")) == QLatin1String("app-#-#-#.log"),
+          "name key: case, rotation tail, .gz, digits");
+    CHECK(nameKey(QStringLiteral("app.log.1")) == nameKey(QStringLiteral("APP.log")),
+          "name key: rotation tail dropped");
+    CHECK(nameKey(QStringLiteral("server12.log")) == QLatin1String("server#.log"), "name key: digits");
+    CHECK(nameKey(QStringLiteral("app.log-20260101")) == QLatin1String("app.log"), "name key: dated tail");
+
+    const SchemaFit::Result fits = fitResult(100, 98, 0);       // подходит
+    const SchemaFit::Result doubtful = fitResult(100, 60, 0);   // 0,60
+    const SchemaFit::Result poor = fitResult(100, 30, 0);       // 0,30
+    Input in;
+    in.results = { poor, fits, doubtful };
+    in.catalogueCount = 3;
+    CHECK(choose(in).source == Source::Content && choose(in).index == 1, "content: the fitting schema");
+    in.nameIndex = 2;
+    CHECK(choose(in).source == Source::Name && choose(in).index == 2,
+          "name beats content when it parses at least half");
+    in.nameIndex = 0;
+    CHECK(choose(in).source == Source::Content, "name below 0.50 — content");
+    in.nameNone = true;
+    CHECK(choose(in).source == Source::NameNone && choose(in).index == -1,
+          "\"no schema\" for the name is not contested");
+    in = Input();
+    in.results = { poor, doubtful };
+    in.catalogueCount = 2;
+    CHECK(choose(in).source == Source::None, "nothing fits — no schema");
+    in.defaultIndex = 1;
+    CHECK(choose(in).source == Source::Default && choose(in).index == 1, "default — at least half");
+    in.defaultIndex = 0;
+    CHECK(choose(in).source == Source::None, "default below 0.50 — no schema");
+    CHECK(fitsFirst({ poor, fits, doubtful, fits }) == QVector<int>({1, 3, 0, 2}),
+          "combo order: fitting first");
+
+    NameTable table;
+    for (int i = 0; i < kMaxNames + 20; ++i)
+        table.remember(QStringLiteral("k%1").arg(i), QStringLiteral("S%1").arg(i));
+    CHECK(table.size() == kMaxNames && !table.lookup(QStringLiteral("k0"))
+              && table.lookup(QStringLiteral("k219")) == QStringLiteral("S219"),
+          "name table: at most 200, the oldest goes");
+    table.remember(QStringLiteral("none"), QString());
+    const NameTable back = NameTable::fromJson(table.toJson());
+    CHECK(back.size() == kMaxNames && back.lookup(QStringLiteral("none")) == QString()
+              && back.lookup(QStringLiteral("k100")) == QStringLiteral("S100"),
+          "name table: JSON round trip, \"no schema\" kept");
+}
+
+static QByteArray corpusBytes(const builtinsamples::SchemaCase& sc, int repeat = 4)
+{
+    QByteArray bytes;
+    for (int r = 0; r < repeat; ++r)
+        for (const builtinsamples::Sample& sample : sc.samples)
+            bytes += sample.line.toUtf8() + '\n';
+    return bytes;
+}
+
+static QByteArray unknownBytes()
+{
+    // Ни меток, ни уровней, ни устойчивых полей.
+    QByteArray bytes;
+    const char* words[] = { "alpha", "beta", "gamma", "delta", "omega", "kappa" };
+    for (int i = 0; i < 60; ++i)
+        bytes += QByteArray(words[i % 6]) + ' ' + words[(i * 7) % 6] + " and " + words[(i * 5 + 1) % 6]
+            + " went " + (i % 3 ? "home" : "out") + '\n';
+    return bytes;
+}
+
+static void checkAutoPick(const QDir& dir, bool indexed)
+{
+    const QString label = QStringLiteral("auto pick, %1").arg(indexed ? "indexed" : "resident");
+    ConfigDir config;
+    AppSettings::instance().setIndexedThresholdMB(indexed ? 0 : 512);
+    AppSettings::instance().setAutoPickSchema(true);
+    std::vector<std::unique_ptr<LogViewWidget>> tabs;
+    FieldSchemaController c;
+    c.setWindow({ [&]() {
+        QList<LogViewWidget*> list;
+        for (const auto& t : tabs)
+            list << t.get();
+        return list;
+    } });
+    SchemaFit::Budget unlimited;
+    unlimited.maxMs = 0;    // санитайзер: без предела времени
+    c.setFitBudget(unlimited);
+    {
+        QSettings s(config.ini(), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("View"));
+        c.load(s);
+        s.endGroup();
+    }
+    QHash<QString, QString> nameOfFile;
+    for (const auto& e : c.schemas())
+        nameOfFile.insert(e.fileName, e.name);
+    CHECK(nameOfFile.size() >= 9, label + ": built-in schemas installed");
+
+    struct Opened {
+        LogViewWidget* tab = nullptr;
+        int passes = 0;
+        int jobsAtFirstRows = -1;
+    };
+    // Открыть вкладку и дождаться мер подбора.
+    const auto open = [&](const QString& path, const std::function<void(LogViewWidget*)>& before = {}) {
+        auto opened = std::make_shared<Opened>();
+        tabs.push_back(std::make_unique<LogViewWidget>());
+        LogViewWidget* tab = tabs.back().get();
+        opened->tab = tab;
+        c.configureView(tab);
+        QObject::connect(tab, &LogViewWidget::fileParsingStarted, tab, [opened]() { ++opened->passes; });
+        const auto firstRows = [&c, opened]() {
+            if (opened->jobsAtFirstRows < 0)
+                opened->jobsAtFirstRows = c.pickJobsStarted();
+        };
+        QObject::connect(tab->model(), &QAbstractItemModel::rowsInserted, tab, firstRows);
+        QObject::connect(tab->model(), &QAbstractItemModel::modelReset, tab, [opened, firstRows, tab]() {
+            if (tab->model()->rowCount() > 0)
+                firstRows();
+        });
+        if (before)
+            before(tab);
+        tab->addLogFile(path);
+        CHECK(settled(*tab), label + ": tab settles");
+        waitFor([&] { return !c.isPicking(tab) && c.coverageOf(tab); }, 30000);
+        settled(*tab);
+        return opened;
+    };
+
+    // Корпус встроенных форматов: схема подставлена, проход один, первая
+    // порция — до задания.
+    for (const builtinsamples::SchemaCase& sc : builtinsamples::cases()) {
+        const QString file = sc.file.startsWith(QLatin1String("syslog-")) ? QStringLiteral("syslog.json") : sc.file;
+        const QString expected = nameOfFile.value(file);
+        const QString path = writeFile(dir, QStringLiteral("pick-%1-%2.log").arg(label.right(3), sc.file), corpusBytes(sc));
+        const int jobsBefore = c.pickJobsStarted();
+        const auto o = open(path);
+        const FieldSettings got = o->tab->fieldSettings();
+        CHECK(got.schemaName == expected && got.origin == FieldSettings::Origin::Auto,
+              QStringLiteral("%1: %2 — picked \"%3\", expected \"%4\"").arg(label, sc.file, got.schemaName, expected));
+        CHECK(o->passes == 1, QStringLiteral("%1: %2 — one loader pass (%3)").arg(label, sc.file).arg(o->passes));
+        CHECK(o->jobsAtFirstRows == jobsBefore && c.pickJobsStarted() == jobsBefore + 1,
+              QStringLiteral("%1: %2 — the first rows come before the one pick job").arg(label, sc.file));
+        CHECK(o->tab->model()->rowCount() > 0, label + ": rows are shown");
+    }
+    const builtinsamples::SchemaCase logback = builtinsamples::cases().constFirst();
+    const QString logbackName = nameOfFile.value(logback.file);
+
+    // Незнакомый формат — без схемы.
+    {
+        const auto o = open(writeFile(dir, QStringLiteral("unknown-%1.txt").arg(indexed), unknownBytes()));
+        CHECK(!o->tab->fieldSettings().hasSchema() && c.pickJobsStarted() > 0,
+              label + ": unknown format — no schema");
+    }
+
+    // Сохранённое состояние главнее содержимого: Python logging на строках Logback.
+    {
+        const QString python = nameOfFile.value(QStringLiteral("python-logging.json"));
+        const auto o = open(writeFile(dir, QStringLiteral("state-%1.log").arg(indexed), corpusBytes(logback)),
+                            [&](LogViewWidget* tab) {
+                                TabState state;
+                                FieldSettings fields;
+                                fields.schemaName = python;
+                                fields.schema = c.schemas()[indexOf(c.schemas(), python)].schema;
+                                fields.origin = FieldSettings::Origin::User;
+                                state.view.fields = fields;
+                                tab->applyState(state, LogViewWidget::StateFilters::Apply);
+                            });
+        CHECK(o->tab->fieldSettings().schemaName == python,
+              QStringLiteral("%1: saved state beats content (%2)").arg(label, o->tab->fieldSettings().schemaName));
+    }
+
+    // Выбор в доке запоминается для имени файла и главнее содержимого:
+    // nginx error — строки, которые Syslog тоже разбирает (схема по имени
+    // ≥ 0,50), а по содержимому выигрывает nginx error.
+    const QVector<builtinsamples::SchemaCase> allCases = builtinsamples::cases();
+    const builtinsamples::SchemaCase* nginx = nullptr;
+    for (const auto& sc : allCases)
+        if (sc.file == QLatin1String("nginx-error.json"))
+            nginx = &sc;
+    const QString syslog = nameOfFile.value(QStringLiteral("syslog.json"));
+    const QString nginxName = nameOfFile.value(QStringLiteral("nginx-error.json"));
+    if (nginx) {
+        const auto first = open(writeFile(dir, QStringLiteral("edge-%1-1.log").arg(indexed), corpusBytes(*nginx)));
+        CHECK(first->tab->fieldSettings().schemaName == nginxName, label + ": nginx error by content");
+        c.setCurrentView(first->tab);
+        c.selectSchema(indexOf(c.schemas(), syslog));
+        CHECK(first->tab->fieldSettings().origin == FieldSettings::Origin::User, label + ": dock choice — user");
+        const auto second = open(writeFile(dir, QStringLiteral("edge-%1-2.log").arg(indexed), corpusBytes(*nginx)));
+        CHECK(second->tab->fieldSettings().schemaName == syslog
+                  && second->tab->fieldSettings().origin == FieldSettings::Origin::Auto,
+              QStringLiteral("%1: the name beats content (%2)").arg(label, second->tab->fieldSettings().schemaName));
+        c.setCurrentView(nullptr);
+    }
+
+    // «No schema» не оспаривается: ни по имени, ни на вкладке.
+    {
+        const auto first = open(writeFile(dir, QStringLiteral("quiet-%1-1.log").arg(indexed), corpusBytes(logback)));
+        CHECK(first->tab->fieldSettings().schemaName == logbackName, label + ": Logback by content");
+        c.setCurrentView(first->tab);
+        c.selectSchema(-1);
+        CHECK(!first->tab->fieldSettings().hasSchema()
+                  && first->tab->fieldSettings().origin == FieldSettings::Origin::User,
+              label + ": \"No schema\" chosen");
+        c.setCurrentView(nullptr);
+        const auto second = open(writeFile(dir, QStringLiteral("quiet-%1-2.log").arg(indexed), corpusBytes(logback)));
+        CHECK(!second->tab->fieldSettings().hasSchema(),
+              label + ": \"No schema\" for the name is not contested");
+        CHECK(!first->tab->fieldSettings().hasSchema(), label + ": the tab keeps \"No schema\"");
+        // Сохранённое состояние вкладки несёт выбор и не оспаривается.
+        const TabState state = first->tab->captureState();
+        CHECK(state.view.fields && state.view.fields->origin == FieldSettings::Origin::User,
+              label + ": the state carries the user's choice");
+    }
+
+    // Таблица имён переживает перезапуск (ini).
+    {
+        QSettings s(config.ini(), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("View"));
+        c.save(s);
+        s.endGroup();
+        FieldSchemaController again;
+        s.beginGroup(QStringLiteral("View"));
+        again.load(s);
+        s.endGroup();
+        CHECK(again.nameTable().lookup(SchemaPick::nameKey(QStringLiteral("quiet-0-7.log"))) == QString()
+                  && again.nameTable().lookup(SchemaPick::nameKey(QStringLiteral("edge-0-9.log"))) == syslog,
+              label + ": the name table is kept in the ini");
+    }
+
+    // «Detect for This Tab» — подбор заново и при выборе пользователя.
+    if (!tabs.empty()) {
+        LogViewWidget* tab = nullptr;
+        for (const auto& t : tabs)
+            if (t->loadedFiles().size() == 1 && t->loadedFiles().first()->displayName.startsWith(QLatin1String("state-")))
+                tab = t.get();
+        if (tab) {
+            c.detectForView(tab);
+            waitFor([&] { return !c.isPicking(tab); }, 30000);
+            CHECK(tab->fieldSettings().schemaName == logbackName
+                      && tab->fieldSettings().origin == FieldSettings::Origin::Auto,
+                  label + ": Detect for This Tab picks by content");
+        }
+    }
+
+    // Настройка выключена — заданий нет.
+    {
+        AppSettings::instance().setAutoPickSchema(false);
+        const int jobsBefore = c.pickJobsStarted();
+        tabs.push_back(std::make_unique<LogViewWidget>());
+        LogViewWidget* tab = tabs.back().get();
+        c.configureView(tab);
+        tab->addLogFile(writeFile(dir, QStringLiteral("off-%1.log").arg(indexed), corpusBytes(logback)));
+        CHECK(settled(*tab), label + ": tab settles with the setting off");
+        pump(100);
+        CHECK(c.pickJobsStarted() == jobsBefore && !tab->fieldSettings().hasSchema(),
+              label + ": setting off — no jobs, no schema");
+        AppSettings::instance().setAutoPickSchema(true);
+    }
+    tabs.clear();
+    AppSettings::instance().setAutoPickSchema(false);
+}
+
+
+// Самое долгое событие GUI-потока (как в field_source).
+class TimingApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* receiver, QEvent* event) override
+    {
+        if (!timing)
+            return QApplication::notify(receiver, event);
+        QElapsedTimer t;
+        t.start();
+        const bool result = QApplication::notify(receiver, event);
+        const qint64 ms = t.elapsed();
+        if (ms > maxMs) {
+            maxMs = ms;
+            maxWhat = QString::fromLatin1(receiver->metaObject()->className()) + QLatin1Char('/')
+                + QString::number(int(event->type()));
+        }
+        return result;
+    }
+    bool timing = false;
+    qint64 maxMs = 0;
+    QString maxWhat;
+};
+
+// Режим замера (F-17, шаг 8): открытие файла с подбором и без — время до
+// первых строк, до конца загрузки, до итога подбора и самое долгое событие
+// GUI-потока. Каталог — встроенные схемы.
+static int runBench(TimingApplication& app, const QString& file)
+{
+    for (const bool indexed : {false, true}) {
+        for (const bool pick : {false, true}) {
+            for (int round = 0; round < 3; ++round) {
+                ConfigDir config;
+                AppSettings::instance().setIndexedThresholdMB(indexed ? 0 : 512);
+                AppSettings::instance().setAutoPickSchema(pick);
+                FieldSchemaController c;
+                {
+                    QSettings s(config.ini(), QSettings::IniFormat);
+                    s.beginGroup(QStringLiteral("View"));
+                    c.load(s);
+                    s.endGroup();
+                }
+                auto tab = std::make_unique<LogViewWidget>();
+                c.configureView(tab.get());
+                QElapsedTimer clock;
+                qint64 firstRowsMs = -1;
+                QObject::connect(tab->model(), &QAbstractItemModel::rowsInserted, tab.get(), [&]() {
+                    if (firstRowsMs < 0)
+                        firstRowsMs = clock.elapsed();
+                });
+                QObject::connect(tab->model(), &QAbstractItemModel::modelReset, tab.get(), [&]() {
+                    if (firstRowsMs < 0 && tab->model()->rowCount() > 0)
+                        firstRowsMs = clock.elapsed();
+                });
+                app.maxMs = 0;
+                app.maxWhat.clear();
+                app.timing = true;
+                clock.start();
+                tab->addLogFile(file);
+                waitFor([&] { return !tab->isLoading(); }, 600000);
+                const qint64 loadedMs = clock.elapsed();
+                if (pick)
+                    waitFor([&] { return c.pickJobsStarted() > 0 && !c.isPicking(tab.get()); }, 600000);
+                const qint64 pickedMs = clock.elapsed();
+                settle(*tab->model());
+                app.timing = false;
+                std::printf("%s pick=%s: first rows %lld ms, loaded %lld ms, picked %lld ms (%s), "
+                            "longest GUI event %lld ms (%s)\n",
+                            indexed ? "indexed " : "resident", pick ? "on " : "off",
+                            static_cast<long long>(firstRowsMs), static_cast<long long>(loadedMs),
+                            static_cast<long long>(pickedMs),
+                            qPrintable(tab->fieldSettings().schemaName.isEmpty()
+                                           ? QStringLiteral("no schema") : tab->fieldSettings().schemaName),
+                            static_cast<long long>(app.maxMs), qPrintable(app.maxWhat));
+                std::fflush(stdout);
+            }
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QStandardPaths::setTestModeEnabled(true);
-    QApplication app(argc, argv);
+    TimingApplication app(argc, argv);
+    if (argc > 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("--bench"))
+        return runBench(app, QString::fromLocal8Bit(argv[2]));
 
+    // Подбор при открытии (F-17, шаг 8) включает только checkAutoPick.
+    AppSettings::instance().setAutoPickSchema(false);
     checkMigrationAndBuiltins();
     checkColumnChoice();
     checkSavedSchema();
@@ -642,6 +1013,9 @@ int main(int argc, char** argv)
     checkViews(dir, false);
     checkViews(dir, true);
     checkLazySchemaSwitch(dir);
+    checkPickRules();
+    checkAutoPick(dir, false);
+    checkAutoPick(dir, true);
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
