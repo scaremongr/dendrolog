@@ -47,7 +47,11 @@
   journalctl, Serilog and Python logging; the schema editor shows real lines of
   the tab split into fields (with the number of distinct values per column),
   the lines that did not match and why, and the share of the file parsed —
-  start from the lines, a template or a **Grok** expression. Each tab has its
+  start from the lines, a template or a **Grok** expression. Select part of a
+  cell and press **Make Field**: where the new field ends is decided from the
+  lines (a separator, a form, a gap, a column, the number of words or a set of
+  values), and each column's **Ends at** menu shows what every choice gives on
+  the sample lines. Each tab has its
   own schema, and in a merged tab each file can have its own (**Applies to**) —
   an app log and an access log side by side.
 - **JSON Lines and logfmt without setup** — the line format of a file is

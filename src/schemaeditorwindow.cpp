@@ -13,6 +13,8 @@
 
 #include <QAction>
 #include <QCloseEvent>
+#include <QStyledItemDelegate>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -129,6 +131,33 @@ protected:
     }
 };
 
+// «Редактор» ячейки таблицы образцов — только для выделения текста (Make
+// Field): поле только для чтения, значение как в строке.
+class CellSelectDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    std::function<void(QLineEdit*, const QModelIndex&)> onCreate;
+
+    QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const override
+    {
+        auto* e = new QLineEdit(parent);
+        e->setObjectName(QStringLiteral("cellSelectEdit"));
+        e->setReadOnly(true);
+        e->setFrame(false);
+        e->setToolTip(QObject::tr("Select part of the value and press Make Field (Ctrl+M)"));
+        if (onCreate)
+            onCreate(e, index);
+        return e;
+    }
+    void setEditorData(QWidget* editor, const QModelIndex& index) const override
+    {
+        auto* e = static_cast<QLineEdit*>(editor);
+        e->setText(index.data(Qt::EditRole).toString());
+        e->selectAll();
+    }
+    void setModelData(QWidget*, QAbstractItemModel*, const QModelIndex&) const override {}
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -146,6 +175,9 @@ public:
                                             : QObject::tr("Replace schema"));
     }
     int id() const override { return m_field == AllFields ? -1 : m_field; }
+    /// Номер команды за время жизни окна (Other Variant узнаёт «свою»
+    /// команду Make Field по нему, а не по адресу: удалённую сменит новая).
+    quint64 serial() const { return m_serial; }
     bool mergeWith(const QUndoCommand* other) override
     {
         const auto* o = static_cast<const EditCommand*>(other);
@@ -170,6 +202,12 @@ private:
     EditState m_before;
     EditState m_after;
     bool m_first = true;
+    quint64 m_serial = nextSerial();
+    static quint64 nextSerial()
+    {
+        static quint64 n = 0;
+        return ++n;
+    }
 };
 
 SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* parent)
@@ -180,6 +218,8 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     , m_fileJob(new SchemaFitJob(this))
     , m_catalogueJob(new SchemaFitJob(this))
     , m_recompute(new QTimer(this))
+    , m_opWatcher(new QFutureWatcher<OpOutcome>(this))
+    , m_endsWatcher(new QFutureWatcher<EndsOutcome>(this))
 {
     setObjectName(QStringLiteral("schemaEditorWindow"));
     setWindowTitle(tr("Field Schemas"));
@@ -271,11 +311,51 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     m_error->hide();
     rightLayout->addWidget(m_error);
 
+    // Правка на строке (шаг 10).
+    auto* editRow = new QHBoxLayout();
+    m_makeFieldButton = new QPushButton(tr("Make Field"), right);
+    m_makeFieldButton->setObjectName(QStringLiteral("makeFieldBtn"));
+    m_makeFieldButton->setFocusPolicy(Qt::NoFocus);   // щелчок не закрывает поле выделения
+    m_makeFieldButton->setToolTip(tr("Double-click a cell (or press F2), select part of its value and make it "
+                                     "a field (Ctrl+M)"));
+    m_otherVariantButton = new QPushButton(tr("Other Variant"), right);
+    m_otherVariantButton->setObjectName(QStringLiteral("otherVariantBtn"));
+    m_otherVariantButton->setFocusPolicy(Qt::NoFocus);
+    m_otherVariantButton->setToolTip(tr("The next way to end the new field (Ctrl+Shift+M)"));
+    m_editLabel = mutedLabel(right);
+    m_editLabel->setObjectName(QStringLiteral("editMessage"));
+    m_editLabel->setText(tr("Double-click a cell, select part of its value and press Make Field. "
+                            "Right-click a column header for where the field ends."));
+    editRow->addWidget(m_makeFieldButton);
+    editRow->addWidget(m_otherVariantButton);
+    editRow->addWidget(m_editLabel, 1);
+    rightLayout->addLayout(editRow);
+
     auto* tables = new QSplitter(Qt::Vertical, right);
     m_table = new QTableView(tables);
     m_table->setObjectName(QStringLiteral("sampleTable"));
     m_table->setModel(m_samples);
-    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    {
+        auto* delegate = new CellSelectDelegate(m_table);
+        delegate->onCreate = [this](QLineEdit* e, const QModelIndex& index) {
+            m_cellEditor = e;
+            m_cellEditorIndex = index;
+            // Выделение запоминается: щелчок по кнопке или правый щелчок
+            // уводит фокус, и поле теряет выделение (и закрывается).
+            m_cellSelection = CellSelection();
+            const QPersistentModelIndex cell(index);
+            connect(e, &QLineEdit::selectionChanged, this, [this, e, cell]() {
+                if (!e->hasSelectedText() || !cell.isValid())
+                    return;
+                m_cellSelection = CellSelection{cell.row(), cell.column(), e->selectionStart(),
+                                                int(e->selectedText().size())};
+            });
+        };
+        m_table->setItemDelegate(delegate);
+    }
+    m_table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setWordWrap(false);
     m_table->verticalHeader()->setVisible(false);
@@ -331,6 +411,93 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     redo->setShortcut(QKeySequence::Redo);
     addAction(undo);
     addAction(redo);
+    // Правка на строке: клавиатура (колонка — текущая ячейка таблицы).
+    m_makeFieldAction = new QAction(tr("Make Field"), this);
+    m_makeFieldAction->setObjectName(QStringLiteral("makeFieldAction"));
+    m_makeFieldAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
+    m_otherVariantAction = new QAction(tr("Other Variant"), this);
+    m_otherVariantAction->setObjectName(QStringLiteral("otherVariantAction"));
+    m_otherVariantAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));
+    auto* columnMenuAction = new QAction(tr("Column Menu"), this);
+    columnMenuAction->setObjectName(QStringLiteral("columnMenuAction"));
+    columnMenuAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F10));
+    auto* mergeAction = new QAction(tr("Merge with Next"), this);
+    mergeAction->setObjectName(QStringLiteral("mergeFieldShortcut"));
+    mergeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_J));
+    auto* renameAction = new QAction(tr("Rename Field…"), this);
+    renameAction->setObjectName(QStringLiteral("renameFieldShortcut"));
+    renameAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+    auto* hideAction = new QAction(tr("Hide Field"), this);
+    hideAction->setObjectName(QStringLiteral("hideFieldShortcut"));
+    hideAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
+    auto* removeAction = new QAction(tr("Remove Field"), this);
+    removeAction->setObjectName(QStringLiteral("removeFieldShortcut"));
+    removeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
+    auto* addValueAction = new QAction(tr("Add Value…"), this);
+    addValueAction->setObjectName(QStringLiteral("addValueShortcut"));
+    addValueAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
+    // Действия над колонкой — только в таблице (и её поле выделения): в
+    // полях имени и шаблона Shift+F10 и Ctrl+R… остаются их собственными.
+    addAction(m_otherVariantAction);
+    for (QAction* a : {m_makeFieldAction, columnMenuAction, mergeAction, renameAction, hideAction, removeAction,
+                       addValueAction}) {
+        a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        m_table->addAction(a);
+    }
+    connect(m_makeFieldAction, &QAction::triggered, this, &SchemaEditorWindow::makeFieldFromSelection);
+    connect(m_makeFieldButton, &QPushButton::clicked, this, &SchemaEditorWindow::makeFieldFromSelection);
+    connect(m_otherVariantAction, &QAction::triggered, this, &SchemaEditorWindow::otherVariant);
+    connect(m_otherVariantButton, &QPushButton::clicked, this, &SchemaEditorWindow::otherVariant);
+    connect(columnMenuAction, &QAction::triggered, this, [this]() {
+        const int column = currentColumn();
+        if (column < 0)
+            return;
+        QMenu* menu = columnMenu(column);
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        const QRect r = m_table->visualRect(m_table->currentIndex());
+        menu->popup(m_table->viewport()->mapToGlobal(r.isValid() ? r.bottomLeft() : QPoint()));
+    });
+    connect(mergeAction, &QAction::triggered, this, [this]() { mergeWithNext(currentColumn()); });
+    connect(hideAction, &QAction::triggered, this, [this]() { hideField(currentColumn()); });
+    connect(removeAction, &QAction::triggered, this, [this]() { removeField(currentColumn()); });
+    connect(renameAction, &QAction::triggered, this, [this]() {
+        const int column = currentColumn();
+        const QStringList columns = columnsOf(m_state.templateText.trimmed());
+        if (column < 0 || column >= columns.size())
+            return;
+        const QString name = askText(tr("Rename Field"), tr("Name:"), columns[column]);
+        if (!name.isEmpty())
+            renameField(column, name);
+    });
+    connect(addValueAction, &QAction::triggered, this, [this]() {
+        const int column = currentColumn();
+        if (column < 0)
+            return;
+        const QStringList items = suggestedValues(column);
+        const QString value = askText(tr("Add Value"), tr("Value:"), items.value(0), items);
+        if (!value.isEmpty())
+            addValue(column, value);
+    });
+    connect(m_table->horizontalHeader(), &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        const int column = m_table->horizontalHeader()->logicalIndexAt(pos);
+        if (column < 0)
+            return;
+        QMenu* menu = columnMenu(column);
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        menu->popup(m_table->horizontalHeader()->mapToGlobal(pos));
+    });
+    connect(m_table, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QModelIndex index = m_table->indexAt(pos);
+        if (!index.isValid())
+            index = m_table->currentIndex();
+        if (!index.isValid())
+            return;
+        QMenu* menu = columnMenu(index.column());
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        menu->popup(m_table->viewport()->mapToGlobal(pos));
+    });
+    connect(m_opWatcher, &QFutureWatcher<OpOutcome>::finished, this, &SchemaEditorWindow::onOperationFinished);
+    connect(m_endsWatcher, &QFutureWatcher<EndsOutcome>::finished, this, &SchemaEditorWindow::onEndsFinished);
     for (QWidget* w : {static_cast<QWidget*>(m_name), static_cast<QWidget*>(m_descriptionEdit),
                        static_cast<QWidget*>(m_template)})
         w->installEventFilter(this);
@@ -357,6 +524,8 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     connect(m_undo, &QUndoStack::indexChanged, this, &SchemaEditorWindow::updateChrome);
     connect(m_list, &QListWidget::currentRowChanged, this, &SchemaEditorWindow::onListRowChanged);
     connect(m_recompute, &QTimer::timeout, this, &SchemaEditorWindow::recompute);
+    // Таблица пересчитана — прежнее выделение указывает на другие ячейки.
+    connect(m_samples, &QAbstractItemModel::modelReset, this, [this]() { m_cellSelection = CellSelection(); });
     connect(m_samples, &SchemaSampleModel::computed, this, [this]() {
         m_table->resizeColumnsToContents();
         showMisses();
@@ -365,6 +534,8 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
         const auto& out = m_fileJob->outcome();
         m_fileFit = out.results.value(0);
         m_fileFitReady = true;
+        m_fileSamples = out.samples;
+        startEndOptions();
         m_samples->setMissLines(m_fileFit.misses);
         updateChrome();
     });
@@ -493,7 +664,17 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     m_undo->clear();
 }
 
-SchemaEditorWindow::~SchemaEditorWindow() = default;
+SchemaEditorWindow::~SchemaEditorWindow()
+{
+    // Задания держат только свои копии (шаблон, строки, флаг), но пул
+    // переживает окно — дождаться, чтобы не держать работу после закрытия.
+    if (m_opCancel)
+        m_opCancel->store(true, std::memory_order_relaxed);
+    if (m_endsCancel)
+        m_endsCancel->store(true, std::memory_order_relaxed);
+    m_opWatcher->waitForFinished();
+    m_endsWatcher->waitForFinished();
+}
 
 // ---------------------------------------------------------------------------
 // Состояние
@@ -535,7 +716,7 @@ QString SchemaEditorWindow::savedName() const
 bool SchemaEditorWindow::isComputing() const
 {
     return m_recompute->isActive() || m_samples->isComputing() || m_fileJob->isRunning()
-        || m_catalogueJob->isRunning();
+        || m_catalogueJob->isRunning() || m_opPending || m_endsPending;
 }
 
 SchemaEditorWindow::EditState SchemaEditorWindow::stateOf(const SchemaStore::SchemaEntry& entry)
@@ -607,6 +788,7 @@ void SchemaEditorWindow::loadEntry(const SchemaStore::SchemaEntry& entry, bool i
     m_original = entry;
     m_isNew = isNew;
     m_undo->clear();
+    resetMakeField();
     m_state = EditState{QStringLiteral("\x01"), QString(), QStringLiteral("\x01")};   // всё — заново
     m_newIsWork = false;
     setState(stateOf(entry));
@@ -624,6 +806,7 @@ void SchemaEditorWindow::setView(LogViewWidget* view)
     m_catalogueJob->setModel(view ? view->model() : nullptr);
     m_fileFitReady = false;
     m_fileFit = SchemaFit::Result();
+    m_fileSamples.clear();
     m_catalogueFits.clear();
     refreshSamples();
     if (m_schemas && !isModified()) {
@@ -705,7 +888,9 @@ void SchemaEditorWindow::startFileFit()
     if (!m_view || !m_view->model() || def.isEmpty()) {
         m_fileJob->cancel();
         m_fileFit = SchemaFit::Result();
+        m_fileSamples.clear();
         m_samples->setMissLines({});
+        startEndOptions();
         updateChrome();
         return;
     }
@@ -783,6 +968,7 @@ void SchemaEditorWindow::updateChrome()
     m_apply->setEnabled(valid && m_view);
     m_save->setEnabled(valid && !schemaName().isEmpty() && (isModified() || m_isNew));
     m_saveAs->setEnabled(valid);
+    updateEditActions();
     QString title = tr("Field Schemas");
     if (!schemaName().isEmpty())
         title = tr("%1 — %2").arg(schemaName(), title);
@@ -861,6 +1047,7 @@ bool SchemaEditorWindow::resolveModified()
     // Отброшено: назад к сохранённому (новая — к тому, с чем создана).
     m_newIsWork = false;
     m_undo->clear();
+    resetMakeField();
     setState(stateOf(m_original));
     return true;
 }
@@ -1058,6 +1245,449 @@ bool SchemaEditorWindow::saveAs(const QString& name)
     loadEntry(entry, false);
     emit schemaSaved(trimmed);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Правка на строке (F-17, шаг 10)
+// ---------------------------------------------------------------------------
+
+QVector<SchemaFit::Sample> SchemaEditorWindow::editSamples() const
+{
+    return m_fileSamples.isEmpty() ? m_samples->lines() : m_fileSamples;
+}
+
+int SchemaEditorWindow::currentColumn() const
+{
+    const QModelIndex index = m_table->currentIndex();
+    return index.isValid() ? index.column() : -1;
+}
+
+void SchemaEditorWindow::setEditMessage(const QString& text)
+{
+    m_editText = text;
+    m_editLabel->setText(text);
+}
+
+void SchemaEditorWindow::updateEditActions()
+{
+    if (!m_makeFieldButton)
+        return;
+    const bool valid = !definition().isEmpty();
+    const bool busy = m_opPending;
+    m_makeFieldButton->setEnabled(valid && !busy);
+    m_makeFieldAction->setEnabled(valid && !busy);
+    const bool other = !busy && variantOnTop();
+    m_otherVariantButton->setEnabled(other);
+    m_otherVariantAction->setEnabled(other);
+    m_otherVariantButton->setText(other ? tr("Other Variant (%1/%2)").arg(m_variantIndex + 1).arg(m_make.variants.size())
+                                        : tr("Other Variant"));
+}
+
+QString SchemaEditorWindow::askText(const QString& title, const QString& label, const QString& text,
+                                    const QStringList& items)
+{
+    if (m_textAsker)
+        return m_textAsker(title, label, text, items).trimmed();
+    bool ok = false;
+    QString value;
+    if (items.isEmpty())
+        value = QInputDialog::getText(this, title, label, QLineEdit::Normal, text, &ok);
+    else
+        value = QInputDialog::getItem(this, title, label, items, 0, /*editable=*/true, &ok);
+    return ok ? value.trimmed() : QString();
+}
+
+void SchemaEditorWindow::startOperation(const QString& label, bool make, OpWork work)
+{
+    if (m_opCancel)
+        m_opCancel->store(true, std::memory_order_relaxed);
+    const int generation = ++m_opGeneration;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_opCancel = cancel;
+    const QString base = m_state.templateText.trimmed();
+    SchemaEdit::Options options;
+    options.budget = m_fitBudget;
+    options.budget.cancel = cancel.get();
+    options.cancel = cancel.get();
+    // Итог доставляется событием после конца задания: «идёт» — до доставки.
+    m_opPending = true;
+    m_opWatcher->setFuture(QtConcurrent::run([work, options, cancel, generation, base, label, make]() {
+        OpOutcome out = work(options);
+        out.generation = generation;
+        out.base = base;
+        out.label = label;
+        out.make = make;
+        return out;
+    }));
+    setEditMessage(tr("%1…").arg(label));
+    updateEditActions();
+}
+
+void SchemaEditorWindow::onOperationFinished()
+{
+    const QFuture<OpOutcome> future = m_opWatcher->future();
+    m_opPending = false;
+    updateEditActions();
+    if (future.resultCount() == 0)
+        return;
+    const OpOutcome out = future.result();
+    if (out.generation != m_opGeneration)
+        return;
+    if (out.base != m_state.templateText.trimmed()) {
+        setEditMessage(tr("The template changed meanwhile — %1 was not applied.").arg(out.label));
+        return;
+    }
+    if (!out.make) {
+        applyEdit(out.edit, out.label);
+        return;
+    }
+    m_make = out.result;
+    m_variantIndex = -1;
+    m_variantUndoIndex = -1;
+    if (!m_make.ok()) {
+        setEditMessage(m_make.error);
+        updateEditActions();
+        return;
+    }
+    m_variantIndex = 0;
+    applyOperation(m_make.variants.first().templateText, tr("Make Field"));
+    m_variantUndoIndex = m_undo->index();
+    m_variantSerial = m_lastOperationSerial;
+    QString text = m_make.message;
+    if (m_make.variants.size() > 1)
+        text += QLatin1Char(' ') + tr("Other variants: %1 (Ctrl+Shift+M).").arg(m_make.variants.size() - 1);
+    setEditMessage(text);
+    updateEditActions();
+}
+
+void SchemaEditorWindow::applyOperation(const QString& text, const QString& label)
+{
+    EditState next = m_state;
+    next.templateText = text;
+    if (next == m_state)
+        return;
+    const EditState before = m_state;
+    m_state = next;
+    m_syncing = true;
+    if (m_template->toPlainText() != text)
+        m_template->setPlainText(text);
+    m_syncing = false;
+    auto* command = new EditCommand(this, AllFields, before, next);
+    command->setText(label);
+    m_lastOperationSerial = command->serial();
+    m_undo->push(command);
+    onTemplateChanged();
+    updateChrome();
+}
+
+void SchemaEditorWindow::applyEdit(const SchemaEdit::Edit& edit, const QString& label)
+{
+    if (!edit.ok()) {
+        setEditMessage(edit.error);
+        return;
+    }
+    applyOperation(edit.templateText, label);
+    setEditMessage(tr("%1: %2").arg(label, edit.templateText));
+}
+
+bool SchemaEditorWindow::makeField(int row, int column, int from, int length)
+{
+    if (definition().isEmpty()) {
+        setEditMessage(tr("Fix the template first."));
+        return false;
+    }
+    if (m_recompute->isActive() || m_samples->isComputing()) {
+        setEditMessage(tr("The sample table is being updated — try again in a moment."));
+        return false;
+    }
+    const int start = m_samples->cellStart(row, column);
+    const QString raw = m_samples->rawCell(row, column);
+    if (start < 0 || from < 0 || length <= 0 || from + length > raw.size()) {
+        setEditMessage(tr("Select part of a field value first."));
+        return false;
+    }
+    const QString line = m_samples->rowText(row);
+    const QString tpl = m_state.templateText.trimmed();
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    const qsizetype a = start + from;
+    startOperation(tr("Make Field"), true, [tpl, line, a, length, samples](const SchemaEdit::Options& o) {
+        OpOutcome out;
+        out.result = SchemaEdit::makeField(tpl, line, a, length, samples, o);
+        return out;
+    });
+    return true;
+}
+
+bool SchemaEditorWindow::makeFieldFromSelection()
+{
+    if (m_cellEditor && m_cellEditorIndex.isValid() && m_cellEditor->hasSelectedText()) {
+        const int row = m_cellEditorIndex.row();
+        const int column = m_cellEditorIndex.column();
+        const int from = m_cellEditor->selectionStart();
+        const int length = int(m_cellEditor->selectedText().size());
+        return makeField(row, column, from, length);
+    }
+    if (m_cellSelection.length > 0)
+        return makeField(m_cellSelection.row, m_cellSelection.column, m_cellSelection.from, m_cellSelection.length);
+    setEditMessage(tr("Double-click a cell (or press F2), select part of its value and press Make Field "
+                      "(Ctrl+M)."));
+    return false;
+}
+
+bool SchemaEditorWindow::variantOnTop() const
+{
+    // Последний шаг отмены — та самая команда Make Field (не просто тот же
+    // номер шага: после отмены и новой правки номер совпадёт).
+    if (m_make.variants.size() < 2 || m_variantUndoIndex <= 0 || m_undo->index() != m_variantUndoIndex)
+        return false;
+    const auto* top = dynamic_cast<const EditCommand*>(m_undo->command(m_undo->index() - 1));
+    return top && top->serial() == m_variantSerial;
+}
+
+void SchemaEditorWindow::resetMakeField()
+{
+    m_make = SchemaEdit::MakeFieldResult();
+    m_variantIndex = -1;
+    m_variantUndoIndex = -1;
+    m_variantSerial = 0;
+    m_cellSelection = CellSelection();
+}
+
+bool SchemaEditorWindow::otherVariant()
+{
+    if (!variantOnTop() || m_opPending)
+        return false;
+    // Тот же шаг отмены: прежний вариант снимается, следующий ставится.
+    m_variantIndex = (m_variantIndex + 1) % int(m_make.variants.size());
+    m_undo->undo();
+    const SchemaEdit::Variant& v = m_make.variants[m_variantIndex];
+    applyOperation(v.templateText, tr("Make Field"));
+    m_variantUndoIndex = m_undo->index();
+    m_variantSerial = m_lastOperationSerial;
+    setEditMessage(tr("Variant %1 of %2: %3 ends at %4 (%5)%6")
+                       .arg(m_variantIndex + 1)
+                       .arg(m_make.variants.size())
+                       .arg(v.field, SchemaEdit::evidenceText(v.evidence), v.summary(),
+                            v.supported ? QString() : tr(" — no evidence in the lines")));
+    updateEditActions();
+    return true;
+}
+
+void SchemaEditorWindow::startEndOptions()
+{
+    if (m_endsCancel)
+        m_endsCancel->store(true, std::memory_order_relaxed);
+    const int generation = ++m_endsGeneration;
+    const QString tpl = m_state.templateText.trimmed();
+    if (definition().isEmpty()) {
+        m_ends = EndsOutcome();
+        m_endsPending = false;
+        return;
+    }
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_endsCancel = cancel;
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    SchemaEdit::Options options;
+    options.budget = m_fitBudget;
+    options.budget.cancel = cancel.get();
+    options.cancel = cancel.get();
+    m_endsPending = true;
+    m_endsWatcher->setFuture(QtConcurrent::run([tpl, samples, options, cancel, generation]() {
+        EndsOutcome out;
+        out.generation = generation;
+        out.base = tpl;
+        const LineTemplate t(tpl);
+        const int columns = int(t.columns().size());
+        out.options.resize(columns);
+        out.suggestions.resize(columns);
+        const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(t);
+        int column = 0;
+        for (const auto& p : pieces) {
+            if (!p.isField() || p.name.isEmpty())
+                continue;
+            if (cancel->load(std::memory_order_relaxed))
+                break;
+            out.options[column] = SchemaEdit::endOptions(tpl, column, samples, options);
+            if (p.kind == LineTemplateElement::Kind::Of)
+                out.suggestions[column] = SchemaEdit::suggestValues(tpl, column, samples, options);
+            ++column;
+        }
+        return out;
+    }));
+}
+
+void SchemaEditorWindow::onEndsFinished()
+{
+    const QFuture<EndsOutcome> future = m_endsWatcher->future();
+    m_endsPending = false;
+    if (future.resultCount() == 0)
+        return;
+    EndsOutcome out = future.result();
+    if (out.generation != m_endsGeneration)
+        return;
+    m_ends = std::move(out);
+}
+
+bool SchemaEditorWindow::endOptionsReady() const
+{
+    return !m_endsPending && !m_recompute->isActive() && !m_ends.base.isEmpty()
+        && m_ends.base == m_state.templateText.trimmed();
+}
+
+QVector<SchemaEdit::EndOption> SchemaEditorWindow::endOptions(int column) const
+{
+    return endOptionsReady() ? m_ends.options.value(column) : QVector<SchemaEdit::EndOption>();
+}
+
+QStringList SchemaEditorWindow::suggestedValues(int column) const
+{
+    return endOptionsReady() ? m_ends.suggestions.value(column) : QStringList();
+}
+
+bool SchemaEditorWindow::setFieldEnd(int column, int option)
+{
+    const QVector<SchemaEdit::EndOption> options = endOptions(column);
+    if (option < 0 || option >= options.size() || !options[option].available)
+        return false;
+    applyOperation(options[option].templateText, tr("Ends at"));
+    setEditMessage(tr("Ends %1: %2").arg(options[option].label, options[option].summary()));
+    return true;
+}
+
+bool SchemaEditorWindow::renameField(int column, const QString& name)
+{
+    const SchemaEdit::Edit e = SchemaEdit::rename(m_state.templateText, column, name);
+    applyEdit(e, tr("Rename Field"));
+    return e.ok();
+}
+
+bool SchemaEditorWindow::hideField(int column)
+{
+    const SchemaEdit::Edit e = SchemaEdit::hide(m_state.templateText, column);
+    applyEdit(e, tr("Hide Field"));
+    return e.ok();
+}
+
+bool SchemaEditorWindow::addValue(int column, const QString& value)
+{
+    const SchemaEdit::Edit e = SchemaEdit::addValue(m_state.templateText, column, value);
+    applyEdit(e, tr("Add Value"));
+    return e.ok();
+}
+
+bool SchemaEditorWindow::removeField(int column)
+{
+    if (column < 0 || definition().isEmpty())
+        return false;
+    const QString tpl = m_state.templateText.trimmed();
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    startOperation(tr("Remove Field"), false, [tpl, column, samples](const SchemaEdit::Options& o) {
+        OpOutcome out;
+        out.edit = SchemaEdit::remove(tpl, column, samples, o);
+        return out;
+    });
+    return true;
+}
+
+bool SchemaEditorWindow::mergeWithNext(int column)
+{
+    if (column < 0 || definition().isEmpty())
+        return false;
+    const QString tpl = m_state.templateText.trimmed();
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    startOperation(tr("Merge with Next"), false, [tpl, column, samples](const SchemaEdit::Options& o) {
+        OpOutcome out;
+        out.edit = SchemaEdit::mergeWithNext(tpl, column, samples, o);
+        return out;
+    });
+    return true;
+}
+
+QMenu* SchemaEditorWindow::columnMenu(int column)
+{
+    auto* menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("columnMenu"));
+    const QString tpl = m_state.templateText.trimmed();
+    const LineTemplate t(tpl);
+    if (!t.isValid() || column < 0 || column >= t.columns().size()) {
+        menu->addAction(tr("Fix the template first"))->setEnabled(false);
+        return menu;
+    }
+    const QString name = t.columns()[column];
+    const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(t);
+    SchemaEdit::Piece field;
+    for (int c = 0, i = 0; i < pieces.size(); ++i) {
+        if (pieces[i].isField() && !pieces[i].name.isEmpty() && c++ == column)
+            field = pieces[i];
+    }
+    menu->setTitle(name);
+    QMenu* ends = menu->addMenu(tr("Ends at"));
+    ends->setObjectName(QStringLiteral("endsAtMenu"));
+    // Пункты — из итога, посчитанного после правки шаблона; меню, открытое
+    // до конца расчёта, наполняется при показе.
+    const auto fill = [this, ends, column]() {
+        ends->clear();
+        const QVector<SchemaEdit::EndOption> options = endOptions(column);
+        if (options.isEmpty()) {
+            ends->addAction(tr("Computing on the sample lines…"))->setEnabled(false);
+            return;
+        }
+        for (int i = 0; i < options.size(); ++i) {
+            const auto& o = options[i];
+            QAction* a = ends->addAction(o.available ? tr("%1 — %2").arg(o.label, o.summary())
+                                                     : tr("%1 (%2)").arg(o.label, o.reason));
+            a->setObjectName(QStringLiteral("endsAt%1").arg(i));
+            a->setCheckable(true);
+            a->setChecked(o.current);
+            a->setEnabled(o.available && !o.current);
+            connect(a, &QAction::triggered, this, [this, column, i]() { setFieldEnd(column, i); });
+        }
+    };
+    fill();
+    connect(ends, &QMenu::aboutToShow, this, fill);
+    connect(m_endsWatcher, &QFutureWatcher<EndsOutcome>::finished, ends, [fill, ends]() {
+        if (ends->isVisible())
+            fill();
+    });
+    menu->addSeparator();
+    // Сочетания — у действий окна; в меню только подписаны (иначе то же
+    // сочетание было бы у двух действий).
+    const auto keys = [this](const char* name) {
+        const QAction* a = findChild<QAction*>(QLatin1String(name));
+        return a ? QLatin1Char('\t') + a->shortcut().toString(QKeySequence::NativeText) : QString();
+    };
+    QAction* make = menu->addAction(tr("Make Field from Selection") + keys("makeFieldAction"));
+    make->setObjectName(QStringLiteral("makeFieldMenuAction"));
+    make->setEnabled((m_cellEditor && m_cellEditor->hasSelectedText()) || m_cellSelection.length > 0);
+    connect(make, &QAction::triggered, this, &SchemaEditorWindow::makeFieldFromSelection);
+    QAction* rename = menu->addAction(tr("Rename…") + keys("renameFieldShortcut"));
+    rename->setObjectName(QStringLiteral("renameFieldAction"));
+    connect(rename, &QAction::triggered, this, [this, column, name]() {
+        const QString n = askText(tr("Rename Field"), tr("Name:"), name);
+        if (!n.isEmpty())
+            renameField(column, n);
+    });
+    QAction* addValueAction = menu->addAction(tr("Add Value…") + keys("addValueShortcut"));
+    addValueAction->setObjectName(QStringLiteral("addValueAction"));
+    addValueAction->setEnabled(field.kind == LineTemplateElement::Kind::Of);
+    connect(addValueAction, &QAction::triggered, this, [this, column]() {
+        const QStringList items = suggestedValues(column);
+        const QString value = askText(tr("Add Value"), tr("Value:"), items.value(0), items);
+        if (!value.isEmpty())
+            addValue(column, value);
+    });
+    QAction* merge = menu->addAction(tr("Merge with Next") + keys("mergeFieldShortcut"));
+    merge->setObjectName(QStringLiteral("mergeFieldAction"));
+    connect(merge, &QAction::triggered, this, [this, column]() { mergeWithNext(column); });
+    QAction* hide = menu->addAction(tr("Hide") + keys("hideFieldShortcut"));
+    hide->setObjectName(QStringLiteral("hideFieldAction"));
+    hide->setToolTip(tr("Keep parsing this part of the line, but not as a column"));
+    connect(hide, &QAction::triggered, this, [this, column]() { hideField(column); });
+    QAction* remove = menu->addAction(tr("Remove") + keys("removeFieldShortcut"));
+    remove->setObjectName(QStringLiteral("removeFieldAction"));
+    remove->setToolTip(tr("The text of the field goes to the field before it"));
+    connect(remove, &QAction::triggered, this, [this, column]() { removeField(column); });
+    return menu;
 }
 
 // ---------------------------------------------------------------------------

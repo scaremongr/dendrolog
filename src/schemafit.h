@@ -197,6 +197,7 @@ public:
         int generation = 0;
         QVector<SchemaFit::Result> results;   ///< по схеме, в порядке start()
         int sampled = 0;                      ///< строк в наборе
+        QVector<SchemaFit::Sample> samples;   ///< сам набор (правка на строке, F-17, шаг 10)
         bool cancelled = false;
     };
 

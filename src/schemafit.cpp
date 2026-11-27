@@ -442,6 +442,7 @@ int SchemaFitJob::start(const QVector<FieldExtractorPtr>& schemas, const LogFile
         outcome.generation = generation;
         const QVector<SchemaFit::Sample> samples = sampleLines(snapshot, file, flag.get());
         outcome.sampled = int(samples.size());
+        outcome.samples = samples;
         const SchemaFit::Corpus lines = SchemaFit::corpus(samples);
         outcome.results.reserve(schemas.size());
         for (const FieldExtractorPtr& schema : schemas) {

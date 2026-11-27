@@ -121,7 +121,9 @@ public:
     QVector<Row> sampleRows(int variant, int maxRows = kTableRows) const;
     QVector<MissRow> misses(int variant) const;
     /// Причина промаха словами.
-    static QString reasonText(const MatchReport& report);
+    /// addValueHint — у списка значений подсказать Add Value… (редактор схем:
+    /// там у колонки есть меню).
+    static QString reasonText(const MatchReport& report, bool addValueHint = false);
 
     // ---- AI -------------------------------------------------------------------
     struct AiSettings {

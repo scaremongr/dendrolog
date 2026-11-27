@@ -142,6 +142,8 @@ set(DENDROLOG_CORE_SOURCES
     src/schemaconverter.cpp
     src/schemainference.h
     src/schemainference.cpp
+    src/schemaedit.h
+    src/schemaedit.cpp
     src/schemaproposal.h
     src/schemaproposal.cpp
     # Системный текст нейро-подсказчика (F-17, шаг 5): ресурс ядра,

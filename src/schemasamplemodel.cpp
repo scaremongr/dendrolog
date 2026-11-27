@@ -88,7 +88,7 @@ void SchemaSampleModel::restart()
                     Miss miss;
                     miss.line = lines[i].line;
                     miss.text = text;
-                    miss.reason = SchemaCandidates::reasonText(extractor->explain(text));
+                    miss.reason = SchemaCandidates::reasonText(extractor->explain(text), true);
                     out.misses.append(miss);
                 }
                 continue;
@@ -98,9 +98,13 @@ void SchemaSampleModel::restart()
             row.text = text;
             row.partial = outcome == FieldExtractor::Outcome::Partial;
             row.values.reserve(columns);
+            row.starts.reserve(columns);
+            row.sizes.reserve(columns);
             for (int c = 0; c < columns; ++c) {
                 const QString v = c < fields.size() ? fields.value(c, text) : QString();
                 row.values.append(v);
+                row.starts.append(fields.has(c) ? fields.spans[c].start : -1);
+                row.sizes.append(fields.has(c) ? fields.spans[c].size() : 0);
                 if (!v.isEmpty())
                     ++counts[c][v];
             }
@@ -110,7 +114,7 @@ void SchemaSampleModel::restart()
                 miss.line = row.line;
                 miss.text = text;
                 miss.partial = true;
-                miss.reason = SchemaCandidates::reasonText(extractor->explain(text));
+                miss.reason = SchemaCandidates::reasonText(extractor->explain(text), true);
                 out.misses.append(miss);
             }
         }
@@ -121,7 +125,7 @@ void SchemaSampleModel::restart()
             miss.line = m.line;
             miss.text = m.text;
             miss.partial = m.partial;
-            miss.reason = SchemaCandidates::reasonText(extractor->explain(m.text));
+            miss.reason = SchemaCandidates::reasonText(extractor->explain(m.text), true);
             out.misses.append(miss);
         }
         out.top.resize(columns);
@@ -169,6 +173,41 @@ QString SchemaSampleModel::cell(int row, int column) const
     return m_rows[row].values.value(column);
 }
 
+QString SchemaSampleModel::rowText(int row) const
+{
+    return row >= 0 && row < m_rows.size() ? m_rows[row].text : QString();
+}
+
+qint64 SchemaSampleModel::rowLine(int row) const
+{
+    return row >= 0 && row < m_rows.size() ? m_rows[row].line : 0;
+}
+
+int SchemaSampleModel::cellStart(int row, int column) const
+{
+    if (row < 0 || row >= m_rows.size())
+        return -1;
+    return m_rows[row].starts.value(column, -1);
+}
+
+QString SchemaSampleModel::rawCell(int row, int column) const
+{
+    const int start = cellStart(row, column);
+    if (start < 0)
+        return QString();
+    return m_rows[row].text.mid(start, m_rows[row].sizes.value(column));
+}
+
+Qt::ItemFlags SchemaSampleModel::flags(const QModelIndex& index) const
+{
+    Qt::ItemFlags f = QAbstractTableModel::flags(index);
+    // «Редактор» ячейки — только для выделения текста (Make Field, F-17,
+    // шаг 10): поле только для чтения, модель не меняется.
+    if (index.isValid() && cellStart(index.row(), index.column()) >= 0)
+        f |= Qt::ItemIsEditable;
+    return f;
+}
+
 int SchemaSampleModel::distinctCount(int column) const
 {
     return m_distinct.value(column);
@@ -197,6 +236,8 @@ QVariant SchemaSampleModel::data(const QModelIndex& index, int role) const
     switch (role) {
     case Qt::DisplayRole:
         return row.values.value(index.column());
+    case Qt::EditRole:
+        return rawCell(index.row(), index.column());
     case Qt::ToolTipRole:
         return row.line > 0 ? tr("Line %1: %2").arg(row.line).arg(row.text) : row.text;
     case Qt::FontRole:

@@ -224,7 +224,7 @@ QVector<SchemaCandidates::MissRow> SchemaCandidates::misses(int variant) const
     return rows;
 }
 
-QString SchemaCandidates::reasonText(const MatchReport& report)
+QString SchemaCandidates::reasonText(const MatchReport& report, bool addValueHint)
 {
     using E = MatchReport::Expect;
     QString what;
@@ -254,6 +254,8 @@ QString SchemaCandidates::reasonText(const MatchReport& report)
         text += tr(", found “%1”").arg(report.found);
     else
         text += tr(", the line ended");
+    if (report.expect == E::Value && addValueHint)
+        text += tr(" — add it with Add Value… in the menu of the column");
     if (report.partial)
         text = tr("parsed partly: %1").arg(text);
     return text;

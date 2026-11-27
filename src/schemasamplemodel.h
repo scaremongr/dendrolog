@@ -60,6 +60,14 @@ public:
     /// Принятых строк в таблице (по образцам).
     int acceptedRows() const { return int(m_rows.size()); }
     QString cell(int row, int column) const;
+    /// Строка образца таблицы, начало значения колонки в ней (-1 — поля нет)
+    /// и само значение как в строке (без раскодирования) — выделение в
+    /// ячейке переводится в позиции строки (Make Field, F-17, шаг 10).
+    QString rowText(int row) const;
+    qint64 rowLine(int row) const;
+    int cellStart(int row, int column) const;
+    QString rawCell(int row, int column) const;
+    Qt::ItemFlags flags(const QModelIndex& index) const override;
     /// Число разных значений колонки (по принятым строкам образцов).
     int distinctCount(int column) const;
     /// Частые значения колонки: «значение — сколько», лучшие первыми.
@@ -80,6 +88,8 @@ private:
         qint64 line = 0;
         QString text;
         QStringList values;
+        QVector<int> starts;   ///< начало значения колонки в text, -1 — нет
+        QVector<int> sizes;
         bool partial = false;
     };
     struct Output {

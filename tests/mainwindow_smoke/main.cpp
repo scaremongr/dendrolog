@@ -68,6 +68,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QTableView>
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPushButton>
@@ -3623,6 +3624,143 @@ void scenarioFieldSchemasDialog(MainWindow& win, const Fixtures& fx)
     check(waitAllLoaded(win) && tab->fieldSettings().schemaName == before, QStringLiteral("the tab returns to %1").arg(before));
 }
 
+// Правка на строке (F-17, шаг 10): незнакомый лог → Field Schemas → Find a
+// Schema (панель редактора) → вариант вывода структуры в редакторе → Make
+// Field выделением в ячейке таблицы образцов (F2, выделение, Ctrl+M) →
+// Save — файл версии 4 с новым полем. Меню колонки — Ends at с итогом.
+void scenarioMakeField(MainWindow& win, const QDir& dir)
+{
+    section(QStringLiteral("make field"));
+    QByteArray bytes;
+    const char* names[] = {"Auth", "DB", "Payment Gateway", "Inventory Sync Worker", "Order Service", "Mail Sender"};
+    const char* words[] = {"started", "request", "timeout", "retry", "pool", "cache", "miss", "token", "refresh", "sent"};
+    const char* levels[] = {"INFO", "WARN", "ERROR", "DEBUG"};
+    quint32 seed = 7;
+    const auto next = [&seed](int n) {
+        seed = seed * 1103515245u + 12345u;
+        return int((seed >> 16) % quint32(n));
+    };
+    for (int i = 0; i < 400; ++i) {
+        QByteArray msg;
+        const int n = 2 + next(5);
+        for (int k = 0; k < n; ++k)
+            msg += QByteArray(k ? " " : "") + words[next(10)];
+        bytes += QStringLiteral("2026-11-18 10:%1:%2 %3 %4 %5\n")
+                     .arg(i / 60 % 60, 2, 10, QLatin1Char('0')).arg(i % 60, 2, 10, QLatin1Char('0'))
+                     .arg(QLatin1String(levels[next(4)]), QLatin1String(names[next(6)]), QString::fromLatin1(msg))
+                     .toUtf8();
+    }
+    const QString path = testdocs::writeFile(dir, QStringLiteral("unknown-format.log"), bytes);
+    win.openCommandLine(OpenRouting::parseCommandLine({path}));
+    check(waitFor([&]() { return tabIndexForFile(win, path) >= 0; }), QStringLiteral("the unknown log opens"));
+    tabs(win)->setCurrentIndex(tabIndexForFile(win, path));
+    LogViewWidget* tab = currentTab(win);
+    check(waitLoaded(tab, 400), QStringLiteral("the unknown log loads"));
+    tab->view()->goToRow(0);
+
+    if (QAction* item = menuAction(win, QStringLiteral("Field Schemas")))
+        item->trigger();
+    auto* editor = win.findChild<SchemaEditorWindow*>();
+    check(editor && editor->isVisible() && editor->view() == tab, QStringLiteral("the editor opens for the unknown log"));
+    if (!editor)
+        return;
+    SchemaFit::Budget noLimit;
+    noLimit.maxMs = 0;
+    editor->setFitBudget(noLimit);
+    const auto settled = [&]() { return !editor->isComputing() && editor->fileFitReady() && editor->endOptionsReady(); };
+
+    // Find a Schema — панелью редактора; вариант вывода структуры — в редактор.
+    auto* findButton = editor->findChild<QPushButton*>(QStringLiteral("findSchemaBtn"));
+    if (findButton && !findButton->isChecked())
+        findButton->click();
+    auto* finder = editor->findChild<SchemaCandidatesWindow*>();
+    check(finder && finder->isVisible(), QStringLiteral("Find a Schema opens inside the editor"));
+    if (!finder)
+        return;
+    SchemaCandidates* candidates = finder->candidates();
+    check(waitFor([&]() { return !candidates->isComputing() && !candidates->variants().isEmpty(); }, 30000),
+          QStringLiteral("Find a Schema computes variants (%1)").arg(candidates->statusText()));
+    int inferred = -1;
+    for (int i = 0; i < candidates->variants().size(); ++i) {
+        if (candidates->variants()[i].source == SchemaCandidates::Variant::Source::Inferred && inferred < 0)
+            inferred = i;
+    }
+    check(inferred >= 0, QStringLiteral("a variant inferred from the unknown lines"));
+    if (inferred < 0)
+        return;
+    finder->selectVariant(inferred);
+    auto* edit = finder->findChild<QPushButton*>(QStringLiteral("editSchemaVariantButton"));
+    check(edit && edit->isVisible() && edit->isEnabled(), QStringLiteral("Edit in Editor is offered"));
+    if (edit)
+        edit->click();
+    const QString inferredTemplate = candidates->variants()[inferred].templateText;
+    check(editor->templateText() == inferredTemplate && editor->savedName().isEmpty(),
+          QStringLiteral("the variant opens as a new schema: ") + editor->templateText());
+    if (findButton)
+        findButton->click();   // панель — прочь
+    check(waitFor(settled, 30000), QStringLiteral("the editor checks the variant"));
+
+    // Make Field: первое слово последней колонки строки образца.
+    auto* table = editor->findChild<QTableView*>(QStringLiteral("sampleTable"));
+    SchemaSampleModel* samples = editor->sampleModel();
+    const int columns = samples->columnCount();
+    const int last = columns - 1;
+    int row = -1;
+    for (int r = 0; r < samples->rowCount() && row < 0; ++r) {
+        if (samples->rawCell(r, last).contains(QLatin1Char(' ')))
+            row = r;
+    }
+    check(table && row >= 0, QStringLiteral("a sample row with several words in the last column"));
+    if (!table || row < 0)
+        return;
+    editor->activateWindow();
+    table->setFocus();
+    table->setCurrentIndex(samples->index(row, last));
+    QTest::keyClick(table, Qt::Key_F2);
+    auto* cell = table->findChild<QLineEdit*>(QStringLiteral("cellSelectEdit"));
+    check(cell && cell->isReadOnly(), QStringLiteral("F2 opens the cell for selection"));
+    if (!cell)
+        return;
+    cell->setSelection(0, int(cell->text().indexOf(QLatin1Char(' '))));
+    QTest::keyClick(cell, Qt::Key_M, Qt::ControlModifier);
+    check(waitFor(settled, 30000), QStringLiteral("Make Field is computed"));
+    const QString made = editor->templateText();
+    check(made != inferredTemplate && LineTemplate(made).isValid() && LineTemplate(made).columns().size() == columns + 1,
+          QStringLiteral("Make Field adds a field: ") + made);
+    check(!editor->editMessage().isEmpty(), QStringLiteral("Make Field says what it chose: ") + editor->editMessage());
+    // Меню колонки: Ends at с итогом у пунктов.
+    std::unique_ptr<QMenu> menu(editor->columnMenu(last));
+    QMenu* ends = menu->findChild<QMenu*>(QStringLiteral("endsAtMenu"));
+    bool summaries = false;
+    if (ends) {
+        for (QAction* a : ends->actions())
+            summaries = summaries || a->text().contains(QStringLiteral(" values · "));
+    }
+    check(summaries, QStringLiteral("Ends at shows a result for its items"));
+
+    // Save — файл версии 4 с новым шаблоном.
+    const QString created = QStringLiteral("Smoke Make Field");
+    editor->setSchemaName(created);
+    auto* save = editor->findChild<QPushButton*>(QStringLiteral("saveBtn"));
+    check(save && save->isEnabled(), QStringLiteral("Save is enabled"));
+    if (save)
+        save->click();
+    check(editor->savedName() == created && !editor->isModified(), QStringLiteral("Save saves the schema"));
+    bool saved = false;
+    for (const QString& f : QDir(SchemaStore::patternsDir()).entryList({ QStringLiteral("*.json") }, QDir::Files)) {
+        QFile file(QDir(SchemaStore::patternsDir()).filePath(f));
+        if (!file.open(QIODevice::ReadOnly))
+            continue;
+        const QJsonObject o = QJsonDocument::fromJson(file.readAll()).object();
+        saved = saved || (o.value(QStringLiteral("name")).toString() == created
+                          && o.value(QStringLiteral("version")).toInt() == 4
+                          && o.value(QStringLiteral("template")).toString() == made);
+    }
+    check(saved, QStringLiteral("the schema with the new field is saved (version 4)"));
+    editor->close();
+    check(!editor->isVisible(), QStringLiteral("the editor closes after Save without a question"));
+}
+
 // «Find a Schema» (F-17, шаг 5): Tools → Find a Schema… — варианты каталога и
 // вывода структуры на строках вкладки; Use for This Tab ставит схему
 // каталога вкладке без перечитывания (ни одного прохода загрузчика); Save to
@@ -4603,6 +4741,7 @@ int runBackend(const QDir& root, bool indexed, const QString& instanceKey)
         scenarioDocks(win);
         scenarioLineWrap(win, dir, indexed);
         scenarioAnsiColors(win, dir);
+        scenarioMakeField(win, dir);
         scenarioFileLabels(win);
         scenarioAutoReload(win, dir);
         scenarioTar(win, fx); // после сценариев, которым нужен alpha в Recent Files

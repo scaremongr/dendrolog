@@ -6,6 +6,22 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Edit a schema on a sample line.** In the schema editor, double-click a cell
+  of the sample table (or press `F2`), select part of its value and press
+  **Make Field** (`Ctrl+M`): the selection becomes a field. Where it ends is
+  decided by the lines, not guessed — the text right after it, its own form
+  (a number, an IP, a time…), a form that follows, a wide gap, a fixed column,
+  the same number of words or a closed set of values; the variant that parses
+  the most lines with the fewest different values wins, **Other Variant**
+  (`Ctrl+Shift+M`) shows the next one. When nothing in the lines tells where
+  the field ends, the editor says so and makes it a list of the selected value
+  (more values — **Add Value…**). The menu of a column header (also `Shift+F10`)
+  has **Ends at** with the result of every choice on the sample lines
+  ("after 2 words — words(2): 14 values · 100%"), **Rename…**, **Add Value…**,
+  **Merge with Next**, **Hide** and **Remove**; every edit is one undo step and
+  the template always stays valid.
+
 ### Changed
 - **Field schemas are line templates, edited in a new schema editor.** A
   schema is one line that looks like the log line:
