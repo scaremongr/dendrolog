@@ -47,14 +47,15 @@
   thread, message…) with a **line template** that looks like the log line
   itself: `{Timestamp:time} [{Thread}] {Level:level} {Logger:word} - {Message}`.
   Ready-made schemas for Logback / Log4j, Spring Boot, nginx / Apache, syslog /
-  journalctl, Serilog and Python logging; the schema editor shows real lines of
-  the tab split into fields (with the number of distinct values per column),
-  the lines that did not match and why, and the share of the file parsed —
-  start from the lines, a template or a **Grok** expression. Select part of a
-  cell and press **Make Field**: where the new field ends is decided from the
-  lines (a separator, a form, a gap, a column, the number of words or a set of
-  values), and each column's **Ends at** menu shows what every choice gives on
-  the sample lines. Each tab has its
+  journalctl, Serilog and Python logging. You do not have to write a template:
+  the schema editor shows the lines of your log with **every field in its own
+  colour** and splits an unknown log into fields by itself. Click a field to
+  rename it or to choose where it ends — every choice shows what it gives on
+  the lines (how many distinct values, what share of the file is read); select
+  text in a line and press **Make Field** to split out one more field. Lines
+  the schema does not read are red, with the reason for each. The template
+  text stays available for fine tuning, and a schema can also start from a
+  template or a **Grok** expression. Each tab has its
   own schema, and in a merged tab each file can have its own (**Applies to**) —
   an app log and an access log side by side. **The schema is picked by
   itself** when a log is opened — the one you chose before for files with

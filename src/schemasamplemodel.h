@@ -40,6 +40,22 @@ public:
         bool partial = false;
     };
 
+    /// Строка-образец для раскрашенного показа (SchemaLinePreview): все
+    /// непустые образцы по порядку, принятые и нет. Спаны полей — через row
+    /// (cellStart / rawCell).
+    struct LineView {
+        enum class State {
+            Accepted,   ///< разобрана целиком
+            Partial,    ///< принята с остановкой (остаток — в последнем поле)
+            Missed,     ///< начало записи, но схема её не приняла
+            Other,      ///< не начало записи (продолжение) или схемы нет
+        };
+        qint64 line = 0;
+        QString text;
+        State state = State::Other;
+        int row = -1;   ///< строка таблицы; -1 — не принята
+    };
+
     explicit SchemaSampleModel(QObject* parent = nullptr);
     ~SchemaSampleModel() override;
 
@@ -73,6 +89,8 @@ public:
     /// Частые значения колонки: «значение — сколько», лучшие первыми.
     QVector<QPair<QString, int>> topValues(int column) const;
     const QVector<Miss>& misses() const { return m_misses; }
+    /// Образцы по порядку с итогом разбора (после computed).
+    const QVector<LineView>& lineViews() const { return m_views; }
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -99,6 +117,7 @@ private:
         QVector<QVector<QPair<QString, int>>> top;   ///< по колонке
         QVector<int> distinct;
         QVector<Miss> misses;
+        QVector<LineView> views;
         SchemaFit::Result fit;
     };
     void restart();
@@ -113,6 +132,7 @@ private:
     QVector<QVector<QPair<QString, int>>> m_top;
     QVector<int> m_distinct;
     QVector<Miss> m_misses;
+    QVector<LineView> m_views;
     SchemaFit::Result m_fit;
 
     int m_generation = 0;

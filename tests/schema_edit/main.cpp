@@ -19,6 +19,13 @@
 //      Rename, Add Value…), клавиатура; слияние и удаление обратимы
 //      (QUndoStack); самое долгое событие GUI-потока при пересчёте ≤ 50 мс
 //      (под санитайзером — печать).
+//   7. Графическая правка (U-28) — то же окно без текста шаблона: незнакомый
+//      лог разбит на поля сам при открытии; блоки полей, раскрашенные строки
+//      и карточка поля согласованы (щелчок по участку строки и по блоку);
+//      имя и «где кончается» — из карточки; Make Field — выделением в строке
+//      (кнопка у выделения, Ctrl+M), дата и уровень получают свои имена;
+//      Detect Fields; скрытая часть строки — снова колонкой; Advanced свёрнут
+//      и раскрывается на ошибке шаблона; не подошедшие строки — по кнопке.
 
 #include "appsettings.h"
 #include "fieldschemacontroller.h"
@@ -28,7 +35,10 @@
 #include "linetemplate.h"
 #include "schemaedit.h"
 #include "schemaeditorwindow.h"
+#include "schemafieldcard.h"
+#include "schemafieldstrip.h"
 #include "schemafit.h"
+#include "schemalinepreview.h"
 #include "schemasamplemodel.h"
 
 #include "builtinsamples.h"
@@ -42,13 +52,20 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QRandomGenerator>
 #include <QSettings>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTableView>
+#include <QTableWidget>
 #include <QTest>
+#include <QTextBlock>
+#include <QToolButton>
 #include <QUndoStack>
 
 #include <QThread>
@@ -809,6 +826,11 @@ void testWindow(TimingApplication& app)
     check(waitFor(settled), QStringLiteral("window: computed"));
     check(w.editSamples().size() >= 2000, QStringLiteral("window: edit samples — the file sample (%1)")
                                                .arg(w.editSamples().size()));
+    // Таблица — второй вид (U-28): первым идут раскрашенные строки.
+    auto* views = w.findChild<QTabWidget*>(QStringLiteral("sampleTabs"));
+    check(views && views->count() == 2 && views->currentIndex() == 0, QStringLiteral("window: Lines, then Table"));
+    if (views)
+        views->setCurrentIndex(1);
 
     auto* table = w.findChild<QTableView*>(QStringLiteral("sampleTable"));
     SchemaSampleModel* m = w.sampleModel();
@@ -1001,6 +1023,457 @@ void testWindow(TimingApplication& app)
     w.close();
 }
 
+
+// ---------------------------------------------------------------------------
+// 7. Графическая правка (U-28)
+// ---------------------------------------------------------------------------
+
+// Заливка участка [start, start + length) блока №line раскрашенных строк.
+QColor previewFill(SchemaLinePreview* preview, int line, int start, int length)
+{
+    const QTextBlock block = preview->document()->findBlockByNumber(line);
+    QColor found;
+    for (const QTextEdit::ExtraSelection& sel : preview->extraSelections()) {
+        if (sel.cursor.selectionStart() == block.position() + start
+            && sel.cursor.selectionEnd() == block.position() + start + length)
+            found = sel.format.background().color();
+    }
+    return found;
+}
+
+int fieldItems(const SchemaFieldStrip* strip)
+{
+    int n = 0;
+    for (const SchemaFieldStrip::Item& item : strip->items())
+        n += item.type == SchemaFieldStrip::Item::Type::Field && item.column >= 0 ? 1 : 0;
+    return n;
+}
+
+void testGraphical(TimingApplication& app)
+{
+    QTemporaryDir tmp;
+    // Свой каталог настроек: в нём схема каталога, которая этот лог не читает.
+    AppSettings::overrideConfigDirForTesting(QDir(tmp.path()).filePath(QStringLiteral("config")));
+    Gen g(77);
+    const QStringList comps = {"Auth", "DB", "Payment Gateway", "Inventory Sync Worker", "Order Service", "Mail Sender"};
+    QByteArray bytes;
+    for (int i = 0; i < 3000; ++i) {
+        if (i == 7 || i == 90) {
+            // Запись другого вида (метка в скобках — схема её не прочтёт) с
+            // продолжением и запись, прочитанная только до половины.
+            bytes += QStringLiteral("[%1] restart requested\n    at com.example.Main.run(Main.java:42)\n").arg(g.ts()).toUtf8();
+            bytes += QStringLiteral("%1 | INFO  | shutting down\n").arg(g.ts()).toUtf8();
+            continue;
+        }
+        bytes += QStringLiteral("%1 | %2 | %3 | req-%4 | %5\n")
+                     .arg(g.ts(), g.level().leftJustified(5), g.pick(comps).leftJustified(22))
+                     .arg(g.num(4096, 65535), 4, 16, QLatin1Char('0'))
+                     .arg(g.words(g.num(2, 8)))
+                     .toUtf8();
+    }
+    const QString path = QDir(tmp.path()).filePath(QStringLiteral("orders-service.log"));
+    {
+        QFile f(path);
+        f.open(QIODevice::WriteOnly);
+        f.write(bytes);
+    }
+    FieldSchemaController c;
+    {
+        QSettings ini(AppSettings::iniFilePath(), QSettings::IniFormat);
+        ini.beginGroup(QStringLiteral("View"));
+        c.load(ini);
+    }
+    LogViewWidget tab;
+    c.configureView(&tab);
+    c.setCurrentView(&tab);
+    tab.addLogFile(path);
+    check(waitFor([&] { return !tab.isLoading() && tab.model()->rowCount() > 3000 && !tab.model()->isFiltering(); }),
+          QStringLiteral("graphical: the tab loads"));
+    check(waitFor([&] { return !c.isPicking(&tab); }), QStringLiteral("graphical: the schema pick settles"));
+    check(c.shownSchema().isEmpty(), QStringLiteral("graphical: an unknown log gets no schema (%1)")
+                                         .arg(c.shownSettings().schemaName));
+
+    SchemaEditorWindow w(&c);
+    w.setAsker([](const QString&, bool saveDiscard) {
+        return saveDiscard ? SchemaEditorWindow::Answer::Discard : SchemaEditorWindow::Answer::No;
+    });
+    SchemaFit::Budget noLimit;
+    noLimit.maxMs = 0;
+    w.setFitBudget(noLimit);
+    w.show();
+    w.activateWindow();
+    QTest::qWaitForWindowExposed(&w);
+    const auto settled = [&]() { return !w.isComputing() && w.fileFitReady() && w.endOptionsReady(); };
+
+    auto* strip = w.findChild<SchemaFieldStrip*>(QStringLiteral("fieldStrip"));
+    auto* preview = w.findChild<SchemaLinePreview*>(QStringLiteral("linePreview"));
+    auto* card = w.findChild<SchemaFieldCard*>(QStringLiteral("fieldCardPanel"));
+    auto* views = w.findChild<QTabWidget*>(QStringLiteral("sampleTabs"));
+    auto* detect = w.findChild<QPushButton*>(QStringLiteral("detectFieldsBtn"));
+    auto* guide = w.findChild<QLabel*>(QStringLiteral("guideLabel"));
+    auto* templateEdit = w.findChild<QPlainTextEdit*>(QStringLiteral("templateEdit"));
+    auto* nameEdit = w.findChild<QLineEdit*>(QStringLiteral("fieldNameEdit"));
+    check(strip && preview && card && views && detect && guide && templateEdit && nameEdit,
+          QStringLiteral("graphical: the strip, the lines, the card, Detect Fields and the guide exist"));
+    if (!strip || !preview || !card || !views || !detect || !guide || !templateEdit || !nameEdit)
+        return;
+    check(!w.guideText().isEmpty() && guide->text() == w.guideText() && !detect->isEnabled(),
+          QStringLiteral("graphical: without a tab the guide says to open a log: ") + w.guideText());
+    const QString foreign = QStringLiteral("Bracketed");
+    check(w.newFromTemplate(QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {Message}"), foreign)
+              && w.saveAs(foreign) && c.schemas().size() == 1,
+          QStringLiteral("graphical: a schema of the catalogue"));
+
+    // --- Открытие на незнакомом логе: поля определены сами ----------------------
+    // Разбиение при открытии идёт на GUI-потоке (вывод структуры по 200 строкам
+    // образцов — без извлекателя схемы, инвариант 12 не при чём): цена — здесь.
+    QElapsedTimer openTimer;
+    openTimer.start();
+    w.setView(&tab);
+    const qint64 openMs = openTimer.elapsed();
+    std::printf("  graphical: opening with detection (200 sample lines, GUI thread) — %lld ms\n", openMs);
+    if (!kSanitized)
+        check(openMs <= 50, QStringLiteral("graphical: opening with detection %1 ms").arg(openMs));
+    check(waitFor(settled), QStringLiteral("graphical: computed"));
+    const QString detected = w.templateText();
+    QStringList columns = LineTemplate(detected).columns();
+    check(w.isDetected() && columns.size() == 5 && columns.first() == QLatin1String("Timestamp")
+              && columns.value(1) == QLatin1String("Level") && columns.last() == QLatin1String("Message"),
+          QStringLiteral("graphical: the lines are split into fields on opening: ") + detected);
+    check(w.savedName().isEmpty() && !w.isModified() && w.schemaName() == QLatin1String("orders-service"),
+          QStringLiteral("graphical: a new schema named after the file, closing does not ask (%1)").arg(w.schemaName()));
+    check(w.guideText().contains(QLatin1String("by itself")) && w.guideText().contains(QLatin1String("5 fields")),
+          QStringLiteral("graphical: the guide says what happened: ") + w.guideText());
+    check(!w.isAdvancedShown() && !templateEdit->isVisible(),
+          QStringLiteral("graphical: the text template is out of the way (Advanced is collapsed)"));
+    check(views->currentWidget() == preview && preview->isVisible(), QStringLiteral("graphical: Lines is the first view"));
+
+    // Блоки: по одному на поле, подпись — словами, без синтаксиса шаблона.
+    bool words = fieldItems(strip) == columns.size();
+    int literals = 0;
+    for (const SchemaFieldStrip::Item& item : strip->items()) {
+        if (item.type == SchemaFieldStrip::Item::Type::Literal) {
+            literals += item.text == QLatin1String("|") ? 1 : 0;
+            continue;
+        }
+        words = words && !item.caption.isEmpty() && !item.caption.contains(QLatin1Char('{'))
+                && !item.caption.contains(QLatin1Char(':')) && item.name == columns.value(item.column);
+    }
+    check(words && literals == 4, QStringLiteral("graphical: a block per field with the end in words, «|» between them"));
+    check(strip->items().value(0).caption == QLatin1String("date and time")
+              && strip->items().last().caption == QLatin1String("to the end of the line"),
+          QStringLiteral("graphical: captions «%1» … «%2»").arg(strip->items().value(0).caption, strip->items().last().caption));
+
+    // Строки: участок поля залит цветом его блока; не прочитанная — красным,
+    // продолжение записи — без полей.
+    const QVector<SchemaLinePreview::Line>& lines = preview->lines();
+    check(lines.size() >= 190 && lines.first().spans.size() == columns.size()
+              && lines.first().text == tab.model()->messageAt(0),
+          QStringLiteral("graphical: the lines of the tab, a span per field (%1 lines)").arg(lines.size()));
+    bool coloured = !lines.isEmpty();
+    if (!lines.isEmpty()) {
+        for (const SchemaLinePreview::Span& span : lines.first().spans)
+            coloured = coloured && previewFill(preview, 0, span.start, span.length)
+                                       == SchemaFieldStrip::fieldColor(span.column, preview->palette());
+        const SchemaLinePreview::Span first = lines.first().spans.value(0);
+        check(lines.first().text.mid(first.start, first.length).startsWith(QLatin1String("2026-11-18 ")),
+              QStringLiteral("graphical: the first span is the timestamp"));
+    }
+    check(coloured, QStringLiteral("graphical: every field of a line has the colour of its block"));
+    int missed = -1, continuation = -1, partial = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines[i].state == SchemaLinePreview::Line::State::Missed && missed < 0)
+            missed = i;
+        if (lines[i].state == SchemaLinePreview::Line::State::Other && continuation < 0)
+            continuation = i;
+        if (lines[i].state == SchemaLinePreview::Line::State::Partial && partial < 0)
+            partial = i;
+    }
+    check(missed >= 0 && lines[missed].text.contains(QLatin1String("restart")) && lines[missed].spans.isEmpty()
+              && continuation == missed + 1 && lines[continuation].text.contains(QLatin1String("Main.java"))
+              && partial == missed + 2 && lines[partial].text.contains(QLatin1String("shutting"))
+              && !lines[partial].spans.isEmpty(),
+          QStringLiteral("graphical: a line the schema does not read, a continuation and a half-read line are "
+                         "told apart (%1, %2, %3)").arg(missed).arg(continuation).arg(partial));
+    if (missed >= 0 && partial >= 0) {
+        // Красным — обе; не прочитанная гуще.
+        QColor missedFill, partialFill;
+        const QTextBlock mb = preview->document()->findBlockByNumber(missed);
+        const QTextBlock pb = preview->document()->findBlockByNumber(partial);
+        for (const QTextEdit::ExtraSelection& sel : preview->extraSelections()) {
+            if (!sel.format.boolProperty(QTextFormat::FullWidthSelection))
+                continue;
+            if (sel.cursor.block() == mb)
+                missedFill = sel.format.background().color();
+            if (sel.cursor.block() == pb)
+                partialFill = sel.format.background().color();
+        }
+        check(missedFill.isValid() && partialFill.isValid() && missedFill != partialFill
+                  && missedFill.red() > missedFill.green() && partialFill.red() > partialFill.green(),
+              QStringLiteral("graphical: both are marked red, the unread one stronger"));
+    }
+
+    // Каталог: покрытие — только у схем, которые читают лог.
+    auto* list = w.findChild<QListWidget*>(QStringLiteral("schemaList"));
+    bool noNoise = list && list->count() > 1;
+    for (int i = 0; list && i < list->count(); ++i)
+        noNoise = noNoise && !list->item(i)->text().contains(QLatin1Char('%'));
+    check(noNoise, QStringLiteral("graphical: schemas that do not read the log show no percent"));
+
+
+    // --- Выбор поля: щелчок по участку строки и по блоку ------------------------
+    check(w.selectedColumn() == -1 && !card->field().isValid(), QStringLiteral("graphical: nothing is selected at first"));
+    QTest::mouseClick(preview->viewport(), Qt::LeftButton, Qt::NoModifier, preview->spanCenter(0, 2));
+    check(w.selectedColumn() == 2 && strip->currentColumn() == 2 && preview->currentColumn() == 2
+              && card->field().column == 2 && nameEdit->isVisible() && nameEdit->text() == columns.value(2),
+          QStringLiteral("graphical: a click on a field in a line selects it everywhere (%1)").arg(w.selectedColumn()));
+    check(waitFor(settled), QStringLiteral("graphical: settled after the selection"));
+    QList<QRadioButton*> radios;   // уходящие (deleteLater) — уже без имени
+    for (QRadioButton* r : card->findChildren<QRadioButton*>()) {
+        if (r->objectName().startsWith(QLatin1String("fieldEnd")))
+            radios.append(r);
+    }
+    int checkedRadios = 0, results = 0;
+    for (QRadioButton* r : radios) {
+        checkedRadios += r->isChecked() ? 1 : 0;
+        const QString id = r->objectName().mid(QStringLiteral("fieldEnd").size());
+        if (auto* result = card->findChild<QLabel*>(QStringLiteral("fieldEndResult") + id))
+            results += result->text().contains(QStringLiteral(" · ")) && result->text().endsWith(QLatin1Char('%'))
+                           && !result->text().contains(QLatin1Char(':')) ? 1 : 0;
+    }
+    check(radios.size() >= 4 && checkedRadios == 1 && results == radios.size(),
+          QStringLiteral("graphical: «Where it ends» — choices with a result each, one is current (%1, %2, %3)")
+              .arg(radios.size()).arg(checkedRadios).arg(results));
+    auto* values = card->findChild<QLabel*>(QStringLiteral("fieldValues"));
+    check(values && values->text().contains(QLatin1String("6 different values"))
+              && values->text().contains(QLatin1String("Order Service")),
+          QStringLiteral("graphical: the card lists the values of the field: ") + (values ? values->text() : QString()));
+    QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->columnRect(1).center());
+    check(w.selectedColumn() == 1 && preview->currentColumn() == 1 && nameEdit->text() == QLatin1String("Level"),
+          QStringLiteral("graphical: a click on a block selects the field"));
+    QTest::keyClick(strip, Qt::Key_Right);
+    check(w.selectedColumn() == 2, QStringLiteral("graphical: → moves along the blocks"));
+
+    // --- Имя — из карточки -------------------------------------------------------
+    nameEdit->setFocus();
+    nameEdit->selectAll();
+    QTest::keyClicks(nameEdit, QStringLiteral("Component"));
+    QTest::keyClick(nameEdit, Qt::Key_Return);
+    columns = LineTemplate(w.templateText()).columns();
+    check(columns.value(2) == QLatin1String("Component") && w.isModified() && !w.isDetected(),
+          QStringLiteral("graphical: the name in the card renames the field: ") + w.templateText());
+    check(strip->items().size() > 4 && w.selectedColumn() == 2 && nameEdit->text() == QLatin1String("Component"),
+          QStringLiteral("graphical: the field stays selected after the rename"));
+    nameEdit->selectAll();
+    QTest::keyClicks(nameEdit, QStringLiteral("Level"));   // занято
+    QTest::keyClick(nameEdit, Qt::Key_Return);
+    check(LineTemplate(w.templateText()).columns().value(2) == QLatin1String("Component")
+              && nameEdit->text() == QLatin1String("Component") && w.editMessage().contains(QLatin1String("Level")),
+          QStringLiteral("graphical: a taken name is refused in words: ") + w.editMessage());
+    check(waitFor(settled), QStringLiteral("graphical: settled after the rename"));
+
+    // --- «Где кончается» — из карточки -------------------------------------------
+    const QVector<SchemaEdit::EndOption> options = w.endOptions(2);
+    int other = -1;
+    for (int i = 0; i < options.size() && other < 0; ++i) {
+        if (options[i].available && !options[i].current && options[i].choice == SchemaEdit::EndOption::Choice::WideGap)
+            other = i;
+    }
+    auto* gap = card->findChild<QRadioButton*>(QStringLiteral("fieldEnd%1").arg(other));
+    check(other >= 0 && gap && gap->isEnabled() && !gap->isChecked(), QStringLiteral("graphical: «at a wide gap» is offered"));
+    if (gap) {
+        const QString before = w.templateText();
+        const int undoCount = w.undoStack()->count();
+        gap->click();
+        check(w.templateText() == options[other].templateText && w.undoStack()->count() == undoCount + 1,
+              QStringLiteral("graphical: a choice in the card changes the end of the field: ") + w.templateText());
+        check(waitFor(settled), QStringLiteral("graphical: settled after the end"));
+        auto* again = card->findChild<QRadioButton*>(QStringLiteral("fieldEnd%1").arg(other));
+        check(again && again->isChecked() && strip->items().value(4).caption == QLatin1String("up to a wide gap"),
+              QStringLiteral("graphical: the card and the block show the new end"));
+        w.undoStack()->undo();
+        check(w.templateText() == before, QStringLiteral("graphical: one undo step"));
+        check(waitFor(settled), QStringLiteral("graphical: settled after undo"));
+    }
+
+    // --- Hide и «Show as a Column» -----------------------------------------------
+    auto* hide = card->findChild<QPushButton*>(QStringLiteral("fieldHideBtn"));
+    const QString beforeHide = w.templateText();
+    if (hide)
+        hide->click();
+    check(LineTemplate(w.templateText()).columns().size() == 4 && w.selectedColumn() == -1,
+          QStringLiteral("graphical: Hide removes the column: ") + w.templateText());
+    int hiddenItem = -1;
+    for (int i = 0; i < strip->items().size(); ++i) {
+        if (strip->items()[i].type == SchemaFieldStrip::Item::Type::Field && strip->items()[i].column < 0)
+            hiddenItem = i;
+    }
+    check(hiddenItem >= 0, QStringLiteral("graphical: the hidden part stays among the blocks"));
+    if (hiddenItem >= 0) {
+        QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->itemRect(hiddenItem).center());
+        auto* show = card->findChild<QPushButton*>(QStringLiteral("fieldShowBtn"));
+        check(card->field().isHidden() && show && show->isVisible(), QStringLiteral("graphical: the card offers to show it"));
+        if (show)
+            show->click();
+        check(LineTemplate(w.templateText()).columns().size() == 5 && w.selectedColumn() == 2
+                  && nameEdit->isVisible(),
+              QStringLiteral("graphical: Show as a Column brings the column back: ") + w.templateText());
+    }
+    w.setTemplateText(beforeHide);
+    check(waitFor(settled), QStringLiteral("graphical: settled after hide and show"));
+
+    // --- Make Field выделением в строке -------------------------------------------
+    check(w.newFromTemplate(QStringLiteral("{Timestamp:time} | {Level:level} | {Message}"), QStringLiteral("Coarse")),
+          QStringLiteral("graphical: a coarse schema"));
+    check(waitFor(settled), QStringLiteral("graphical: the coarse schema is computed"));
+    auto* floating = preview->findChild<QToolButton*>(QStringLiteral("previewMakeFieldBtn"));
+    check(floating && !floating->isVisible(), QStringLiteral("graphical: no Make Field button without a selection"));
+    const QString line0 = preview->lines().value(0).text;
+    const QString comp = line0.section(QLatin1Char('|'), 2, 2).trimmed();
+    const int compAt = int(line0.indexOf(comp, line0.indexOf(QLatin1Char('|'), line0.indexOf(QLatin1Char('|')) + 1)));
+    preview->selectInLine(0, compAt, int(comp.size()));
+    check(floating && floating->isVisible() && preview->lineSelection().isValid(),
+          QStringLiteral("graphical: a selection in a line brings the Make Field button"));
+    app.timing = true;
+    app.maxMs = 0;
+    if (floating)
+        QTest::mouseClick(floating, Qt::LeftButton);
+    check(waitFor(settled), QStringLiteral("graphical: Make Field computed"));
+    app.timing = false;
+    std::printf("  graphical: the longest GUI event of Make Field in a line — %lld ms (%s)\n", app.maxMs,
+                qPrintable(app.maxWhat));
+    if (!kSanitized)
+        check(app.maxMs <= 50, QStringLiteral("graphical: the longest GUI event %1 ms (%2)").arg(app.maxMs).arg(app.maxWhat));
+    columns = LineTemplate(w.templateText()).columns();
+    check(columns.size() == 4 && w.makeFieldResult().ok() && w.selectedColumn() == 2 && card->field().column == 2,
+          QStringLiteral("graphical: the selection became a field, it is selected: ") + w.templateText());
+    check(!preview->lineSelection().isValid() && floating && !floating->isVisible(),
+          QStringLiteral("graphical: the selection is cleared after Make Field"));
+    check(w.editMessage().contains(columns.value(2)) && !w.editMessage().contains(QLatin1Char('{')),
+          QStringLiteral("graphical: the message names the field in words: ") + w.editMessage());
+    check(preview->lines().value(0).spans.size() == 4, QStringLiteral("graphical: the lines are recoloured"));
+
+    // Дата и уровень получают свои имена; Ctrl+M в строках.
+    check(w.newEmpty(), QStringLiteral("graphical: an empty schema"));
+    check(waitFor(settled), QStringLiteral("graphical: the empty schema is computed"));
+    check(w.guideText().contains(QLatin1String("not split")) && detect->isEnabled() && detect->font().bold(),
+          QStringLiteral("graphical: the guide of an unsplit log points at Detect Fields: ") + w.guideText());
+    preview->setFocus();
+    preview->selectInLine(0, 0, 19);
+    QTest::keyClick(preview, Qt::Key_M, Qt::ControlModifier);
+    check(waitFor(settled), QStringLiteral("graphical: Make Field of the date computed"));
+    check(w.templateText().startsWith(QLatin1String("{Timestamp:time}")),
+          QStringLiteral("graphical: a selected date becomes Timestamp: ") + w.templateText());
+    const QString afterDate = w.templateText();
+
+    // Нечего делать — словами, шаблон прежний.
+    const SchemaLinePreview::Span ts = preview->lines().value(0).spans.value(0);
+    check(!w.makeFieldInLine(0, ts.start, ts.length) && w.selectedColumn() == 0 && w.templateText() == afterDate,
+          QStringLiteral("graphical: the whole field selected — it is selected instead: ") + w.editMessage());
+    check(!w.makeFieldInLine(0, ts.start + 3, ts.length + 4) && w.templateText() == afterDate
+              && w.editMessage().contains(QLatin1String("inside one")),
+          QStringLiteral("graphical: a selection across fields is refused: ") + w.editMessage());
+    int missedNow = -1;
+    for (int i = 0; i < preview->lines().size() && missedNow < 0; ++i) {
+        if (preview->lines()[i].row < 0)
+            missedNow = i;
+    }
+    if (missedNow >= 0)
+        check(!w.makeFieldInLine(missedNow, 0, 4) && w.templateText() == afterDate,
+              QStringLiteral("graphical: a line the schema does not read is refused: ") + w.editMessage());
+    views->setCurrentIndex(0);
+    preview->clearLineSelection();
+    check(!w.makeFieldFromSelection() && !w.editMessage().isEmpty() && w.templateText() == afterDate,
+          QStringLiteral("graphical: Make Field without a selection explains"));
+
+    // --- Detect Fields --------------------------------------------------------------
+    check(w.newEmpty() && waitFor(settled), QStringLiteral("graphical: empty again"));
+    const int undoBefore = w.undoStack()->count();
+    detect->click();
+    check(w.templateText() == detected && w.isDetected() && w.savedName().isEmpty()
+              && w.undoStack()->count() == undoBefore + 1,
+          QStringLiteral("graphical: Detect Fields splits the lines (an undo step): ") + w.templateText());
+    w.undoStack()->undo();
+    check(w.templateText() == QLatin1String("{Message}"), QStringLiteral("graphical: undo of Detect Fields"));
+    w.undoStack()->redo();
+    check(waitFor(settled), QStringLiteral("graphical: settled after Detect Fields"));
+    // Схема каталога, которая лог не читает: подсказка и новая схема вместо правки чужой.
+    const QString foreignDefinition = c.schemas().value(0).schema;
+    check(w.openSchema(foreign) && waitFor(settled), QStringLiteral("graphical: a catalogue schema opens"));
+    check(w.guideText().contains(QLatin1String("reads only")) && detect->font().bold(),
+          QStringLiteral("graphical: a schema that does not read the log says so: ") + w.guideText());
+    detect->click();
+    check(w.templateText() == detected && w.savedName().isEmpty() && c.schemas().value(0).schema == foreignDefinition,
+          QStringLiteral("graphical: Detect Fields on a catalogue schema makes a new one: ") + w.savedName());
+    check(waitFor(settled), QStringLiteral("graphical: settled after the second Detect Fields"));
+
+    // --- Не подошедшие строки — по кнопке -------------------------------------------
+    auto* missesToggle = w.findChild<QToolButton*>(QStringLiteral("missesToggle"));
+    auto* missesTable = w.findChild<QTableWidget*>(QStringLiteral("missesTable"));
+    check(missesToggle && missesTable && missesToggle->isVisible() && !missesTable->isVisible()
+              && missesTable->rowCount() > 0 && missesToggle->text().contains(QString::number(missesTable->rowCount())),
+          QStringLiteral("graphical: the lines the schema does not read are behind a button: ")
+              + (missesToggle ? missesToggle->text() : QString()));
+    if (missesToggle)
+        missesToggle->click();
+    check(missesTable && missesTable->isVisible(), QStringLiteral("graphical: the button shows them"));
+
+    // --- Advanced: раскрывается на ошибке -------------------------------------------
+    w.setTemplateText(QStringLiteral("{A:text} {B}"));
+    auto* error = w.findChild<QLabel*>(QStringLiteral("templateError"));
+    check(w.isAdvancedShown() && templateEdit->isVisible() && error && error->isVisible()
+              && w.guideText().contains(QLatin1String("Advanced")) && strip->items().isEmpty(),
+          QStringLiteral("graphical: a template error opens Advanced and the guide points there"));
+    w.undoStack()->undo();
+    check(w.templateText() == detected && fieldItems(strip) == 5, QStringLiteral("graphical: undo brings the blocks back"));
+
+    // --- Таблица — второй вид, выбор общий -------------------------------------------
+    check(waitFor(settled), QStringLiteral("graphical: settled before the table"));
+    views->setCurrentIndex(1);
+    auto* table = w.findChild<QTableView*>(QStringLiteral("sampleTable"));
+    if (table && w.sampleModel()->rowCount() > 0) {
+        table->setCurrentIndex(w.sampleModel()->index(0, 3));
+        check(w.selectedColumn() == 3 && strip->currentColumn() == 3,
+              QStringLiteral("graphical: a cell of the table selects the field too"));
+    }
+
+    // --- Схема вкладки её лог не читает: редактор показывает разбиение ---------------
+    check(w.openSchema(foreign) && !w.isModified(), QStringLiteral("graphical: the catalogue schema again"));
+    c.selectSchema(0);
+    check(tab.parserPattern() == foreignDefinition, QStringLiteral("graphical: the tab gets the schema that does not fit"));
+    w.setView(&tab);
+    check(waitFor(settled), QStringLiteral("graphical: settled on the tab with a wrong schema"));
+    check(w.isDetected() && w.templateText() == detected && w.savedName().isEmpty() && !w.isModified(),
+          QStringLiteral("graphical: instead of a schema that does not read the log — the split lines: ") + w.templateText());
+    check(w.guideText().contains(foreign) && w.guideText().contains(QLatin1String("reads only"))
+              && w.guideText().contains(QLatin1String("by itself")),
+          QStringLiteral("graphical: the guide names the schema of the tab: ") + w.guideText());
+    check(c.schemas().value(0).schema == foreignDefinition && tab.parserPattern() == foreignDefinition,
+          QStringLiteral("graphical: neither the catalogue nor the tab is changed by that"));
+    // Открытая из списка явно — показана как есть.
+    check(w.openSchema(foreign) && waitFor(settled) && w.savedName() == foreign && !w.isDetected()
+              && w.guideText().contains(QLatin1String("reads only")),
+          QStringLiteral("graphical: opened from the list, the schema is shown as it is"));
+    // В каталоге есть схема, которая этот лог читает: она главнее догадки.
+    detect->click();
+    check(w.isDetected() && w.saveAs(QStringLiteral("Orders")) && c.schemas().size() == 2,
+          QStringLiteral("graphical: the detected schema is saved to the catalogue"));
+    w.setView(&tab);   // у вкладки по-прежнему схема, которая её лог не читает
+    check(waitFor(settled), QStringLiteral("graphical: settled with a fitting schema in the catalogue"));
+    check(w.savedName() == QLatin1String("Orders") && !w.isDetected() && !w.isModified()
+              && w.guideText().contains(QLatin1String("Orders")) && w.guideText().contains(QLatin1String("your schemas")),
+          QStringLiteral("graphical: a catalogue schema that reads the log is shown instead of a guess: %1 | %2")
+              .arg(w.savedName(), w.guideText()));
+    bool percentShown = false;
+    for (int i = 0; list && i < list->count(); ++i)
+        percentShown = percentShown || (list->item(i)->text().startsWith(QLatin1String("Orders"))
+                                        && list->item(i)->text().contains(QLatin1Char('%')));
+    check(percentShown, QStringLiteral("graphical: a schema that reads the log shows its percent in the list"));
+    check(tab.parserPattern() == foreignDefinition, QStringLiteral("graphical: the tab is not changed until Apply to Tab"));
+    w.close();
+    w.setView(nullptr);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1028,6 +1501,8 @@ int main(int argc, char** argv)
     testCost();
     std::printf("Window:\n");
     testWindow(app);
+    std::printf("Graphical editing:\n");
+    testGraphical(app);
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

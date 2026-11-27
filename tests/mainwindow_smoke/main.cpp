@@ -45,6 +45,9 @@
 #include "schemastore.h"
 #include "schemacandidateswindow.h"
 #include "schemaeditorwindow.h"
+#include "schemafieldcard.h"
+#include "schemafieldstrip.h"
+#include "schemalinepreview.h"
 #include "schemasamplemodel.h"
 #include "secretstore.h"
 #include "linetemplate.h"
@@ -4038,6 +4041,29 @@ void scenarioMakeField(MainWindow& win, const QDir& dir)
     editor->setFitBudget(noLimit);
     const auto settled = [&]() { return !editor->isComputing() && editor->fileFitReady() && editor->endOptionsReady(); };
 
+    // Графическая правка (U-28): незнакомый лог разбит на поля сам, строки
+    // раскрашены, щелчок по полю в строке открывает его карточку; текст
+    // шаблона — в свёрнутом Advanced.
+    check(waitFor(settled, 30000) && editor->isDetected()
+              && LineTemplate(editor->templateText()).columns().size() >= 3,
+          QStringLiteral("the editor splits the unknown log into fields by itself: ") + editor->templateText());
+    auto* strip = editor->findChild<SchemaFieldStrip*>(QStringLiteral("fieldStrip"));
+    auto* preview = editor->findChild<SchemaLinePreview*>(QStringLiteral("linePreview"));
+    auto* card = editor->findChild<SchemaFieldCard*>(QStringLiteral("fieldCardPanel"));
+    auto* sampleTabs = editor->findChild<QTabWidget*>(QStringLiteral("sampleTabs"));
+    auto* templateEdit = editor->findChild<QWidget*>(QStringLiteral("templateEdit"));
+    check(strip && preview && card && sampleTabs && templateEdit, QStringLiteral("the blocks, the lines and the card exist"));
+    if (!strip || !preview || !card || !sampleTabs || !templateEdit)
+        return;
+    check(preview->isVisible() && !preview->lines().isEmpty() && !preview->lines().first().spans.isEmpty()
+              && !strip->items().isEmpty() && !templateEdit->isVisible() && !editor->guideText().isEmpty(),
+          QStringLiteral("the lines are coloured by field, the template text is collapsed"));
+    QTest::mouseClick(preview->viewport(), Qt::LeftButton, Qt::NoModifier, preview->spanCenter(0, 1));
+    auto* fieldName = card->findChild<QLineEdit*>(QStringLiteral("fieldNameEdit"));
+    check(editor->selectedColumn() == 1 && strip->currentColumn() == 1 && fieldName && fieldName->isVisible()
+              && fieldName->text() == LineTemplate(editor->templateText()).columns().value(1),
+          QStringLiteral("a click on a field in a line opens its card"));
+
     // Find a Schema — панелью редактора; вариант вывода структуры — в редактор.
     auto* findButton = editor->findChild<QPushButton*>(QStringLiteral("findSchemaBtn"));
     if (findButton && !findButton->isChecked())
@@ -4083,6 +4109,7 @@ void scenarioMakeField(MainWindow& win, const QDir& dir)
     if (!table || row < 0)
         return;
     editor->activateWindow();
+    sampleTabs->setCurrentIndex(1);   // таблица — второй вид
     table->setFocus();
     table->setCurrentIndex(samples->index(row, last));
     QTest::keyClick(table, Qt::Key_F2);

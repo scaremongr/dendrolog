@@ -697,7 +697,8 @@ void testEditor(const QDir& tmp)
 
     for (const char* name : {"schemaList", "nameEdit", "descriptionEdit", "templateEdit", "sampleTable", "missesTable",
                              "fileFitLabel", "applyToTabBtn", "saveBtn", "saveAsBtn", "closeBtn", "newSchemaBtn",
-                             "findSchemaBtn"})
+                             "findSchemaBtn", "guideLabel", "detectFieldsBtn", "fieldStrip", "linePreview",
+                             "fieldCardPanel", "sampleTabs", "missesToggle", "advancedToggle"})
         check(w.findChild<QWidget*>(QString::fromLatin1(name)) != nullptr,
               QStringLiteral("editor: %1 exists").arg(QString::fromLatin1(name)));
     for (const char* name : {"newEmptyAction", "newFromSamplesAction", "newFromTemplateAction", "importGrokAction"})

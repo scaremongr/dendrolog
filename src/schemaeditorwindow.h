@@ -22,44 +22,71 @@ class QListWidget;
 class QMenu;
 class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
 class QSplitter;
+class QTabWidget;
 class QTableView;
 class QTableWidget;
 class QTimer;
 class QToolButton;
 class QUndoStack;
 class SchemaCandidatesWindow;
+class SchemaFieldCard;
+class SchemaFieldStrip;
+class SchemaLinePreview;
 class SchemaSampleModel;
 
 // ============================================================================
-// SchemaEditorWindow — редактор схем полей (F-17, шаг 9; раздел 8 F-17.md),
-// немодальное окно вместо прежнего ConversionPatternDialog (блочной модели
-// больше нет). Схема — шаблон строки (linetemplate.h), правится текстом:
+// SchemaEditorWindow — редактор схем полей (F-17, шаг 9; раздел 8 F-17.md;
+// графическая правка — U-28), немодальное окно. Схема — шаблон строки
+// (linetemplate.h), но правится она НЕ текстом: пользователь видит строки
+// своего лога, раскрашенные по полям, и работает с ними; текст шаблона — в
+// свёрнутом разделе Advanced.
 //
-//   • слева — каталог (FieldSchemaController::schemas) с покрытием файла
-//     вкладки у каждой схемы (SchemaFitJob), New ▾ (Empty, From Sample
-//     Lines — SchemaInference, From Template…, Import Grok… —
+//   • слева — каталог (FieldSchemaController::schemas); у схем, которые
+//     читают файл вкладки, — покрытие (SchemaFitJob); New ▾ (Empty, From
+//     Sample Lines — SchemaInference, From Template…, Import Grok… —
 //     SchemaConverter::fromGrok) и ⋯ (Delete, Import, Export, Open Folder);
-//   • справа — Name, Description, Template: ошибка компиляции подчёркнута на
-//     месте и названа словами (LineTemplateError);
-//   • таблица образцов (SchemaSampleModel): строки вкладки с текущей, ячейки
-//     — ровно то, что увидит вкладка; в заголовке колонки — число разных
-//     значений, в подсказке — частые со счётчиками;
-//   • «Did not match» — строки файла вкладки, которые схема не приняла, с
-//     причиной словами; под ним — покрытие файла (SchemaFit::summary);
+//   • сверху справа — Name, Description и подсказка «что делать сейчас»
+//     (guideText: нет вкладки; JSON / logfmt; строки не разбиты; схема не
+//     читает лог; поля определены сами; обычная) с кнопками Detect Fields
+//     (detectFields — SchemaInference по строкам вкладки) и Find a Schema;
+//   • поля схемы цветными блоками в ряд (SchemaFieldStrip): имя и «где
+//     кончается» словами, между блоками — текст между полями;
+//   • строки вкладки, раскрашенные теми же цветами (SchemaLinePreview,
+//     вкладка Lines): щелчок по участку выбирает поле, выделение текста —
+//     кнопка Make Field у выделения; строка, которую схема не читает, —
+//     красным. Вкладка Table — прежняя таблица образцов (SchemaSampleModel:
+//     ячейки — то, что увидит вкладка; в заголовке — число разных значений);
+//   • карточка выбранного поля (SchemaFieldCard): имя, «где кончается»
+//     переключателями с итогом на строках (SchemaEdit::endOptions), значения,
+//     Hide / Merge with Next / Remove / Add Value…; у части строки без
+//     колонки — Show as a Column;
+//   • покрытие файла (SchemaFit::summary) и, по кнопке, строки, которые схема
+//     не приняла, с причиной словами;
+//   • Advanced — текст шаблона: ошибка компиляции подчёркнута на месте и
+//     названа словами (LineTemplateError), рядом — памятка по синтаксису;
+//     раздел раскрывается сам, когда в шаблоне ошибка;
 //   • Find a Schema — панелью (SchemaCandidatesWindow встроенным видом):
 //     вариант открывается в редакторе новой схемой;
 //   • одно сохранение: Apply to Tab (схема вкладке, без перечитывания —
 //     FieldSchemaController), Save (в свой файл каталога), Save As…;
 //     закрытие и переход к другой схеме с правками спрашивают;
-//   • правка на строке (шаг 10, SchemaEdit): Make Field — выделение в
-//     ячейке (двойной щелчок или F2, затем Ctrl+M) становится полем, Other
-//     Variant (Ctrl+Shift+M) — следующая гипотеза конца; меню колонки
-//     (заголовок, контекстное меню таблицы, Shift+F10): Ends at с итогом
-//     каждого пункта на образцах, Rename…, Add Value…, Merge with Next, Hide,
-//     Remove. Образцы оценки — выборка файла вкладки (SchemaFitJob, до 2300
-//     строк); всё считается в пуле, итог «Ends at» — заранее, после каждой
-//     правки шаблона;
+//   • вкладка без схемы — редактор сам разбивает её строки (autoDetect в
+//     setView): новая несохранённая схема, закрытие о ней не спрашивает. То
+//     же — когда схема вкладки её лог не читает (SchemaFit::Verdict::NoFit по
+//     итогу проверки файла): вместо неё показано разбиение, подсказка
+//     называет схему и её покрытие; сама схема каталога не тронута и
+//     открывается из списка слева. Если же в каталоге есть схема, которая
+//     этот лог читает (вердикт Fits по проверке каталога), вместо догадки
+//     показана она (preferCatalogueSchema);
+//   • правка на строке (шаг 10, SchemaEdit): Make Field — выделение в строке
+//     (или в ячейке таблицы: двойной щелчок или F2), затем кнопка или Ctrl+M;
+//     Other Variant (Ctrl+Shift+M) — следующая гипотеза конца; меню колонки
+//     (блок, заголовок и ячейка таблицы, Shift+F10): Ends at с итогом каждого
+//     пункта, Rename…, Add Value…, Merge with Next, Hide, Remove. Образцы
+//     оценки — выборка файла вкладки (SchemaFitJob, до 2300 строк); всё
+//     считается в пуле, итог «Ends at» — заранее, после каждой правки;
 //   • QUndoStack на имя, описание и шаблон (Ctrl+Z / Ctrl+Shift+Z); каждая
 //     операция правки на строке — отдельный шаг отмены;
 //   • переименование поля (колонка на том же месте под другим именем)
@@ -124,6 +151,13 @@ public:
     void setDescription(const QString& text);
     bool newEmpty();
     bool newFromSampleLines();
+    /// Detect Fields: разбить строки вкладки на поля (SchemaInference). У
+    /// новой схемы — шаг отмены, у схемы каталога — новая несохранённая
+    /// (с вопросом о правках). false — не вышло (причина — editMessage()).
+    bool detectFields();
+    /// Схема на экране — итог Detect Fields (или разбиения при открытии),
+    /// ещё не правленный.
+    bool isDetected() const;
     bool newFromTemplate(const QString& templateText, const QString& name = QString());
     /// Grok → шаблон новой схемы; error — почему нет.
     bool importGrok(const QString& grok, QString* error = nullptr);
@@ -139,7 +173,11 @@ public:
     /// образцов — полем (в пуле; итог — новый шаблон, шаг отмены). false — не
     /// начато (причина — editMessage()).
     bool makeField(int row, int column, int from, int length);
-    /// Выделение в открытом редакторе ячейки (двойной щелчок или F2).
+    /// Make Field по раскрашенным строкам: [start, start + length) образца
+    /// №line (SchemaLinePreview::lines). false — не начато (editMessage()).
+    bool makeFieldInLine(int line, int start, int length);
+    /// Выделение в раскрашенных строках (вкладка Lines) или в открытом
+    /// редакторе ячейки таблицы (двойной щелчок или F2).
     bool makeFieldFromSelection();
     /// Следующая гипотеза последнего Make Field вместо текущей (тот же шаг
     /// отмены). false — нечего или шаблон с тех пор правили.
@@ -158,8 +196,20 @@ public:
     bool addValue(int column, const QString& value);
     /// Значения для Add Value… (по строкам, где разбор остановился на поле).
     QStringList suggestedValues(int column) const;
+    /// Часть строки без колонки («{_}», элемент шаблона piece) — колонкой.
+    bool showHiddenField(int piece);
     /// Меню колонки — то же, что у заголовка; владелец — вызывающий.
     QMenu* columnMenu(int column);
+
+    // ---- Графическая правка (U-28) ---------------------------------------------
+    /// Выбранное поле: рамка блока, подчёркивание в строках, карточка. -1 — нет.
+    int selectedColumn() const { return m_selectedColumn; }
+    void selectColumn(int column);
+    /// Подсказка «что делать сейчас» (как на экране).
+    QString guideText() const { return m_guideText; }
+    /// Раздел Advanced (текст шаблона) раскрыт.
+    bool isAdvancedShown() const;
+    void setAdvancedShown(bool shown);
     /// Вопрос текста (Rename…, Add Value…). Тест: без диалога; пусто — отмена.
     using TextAsker = std::function<QString(const QString& title, const QString& label, const QString& text,
                                             const QStringList& items)>;
@@ -200,6 +250,14 @@ private:
     bool confirmRenames(const QString& oldDefinition, const QString& newDefinition);
 
     void rebuildList();
+    void rebuildStrip();
+    void rebuildPreview();
+    void updateCard();
+    void updateGuide();
+    bool autoDetect(bool keepIfNone = false);
+    void preferCatalogueSchema();
+    QString suggestedName() const;
+    void selectHiddenPiece(int piece);
     void onTemplateChanged();
     void recompute();
     void startFileFit();
@@ -214,6 +272,7 @@ private:
         QString base;            ///< шаблон на старте: правили с тех пор — итог отброшен
         QString label;
         bool make = false;
+        bool deselect = false;   ///< поле ушло (Remove): выбор снять
         SchemaEdit::MakeFieldResult result;
         SchemaEdit::Edit edit;
     };
@@ -310,6 +369,31 @@ private:
     QPushButton* m_otherVariantButton = nullptr;
     QAction* m_makeFieldAction = nullptr;
     QAction* m_otherVariantAction = nullptr;
+
+    // Графическая правка (U-28).
+    QLabel* m_guide = nullptr;
+    QString m_guideText;
+    QPushButton* m_detectButton = nullptr;
+    SchemaFieldStrip* m_strip = nullptr;
+    SchemaLinePreview* m_preview = nullptr;
+    SchemaFieldCard* m_card = nullptr;
+    QScrollArea* m_cardScroll = nullptr;
+    QTabWidget* m_sampleTabs = nullptr;
+    QToolButton* m_missesToggle = nullptr;
+    QWidget* m_missesBox = nullptr;
+    QToolButton* m_advancedToggle = nullptr;
+    QWidget* m_advancedBox = nullptr;
+    int m_selectedColumn = -1;
+    int m_selectedPiece = -1;      ///< выбранная часть строки без колонки
+    bool m_selecting = false;      ///< выбор расходится по видам — без петли
+    QString m_detectedTemplate;    ///< шаблон последнего Detect Fields
+    QString m_detectFailure;       ///< почему Detect Fields не вышел (до правки)
+    QString m_checkTabSchema;      ///< схема вкладки, загруженная setView: не читает лог — разбить самому
+    QString m_replacedSchema;      ///< имя схемы вкладки, вместо которой показано разбиение
+    QString m_replacedPercent;     ///< её покрытие
+    bool m_detectedOnOpen = false; ///< разбиение показано само: схема каталога, читающая лог, главнее
+    QString m_offeredSchema;       ///< схема каталога, показанная вместо разбиения
+    QString m_offeredPercent;
 };
 
 #endif // SCHEMAEDITORWINDOW_H

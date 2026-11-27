@@ -6,6 +6,33 @@ All notable changes to DendroLog are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The schema editor is graphical again.** `Tools → Field Schemas…` no longer
+  asks you to write a template: it shows the lines of your log with every
+  field in its own colour, and the same fields as coloured blocks above them
+  with the name of each field and where it ends, in words.
+  - A log without a schema — or with a schema that does not read it — is
+    split into fields by the editor itself when the window opens (if one of
+    your schemas reads the log, that schema is shown instead); **Detect
+    Fields** splits the lines on request. A hint at the top says what to do
+    next.
+  - Click a field (a block or the coloured text in a line) to open its card:
+    the name, the ways the field can end with the result of each on the lines
+    of the log (how many different values, what share of lines is read), the
+    most frequent values, and **Hide**, **Merge with Next**, **Remove**,
+    **Add Value…**.
+  - Select text in a line and a **Make Field** button appears at the
+    selection; a selected date is named `Timestamp` and a level `Level` right
+    away.
+  - Lines the schema does not read are red in place (half-read ones pale
+    red); their list with the reasons opens with a button under the lines.
+  - The template text moved to a collapsed **Advanced** section (it opens by
+    itself when the template has an error) together with a reminder of the
+    syntax. The table of sample lines is the second view, **Table**; all the
+    former shortcuts and the column menu work as before.
+  - In the list of schemas the share of lines is shown only for schemas that
+    read the log of the tab.
+
 ## [0.7.0] — 2026-11-27
 
 **A log splits into fields without setting anything up.** JSON Lines and

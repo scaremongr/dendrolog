@@ -70,8 +70,18 @@ void SchemaSampleModel::restart()
     m_watcher->setFuture(QtConcurrent::run([generation, lines, missLines, extractor, cancel]() {
         Output out;
         out.generation = generation;
-        if (!extractor || !extractor->isValid())
+        if (!extractor || !extractor->isValid()) {
+            // Схемы нет (или шаблон с ошибкой): строки показываются как есть.
+            for (const SchemaFit::Sample& sample : lines) {
+                if (sample.text.trimmed().isEmpty())
+                    continue;
+                LineView view;
+                view.line = sample.line;
+                view.text = sample.text;
+                out.views.append(view);
+            }
             return out;
+        }
         out.columns = extractor->fields();
         const int columns = int(out.columns.size());
         SchemaFit::Budget budget;
@@ -87,7 +97,12 @@ void SchemaSampleModel::restart()
             if (text.trimmed().isEmpty())
                 continue;
             const FieldExtractor::Outcome outcome = extractor->extract(text, &fields);
+            LineView view;
+            view.line = lines[i].line;
+            view.text = text;
             if (outcome == FieldExtractor::Outcome::Rejected) {
+                view.state = corpus.candidate.value(i) ? LineView::State::Missed : LineView::State::Other;
+                out.views.append(view);
                 if (missLines.isEmpty() && corpus.candidate.value(i) && out.misses.size() < kMaxMisses) {
                     Miss miss;
                     miss.line = lines[i].line;
@@ -112,6 +127,9 @@ void SchemaSampleModel::restart()
                 if (!v.isEmpty())
                     ++counts[c][v];
             }
+            view.state = row.partial ? LineView::State::Partial : LineView::State::Accepted;
+            view.row = int(out.rows.size());
+            out.views.append(view);
             out.rows.append(row);
             if (row.partial && missLines.isEmpty() && out.misses.size() < kMaxMisses) {
                 Miss miss;
@@ -166,6 +184,7 @@ void SchemaSampleModel::onFinished()
     m_top = out.top;
     m_distinct = out.distinct;
     m_misses = out.misses;
+    m_views = out.views;
     m_fit = out.fit;
     endResetModel();
     emit computed();

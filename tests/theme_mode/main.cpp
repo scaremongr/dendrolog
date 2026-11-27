@@ -813,6 +813,11 @@ static void checkOpenPanels(const QDir& dir)
                                     QStringLiteral("Fixture"));
             SchemaEditorWindow* w = window.get();
             testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady(); }, 30000);
+            // Графическая правка (U-28): выбранное поле — рамка блока, участки
+            // строк гуще, карточка с именем, «где кончается» и значениями.
+            w->selectColumn(2);
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady() && w->endOptionsReady(); },
+                              30000);
             return window;
         });
     }

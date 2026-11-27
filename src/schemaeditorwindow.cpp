@@ -7,8 +7,12 @@
 #include "logmodel.h"
 #include "logviewwidget.h"
 #include "schemacandidateswindow.h"
+#include "cardframe.h"
 #include "schemaconverter.h"
+#include "schemafieldcard.h"
+#include "schemafieldstrip.h"
 #include "schemainference.h"
+#include "schemalinepreview.h"
 #include "schemasamplemodel.h"
 
 #include <QAction>
@@ -17,6 +21,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <QDesktopServices>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -28,10 +33,13 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QTabWidget>
 #include <QTableView>
 #include <QTableWidget>
 #include <QTextBlock>
@@ -44,6 +52,7 @@
 namespace {
 
 constexpr int kSampleLines = 200;
+constexpr int kCardMinWidth = 270;
 constexpr int kRecomputeMs = 300;
 
 enum Field { NameField = 1, DescriptionField = 2, TemplateField = 3, AllFields = 4 };
@@ -70,6 +79,63 @@ QStringList columnsOf(const QString& templateText)
         return {};
     const LineTemplate tpl(templateText);
     return tpl.isValid() ? tpl.columns() : QStringList();
+}
+
+// «Где кончается поле» словами — подпись блока и карточки (без синтаксиса
+// шаблона). next — что стоит в шаблоне за полем (пробелы пропущены).
+QString endCaption(const QVector<SchemaEdit::Piece>& pieces, int index)
+{
+    using Kind = LineTemplateElement::Kind;
+    using Type = LineTemplateElement::Type;
+    const SchemaEdit::Piece& p = pieces[index];
+    const SchemaEdit::Piece* next = nullptr;
+    for (int i = index + 1; i < pieces.size() && !next; ++i) {
+        if (pieces[i].type != Type::Space)
+            next = &pieces[i];
+    }
+    const QString literal = next && next->type == Type::Literal ? next->text.trimmed() : QString();
+    switch (p.kind) {
+    case Kind::Time: return QObject::tr("date and time");
+    case Kind::Level: return QObject::tr("level");
+    case Kind::Int: return QObject::tr("whole number");
+    case Kind::Num: return QObject::tr("number");
+    case Kind::Hex: return QObject::tr("hex number");
+    case Kind::Uuid: return QObject::tr("UUID");
+    case Kind::Ip: return QObject::tr("IP address");
+    case Kind::Path: return QObject::tr("path");
+    case Kind::Quoted: return QObject::tr("text in quotes");
+    case Kind::Of:
+        return p.values.size() == 1 ? QObject::tr("always “%1”").arg(p.values.first())
+                                    : QObject::tr("one of %1 values").arg(p.values.size());
+    case Kind::Regex: return QObject::tr("regular expression");
+    case Kind::Word: return QObject::tr("one word");
+    case Kind::Text:
+        if (!literal.isEmpty())
+            return QObject::tr("up to “%1”").arg(literal);
+        if (next && next->isField() && !next->name.isEmpty())
+            return QObject::tr("up to %1").arg(next->name);
+        return QObject::tr("text");
+    case Kind::Greedy:
+        return literal.isEmpty() ? QObject::tr("as much as fits") : QObject::tr("up to the last “%1”").arg(literal);
+    case Kind::Padded: return QObject::tr("up to a wide gap");
+    case Kind::Width: return p.count == 1 ? QObject::tr("1 character") : QObject::tr("%1 characters").arg(p.count);
+    case Kind::Words: return p.count == 1 ? QObject::tr("1 word") : QObject::tr("%1 words").arg(p.count);
+    case Kind::Rest: return QObject::tr("to the end of the line");
+    }
+    return QString();
+}
+
+QString partOf(SchemaEdit::Piece piece)
+{
+    piece.opt = -1;
+    return SchemaEdit::render({piece});
+}
+
+QString valuesText(int n)
+{
+    return n == 1 ? QObject::tr("1 value")
+         : n > SchemaFit::kDistinctCap ? QObject::tr("%1+ values").arg(SchemaFit::kDistinctCap)
+                                        : QObject::tr("%1 values").arg(n);
 }
 
 // Строка Template: одна строка текста, ошибка компиляции подчёркнута на месте.
@@ -128,6 +194,25 @@ protected:
         QString text = source->text();
         text.replace(QLatin1Char('\n'), QLatin1Char(' ')).remove(QLatin1Char('\r'));
         insertPlainText(text);
+    }
+};
+
+// Плашка подсказки: тонированный фон и рамка из палитры при отрисовке (без
+// строки стиля — смена темы ничего не кэширует).
+class GuideFrame : public QFrame {
+public:
+    using QFrame::QFrame;
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QPalette pal = palette();
+        const QColor accent = pal.color(QPalette::Highlight);
+        p.setPen(CardFrame::mixedColor(pal.color(QPalette::Window), accent, 0.45));
+        p.setBrush(CardFrame::mixedColor(pal.color(QPalette::Window), accent, 0.10));
+        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
     }
 };
 
@@ -223,7 +308,7 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
 {
     setObjectName(QStringLiteral("schemaEditorWindow"));
     setWindowTitle(tr("Field Schemas"));
-    resize(1100, 700);
+    resize(1200, 760);
     m_recompute->setSingleShot(true);
     m_recompute->setInterval(kRecomputeMs);
 
@@ -274,65 +359,60 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     auto* right = new QWidget(m_mainSplitter);
     auto* rightLayout = new QVBoxLayout(right);
     rightLayout->setContentsMargins(0, 0, 0, 0);
-    auto* form = new QFormLayout();
     auto* nameRow = new QHBoxLayout();
+    nameRow->addWidget(new QLabel(tr("Name"), right));
     m_name = new QLineEdit(right);
     m_name->setObjectName(QStringLiteral("nameEdit"));
-    nameRow->addWidget(m_name, 1);
-    m_findButton = new QPushButton(tr("Find a Schema"), right);
+    nameRow->addWidget(m_name, 2);
+    nameRow->addWidget(new QLabel(tr("Description"), right));
+    m_descriptionEdit = new QLineEdit(right);
+    m_descriptionEdit->setObjectName(QStringLiteral("descriptionEdit"));
+    m_descriptionEdit->setPlaceholderText(tr("What logs this schema is for (optional)"));
+    nameRow->addWidget(m_descriptionEdit, 3);
+    rightLayout->addLayout(nameRow);
+
+    // Подсказка «что делать сейчас» и два главных действия.
+    auto* guide = new GuideFrame(right);
+    guide->setObjectName(QStringLiteral("guideFrame"));
+    auto* guideLayout = new QHBoxLayout(guide);
+    m_guide = new QLabel(guide);
+    m_guide->setObjectName(QStringLiteral("guideLabel"));
+    m_guide->setWordWrap(true);
+    m_guide->setTextFormat(Qt::PlainText);
+    guideLayout->addWidget(m_guide, 1);
+    m_detectButton = new QPushButton(tr("Detect Fields"), guide);
+    m_detectButton->setObjectName(QStringLiteral("detectFieldsBtn"));
+    m_detectButton->setToolTip(tr("Let DendroLog split the lines of the log into fields by itself. "
+                                  "You can correct the result afterwards."));
+    guideLayout->addWidget(m_detectButton, 0, Qt::AlignVCenter);
+    m_findButton = new QPushButton(tr("Find a Schema"), guide);
     m_findButton->setObjectName(QStringLiteral("findSchemaBtn"));
     m_findButton->setCheckable(true);
     m_findButton->setToolTip(tr("Show the schemas of the catalogue, the inferred ones and the AI suggestion "
                                 "for the lines of the tab"));
-    nameRow->addWidget(m_findButton);
-    form->addRow(tr("Name"), nameRow);
-    m_descriptionEdit = new QLineEdit(right);
-    m_descriptionEdit->setObjectName(QStringLiteral("descriptionEdit"));
-    form->addRow(tr("Description"), m_descriptionEdit);
-    m_template = new TemplateEdit(right);
-    m_template->setObjectName(QStringLiteral("templateEdit"));
-    m_template->setToolTip(tr(
-        "The line template: text stays as in the line, {Name:kind} is a field.\n"
-        "Kinds: time, level, int, num, hex, uuid, ip, path, quoted — the field ends where its form ends;\n"
-        "word — at a space; text — at what follows in the template; greedy — at the last occurrence;\n"
-        "padded — at two or more spaces; width(N); words(N); of(a|b|c) — one of the values;\n"
-        "rest — at the end of the line; /regex/ — a regular expression (slow: fields come in the background).\n"
-        "{? … ?} — an optional part; {_} — parsed, but not a column."));
-    form->addRow(tr("Template"), m_template);
-    rightLayout->addLayout(form);
-    m_error = new QLabel(right);
-    m_error->setObjectName(QStringLiteral("templateError"));
-    m_error->setWordWrap(true);
-    {
-        QPalette p = m_error->palette();
-        p.setColor(QPalette::WindowText, QColor(0xc0, 0x30, 0x30));
-        m_error->setPalette(p);
-    }
-    m_error->hide();
-    rightLayout->addWidget(m_error);
+    guideLayout->addWidget(m_findButton, 0, Qt::AlignVCenter);
+    rightLayout->addWidget(guide);
 
-    // Правка на строке (шаг 10).
-    auto* editRow = new QHBoxLayout();
-    m_makeFieldButton = new QPushButton(tr("Make Field"), right);
-    m_makeFieldButton->setObjectName(QStringLiteral("makeFieldBtn"));
-    m_makeFieldButton->setFocusPolicy(Qt::NoFocus);   // щелчок не закрывает поле выделения
-    m_makeFieldButton->setToolTip(tr("Double-click a cell (or press F2), select part of its value and make it "
-                                     "a field (Ctrl+M)"));
-    m_otherVariantButton = new QPushButton(tr("Other Variant"), right);
-    m_otherVariantButton->setObjectName(QStringLiteral("otherVariantBtn"));
-    m_otherVariantButton->setFocusPolicy(Qt::NoFocus);
-    m_otherVariantButton->setToolTip(tr("The next way to end the new field (Ctrl+Shift+M)"));
-    m_editLabel = mutedLabel(right);
-    m_editLabel->setObjectName(QStringLiteral("editMessage"));
-    m_editLabel->setText(tr("Double-click a cell, select part of its value and press Make Field. "
-                            "Right-click a column header for where the field ends."));
-    editRow->addWidget(m_makeFieldButton);
-    editRow->addWidget(m_otherVariantButton);
-    editRow->addWidget(m_editLabel, 1);
-    rightLayout->addLayout(editRow);
+    // Поля схемы цветными блоками.
+    m_strip = new SchemaFieldStrip(right);
+    m_strip->setObjectName(QStringLiteral("fieldStrip"));
+    m_strip->setPlaceholderText(tr("The fields of the schema appear here as coloured blocks."));
+    rightLayout->addWidget(m_strip);
 
-    auto* tables = new QSplitter(Qt::Vertical, right);
-    m_table = new QTableView(tables);
+    // Строки лога (раскрашенные и таблицей) и карточка выбранного поля.
+    auto* work = new QSplitter(Qt::Horizontal, right);
+    work->setObjectName(QStringLiteral("workSplitter"));
+    work->setChildrenCollapsible(false);
+    m_sampleTabs = new QTabWidget(work);
+    m_sampleTabs->setObjectName(QStringLiteral("sampleTabs"));
+    m_sampleTabs->setDocumentMode(true);
+    m_preview = new SchemaLinePreview(m_sampleTabs);
+    m_preview->setObjectName(QStringLiteral("linePreview"));
+    m_preview->setPlaceholderText(tr("Open a log: its lines are shown here, coloured by field."));
+    m_sampleTabs->addTab(m_preview, tr("Lines"));
+    m_sampleTabs->setTabToolTip(0, tr("The lines of the log, coloured by field: click a field to select it, "
+                                      "select text to make it a field"));
+    m_table = new QTableView(m_sampleTabs);
     m_table->setObjectName(QStringLiteral("sampleTable"));
     m_table->setModel(m_samples);
     {
@@ -360,13 +440,64 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     m_table->setWordWrap(false);
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setStretchLastSection(true);
-    auto* missBox = new QWidget(tables);
-    auto* missLayout = new QVBoxLayout(missBox);
+    m_sampleTabs->addTab(m_table, tr("Table"));
+    m_sampleTabs->setTabToolTip(1, tr("The same lines as a table: a column per field, as the tab will show them"));
+
+    auto* cardScroll = new QScrollArea(work);
+    m_cardScroll = cardScroll;
+    cardScroll->setObjectName(QStringLiteral("fieldCardScroll"));
+    cardScroll->setFrameShape(QFrame::NoFrame);
+    cardScroll->setWidgetResizable(true);
+    cardScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    cardScroll->setMinimumWidth(kCardMinWidth);
+    m_card = new SchemaFieldCard(cardScroll);
+    m_card->setObjectName(QStringLiteral("fieldCardPanel"));
+    cardScroll->setWidget(m_card);
+    work->setStretchFactor(0, 1);
+    work->setStretchFactor(1, 0);
+    work->setSizes({600, 300});
+    rightLayout->addWidget(work, 1);
+
+    // Правка на строке (шаг 10): кнопки и что получилось.
+    auto* editRow = new QHBoxLayout();
+    m_makeFieldButton = new QPushButton(tr("Make Field"), right);
+    m_makeFieldButton->setObjectName(QStringLiteral("makeFieldBtn"));
+    m_makeFieldButton->setFocusPolicy(Qt::NoFocus);   // щелчок не снимает выделение
+    m_makeFieldButton->setToolTip(tr("Select a piece of text in a line (drag over it or double-click a word) "
+                                     "and make it a field of its own (Ctrl+M)"));
+    m_otherVariantButton = new QPushButton(tr("Other Variant"), right);
+    m_otherVariantButton->setObjectName(QStringLiteral("otherVariantBtn"));
+    m_otherVariantButton->setFocusPolicy(Qt::NoFocus);
+    m_otherVariantButton->setToolTip(tr("The next way to end the new field (Ctrl+Shift+M)"));
+    m_editLabel = mutedLabel(right);
+    m_editLabel->setObjectName(QStringLiteral("editMessage"));
+    editRow->addWidget(m_makeFieldButton);
+    editRow->addWidget(m_otherVariantButton);
+    editRow->addWidget(m_editLabel, 1);
+    rightLayout->addLayout(editRow);
+
+    // Покрытие файла и, по кнопке, строки, которые схема не приняла.
+    auto* fitRow = new QHBoxLayout();
+    m_fileLabel = mutedLabel(right);
+    m_fileLabel->setObjectName(QStringLiteral("fileFitLabel"));
+    fitRow->addWidget(m_fileLabel, 1);
+    m_missesToggle = new QToolButton(right);
+    m_missesToggle->setObjectName(QStringLiteral("missesToggle"));
+    m_missesToggle->setCheckable(true);
+    m_missesToggle->setAutoRaise(true);
+    m_missesToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_missesToggle->setArrowType(Qt::RightArrow);
+    m_missesToggle->setToolTip(tr("Show the lines the schema does not read, with the reason for each"));
+    m_missesToggle->hide();   // появляется, когда такие строки есть
+    fitRow->addWidget(m_missesToggle);
+    rightLayout->addLayout(fitRow);
+    m_missesBox = new QWidget(right);
+    auto* missLayout = new QVBoxLayout(m_missesBox);
     missLayout->setContentsMargins(0, 0, 0, 0);
-    m_missesLabel = new QLabel(missBox);
+    m_missesLabel = new QLabel(m_missesBox);
     m_missesLabel->setObjectName(QStringLiteral("missesLabel"));
-    missLayout->addWidget(m_missesLabel);
-    m_misses = new QTableWidget(missBox);
+    m_missesLabel->hide();   // число — на кнопке
+    m_misses = new QTableWidget(m_missesBox);
     m_misses->setObjectName(QStringLiteral("missesTable"));
     m_misses->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_misses->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -375,17 +506,55 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     m_misses->setColumnCount(3);
     m_misses->setHorizontalHeaderLabels({tr("Line"), tr("Why"), tr("Text")});
     m_misses->horizontalHeader()->setStretchLastSection(true);
+    m_misses->setMaximumHeight(170);
     missLayout->addWidget(m_misses, 1);
-    tables->setStretchFactor(0, 3);
-    tables->setStretchFactor(1, 1);
-    rightLayout->addWidget(tables, 1);
-    m_fileLabel = mutedLabel(right);
-    m_fileLabel->setObjectName(QStringLiteral("fileFitLabel"));
-    rightLayout->addWidget(m_fileLabel);
+    m_missesBox->hide();
+    rightLayout->addWidget(m_missesBox);
+
+    // Advanced: текст шаблона — тем, кому он нужен.
+    m_advancedToggle = new QToolButton(right);
+    m_advancedToggle->setObjectName(QStringLiteral("advancedToggle"));
+    m_advancedToggle->setText(tr("Advanced: the schema as a text template"));
+    m_advancedToggle->setCheckable(true);
+    m_advancedToggle->setAutoRaise(true);
+    m_advancedToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_advancedToggle->setArrowType(Qt::RightArrow);
+    m_advancedToggle->setToolTip(tr("The same schema as one line of text. You do not need it to set up the "
+                                    "fields — it is here for fine tuning and for copying a schema."));
+    rightLayout->addWidget(m_advancedToggle, 0, Qt::AlignLeft);
+    m_advancedBox = new QWidget(right);
+    m_advancedBox->setObjectName(QStringLiteral("advancedBox"));
+    auto* advancedLayout = new QVBoxLayout(m_advancedBox);
+    advancedLayout->setContentsMargins(0, 0, 0, 0);
+    m_template = new TemplateEdit(m_advancedBox);
+    m_template->setObjectName(QStringLiteral("templateEdit"));
+    advancedLayout->addWidget(m_template);
+    m_error = new QLabel(m_advancedBox);
+    m_error->setObjectName(QStringLiteral("templateError"));
+    m_error->setWordWrap(true);
+    {
+        QPalette p = m_error->palette();
+        p.setColor(QPalette::WindowText, QColor(0xc0, 0x30, 0x30));
+        m_error->setPalette(p);
+    }
+    m_error->hide();
+    advancedLayout->addWidget(m_error);
+    auto* syntax = mutedLabel(m_advancedBox);
+    syntax->setObjectName(QStringLiteral("templateSyntaxHelp"));
+    syntax->setText(tr(
+        "Text stays as it is in the line; {Name:kind} is a field. Kinds: time, level, int, num, hex, uuid, ip, "
+        "path, quoted — the field ends where its form ends; word — at a space; text — at what follows it in the "
+        "template; greedy — at the last occurrence of what follows; padded — at two or more spaces; width(N); "
+        "words(N); of(a|b|c) — one of the values; rest — at the end of the line; /regex/ — a regular expression "
+        "(slow: such fields come in the background). {? … ?} is an optional part; {_} is read, but is not a "
+        "column."));
+    advancedLayout->addWidget(syntax);
+    m_advancedBox->hide();
+    rightLayout->addWidget(m_advancedBox);
 
     m_mainSplitter->setStretchFactor(0, 1);
-    m_mainSplitter->setStretchFactor(1, 4);
-    m_mainSplitter->setSizes({240, 860});
+    m_mainSplitter->setStretchFactor(1, 5);
+    m_mainSplitter->setSizes({220, 980});
 
     // ---- Кнопки --------------------------------------------------------------
     auto* buttons = new QHBoxLayout();
@@ -436,13 +605,16 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     auto* addValueAction = new QAction(tr("Add Value…"), this);
     addValueAction->setObjectName(QStringLiteral("addValueShortcut"));
     addValueAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
-    // Действия над колонкой — только в таблице (и её поле выделения): в
-    // полях имени и шаблона Shift+F10 и Ctrl+R… остаются их собственными.
+    // Действия над полем — в строках, таблице (и её поле выделения) и ряду
+    // блоков: в полях имени и шаблона Shift+F10 и Ctrl+R… остаются их
+    // собственными.
     addAction(m_otherVariantAction);
     for (QAction* a : {m_makeFieldAction, columnMenuAction, mergeAction, renameAction, hideAction, removeAction,
                        addValueAction}) {
         a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
         m_table->addAction(a);
+        m_preview->addAction(a);
+        m_strip->addAction(a);
     }
     connect(m_makeFieldAction, &QAction::triggered, this, &SchemaEditorWindow::makeFieldFromSelection);
     connect(m_makeFieldButton, &QPushButton::clicked, this, &SchemaEditorWindow::makeFieldFromSelection);
@@ -454,8 +626,12 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
             return;
         QMenu* menu = columnMenu(column);
         menu->setAttribute(Qt::WA_DeleteOnClose);
-        const QRect r = m_table->visualRect(m_table->currentIndex());
-        menu->popup(m_table->viewport()->mapToGlobal(r.isValid() ? r.bottomLeft() : QPoint()));
+        if (m_sampleTabs->currentWidget() == m_table && m_table->currentIndex().isValid()) {
+            const QRect r = m_table->visualRect(m_table->currentIndex());
+            menu->popup(m_table->viewport()->mapToGlobal(r.isValid() ? r.bottomLeft() : QPoint()));
+        } else {
+            menu->popup(m_strip->mapToGlobal(m_strip->columnRect(column).bottomLeft()));
+        }
     });
     connect(mergeAction, &QAction::triggered, this, [this]() { mergeWithNext(currentColumn()); });
     connect(hideAction, &QAction::triggered, this, [this]() { hideField(currentColumn()); });
@@ -498,6 +674,49 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     });
     connect(m_opWatcher, &QFutureWatcher<OpOutcome>::finished, this, &SchemaEditorWindow::onOperationFinished);
     connect(m_endsWatcher, &QFutureWatcher<EndsOutcome>::finished, this, &SchemaEditorWindow::onEndsFinished);
+
+    // ---- Графическая правка (U-28): блоки, строки, карточка -------------------
+    connect(m_detectButton, &QPushButton::clicked, this, &SchemaEditorWindow::detectFields);
+    connect(m_strip, &SchemaFieldStrip::columnActivated, this, &SchemaEditorWindow::selectColumn);
+    connect(m_strip, &SchemaFieldStrip::pieceActivated, this, &SchemaEditorWindow::selectHiddenPiece);
+    connect(m_strip, &SchemaFieldStrip::menuRequested, this, [this](int column, const QPoint& globalPos) {
+        QMenu* menu = columnMenu(column);
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        menu->popup(globalPos);
+    });
+    connect(m_preview, &SchemaLinePreview::columnClicked, this, &SchemaEditorWindow::selectColumn);
+    connect(m_preview, &SchemaLinePreview::makeFieldRequested, this, &SchemaEditorWindow::makeFieldFromSelection);
+    connect(m_table->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            [this](const QModelIndex& current, const QModelIndex&) {
+                if (current.isValid() && !m_selecting)
+                    selectColumn(current.column());
+            });
+    connect(m_card, &SchemaFieldCard::renameRequested, this, [this](int column, const QString& name) {
+        if (!renameField(column, name))
+            updateCard();   // имя в карточке — назад
+    });
+    connect(m_card, &SchemaFieldCard::endRequested, this, [this](int column, int option) {
+        if (!setFieldEnd(column, option))
+            updateCard();
+    });
+    connect(m_card, &SchemaFieldCard::hideRequested, this, &SchemaEditorWindow::hideField);
+    connect(m_card, &SchemaFieldCard::mergeRequested, this, &SchemaEditorWindow::mergeWithNext);
+    connect(m_card, &SchemaFieldCard::removeRequested, this, &SchemaEditorWindow::removeField);
+    connect(m_card, &SchemaFieldCard::showRequested, this, &SchemaEditorWindow::showHiddenField);
+    connect(m_card, &SchemaFieldCard::addValueRequested, this, [this](int column) {
+        const QStringList items = suggestedValues(column);
+        const QString value = askText(tr("Add Value"), tr("Value:"), items.value(0), items);
+        if (!value.isEmpty())
+            addValue(column, value);
+    });
+    connect(m_missesToggle, &QToolButton::toggled, this, [this](bool on) {
+        m_missesToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+        m_missesBox->setVisible(on);
+    });
+    connect(m_advancedToggle, &QToolButton::toggled, this, [this](bool on) {
+        m_advancedToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+        m_advancedBox->setVisible(on);
+    });
     for (QWidget* w : {static_cast<QWidget*>(m_name), static_cast<QWidget*>(m_descriptionEdit),
                        static_cast<QWidget*>(m_template)})
         w->installEventFilter(this);
@@ -529,11 +748,39 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     connect(m_samples, &SchemaSampleModel::computed, this, [this]() {
         m_table->resizeColumnsToContents();
         showMisses();
+        rebuildPreview();
+        // Сброс модели снял текущую ячейку таблицы — вернуть её к выбранному полю.
+        if (m_selectedColumn >= 0 && m_selectedColumn < m_samples->columnCount() && m_samples->rowCount() > 0) {
+            m_selecting = true;
+            m_table->setCurrentIndex(m_samples->index(0, m_selectedColumn));
+            m_selecting = false;
+        }
+        updateCard();
+        updateGuide();
     });
     connect(m_fileJob, &SchemaFitJob::finished, this, [this]() {
         const auto& out = m_fileJob->outcome();
         m_fileFit = out.results.value(0);
         m_fileFitReady = true;
+        if (!m_checkTabSchema.isEmpty()) {
+            // Схема вкладки, с которой открылся редактор, её лог не читает:
+            // показать разбиение строк, а не стену красных строк.
+            const bool untouched = m_checkTabSchema == definition() && !isModified();
+            m_checkTabSchema.clear();
+            if (untouched && m_fileFit.valid && m_fileFit.candidates > 0
+                && SchemaFit::verdict(m_fileFit) == SchemaFit::Verdict::NoFit) {
+                const QString name = schemaName();
+                const QString percent = SchemaFit::percent(m_fileFit.coverage());
+                if (autoDetect(/*keepIfNone=*/true)) {
+                    m_replacedSchema = name;
+                    m_replacedPercent = percent;
+                    m_fileFitReady = false;   // у новой схемы — своя проверка
+                    updateChrome();
+                    preferCatalogueSchema();   // проверка каталога могла уже кончиться
+                    return;
+                }
+            }
+        }
         m_fileSamples = out.samples;
         startEndOptions();
         m_samples->setMissLines(m_fileFit.misses);
@@ -546,6 +793,7 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     connect(m_catalogueJob, &SchemaFitJob::finished, this, [this]() {
         m_catalogueFits = m_catalogueJob->outcome().results;
         rebuildList();
+        preferCatalogueSchema();
     });
     connect(m_catalogueJob, &SchemaFitJob::invalidated, this, &SchemaEditorWindow::startCatalogueFit);
 
@@ -662,6 +910,8 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     rebuildList();
     newEmpty();
     m_undo->clear();
+    setEditMessage(QString());
+    updateCard();
 }
 
 SchemaEditorWindow::~SchemaEditorWindow()
@@ -789,6 +1039,14 @@ void SchemaEditorWindow::loadEntry(const SchemaStore::SchemaEntry& entry, bool i
     m_isNew = isNew;
     m_undo->clear();
     resetMakeField();
+    m_selectedColumn = -1;
+    m_selectedPiece = -1;
+    m_detectedTemplate.clear();
+    m_detectFailure.clear();
+    m_checkTabSchema.clear();
+    m_replacedSchema.clear();
+    m_detectedOnOpen = false;
+    m_offeredSchema.clear();
     m_state = EditState{QStringLiteral("\x01"), QString(), QStringLiteral("\x01")};   // всё — заново
     m_newIsWork = false;
     setState(stateOf(entry));
@@ -825,12 +1083,151 @@ void SchemaEditorWindow::setView(LogViewWidget* view)
             e.name = m_schemas->shownSettings().schemaName;
             e.schema = shown;
             loadEntry(e, true);
+            found = true;
+        }
+        if (found && view) {
+            // Схема вкладки может её лог не читать — это решит проверка файла
+            // (обработчик m_fileJob): тогда вместо неё — разбиение строк.
+            m_checkTabSchema = definition();
+        } else if (!found && view && shown.isEmpty()) {
+            // У вкладки нет схемы: редактор разбивает её строки сам.
+            autoDetect();
         }
     }
     if (m_find && m_find->isVisible())
         m_find->setView(view);
     startCatalogueFit();
     m_recompute->start();
+    updateChrome();
+}
+
+QString SchemaEditorWindow::suggestedName() const
+{
+    // Имя файла вкладки без расширения — понятнее, чем «New schema»; занятое
+    // в каталоге — с номером.
+    QString base;
+    if (LogModel* model = m_view ? m_view->model() : nullptr) {
+        int row = m_view->view() ? m_view->view()->currentIndex().row() : -1;
+        if (row < 0 && model->rowCount() > 0)
+            row = 0;
+        if (row >= 0) {
+            if (const auto key = model->keyAt(row); key.file)
+                base = QFileInfo(key.file->displayPath()).completeBaseName();
+        }
+    }
+    if (base.trimmed().isEmpty())
+        return tr("New schema");
+    QString name = base;
+    if (m_schemas) {
+        const auto taken = [this](const QString& n) {
+            for (const auto& e : m_schemas->schemas()) {
+                if (e.name == n)
+                    return true;
+            }
+            return false;
+        };
+        for (int n = 2; taken(name); ++n)
+            name = tr("%1 %2").arg(base).arg(n);
+    }
+    return name;
+}
+
+bool SchemaEditorWindow::autoDetect(bool keepIfNone)
+{
+    QString text = QStringLiteral("{Message}");
+    bool detected = false;
+    const bool keyed = m_schemas && m_schemas->keyedFile();
+    if (!keyed && !m_samples->lines().isEmpty()) {
+        const SchemaInference::Result inferred = SchemaInference::infer(m_samples->lines());
+        if (inferred.ok()) {
+            const QString first = inferred.variants.first().templateText;
+            if (columnsOf(first).size() >= 2) {
+                text = first;
+                detected = true;
+            }
+        }
+    }
+    if (!detected && keepIfNone)
+        return false;
+    SchemaStore::SchemaEntry e;
+    e.name = suggestedName();
+    e.schema = LineTemplateSchema::definition(text);
+    loadEntry(e, true);   // не «работа»: закрытие о ней не спрашивает
+    if (detected)
+        m_detectedTemplate = text;
+    m_detectedOnOpen = detected;
+    updateChrome();
+    return detected;
+}
+
+void SchemaEditorWindow::preferCatalogueSchema()
+{
+    // Разбиение показано само, а в каталоге есть схема, которая этот лог
+    // читает: проверенная схема главнее догадки. Решается один раз, по
+    // свежей проверке каталога.
+    if (!m_detectedOnOpen || !m_schemas || !isDetected() || isModified())
+        return;
+    const auto& list = m_schemas->schemas();
+    if (m_catalogueJob->isRunning() || m_catalogueFits.size() != list.size())
+        return;   // проверка каталога ещё идёт — решит её итог
+    m_detectedOnOpen = false;
+    int best = -1;
+    for (int i = 0; i < list.size(); ++i) {
+        const SchemaFit::Result& fit = m_catalogueFits[i];
+        if (!fit.valid || fit.candidates <= 0 || SchemaFit::verdict(fit) != SchemaFit::Verdict::Fits)
+            continue;
+        if (best < 0 || SchemaFit::better(fit, m_catalogueFits[best]))
+            best = i;
+    }
+    if (best < 0)
+        return;
+    const QString name = list[best].name;
+    const QString percent = SchemaFit::percent(m_catalogueFits[best].coverage());
+    loadEntry(list[best], false);
+    m_offeredSchema = name;
+    m_offeredPercent = percent;
+    m_fileFitReady = false;
+    updateChrome();
+}
+
+bool SchemaEditorWindow::isDetected() const
+{
+    return !m_detectedTemplate.isEmpty() && m_detectedTemplate == m_state.templateText.trimmed();
+}
+
+bool SchemaEditorWindow::detectFields()
+{
+    m_detectFailure.clear();
+    if (!m_view || m_samples->lines().isEmpty()) {
+        setEditMessage(tr("Open a log first: Detect Fields works on its lines."));
+        return false;
+    }
+    const SchemaInference::Result inferred = SchemaInference::infer(m_samples->lines());
+    if (!inferred.ok()) {
+        m_detectFailure = inferred.failureText.isEmpty() ? SchemaInference::failureText(inferred.failure)
+                                                         : inferred.failureText;
+        setEditMessage(m_detectFailure);
+        updateGuide();
+        return false;
+    }
+    const QString text = inferred.variants.first().templateText;
+    const int fields = int(columnsOf(text).size());
+    if (m_isNew) {
+        // Новая схема: шаг отмены — Ctrl+Z вернёт прежнее.
+        if (text != m_state.templateText.trimmed()) {
+            applyOperation(text, tr("Detect Fields"));
+            m_newIsWork = true;
+        }
+    } else if (!newFromTemplate(text, suggestedName())) {
+        return false;
+    }
+    m_detectedTemplate = text;
+    selectColumn(-1);
+    setEditMessage(fields == 1 ? tr("Detect Fields found no fields in these lines — select text in a line and "
+                                    "press Make Field.")
+                               : tr("Detected %1 fields in the lines of the log.").arg(fields));
+    updateChrome();
+    return true;
 }
 
 void SchemaEditorWindow::refreshSamples()
@@ -869,8 +1266,270 @@ void SchemaEditorWindow::onTemplateChanged()
         edit->setErrorAt(e.position);
         m_error->setText(e.position >= 0 ? tr("Character %1: %2").arg(e.position + 1).arg(e.message) : e.message);
         m_error->show();
+        // Ошибка — в тексте шаблона: раздел с ним раскрывается сам.
+        setAdvancedShown(true);
     }
+    if (text.isEmpty() || !tpl.isValid() || m_selectedColumn >= tpl.columns().size())
+        m_selectedColumn = -1;
+    m_selectedPiece = -1;
+    m_detectFailure.clear();
+    rebuildStrip();
+    updateCard();
     m_recompute->start();
+}
+
+// ---------------------------------------------------------------------------
+// Графическая правка (U-28): блоки, строки, карточка, подсказка
+// ---------------------------------------------------------------------------
+
+void SchemaEditorWindow::rebuildStrip()
+{
+    using Type = LineTemplateElement::Type;
+    QVector<SchemaFieldStrip::Item> items;
+    const LineTemplate tpl(m_state.templateText.trimmed());
+    if (tpl.isValid()) {
+        const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(tpl);
+        int column = 0;
+        for (int i = 0; i < pieces.size(); ++i) {
+            const SchemaEdit::Piece& p = pieces[i];
+            SchemaFieldStrip::Item item;
+            item.piece = i;
+            item.optional = p.opt >= 0;
+            if (p.type == Type::Literal) {
+                item.type = SchemaFieldStrip::Item::Type::Literal;
+                item.text = p.text.trimmed();
+                if (item.text.isEmpty())
+                    continue;
+                item.toolTip = item.optional
+                    ? tr("“%1” — text between the fields; some lines do not have it").arg(item.text)
+                    : tr("“%1” — text that stands between the fields in every line").arg(item.text);
+                items.append(item);
+            } else if (p.isField()) {
+                item.type = SchemaFieldStrip::Item::Type::Field;
+                item.name = p.name;
+                item.caption = endCaption(pieces, i);
+                item.column = p.name.isEmpty() ? -1 : column++;
+                item.toolTip = p.name.isEmpty()
+                    ? tr("A part of the line that is read, but is not a column (%1).\n"
+                         "Click to make it a column.").arg(item.caption)
+                    : tr("%1 — %2.\nClick to rename the field or to change where it ends.\n"
+                         "In the template: %3").arg(p.name, item.caption, partOf(p));
+                items.append(item);
+            }
+        }
+    }
+    m_strip->setPlaceholderText(m_state.templateText.trimmed().isEmpty()
+                                    ? tr("The fields of the schema appear here as coloured blocks.")
+                                    : tr("The template has an error — see Advanced below, or press Undo (Ctrl+Z)."));
+    m_strip->setItems(items);
+    m_strip->setCurrentColumn(m_selectedColumn);
+}
+
+void SchemaEditorWindow::rebuildPreview()
+{
+    using State = SchemaSampleModel::LineView::State;
+    const QVector<SchemaSampleModel::LineView>& views = m_samples->lineViews();
+    const int columns = m_samples->columnCount();
+    QVector<SchemaLinePreview::Line> lines;
+    lines.reserve(views.size());
+    for (const SchemaSampleModel::LineView& v : views) {
+        SchemaLinePreview::Line line;
+        line.text = v.text;
+        line.number = v.line;
+        line.row = v.row;
+        line.state = v.state == State::Accepted ? SchemaLinePreview::Line::State::Accepted
+                   : v.state == State::Partial  ? SchemaLinePreview::Line::State::Partial
+                   : v.state == State::Missed   ? SchemaLinePreview::Line::State::Missed
+                                                : SchemaLinePreview::Line::State::Other;
+        if (v.row >= 0) {
+            for (int c = 0; c < columns; ++c) {
+                const int start = m_samples->cellStart(v.row, c);
+                const int size = start >= 0 ? int(m_samples->rawCell(v.row, c).size()) : 0;
+                if (size > 0)
+                    line.spans.append(SchemaLinePreview::Span{c, start, size});
+            }
+        }
+        lines.append(line);
+    }
+    m_preview->setColumnNames(m_samples->columns());
+    m_preview->setLines(lines);
+    m_preview->setCurrentColumn(m_selectedColumn);
+}
+
+void SchemaEditorWindow::selectColumn(int column)
+{
+    const QStringList columns = columnsOf(m_state.templateText.trimmed());
+    if (column < 0 || column >= columns.size())
+        column = -1;
+    m_selectedColumn = column;
+    m_selectedPiece = -1;
+    m_strip->setCurrentColumn(column);
+    m_preview->setCurrentColumn(column);
+    if (column >= 0 && column < m_samples->columnCount() && m_samples->rowCount() > 0
+        && m_table->currentIndex().column() != column) {
+        m_selecting = true;
+        m_table->setCurrentIndex(m_samples->index(qMax(0, m_table->currentIndex().row()), column));
+        m_selecting = false;
+    }
+    updateCard();
+}
+
+void SchemaEditorWindow::selectHiddenPiece(int piece)
+{
+    m_selectedColumn = -1;
+    m_selectedPiece = piece;
+    m_strip->setCurrentColumn(-1);
+    m_preview->setCurrentColumn(-1);
+    updateCard();
+}
+
+void SchemaEditorWindow::updateCard()
+{
+    if (!m_card)
+        return;
+    SchemaFieldCard::Field field;
+    const LineTemplate tpl(m_state.templateText.trimmed());
+    if (tpl.isValid()) {
+        const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(tpl);
+        int column = 0;
+        for (int i = 0; i < pieces.size(); ++i) {
+            const SchemaEdit::Piece& p = pieces[i];
+            if (!p.isField())
+                continue;
+            const bool named = !p.name.isEmpty();
+            if ((named && column == m_selectedColumn) || (!named && i == m_selectedPiece)) {
+                field.column = named ? column : -1;
+                field.piece = i;
+                field.name = p.name;
+                field.caption = endCaption(pieces, i);
+                field.templatePart = partOf(p);
+                field.isList = p.kind == LineTemplateElement::Kind::Of;
+                for (int k = i + 1; k < pieces.size(); ++k)
+                    field.canMerge = field.canMerge || (pieces[k].isField() && !pieces[k].name.isEmpty());
+            }
+            if (named)
+                ++column;
+        }
+    }
+    m_card->setHint(tr(
+        "<b>No field is selected</b>"
+        "<p>Click a field — a coloured block above or coloured text in a line — to rename it or to change "
+        "where it ends.</p>"
+        "<p>Select a piece of text in a line (drag over it or double-click a word) and press <b>Make Field</b> "
+        "to split it out as a field of its own.</p>"
+        "<p>Mistake? <b>Ctrl+Z</b> undoes every step.</p>"));
+    m_card->setField(field);
+    if (field.column >= 0) {
+        const bool valuesReady = !m_recompute->isActive() && !m_samples->isComputing()
+                                 && m_samples->columns() == tpl.columns();
+        m_card->setValues(valuesReady ? m_samples->distinctCount(field.column) : 0,
+                          valuesReady ? m_samples->topValues(field.column) : QVector<QPair<QString, int>>(),
+                          valuesReady);
+        m_card->setEndOptions(endOptions(field.column), endOptionsReady());
+    }
+    m_card->setBusy(m_opPending);
+    // Карточка не обрезается: панель не уже её содержимого (длинный пункт
+    // «где кончается» с итогом).
+    if (m_cardScroll)
+        m_cardScroll->setMinimumWidth(qMax(kCardMinWidth, m_card->minimumSizeHint().width() + 4));
+}
+
+void SchemaEditorWindow::updateGuide()
+{
+    if (!m_guide)
+        return;
+    const QString text = m_state.templateText.trimmed();
+    const bool valid = !definition().isEmpty();
+    const int fields = int(columnsOf(text).size());
+    const bool keyed = m_view && m_schemas && m_schemas->keyedFile();
+    const bool poor = valid && m_view && m_fileFitReady && m_fileFit.valid && m_fileFit.candidates > 0
+                      && SchemaFit::verdict(m_fileFit) == SchemaFit::Verdict::NoFit;
+    bool suggestDetect = false;
+    QString guide;
+    if (!m_view) {
+        guide = tr("Open a log and come back: the editor shows its lines and splits them into fields.");
+    } else if (keyed) {
+        guide = tr("This log is JSON Lines or logfmt: its fields are the keys of the lines, and a schema is not "
+                   "needed. Choose the columns in the Log Fields panel.");
+    } else if (!valid) {
+        guide = tr("The text template has an error — it is shown in Advanced below. Fix it there or press "
+                   "Ctrl+Z to undo.");
+    } else if (!m_detectFailure.isEmpty()) {
+        guide = tr("Detect Fields could not split these lines: %1 You can still select a piece of a line and "
+                   "press Make Field.").arg(m_detectFailure);
+    } else if (fields <= 1) {
+        guide = tr("The lines are not split into fields yet. Press Detect Fields to let DendroLog split them — "
+                   "or select a piece of a line below (a date, a level, a name) and press Make Field.");
+        suggestDetect = true;
+    } else if (poor) {
+        guide = tr("This schema reads only %1% of the lines of the log (the lines it does not read are red). "
+                   "Press Detect Fields to build a schema from these lines, or Find a Schema to try the known "
+                   "formats.").arg(SchemaFit::percent(m_fileFit.coverage()));
+        suggestDetect = true;
+    } else if (!m_offeredSchema.isEmpty() && savedName() == m_offeredSchema && !isModified()) {
+        guide = tr("“%1” from your schemas reads this log (%2% of its lines), so the editor shows it — every "
+                   "colour is a field. Press Apply to Tab to use it for this tab. Not the right one? Detect "
+                   "Fields splits the lines anew.").arg(m_offeredSchema, m_offeredPercent);
+    } else if (isDetected() && !m_replacedSchema.isEmpty()) {
+        guide = tr("“%1”, the schema of the tab, reads only %2% of this log, so DendroLog split the lines into "
+                   "%3 fields by itself — every colour is a field. Click a field to rename it or to change "
+                   "where it ends; select text in a line to make one more field. When it looks right: Apply to "
+                   "Tab shows the fields in the log, Save keeps the schema for the next time.")
+                    .arg(m_replacedSchema, m_replacedPercent).arg(fields);
+    } else if (isDetected()) {
+        guide = tr("DendroLog split the lines into %1 fields by itself — every colour is a field. Click a field "
+                   "to rename it or to change where it ends; select text in a line to make one more field. "
+                   "When it looks right: Apply to Tab shows the fields in the log, Save keeps the schema for "
+                   "the next time.").arg(fields);
+    } else {
+        guide = tr("Every colour is a field. Click a field to rename it or to change where it ends; select "
+                   "text in a line to make one more field. Apply to Tab shows the fields in the log, Save "
+                   "keeps the schema for the next time.");
+    }
+    m_guideText = guide;
+    m_guide->setText(guide);
+    m_detectButton->setEnabled(m_view && !keyed && !m_samples->lines().isEmpty());
+    QFont f = m_detectButton->font();
+    f.setBold(suggestDetect && m_detectButton->isEnabled());
+    m_detectButton->setFont(f);
+}
+
+bool SchemaEditorWindow::isAdvancedShown() const
+{
+    return m_advancedToggle && m_advancedToggle->isChecked();
+}
+
+void SchemaEditorWindow::setAdvancedShown(bool shown)
+{
+    if (m_advancedToggle)
+        m_advancedToggle->setChecked(shown);
+}
+
+bool SchemaEditorWindow::showHiddenField(int piece)
+{
+    const LineTemplate tpl(m_state.templateText.trimmed());
+    if (!tpl.isValid())
+        return false;
+    QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(tpl);
+    if (piece < 0 || piece >= pieces.size() || !pieces[piece].isField() || !pieces[piece].name.isEmpty())
+        return false;
+    const QStringList columns = tpl.columns();
+    QString name;
+    for (int n = 1; name.isEmpty() || columns.contains(name); ++n)
+        name = QStringLiteral("Field%1").arg(n);
+    pieces[piece].name = name;
+    const QString text = SchemaEdit::render(pieces);
+    if (!LineTemplate(text).isValid()) {
+        setEditMessage(tr("This part of the line cannot become a column here."));
+        return false;
+    }
+    int column = 0;
+    for (int i = 0; i < piece; ++i)
+        column += pieces[i].isField() && !pieces[i].name.isEmpty() ? 1 : 0;
+    applyOperation(text, tr("Show as a Column"));
+    selectColumn(column);
+    setEditMessage(tr("“%1” is a column now — give it a name in the card.").arg(name));
+    return true;
 }
 
 void SchemaEditorWindow::recompute()
@@ -929,11 +1588,19 @@ void SchemaEditorWindow::rebuildList()
     int current = -1;
     for (int i = 0; i < list.size(); ++i) {
         QString text = list[i].name;
-        if (i < m_catalogueFits.size() && m_catalogueFits[i].valid && m_catalogueFits[i].candidates > 0)
-            text += QStringLiteral("  ") + SchemaFit::percent(m_catalogueFits[i].coverage()) + QLatin1Char('%');
+        // Покрытие — только у схем, которые читают этот лог: «0%» и «50%» у
+        // чужих форматов — шум.
+        QString tip = list[i].description();
+        if (i < m_catalogueFits.size() && m_catalogueFits[i].valid && m_catalogueFits[i].candidates > 0
+            && SchemaFit::verdict(m_catalogueFits[i]) != SchemaFit::Verdict::NoFit) {
+            const QString percent = SchemaFit::percent(m_catalogueFits[i].coverage());
+            text += QStringLiteral("  ") + percent + QLatin1Char('%');
+            tip += (tip.isEmpty() ? QString() : QStringLiteral("\n"))
+                   + tr("Reads %1% of the lines of this log").arg(percent);
+        }
         auto* item = new QListWidgetItem(text, m_list);
         item->setData(Qt::UserRole, list[i].name);
-        item->setToolTip(list[i].description());
+        item->setToolTip(tip);
         if (!m_isNew && list[i].name == m_original.name)
             current = i;
     }
@@ -984,12 +1651,17 @@ void SchemaEditorWindow::updateChrome()
     } else {
         m_fileLabel->setText(tr("In the file: %1").arg(SchemaFit::summary(m_fileFit)));
     }
+    updateGuide();
 }
 
 void SchemaEditorWindow::showMisses()
 {
     const auto& misses = m_samples->misses();
     m_missesLabel->setText(tr("Did not match (%1)").arg(misses.size()));
+    m_missesToggle->setText(tr("Lines the schema does not read: %1").arg(misses.size()));
+    m_missesToggle->setVisible(!misses.isEmpty());
+    if (misses.isEmpty())
+        m_missesToggle->setChecked(false);
     m_misses->setRowCount(int(misses.size()));
     for (int i = 0; i < misses.size(); ++i) {
         const auto& m = misses[i];
@@ -1258,14 +1930,19 @@ QVector<SchemaFit::Sample> SchemaEditorWindow::editSamples() const
 
 int SchemaEditorWindow::currentColumn() const
 {
+    // В таблице — её текущая ячейка; в строках и ряду блоков — выбранное поле.
     const QModelIndex index = m_table->currentIndex();
-    return index.isValid() ? index.column() : -1;
+    if (m_sampleTabs->currentWidget() == m_table && index.isValid())
+        return index.column();
+    return m_selectedColumn;
 }
 
 void SchemaEditorWindow::setEditMessage(const QString& text)
 {
     m_editText = text;
-    m_editLabel->setText(text);
+    m_editLabel->setText(text.isEmpty() ? tr("Select a piece of text in a line and press Make Field to split it "
+                                             "out as a field.")
+                                        : text);
 }
 
 void SchemaEditorWindow::updateEditActions()
@@ -1321,6 +1998,7 @@ void SchemaEditorWindow::startOperation(const QString& label, bool make, OpWork 
     }));
     setEditMessage(tr("%1…").arg(label));
     updateEditActions();
+    m_card->setBusy(true);
 }
 
 void SchemaEditorWindow::onOperationFinished()
@@ -1328,6 +2006,7 @@ void SchemaEditorWindow::onOperationFinished()
     const QFuture<OpOutcome> future = m_opWatcher->future();
     m_opPending = false;
     updateEditActions();
+    m_card->setBusy(false);
     if (future.resultCount() == 0)
         return;
     const OpOutcome out = future.result();
@@ -1339,6 +2018,8 @@ void SchemaEditorWindow::onOperationFinished()
     }
     if (!out.make) {
         applyEdit(out.edit, out.label);
+        if (out.edit.ok() && out.deselect)
+            selectColumn(-1);
         return;
     }
     m_make = out.result;
@@ -1349,13 +2030,35 @@ void SchemaEditorWindow::onOperationFinished()
         updateEditActions();
         return;
     }
+    // Метка времени и уровень получают свои имена сразу (если не заняты):
+    // «Field1» у даты — лишний шаг для пользователя.
+    for (SchemaEdit::Variant& v : m_make.variants) {
+        const QString wanted = v.kind == QLatin1String("time")    ? QStringLiteral("Timestamp")
+                               : v.kind == QLatin1String("level") ? QStringLiteral("Level")
+                                                                  : QString();
+        if (wanted.isEmpty() || columnsOf(v.templateText).contains(wanted))
+            continue;
+        const SchemaEdit::Edit renamed = SchemaEdit::rename(v.templateText, v.column, wanted);
+        if (renamed.ok()) {
+            v.templateText = renamed.templateText;
+            v.field = wanted;
+        }
+    }
     m_variantIndex = 0;
-    applyOperation(m_make.variants.first().templateText, tr("Make Field"));
+    m_preview->clearLineSelection();
+    const SchemaEdit::Variant& made = m_make.variants.first();
+    applyOperation(made.templateText, tr("Make Field"));
     m_variantUndoIndex = m_undo->index();
     m_variantSerial = m_lastOperationSerial;
-    QString text = m_make.message;
+    selectColumn(made.column);   // новое поле — в карточке: имя и «где кончается» сразу под рукой
+    QString text = m_make.noEvidence
+        ? m_make.message
+        : tr("New field “%1”: it ends at %2 — %3, %4% of the lines. Give it a name in the card.")
+              .arg(made.field, SchemaEdit::evidenceText(made.evidence), valuesText(made.distinct()),
+                   SchemaFit::percent(made.fit.coverage()));
     if (m_make.variants.size() > 1)
-        text += QLatin1Char(' ') + tr("Other variants: %1 (Ctrl+Shift+M).").arg(m_make.variants.size() - 1);
+        text += QLatin1Char(' ') + tr("Not what you meant? Other Variant (Ctrl+Shift+M) tries %1 more.")
+                                       .arg(m_make.variants.size() - 1);
     setEditMessage(text);
     updateEditActions();
 }
@@ -1377,6 +2080,9 @@ void SchemaEditorWindow::applyOperation(const QString& text, const QString& labe
     m_lastOperationSerial = command->serial();
     m_undo->push(command);
     onTemplateChanged();
+    // Операция — не набор текста: пересчёт сразу, без паузы на ввод.
+    m_recompute->stop();
+    recompute();
     updateChrome();
 }
 
@@ -1387,7 +2093,7 @@ void SchemaEditorWindow::applyEdit(const SchemaEdit::Edit& edit, const QString& 
         return;
     }
     applyOperation(edit.templateText, label);
-    setEditMessage(tr("%1: %2").arg(label, edit.templateText));
+    setEditMessage(tr("%1 — done. Ctrl+Z undoes it.").arg(label));
 }
 
 bool SchemaEditorWindow::makeField(int row, int column, int from, int length)
@@ -1418,8 +2124,82 @@ bool SchemaEditorWindow::makeField(int row, int column, int from, int length)
     return true;
 }
 
+bool SchemaEditorWindow::makeFieldInLine(int line, int start, int length)
+{
+    if (definition().isEmpty()) {
+        setEditMessage(tr("Fix the template first."));
+        return false;
+    }
+    if (m_recompute->isActive() || m_samples->isComputing()) {
+        setEditMessage(tr("The lines are being updated — try again in a moment."));
+        return false;
+    }
+    const QVector<SchemaLinePreview::Line>& lines = m_preview->lines();
+    if (line < 0 || line >= lines.size() || start < 0 || length <= 0
+        || start + length > lines[line].text.size()) {
+        setEditMessage(tr("Select a piece of text in a line first."));
+        return false;
+    }
+    const SchemaLinePreview::Line& sample = lines[line];
+    // Пробелы по краям выделения мышью — не часть поля.
+    int a = start;
+    int b = start + length;
+    while (a < b && sample.text[a].isSpace())
+        ++a;
+    while (b > a && sample.text[b - 1].isSpace())
+        --b;
+    if (a >= b) {
+        setEditMessage(tr("Select a piece of text in a line first."));
+        return false;
+    }
+    if (sample.row < 0) {
+        setEditMessage(sample.state == SchemaLinePreview::Line::State::Missed
+                           ? tr("The schema does not read this line (it is red) — select text in a coloured line.")
+                           : tr("This line continues the record above — select text in a coloured line."));
+        return false;
+    }
+    int column = -1;
+    bool whole = false;
+    for (const SchemaLinePreview::Span& span : sample.spans) {
+        if (span.start <= a && b <= span.start + span.length) {
+            column = span.column;
+            whole = span.start == a && b == span.start + span.length;
+        }
+    }
+    if (column < 0) {
+        setEditMessage(tr("Select text inside one coloured field: the selection crosses fields or the text "
+                          "between them."));
+        return false;
+    }
+    if (whole) {
+        selectColumn(column);
+        setEditMessage(tr("This is the whole field “%1” — it is selected now: rename it or change where it "
+                          "ends in the card.").arg(m_samples->columns().value(column)));
+        return false;
+    }
+    const QString tpl = m_state.templateText.trimmed();
+    const QString text = sample.text;
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    const qsizetype from = a;
+    const qsizetype size = b - a;
+    startOperation(tr("Make Field"), true, [tpl, text, from, size, samples](const SchemaEdit::Options& o) {
+        OpOutcome out;
+        out.result = SchemaEdit::makeField(tpl, text, from, size, samples, o);
+        return out;
+    });
+    return true;
+}
+
 bool SchemaEditorWindow::makeFieldFromSelection()
 {
+    if (m_sampleTabs->currentWidget() == m_preview) {
+        const SchemaLinePreview::Selection sel = m_preview->lineSelection();
+        if (sel.isValid())
+            return makeFieldInLine(sel.line, sel.start, sel.length);
+        setEditMessage(tr("Select a piece of text in a line first (drag over it or double-click a word), then "
+                          "press Make Field (Ctrl+M)."));
+        return false;
+    }
     if (m_cellEditor && m_cellEditorIndex.isValid() && m_cellEditor->hasSelectedText()) {
         const int row = m_cellEditorIndex.row();
         const int column = m_cellEditorIndex.column();
@@ -1464,11 +2244,13 @@ bool SchemaEditorWindow::otherVariant()
     applyOperation(v.templateText, tr("Make Field"));
     m_variantUndoIndex = m_undo->index();
     m_variantSerial = m_lastOperationSerial;
-    setEditMessage(tr("Variant %1 of %2: %3 ends at %4 (%5)%6")
+    selectColumn(v.column);
+    setEditMessage(tr("Variant %1 of %2: “%3” ends at %4 — %5, %6% of the lines%7")
                        .arg(m_variantIndex + 1)
                        .arg(m_make.variants.size())
-                       .arg(v.field, SchemaEdit::evidenceText(v.evidence), v.summary(),
-                            v.supported ? QString() : tr(" — no evidence in the lines")));
+                       .arg(v.field, SchemaEdit::evidenceText(v.evidence), valuesText(v.distinct()),
+                            SchemaFit::percent(v.fit.coverage()),
+                            v.supported ? QString() : tr(" (nothing in the lines confirms it)")));
     updateEditActions();
     return true;
 }
@@ -1526,6 +2308,7 @@ void SchemaEditorWindow::onEndsFinished()
     if (out.generation != m_endsGeneration)
         return;
     m_ends = std::move(out);
+    updateCard();
 }
 
 bool SchemaEditorWindow::endOptionsReady() const
@@ -1549,8 +2332,10 @@ bool SchemaEditorWindow::setFieldEnd(int column, int option)
     const QVector<SchemaEdit::EndOption> options = endOptions(column);
     if (option < 0 || option >= options.size() || !options[option].available)
         return false;
+    const QString name = columnsOf(m_state.templateText.trimmed()).value(column);
     applyOperation(options[option].templateText, tr("Ends at"));
-    setEditMessage(tr("Ends %1: %2").arg(options[option].label, options[option].summary()));
+    setEditMessage(tr("“%1” now ends %2 — %3.").arg(name, options[option].label,
+                                                   SchemaFieldCard::resultText(options[option])));
     return true;
 }
 
@@ -1565,6 +2350,8 @@ bool SchemaEditorWindow::hideField(int column)
 {
     const SchemaEdit::Edit e = SchemaEdit::hide(m_state.templateText, column);
     applyEdit(e, tr("Hide Field"));
+    if (e.ok())
+        selectColumn(-1);
     return e.ok();
 }
 
@@ -1583,6 +2370,7 @@ bool SchemaEditorWindow::removeField(int column)
     const QVector<SchemaFit::Sample> samples = editSamples();
     startOperation(tr("Remove Field"), false, [tpl, column, samples](const SchemaEdit::Options& o) {
         OpOutcome out;
+        out.deselect = true;
         out.edit = SchemaEdit::remove(tpl, column, samples, o);
         return out;
     });

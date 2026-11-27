@@ -312,6 +312,13 @@ set(DENDROLOG_APP_SOURCES
     src/schemaeditorwindow.cpp
     src/schemasamplemodel.h
     src/schemasamplemodel.cpp
+    # Графическая правка схемы (U-28): блоки полей, раскрашенные строки, карточка поля.
+    src/schemafieldstrip.h
+    src/schemafieldstrip.cpp
+    src/schemalinepreview.h
+    src/schemalinepreview.cpp
+    src/schemafieldcard.h
+    src/schemafieldcard.cpp
     src/aiconsentdialog.h
     src/aiconsentdialog.cpp
 )
