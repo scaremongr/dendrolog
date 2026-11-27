@@ -21,6 +21,7 @@
 // ============================================================================
 
 #include "appsettings.h"
+#include "blockingextractor.h"
 #include "builtinsamples.h"
 #include "schemapick.h"
 #include "documentstate.h"
@@ -41,7 +42,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThreadPool>
-#include <QSemaphore>
+#include <QtConcurrent>
 
 #include <algorithm>
 #include <cstdio>
@@ -1028,13 +1029,17 @@ static void checkPickRowsDuringJob(const QDir& dir)
     const QString plain = writeFile(dir, QStringLiteral("during-job.log"), QByteArray());
 
     // Шлагбаум: все потоки глобального пула ждут, задание подбора — в очереди.
+    // QtConcurrent::run и std::mutex (testdocs::Gate), а не QThreadPool::start
+    // с лямбдой и QSemaphore: эти передачи TSan не видит (слой tsan_qt_sync
+    // знает QtConcurrent, мьютексы Qt не инструментированы).
     QThreadPool* pool = QThreadPool::globalInstance();
     const int threads = pool->maxThreadCount();
-    QSemaphore gate;
-    QAtomicInt blocked = 0;
+    auto gate = std::make_shared<testdocs::Gate>();
+    gate->close();
+    QList<QFuture<void>> blockers;
     for (int i = 0; i < threads; ++i)
-        pool->start([&gate, &blocked]() { blocked.fetchAndAddOrdered(1); gate.acquire(); });
-    CHECK(waitFor([&] { return blocked.loadAcquire() == threads; }, 30000), label + ": the pool is blocked");
+        blockers << QtConcurrent::run(pool, [gate]() { gate->pass(); });
+    CHECK(waitFor([&] { return gate->waiting.load() == threads; }, 30000), label + ": the pool is blocked");
 
     tab = std::make_unique<LogViewWidget>();
     c.configureView(tab.get());
@@ -1055,7 +1060,9 @@ static void checkPickRowsDuringJob(const QDir& dir)
     CHECK(c.isPicking(tab.get()) && c.pickJobsStarted() == jobsBefore,
           label + ": the rows did not start another job");
 
-    gate.release(threads);
+    gate->release();
+    for (QFuture<void>& f : blockers)
+        f.waitForFinished();
     waitFor([&] { return !c.isPicking(tab.get()) && c.coverageOf(tab.get()); }, 30000);
     CHECK(tab->fieldSettings().schemaName == logbackName
               && tab->fieldSettings().origin == FieldSettings::Origin::Auto,
