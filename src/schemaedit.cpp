@@ -1518,4 +1518,425 @@ QStringList suggestValues(const QString& templateText, int column, const QVector
     return out;
 }
 
+
+// ---------------------------------------------------------------------------
+// Разбить поле на два; текст между полями (U-28)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool validFieldName(const QString& n, QString* error)
+{
+    if (n.isEmpty() || n == QLatin1String("_")) {
+        *error = QStringLiteral("The name is empty.");
+        return false;
+    }
+    if (n.contains(QLatin1Char('{')) || n.contains(QLatin1Char('}')) || n.contains(QLatin1Char(':'))) {
+        *error = QStringLiteral("A field name cannot contain “{”, “}” or “:”.");
+        return false;
+    }
+    return true;
+}
+
+struct SplitContext {
+    QVector<Piece> pieces;
+    int iF = -1;
+    Piece F;
+    int column = -1;
+    bool tail = false;          ///< за полем только пробелы
+    QString firstName;
+    SchemaFit::Corpus corpus;
+    Positions pos;              ///< значения поля по строкам образцов
+};
+
+bool loadSplit(const QString& templateText, int column, const QVector<SchemaFit::Sample>& samples,
+               const Options& options, SplitContext* cx)
+{
+    const LineTemplate tpl(templateText.trimmed());
+    if (!tpl.isValid() || column < 0 || column >= tpl.columns().size())
+        return false;
+    cx->pieces = piecesOf(tpl);
+    cx->iF = pieceOfColumn(cx->pieces, column);
+    if (cx->iF < 0)
+        return false;
+    cx->F = cx->pieces[cx->iF];
+    cx->column = column;
+    cx->tail = true;
+    for (int i = cx->iF + 1; i < cx->pieces.size(); ++i)
+        cx->tail = cx->tail && cx->pieces[i].type == Type::Space;
+    cx->firstName = uniqueName(cx->pieces, QStringLiteral("Field"), true);
+    cx->corpus = SchemaFit::corpus(samples);
+    cx->pos = positionsOf(tpl, column, samples, options);
+    return true;
+}
+
+// Шаблон «…{первая часть}<sep>{вторая часть = прежнее поле}…» с итогом.
+SplitOption makeSplit(const SplitContext& cx, EndOption::Choice choice, const QString& label, Piece first,
+                      QVector<Piece> sep, bool optionalTail, const Options& options)
+{
+    SplitOption o;
+    o.choice = choice;
+    o.label = label;
+    o.column = cx.column;
+    o.optionalTail = optionalTail;
+    first.name = cx.firstName;
+    first.opt = cx.F.opt;
+    o.kind = kindLabel(first);
+    Piece second = cx.F;
+    int group = cx.F.opt;
+    if (optionalTail) {
+        // Свой номер участка: не совпадает ни с одним из шаблона.
+        group = 1;
+        for (const Piece& p : cx.pieces)
+            group = std::max(group, p.opt + 1);
+        second.opt = group;
+    }
+    QVector<Piece> np = cx.pieces.mid(0, cx.iF);
+    np.append(first);
+    for (Piece& s : sep) {
+        s.opt = group;
+        np.append(s);
+    }
+    np.append(second);
+    np += cx.pieces.mid(cx.iF + 1);
+    QString text;
+    std::shared_ptr<const LineTemplate> compiled;
+    if (!build(np, &text, &compiled)) {
+        const LineTemplate failed(render(np));
+        o.reason = failed.error().message;
+        return o;
+    }
+    o.kind = kindLabel(np[cx.iF]);
+    o.templateText = text;
+    o.available = true;
+    o.fit = evaluate(compiled, cx.corpus, options);
+    LogEntryFields f;
+    for (int k = 0; k < cx.pos.texts.size() && o.examples.size() < kSplitExamples; ++k) {
+        const QString line = cx.pos.texts[k].toString();
+        if (compiled->match(line, &f) == FieldExtractor::Outcome::Rejected)
+            continue;
+        const QString a = f.has(cx.column) ? f.value(cx.column, line) : QString();
+        const QString b = f.has(cx.column + 1) ? f.value(cx.column + 1, line) : QString();
+        if (a.isEmpty() && b.isEmpty())
+            continue;
+        o.examples.append({ a, b });
+    }
+    return o;
+}
+
+// Сколько значений поля содержат разделитель (по сути — без пробелов по краям,
+// если их нет в самом разделителе).
+int valuesWith(const Positions& pos, const QString& delimiter)
+{
+    int n = 0;
+    for (int k = 0; k < pos.texts.size(); ++k) {
+        const QStringView v = pos.texts[k].mid(pos.pos[k], pos.end[k] - pos.pos[k]);
+        // Разделитель с пробелами по краям ищется и у края значения: значение
+        // обрезано, а в строке пробел за ним есть.
+        const qsizetype from = std::max<qsizetype>(0, pos.pos[k] - 1);
+        const QStringView wide = pos.texts[k].mid(from, std::min(pos.texts[k].size(), pos.end[k] + 1) - from);
+        n += (v.contains(delimiter) || wide.contains(delimiter)) ? 1 : 0;
+    }
+    return n;
+}
+
+SplitOption textSplit(const SplitContext& cx, const QString& delimiter, const Options& options)
+{
+    const QString label = delimiterLabel(delimiter);
+    SplitOption none;
+    none.choice = EndOption::Choice::Literal;
+    none.label = label;
+    none.column = cx.column;
+    none.delimiter = delimiter;
+    if (delimiter.trimmed().isEmpty()) {
+        none.reason = QStringLiteral("The separator is empty.");
+        return none;
+    }
+    if (!cx.pos.texts.isEmpty() && valuesWith(cx.pos, delimiter) == 0) {
+        none.reason = QStringLiteral("“%1” does not occur in the values of “%2” in the lines.")
+                          .arg(delimiter.trimmed(), cx.F.name);
+        return none;
+    }
+    const Piece first = fieldPiece(QString(), Kind::Text, false, cx.F.opt);
+    SplitOption fixed = makeSplit(cx, EndOption::Choice::Literal, label, first, tokens(delimiter, -1), false, options);
+    fixed.delimiter = delimiter;
+    if (!cx.tail || cx.F.opt >= 0)
+        return fixed;
+    // Последнее поле: строки без разделителя могут остаться целыми — участок
+    // {? разделитель {вторая часть} ?}. Берётся, если так читается больше строк.
+    SplitOption loose = makeSplit(cx, EndOption::Choice::Literal,
+                                  label + QStringLiteral(" (lines without it stay whole)"), first,
+                                  tokens(delimiter, -1), true, options);
+    loose.delimiter = delimiter;
+    if (!loose.available)
+        return fixed;
+    if (!fixed.available)
+        return loose;
+    const qint64 cf = qRound64(fixed.fit.coverage() / SchemaFit::kCoverageStep);
+    const qint64 cl = qRound64(loose.fit.coverage() / SchemaFit::kCoverageStep);
+    return cl > cf ? loose : fixed;
+}
+
+inline bool isSeparatorChar(QChar c)
+{
+    if (c.isLetterOrNumber() || isBlank(c) || c == QLatin1Char('_'))
+        return false;
+    // Открывающие скобки и кавычки — обёртки значения, а не разделители.
+    static const QString kWrappers = QStringLiteral("([{<\"'`");
+    return !kWrappers.contains(c);
+}
+
+QStringList delimitersOf(const Positions& pos, int limit)
+{
+    QHash<QString, int> counts;
+    const int n = int(pos.texts.size());
+    for (int k = 0; k < n; ++k) {
+        const QStringView v = pos.texts[k].mid(pos.pos[k], pos.end[k] - pos.pos[k]);
+        QSet<QString> seen;
+        for (qsizetype i = 0; i < v.size();) {
+            if (!isSeparatorChar(v[i])) {
+                ++i;
+                continue;
+            }
+            qsizetype j = i;
+            while (j < v.size() && isSeparatorChar(v[j]))
+                ++j;
+            const qsizetype len = j - i;
+            // Разделитель — внутри значения: до и после него что-то есть.
+            if (i > 0 && j < v.size() && len <= kMaxDelimiter) {
+                const bool lead = isBlank(v[i - 1]);
+                const bool trail = isBlank(v[j]);
+                const QString run = v.mid(i, len).toString();
+                static const QString kStrong = QStringLiteral("|;=~#");
+                QString candidate;
+                if (lead && trail)
+                    candidate = QLatin1Char(' ') + run + QLatin1Char(' ');
+                else if (trail)
+                    candidate = run + QLatin1Char(' ');
+                else if (!lead && (len >= 2 || kStrong.contains(run[0])))
+                    candidate = run;
+                if (!candidate.isEmpty())
+                    seen.insert(candidate);
+            }
+            i = j;
+        }
+        for (const QString& c : seen)
+            ++counts[c];
+    }
+    QVector<QPair<QString, int>> list;
+    const int need = std::max(kMinValueCount, int(n * kDelimiterShare));
+    for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+        if (it.value() >= need)
+            list.append({ it.key(), it.value() });
+    }
+    std::sort(list.begin(), list.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second)
+            return a.second > b.second;
+        if (a.first.size() != b.first.size())
+            return a.first.size() > b.first.size();
+        return a.first < b.first;
+    });
+    QStringList out;
+    for (const auto& d : list) {
+        if (out.size() >= limit)
+            break;
+        out.append(d.first);
+    }
+    return out;
+}
+
+} // namespace
+
+QString delimiterLabel(const QString& delimiter)
+{
+    const QString t = delimiter.trimmed();
+    const bool lead = !delimiter.isEmpty() && isBlank(delimiter[0]);
+    const bool trail = !delimiter.isEmpty() && isBlank(delimiter[delimiter.size() - 1]);
+    QString s = QStringLiteral("at “%1”").arg(t);
+    if (lead && trail)
+        s += QStringLiteral(" with spaces around");
+    else if (trail)
+        s += QStringLiteral(" and a space");
+    else if (lead)
+        s += QStringLiteral(" after a space");
+    return s;
+}
+
+QVector<SplitOption> splitOptions(const QString& templateText, int column,
+                                  const QVector<SchemaFit::Sample>& samples, const Options& options)
+{
+    QVector<SplitOption> out;
+    SplitContext cx;
+    if (!loadSplit(templateText, column, samples, options, &cx))
+        return out;
+    using C = EndOption::Choice;
+    const QVector<Piece> space = tokens(QStringLiteral(" "), -1);
+    const auto kindPiece = [&cx](Kind k) { return fieldPiece(QString(), k, true, cx.F.opt); };
+
+    // Разделители, найденные в значениях поля.
+    for (const QString& d : delimitersOf(cx.pos, kSplitDelimiters)) {
+        if (cancelled(options))
+            return out;
+        out.append(textSplit(cx, d, options));
+    }
+    out.append(makeSplit(cx, C::NextSpace, QStringLiteral("at the first space"), kindPiece(Kind::Word), space, false,
+                         options));
+    const Diversity div = diversity(cx.pos);
+    {
+        Piece f = kindPiece(Kind::Words);
+        f.count = div.constantWords >= 2 ? div.constantWords : 2;
+        out.append(makeSplit(cx, C::Words, QStringLiteral("after %1 words").arg(f.count), f, space, false, options));
+    }
+    if (!div.values.isEmpty()) {
+        Piece f = kindPiece(Kind::Of);
+        for (const auto& v : div.values)
+            f.values.append(v.first);
+        out.append(makeSplit(cx, C::Values, QStringLiteral("one of the %1 listed values").arg(f.values.size()), f,
+                             space, false, options));
+    }
+    if (gapEvidence(cx.pos))
+        out.append(makeSplit(cx, C::WideGap, QStringLiteral("at a wide gap"), kindPiece(Kind::Padded), space, false,
+                             options));
+    if (const int w = widthEvidence(cx.pos); w > 0) {
+        Piece f = kindPiece(Kind::Width);
+        f.count = w;
+        out.append(makeSplit(cx, C::Width, QStringLiteral("after %1 characters").arg(w), f, space, false, options));
+    }
+    // Форма первого слова значения (число, IP, время…).
+    if (!cx.pos.texts.isEmpty()) {
+        for (Kind k : kFormOrder) {
+            int hits = 0, spaced = 0;
+            for (int i = 0; i < cx.pos.texts.size(); ++i) {
+                const QStringView s = cx.pos.texts[i];
+                const qsizetype a = cx.pos.pos[i];
+                const qsizetype len = scan(k, s, a);
+                // Не всё значение целиком: за формой остаётся вторая часть.
+                if (len > 0 && a + len < cx.pos.end[i] && strictForm(k, s.mid(a, len))) {
+                    ++hits;
+                    spaced += isBlank(s[a + len]) ? 1 : 0;
+                }
+            }
+            if (hits < cx.pos.texts.size() * kAgree)
+                continue;
+            out.append(makeSplit(cx, C::Form, QStringLiteral("where the %1 ends").arg(formText(k)), kindPiece(k),
+                                 spaced * 2 >= hits ? space : QVector<Piece>(), false, options));
+            break;
+        }
+    }
+    // Лучший: покрытие (шаг kCoverageStep), затем меньше разных значений
+    // первой части; при равенстве — раньше в списке. Но явный разделитель,
+    // найденный в значениях, — свидетельство сильнее числа значений («первое
+    // слово» свободного текста даёт мало значений, а границей не является):
+    // самый частый разделитель с тем же покрытием главнее.
+    int best = -1;
+    for (int i = 0; i < out.size(); ++i) {
+        if (!out[i].available || !usable(out[i].fit))
+            continue;
+        if (best < 0 || compareFit(out[i].fit, out[i].distinct(), out[best].fit, out[best].distinct()) < 0)
+            best = i;
+    }
+    if (best >= 0) {
+        const qint64 top = qRound64(out[best].fit.coverage() / SchemaFit::kCoverageStep);
+        for (int i = 0; i < out.size(); ++i) {
+            if (out[i].choice == C::Literal && out[i].available && usable(out[i].fit)
+                && qRound64(out[i].fit.coverage() / SchemaFit::kCoverageStep) >= top) {
+                best = i;
+                break;
+            }
+        }
+    }
+    if (best >= 0)
+        out[best].recommended = true;
+    return out;
+}
+
+SplitOption splitAtText(const QString& templateText, int column, const QString& delimiter,
+                        const QVector<SchemaFit::Sample>& samples, const Options& options)
+{
+    SplitContext cx;
+    if (!loadSplit(templateText, column, samples, options, &cx)) {
+        SplitOption o;
+        o.choice = EndOption::Choice::Literal;
+        o.label = delimiterLabel(delimiter);
+        o.column = column;
+        o.delimiter = delimiter;
+        o.reason = QStringLiteral("The template has an error — fix it first.");
+        return o;
+    }
+    return textSplit(cx, delimiter, options);
+}
+
+QStringList suggestDelimiters(const QString& templateText, int column, const QVector<SchemaFit::Sample>& samples,
+                              const Options& options)
+{
+    SplitContext cx;
+    if (!loadSplit(templateText, column, samples, options, &cx))
+        return {};
+    return delimitersOf(cx.pos, 8);
+}
+
+Edit nameSplit(const QString& templateText, int column, const QString& first, const QString& second)
+{
+    Edit out;
+    LineTemplate tpl;
+    QVector<Piece> pieces;
+    int i = -1;
+    if (!loadColumn(templateText, column, &tpl, &pieces, &i, &out))
+        return out;
+    const int j = pieceOfColumn(pieces, column + 1);
+    if (j < 0) {
+        out.error = QStringLiteral("There is no such column.");
+        return out;
+    }
+    const QString a = first.trimmed();
+    const QString b = second.trimmed();
+    if (!validFieldName(a, &out.error) || !validFieldName(b, &out.error))
+        return out;
+    if (a.compare(b, Qt::CaseInsensitive) == 0) {
+        out.error = QStringLiteral("The two parts need different names.");
+        return out;
+    }
+    for (int c = 0; c < tpl.columns().size(); ++c) {
+        if (c == column || c == column + 1)
+            continue;
+        for (const QString& n : { a, b }) {
+            if (tpl.columns()[c].compare(n, Qt::CaseInsensitive) == 0) {
+                out.error = QStringLiteral("There is already a column named “%1”.").arg(tpl.columns()[c]);
+                return out;
+            }
+        }
+    }
+    pieces[i].name = a;
+    pieces[j].name = b;
+    return finish(pieces, QStringLiteral("Naming the parts"));
+}
+
+Edit setLiteral(const QString& templateText, int piece, const QString& text)
+{
+    Edit out;
+    const LineTemplate tpl(templateText.trimmed());
+    if (!tpl.isValid()) {
+        out.error = QStringLiteral("The template has an error — fix it first.");
+        return out;
+    }
+    QVector<Piece> pieces = piecesOf(tpl);
+    if (piece < 0 || piece >= pieces.size() || pieces[piece].type != Type::Literal) {
+        out.error = QStringLiteral("There is no such text between the fields.");
+        return out;
+    }
+    const int opt = pieces[piece].opt;
+    const QString t = text.trimmed();
+    QVector<Piece> np = pieces.mid(0, piece);
+    if (t.isEmpty()) {
+        // Текст убран: два пробела вокруг него — один.
+        if (!np.isEmpty() && np.last().type == Type::Space && piece + 1 < pieces.size()
+            && pieces[piece + 1].type == Type::Space)
+            np.removeLast();
+    } else {
+        np += tokens(t, opt);
+    }
+    np += pieces.mid(piece + 1);
+    return finish(np, t.isEmpty() ? QStringLiteral("Removing the text") : QStringLiteral("Changing the text"));
+}
+
 } // namespace SchemaEdit

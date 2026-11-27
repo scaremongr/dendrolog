@@ -52,7 +52,9 @@
   colour** and splits an unknown log into fields by itself. Click a field to
   rename it or to choose where it ends — every choice shows what it gives on
   the lines (how many distinct values, what share of the file is read); select
-  text in a line and press **Make Field** to split out one more field. Lines
+  text in a line and press **Make Field**, or press **+ Add field**, to split
+  out one more field — at a separator found in your lines or at any text you
+  type. Lines
   the schema does not read are red, with the reason for each. The template
   text stays available for fine tuning, and a schema can also start from a
   template or a **Grok** expression. Each tab has its

@@ -46,6 +46,7 @@
 #include <QAbstractItemDelegate>
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -665,6 +666,214 @@ QStringList builtinTemplates()
     };
 }
 
+
+// ---------------------------------------------------------------------------
+// 4а. Разбить поле на два; свой разделитель; текст между полями (U-28)
+// ---------------------------------------------------------------------------
+
+const SchemaEdit::SplitOption* splitOf(const QVector<SchemaEdit::SplitOption>& options,
+                                       SchemaEdit::EndOption::Choice choice)
+{
+    for (const auto& o : options) {
+        if (o.choice == choice)
+            return &o;
+    }
+    return nullptr;
+}
+
+void testSplit()
+{
+    using C = SchemaEdit::EndOption::Choice;
+    Gen g(53);
+    const QStringList comps = {"Auth", "DB", "Payment Gateway", "Inventory Sync Worker", "Order Service", "Mail Sender"};
+
+    // Свой разделитель «~~» у последнего поля: есть во всех строках.
+    {
+        QStringList lines;
+        for (int i = 0; i < 300; ++i)
+            lines << QStringLiteral("%1 %2 %3 ~~ user=%4").arg(g.ts(), g.level(), g.words(g.num(2, 6))).arg(g.num(1, 99));
+        const Samples s = samplesOf(lines);
+        const auto o = SchemaEdit::splitAtText(kHead, 2, QStringLiteral("~~"), s, opts());
+        check(o.available && !o.optionalTail
+                  && o.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1}~~{Message}"),
+              QStringLiteral("split at “~~”: ") + o.templateText + o.reason);
+        check(o.fit.coverage() > 0.999 && o.column == 2 && o.label == QStringLiteral("at “~~”"),
+              QStringLiteral("split at “~~”: reads every line (%1), label «%2»").arg(o.fit.coverage()).arg(o.label));
+        check(o.examples.size() == SchemaEdit::kSplitExamples && !o.examples.first().first.isEmpty()
+                  && o.examples.first().second.startsWith(QStringLiteral("user=")),
+              QStringLiteral("split at “~~”: examples «%1» | «%2»")
+                  .arg(o.examples.value(0).first, o.examples.value(0).second));
+        std::printf("  %-14s %s\n", "custom text", qPrintable(o.templateText));
+        // Имена частей: прежнее имя — первой.
+        const auto named = SchemaEdit::nameSplit(o.templateText, 2, QStringLiteral("Message"), QStringLiteral("Extra"));
+        check(named.ok() && named.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Message}~~{Extra}"),
+              QStringLiteral("nameSplit: ") + named.templateText + named.error);
+        check(!SchemaEdit::nameSplit(o.templateText, 2, QStringLiteral("Level"), QStringLiteral("Extra")).ok()
+                  && !SchemaEdit::nameSplit(o.templateText, 2, QStringLiteral("Same"), QStringLiteral("same")).ok()
+                  && !SchemaEdit::nameSplit(o.templateText, 2, QStringLiteral("A{"), QStringLiteral("B")).ok()
+                  && !SchemaEdit::nameSplit(o.templateText, 3, QStringLiteral("A"), QStringLiteral("B")).ok(),
+              QStringLiteral("nameSplit: a taken, a repeated, a broken name and the last column are refused"));
+        // Нет в строках — отказ словами.
+        const auto none = SchemaEdit::splitAtText(kHead, 2, QStringLiteral("§§"), s, opts());
+        check(!none.available && none.reason.contains(QStringLiteral("§§")) && none.reason.contains(QStringLiteral("Message")),
+              QStringLiteral("split at an absent text is refused: ") + none.reason);
+        check(!SchemaEdit::splitAtText(kHead, 2, QStringLiteral("  "), s, opts()).available,
+              QStringLiteral("split at an empty text is refused"));
+        // Найденные разделители — подсказкой.
+        const QStringList found = SchemaEdit::suggestDelimiters(kHead, 2, s, opts());
+        check(found.value(0) == QStringLiteral(" ~~ "), QStringLiteral("suggested delimiters: ") + found.join(QLatin1Char('|')));
+    }
+
+    // Разделитель не во всех строках: хвост — необязательный, строки без него целы.
+    {
+        QStringList lines;
+        for (int i = 0; i < 300; ++i) {
+            QString line = QStringLiteral("%1 %2 %3").arg(g.ts(), g.level(), g.words(g.num(2, 6)));
+            if (i % 5 != 0)
+                line += QStringLiteral(" ~~ user=%1").arg(g.num(1, 99));
+            lines << line;
+        }
+        const auto o = SchemaEdit::splitAtText(kHead, 2, QStringLiteral("~~"), samplesOf(lines), opts());
+        check(o.available && o.optionalTail
+                  && o.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1}{?~~{Message}?}")
+                  && o.fit.coverage() > 0.999,
+              QStringLiteral("split at “~~” in some lines — an optional tail: %1 (%2)").arg(o.templateText).arg(o.fit.coverage()));
+        std::printf("  %-14s %s\n", "optional tail", qPrintable(o.templateText));
+    }
+
+    // Пробелы в разделителе значимы: « - » не режет слово с дефисом.
+    {
+        QStringList lines;
+        for (int i = 0; i < 200; ++i)
+            lines << QStringLiteral("%1 %2 node-%3 - %4").arg(g.ts(), g.level()).arg(g.num(1, 9)).arg(g.words(g.num(2, 5)));
+        const Samples s = samplesOf(lines);
+        const auto spaced = SchemaEdit::splitAtText(kHead, 2, QStringLiteral(" - "), s, opts());
+        check(spaced.available && spaced.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1} - {Message}")
+                  && spaced.examples.value(0).first.startsWith(QStringLiteral("node-"))
+                  && spaced.label == QStringLiteral("at “-” with spaces around"),
+              QStringLiteral("split at “ - ”: %1 «%2» (%3)").arg(spaced.templateText, spaced.examples.value(0).first, spaced.label));
+        const auto tight = SchemaEdit::splitAtText(kHead, 2, QStringLiteral("-"), s, opts());
+        check(tight.available && tight.examples.value(0).first == QStringLiteral("node"),
+              QStringLiteral("split at “-”: the first dash — «%1»").arg(tight.examples.value(0).first));
+    }
+
+    // Пункты разбиения: разделитель, первое слово, N слов, набор значений, форма.
+    {
+        QStringList lines;
+        for (int i = 0; i < 400; ++i)
+            lines << QStringLiteral("%1 %2 %3 | req-%4 | %5")
+                         .arg(g.ts(), g.level(), g.pick(comps))
+                         .arg(g.num(4096, 65535), 4, 16, QLatin1Char('0'))
+                         .arg(g.words(g.num(2, 6)));
+        const Samples s = samplesOf(lines);
+        const auto options = SchemaEdit::splitOptions(kHead, 2, s, opts());
+        const auto* text = splitOf(options, C::Literal);
+        const auto* word = splitOf(options, C::NextSpace);
+        const auto* words = splitOf(options, C::Words);
+        const auto* values = splitOf(options, C::Values);
+        check(text && text->available && text->delimiter == QStringLiteral(" | ")
+                  && text->templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1} | {Message}")
+                  && text->distinct() == comps.size() && text->fit.coverage() > 0.999,
+              QStringLiteral("split options: the separator found in the values: ")
+                  + (text ? text->templateText + QLatin1Char(' ') + text->summary() : QString()));
+        check(word && word->available
+                  && word->templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1:word} {Message}"),
+              QStringLiteral("split options: at the first space: ") + (word ? word->templateText : QString()));
+        check(words && words->available && words->templateText.contains(QStringLiteral("{Field1:words(")),
+              QStringLiteral("split options: after N words: ") + (words ? words->templateText : QString()));
+        check(values && values->available && values->templateText.contains(QStringLiteral("{Field1:of("))
+                  && values->templateText.contains(QStringLiteral("Inventory Sync Worker")) && values->distinct() == comps.size(),
+              QStringLiteral("split options: the closed set of values: ") + (values ? values->templateText : QString()));
+        int recommended = 0;
+        for (const auto& o : options) {
+            recommended += o.recommended ? 1 : 0;
+            if (!o.available)
+                continue;
+            const QStringList columns = LineTemplate(o.templateText).columns();
+            check(compiles(o.templateText) && columns.size() == 4 && columns.value(2) == QStringLiteral("Field1")
+                      && columns.value(3) == QStringLiteral("Message") && !o.examples.isEmpty(),
+                  QStringLiteral("split options: «%1» → %2").arg(o.label, o.templateText));
+            std::printf("  %-14s %-30s %s%s\n", "split", qPrintable(o.label), qPrintable(o.summary()),
+                        o.recommended ? "  ← best" : "");
+        }
+        check(recommended == 1 && text && text->recommended,
+              QStringLiteral("split options: one is recommended — the separator (fewest values at full coverage)"));
+        // Поле посреди шаблона: вторая часть сохраняет свой конец.
+        const QString mid = QStringLiteral("{Timestamp:time} {Level:level} {Component} | {Request} | {Message}");
+        const auto midOptions = SchemaEdit::splitOptions(mid, 2, s, opts());
+        const auto* midWord = splitOf(midOptions, C::NextSpace);
+        check(midWord && midWord->available
+                  && midWord->templateText
+                         == QStringLiteral("{Timestamp:time} {Level:level} {Field1:word} {Component} | {Request} | {Message}"),
+              QStringLiteral("split options: a field in the middle: ") + (midWord ? midWord->templateText : QString()));
+        // Текст между полями: другой, с пробелом внутри, убрать.
+        const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(LineTemplate(mid));
+        int bar = -1;
+        for (int i = 0; i < pieces.size() && bar < 0; ++i) {
+            if (pieces[i].type == LineTemplateElement::Type::Literal)
+                bar = i;
+        }
+        auto e = SchemaEdit::setLiteral(mid, bar, QStringLiteral("~~"));
+        check(e.ok() && e.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Component} ~~ {Request} | {Message}"),
+              QStringLiteral("setLiteral: ") + e.templateText + e.error);
+        e = SchemaEdit::setLiteral(mid, bar, QStringLiteral(" = > "));
+        check(e.ok() && e.templateText == QStringLiteral("{Timestamp:time} {Level:level} {Component} = > {Request} | {Message}"),
+              QStringLiteral("setLiteral with a space inside: ") + e.templateText + e.error);
+        e = SchemaEdit::setLiteral(mid, bar, QString());
+        check(e.ok() ? compiles(e.templateText) && !e.templateText.contains(QStringLiteral("{Component} |"))
+                     : !e.error.isEmpty(),
+              QStringLiteral("setLiteral: removing the text compiles or is refused in words: ") + e.templateText + e.error);
+        check(!SchemaEdit::setLiteral(mid, 0, QStringLiteral("x")).ok() && !SchemaEdit::setLiteral(mid, 99, QStringLiteral("x")).ok(),
+              QStringLiteral("setLiteral: not a text between fields — refused"));
+    }
+
+    // Форма первого слова: число, за которым текст.
+    {
+        QStringList lines;
+        for (int i = 0; i < 200; ++i)
+            lines << QStringLiteral("%1 %2 %3 %4").arg(g.ts(), g.level()).arg(g.num(100, 599)).arg(g.words(g.num(2, 5)));
+        const auto options = SchemaEdit::splitOptions(kHead, 2, samplesOf(lines), opts());
+        const auto* form = splitOf(options, C::Form);
+        check(form && form->available
+                  && form->templateText == QStringLiteral("{Timestamp:time} {Level:level} {Field1:int} {Message}"),
+              QStringLiteral("split options: the form of the first word: ") + (form ? form->templateText : QString()));
+    }
+
+    // Случайно: всё, что предложено, компилируется и даёт на одну колонку больше.
+    {
+        QStringList all;
+        for (const auto& c : builtinsamples::cases()) {
+            for (const auto& sample : c.samples)
+                all << sample.line;
+        }
+        const Samples s = samplesOf(all).mid(0, 60);
+        QRandomGenerator rng(977);
+        int offered = 0;
+        for (const QString& tpl : builtinTemplates()) {
+            const int columns = int(LineTemplate(tpl).columns().size());
+            for (int c = 0; c < columns; ++c) {
+                QVector<SchemaEdit::SplitOption> options = SchemaEdit::splitOptions(tpl, c, s, opts());
+                const QString line = all[int(rng.bounded(quint32(all.size())))];
+                if (!line.isEmpty()) {
+                    const qsizetype at = rng.bounded(quint32(line.size()));
+                    options.append(SchemaEdit::splitAtText(tpl, c, line.mid(at, 1 + rng.bounded(3)), s, opts()));
+                }
+                for (const auto& o : options) {
+                    if (!o.available) {
+                        check(!o.reason.isEmpty(), QStringLiteral("split fuzz: a refusal without words (%1)").arg(o.label));
+                        continue;
+                    }
+                    ++offered;
+                    check(compiles(o.templateText) && LineTemplate(o.templateText).columns().size() == columns + 1,
+                          QStringLiteral("split fuzz: %1 col %2 «%3» → %4").arg(tpl).arg(c).arg(o.label, o.templateText));
+                }
+            }
+        }
+        check(offered > 30, QStringLiteral("split fuzz: options are offered (%1)").arg(offered));
+        std::printf("  split fuzz: %d options compile\n", offered);
+    }
+}
+
 void testFuzz()
 {
     QStringList all;
@@ -1151,18 +1360,24 @@ void testGraphical(TimingApplication& app)
     // Блоки: по одному на поле, подпись — словами, без синтаксиса шаблона.
     bool words = fieldItems(strip) == columns.size();
     int literals = 0;
+    QString lastCaption;
     for (const SchemaFieldStrip::Item& item : strip->items()) {
+        if (item.type == SchemaFieldStrip::Item::Type::Add)
+            continue;
         if (item.type == SchemaFieldStrip::Item::Type::Literal) {
             literals += item.text == QLatin1String("|") ? 1 : 0;
             continue;
         }
         words = words && !item.caption.isEmpty() && !item.caption.contains(QLatin1Char('{'))
                 && !item.caption.contains(QLatin1Char(':')) && item.name == columns.value(item.column);
+        lastCaption = item.caption;
     }
     check(words && literals == 4, QStringLiteral("graphical: a block per field with the end in words, «|» between them"));
     check(strip->items().value(0).caption == QLatin1String("date and time")
-              && strip->items().last().caption == QLatin1String("to the end of the line"),
-          QStringLiteral("graphical: captions «%1» … «%2»").arg(strip->items().value(0).caption, strip->items().last().caption));
+              && lastCaption == QLatin1String("to the end of the line"),
+          QStringLiteral("graphical: captions «%1» … «%2»").arg(strip->items().value(0).caption, lastCaption));
+    check(strip->items().last().type == SchemaFieldStrip::Item::Type::Add && strip->addRect().isValid(),
+          QStringLiteral("graphical: «+ Add field» is the last block"));
 
     // Строки: участок поля залит цветом его блока; не прочитанная — красным,
     // продолжение записи — без полей.
@@ -1386,6 +1601,198 @@ void testGraphical(TimingApplication& app)
     check(!w.makeFieldFromSelection() && !w.editMessage().isEmpty() && w.templateText() == afterDate,
           QStringLiteral("graphical: Make Field without a selection explains"));
 
+
+    // --- Новое поле: «+ Add field» → разбить последнее поле -------------------------
+    check(w.newFromTemplate(QStringLiteral("{Timestamp:time} | {Level:level} | {Message}"), QStringLiteral("Coarse 2"))
+              && waitFor(settled),
+          QStringLiteral("blocks: a coarse schema"));
+    const QString coarse = w.templateText();
+    auto* splitCard = card->findChild<QWidget*>(QStringLiteral("splitCard"));
+    auto* splitApply = card->findChild<QPushButton*>(QStringLiteral("splitApplyBtn"));
+    auto* splitCancel = card->findChild<QPushButton*>(QStringLiteral("splitCancelBtn"));
+    auto* splitFirst = card->findChild<QLineEdit*>(QStringLiteral("splitFirstName"));
+    auto* splitSecond = card->findChild<QLineEdit*>(QStringLiteral("splitSecondName"));
+    auto* splitSwap = card->findChild<QToolButton*>(QStringLiteral("splitSwapNames"));
+    auto* splitText = card->findChild<QComboBox*>(QStringLiteral("splitTextEdit"));
+    auto* splitTextRadio = card->findChild<QRadioButton*>(QStringLiteral("splitOptionText"));
+    auto* splitTextResult = card->findChild<QLabel*>(QStringLiteral("splitResultText"));
+    auto* splitPreview = card->findChild<QLabel*>(QStringLiteral("splitPreview"));
+    check(splitCard && splitApply && splitCancel && splitFirst && splitSecond && splitSwap && splitText && splitTextRadio
+              && splitTextResult && splitPreview,
+          QStringLiteral("blocks: the split page exists"));
+    if (!splitCard || !splitApply || !splitCancel || !splitFirst || !splitSecond || !splitSwap || !splitText
+        || !splitTextRadio || !splitTextResult || !splitPreview)
+        return;
+    const auto splitSettled = [&]() { return settled() && w.splitOptionsReady(); };
+    QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->addRect().center());
+    check(w.splitColumn() == 2 && splitCard->isVisible() && w.selectedColumn() == 2 && strip->currentColumn() == 2,
+          QStringLiteral("blocks: «+ Add field» opens the split of the last field (%1)").arg(w.splitColumn()));
+    check(waitFor(splitSettled), QStringLiteral("blocks: the split options are computed"));
+    const QVector<SchemaEdit::SplitOption> splits = w.splitOptions();
+    int barOption = -1;
+    for (int i = 0; i < splits.size(); ++i) {
+        if (splits[i].delimiter == QLatin1String(" | ") && splits[i].available)
+            barOption = i;
+    }
+    auto* barRadio = card->findChild<QRadioButton*>(QStringLiteral("splitOption%1").arg(barOption));
+    auto* barResult = card->findChild<QLabel*>(QStringLiteral("splitResult%1").arg(barOption));
+    check(barOption >= 0 && barRadio && barRadio->isChecked() && barResult
+              && barResult->text().contains(QStringLiteral("6 values")) && barResult->text().endsWith(QLatin1Char('%')),
+          QStringLiteral("blocks: the separator found in the values is offered first and chosen: ")
+              + (barResult ? barResult->text() : QString()));
+    check(splitApply->isEnabled() && splitPreview->text().contains(QChar(0x258F))
+              && splitFirst->text() == QLatin1String("Message") && splitSecond->text() == QLatin1String("Field1"),
+          QStringLiteral("blocks: an example and the names of the parts (%1, %2)").arg(splitFirst->text(), splitSecond->text()));
+    // Другой пункт — имена следуют за ним, пока их не трогали.
+    auto* wordRadio = card->findChild<QRadioButton*>(
+        QStringLiteral("splitOption%1").arg([&]() {
+            for (int i = 0; i < splits.size(); ++i) {
+                if (splits[i].choice == SchemaEdit::EndOption::Choice::NextSpace)
+                    return i;
+            }
+            return -1;
+        }()));
+    if (wordRadio) {
+        wordRadio->click();
+        check(splitFirst->text() == QLatin1String("Field1") && splitSecond->text() == QLatin1String("Message"),
+              QStringLiteral("blocks: a word split names the new field first (%1, %2)").arg(splitFirst->text(), splitSecond->text()));
+        if (barRadio)
+            barRadio->click();
+    }
+    splitSwap->click();
+    check(splitFirst->text() == QLatin1String("Field1") && splitSecond->text() == QLatin1String("Message"),
+          QStringLiteral("blocks: ⇄ swaps the names"));
+    splitFirst->setFocus();
+    splitFirst->selectAll();
+    QTest::keyClicks(splitFirst, QStringLiteral("Component"));
+    const int undoBeforeSplit = w.undoStack()->count();
+    splitApply->click();
+    check(w.templateText() == QLatin1String("{Timestamp:time} | {Level:level} | {Component} | {Message}")
+              && w.undoStack()->count() == undoBeforeSplit + 1 && w.splitColumn() == -1 && !splitCard->isVisible()
+              && w.selectedColumn() == 2,
+          QStringLiteral("blocks: Split adds the field (an undo step): ") + w.templateText());
+    check(w.editMessage().contains(QLatin1String("Component")) && !w.editMessage().contains(QLatin1Char('{')),
+          QStringLiteral("blocks: the message says what was split: ") + w.editMessage());
+    check(waitFor(settled) && fieldItems(strip) == 4, QStringLiteral("blocks: the new block is in the row"));
+    w.undoStack()->undo();
+    check(w.templateText() == coarse && waitFor(settled), QStringLiteral("blocks: undo of the split"));
+
+    // Свой разделитель — любой текст; того, чего нет в строках, разбить нельзя.
+    check(w.beginSplit(2) && waitFor(splitSettled), QStringLiteral("blocks: split again"));
+    splitText->setEditText(QStringLiteral("| req-"));
+    check(splitTextRadio->isChecked(), QStringLiteral("blocks: typing a text chooses «at the text»"));
+    check(waitFor([&]() { return !w.isComputing(); }), QStringLiteral("blocks: the typed text is checked"));
+    check(splitTextResult->isVisible() && splitTextResult->text().contains(QStringLiteral("6 values"))
+              && splitApply->isEnabled() && splitPreview->text().contains(QChar(0x258F)),
+          QStringLiteral("blocks: the typed text gets its result: ") + splitTextResult->text());
+    splitText->setEditText(QString::fromUtf8("§§"));
+    check(waitFor([&]() { return !w.isComputing(); }) && !splitApply->isEnabled()
+              && splitTextResult->text().contains(QString::fromUtf8("§§")),
+          QStringLiteral("blocks: a text that is not in the lines cannot split: ") + splitTextResult->text());
+    splitText->setEditText(QStringLiteral("| req-"));
+    check(waitFor([&]() { return !w.isComputing(); }) && splitApply->isEnabled(), QStringLiteral("blocks: the text again"));
+    splitApply->click();
+    check(LineTemplate(w.templateText()).columns().size() == 4 && w.templateText().contains(QStringLiteral("| req-")),
+          QStringLiteral("blocks: Split at the typed text: ") + w.templateText());
+    w.undoStack()->undo();
+    check(w.templateText() == coarse && waitFor(settled), QStringLiteral("blocks: undo of the text split"));
+
+    // Cancel, «+» с клавиатуры, Split… карточки и меню поля.
+    strip->setFocus();
+    QTest::keyClick(strip, Qt::Key_Plus);
+    check(w.splitColumn() == 2 && splitCard->isVisible(), QStringLiteral("blocks: «+» on the keyboard"));
+    splitCancel->click();
+    check(w.splitColumn() == -1 && !splitCard->isVisible() && nameEdit->isVisible() && w.templateText() == coarse,
+          QStringLiteral("blocks: Cancel returns to the card of the field"));
+    auto* splitButton = card->findChild<QPushButton*>(QStringLiteral("fieldSplitBtn"));
+    w.selectColumn(1);
+    if (splitButton)
+        splitButton->click();
+    check(splitButton && w.splitColumn() == 1 && splitCard->isVisible(), QStringLiteral("blocks: Split… of the card"));
+    QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->columnRect(0).center());
+    check(w.splitColumn() == -1 && w.selectedColumn() == 0 && !splitCard->isVisible(),
+          QStringLiteral("blocks: choosing another field closes the split"));
+    {
+        std::unique_ptr<QMenu> menu(w.columnMenu(2));
+        QAction* splitAction = menuAction(menu.get(), QStringLiteral("splitFieldAction"));
+        check(splitAction != nullptr, QStringLiteral("blocks: the menu of the field has Split"));
+        if (splitAction)
+            splitAction->trigger();
+        check(w.splitColumn() == 2, QStringLiteral("blocks: Split from the menu"));
+        w.cancelSplit();
+    }
+
+    // --- Свой разделитель у поля: «or at the text» ----------------------------------
+    check(waitFor(settled), QStringLiteral("blocks: settled before the text end"));
+    w.selectColumn(2);
+    auto* textEnd = card->findChild<QComboBox*>(QStringLiteral("fieldTextEndEdit"));
+    auto* textEndHint = card->findChild<QLabel*>(QStringLiteral("fieldTextEndHint"));
+    auto* textEndApply = card->findChild<QPushButton*>(QStringLiteral("fieldTextEndBtn"));
+    check(textEnd && textEndHint && textEndApply && textEnd->isVisible() && !textEndApply->isEnabled(),
+          QStringLiteral("blocks: «or at the text» is in the card"));
+    if (!textEnd || !textEndHint || !textEndApply)
+        return;
+    bool suggested = false;
+    for (int i = 0; i < textEnd->count(); ++i)
+        suggested = suggested || textEnd->itemText(i) == QLatin1String(" | ");
+    check(suggested, QStringLiteral("blocks: the separators found in the values are suggested"));
+    textEnd->setEditText(QString::fromUtf8("§§"));
+    check(textEndHint->isVisible() && textEndHint->text().contains(QStringLiteral("is not in the values")),
+          QStringLiteral("blocks: a text that is not in the values says so at once: ") + textEndHint->text());
+    textEnd->lineEdit()->setFocus();
+    QTest::keyClick(textEnd->lineEdit(), Qt::Key_Return);
+    check(waitFor(settled) && w.templateText() == coarse && w.editMessage().contains(QString::fromUtf8("§§")),
+          QStringLiteral("blocks: and it is refused in words: ") + w.editMessage());
+    textEnd->setEditText(QStringLiteral(" | "));
+    check(textEndHint->text().contains(QStringLiteral(" of ")) && textEndHint->text().contains(QStringLiteral("with spaces around"))
+              && textEndApply->isEnabled(),
+          QStringLiteral("blocks: the hint counts the values with the text: ") + textEndHint->text());
+    textEndApply->click();
+    check(waitFor(settled), QStringLiteral("blocks: the text end is computed"));
+    check(w.templateText() == QLatin1String("{Timestamp:time} | {Level:level} | {Message} | {Field1}")
+              && w.selectedColumn() == 3 && nameEdit->text() == QLatin1String("Field1"),
+          QStringLiteral("blocks: the field ends at the text, the rest is a new field: ") + w.templateText());
+    check(w.editMessage().contains(QLatin1String("Message")) && w.editMessage().contains(QLatin1String("Field1"))
+              && !w.editMessage().contains(QLatin1Char('{')),
+          QStringLiteral("blocks: the message says so: ") + w.editMessage());
+
+    // --- Текст между полями: щелчок по нему, другой текст, убрать -------------------
+    int firstBar = -1;
+    for (const SchemaFieldStrip::Item& item : strip->items()) {
+        if (item.type == SchemaFieldStrip::Item::Type::Literal && firstBar < 0)
+            firstBar = item.piece;
+    }
+    auto* literalEdit = card->findChild<QLineEdit*>(QStringLiteral("literalEdit"));
+    auto* literalRemove = card->findChild<QPushButton*>(QStringLiteral("literalRemoveBtn"));
+    auto* literalInfo = card->findChild<QLabel*>(QStringLiteral("literalInfo"));
+    check(firstBar >= 0 && literalEdit && literalRemove && literalInfo, QStringLiteral("blocks: a text between the fields"));
+    if (firstBar < 0 || !literalEdit || !literalRemove || !literalInfo)
+        return;
+    QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->pieceRect(firstBar).center());
+    check(w.selectedLiteral() == firstBar && strip->currentPiece() == firstBar && w.selectedColumn() == -1
+              && literalEdit->isVisible() && literalEdit->text() == QLatin1String("|")
+              && literalInfo->text().contains(QLatin1String("Timestamp")) && literalInfo->text().contains(QLatin1String("Level")),
+          QStringLiteral("blocks: a click on the text between the fields opens it: ") + literalInfo->text());
+    const QString beforeLiteral = w.templateText();
+    literalEdit->setFocus();
+    literalEdit->selectAll();
+    QTest::keyClicks(literalEdit, QStringLiteral("=>"));
+    QTest::keyClick(literalEdit, Qt::Key_Return);
+    check(w.templateText() == QLatin1String("{Timestamp:time} => {Level:level} | {Message} | {Field1}")
+              && w.selectedLiteral() == firstBar && literalEdit->text() == QLatin1String("=>"),
+          QStringLiteral("blocks: the text between the fields is changed: ") + w.templateText());
+    w.undoStack()->undo();
+    check(w.templateText() == beforeLiteral && waitFor(settled), QStringLiteral("blocks: undo of the text change"));
+    w.selectLiteral(firstBar);
+    literalRemove->click();
+    check(w.templateText() != beforeLiteral ? LineTemplate(w.templateText()).isValid() && !w.templateText().contains(QStringLiteral("} | {Level"))
+                                            : !w.editMessage().isEmpty(),
+          QStringLiteral("blocks: Remove the Text compiles or is refused in words: ") + w.templateText() + QLatin1Char(' ')
+              + w.editMessage());
+    if (w.templateText() != beforeLiteral)
+        w.undoStack()->undo();
+    check(waitFor(settled), QStringLiteral("blocks: settled after the text between the fields"));
+
     // --- Detect Fields --------------------------------------------------------------
     check(w.newEmpty() && waitFor(settled), QStringLiteral("graphical: empty again"));
     const int undoBefore = w.undoStack()->count();
@@ -1496,6 +1903,8 @@ int main(int argc, char** argv)
     std::printf("Ends at:\n");
     testEndOptions();
     testOperations();
+    std::printf("Split:\n");
+    testSplit();
     testRoundTrip();
     testFuzz();
     testCost();

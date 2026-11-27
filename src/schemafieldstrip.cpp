@@ -49,6 +49,19 @@ QString elided(const QString& text)
     return text.size() > kMaxNameChars ? text.left(kMaxNameChars - 1) + QChar(0x2026) : text;
 }
 
+// Элемент без колонки, который можно выбрать: текст между полями или
+// скрытая часть строки.
+bool pieceRectIndexValid(const QVector<SchemaFieldStrip::Item>& items, int piece)
+{
+    if (piece < 0)
+        return false;
+    for (const SchemaFieldStrip::Item& item : items) {
+        if (item.type != SchemaFieldStrip::Item::Type::Add && item.piece == piece && item.column < 0)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 SchemaFieldStrip::SchemaFieldStrip(QWidget* parent)
@@ -82,6 +95,8 @@ void SchemaFieldStrip::setItems(const QVector<Item>& items)
     m_hover = -1;
     if (indexOfColumn(m_current) < 0)
         m_current = -1;
+    if (!pieceRectIndexValid(m_items, m_currentPiece))
+        m_currentPiece = -1;
     layoutItems(width(), &m_rects);
     updateGeometry();
     update();
@@ -101,6 +116,34 @@ void SchemaFieldStrip::setCurrentColumn(int column)
         return;
     m_current = column;
     update();
+}
+
+void SchemaFieldStrip::setCurrentPiece(int piece)
+{
+    if (!pieceRectIndexValid(m_items, piece))
+        piece = -1;
+    if (m_currentPiece == piece)
+        return;
+    m_currentPiece = piece;
+    update();
+}
+
+QRect SchemaFieldStrip::pieceRect(int piece) const
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        if (m_items[i].type != Item::Type::Add && m_items[i].piece == piece && piece >= 0)
+            return itemRect(i);
+    }
+    return QRect();
+}
+
+QRect SchemaFieldStrip::addRect() const
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        if (m_items[i].type == Item::Type::Add)
+            return itemRect(i);
+    }
+    return QRect();
 }
 
 int SchemaFieldStrip::indexOfColumn(int column) const
@@ -140,8 +183,10 @@ QSize SchemaFieldStrip::itemSize(const Item& item) const
     const int height = name.height() + caption.height() + 2 * kPadY;
     if (item.type == Item::Type::Literal) {
         const QFontMetrics mono(literalFont(font()));
-        return QSize(mono.horizontalAdvance(visibleLiteral(item.text)) + 6, height);
+        return QSize(mono.horizontalAdvance(visibleLiteral(item.text)) + 10, height);
     }
+    if (item.type == Item::Type::Add)
+        return QSize(QFontMetrics(font()).horizontalAdvance(QStringLiteral("+ ") + item.text) + 2 * kPadX, height);
     const QString shown = item.name.isEmpty() ? tr("(hidden)") : elided(item.name);
     QString sub = item.caption;
     if (item.optional)
@@ -226,12 +271,36 @@ void SchemaFieldStrip::paintEvent(QPaintEvent*)
         const Item& item = m_items[i];
         const QRectF r = QRectF(m_rects[i]).adjusted(0.5, 0.5, -0.5, -0.5);
         if (item.type == Item::Type::Literal) {
+            // Текст между полями — тоже элемент схемы: под курсором и выбранный
+            // обведён, щелчок даёт его поправить.
+            const bool chosen = item.piece == m_currentPiece && m_currentPiece >= 0;
+            if (chosen || i == m_hover) {
+                QPen pen(chosen ? pal.color(QPalette::Highlight) : border);
+                pen.setWidthF(chosen ? 2.0 : 1.0);
+                p.setPen(pen);
+                p.setBrush(Qt::NoBrush);
+                p.drawRoundedRect(r.adjusted(0, 4, 0, -4), 3, 3);
+            }
             p.setFont(fLiteral);
-            p.setPen(muted);
+            p.setPen(i == m_hover || chosen ? pal.color(QPalette::Text) : muted);
             p.drawText(m_rects[i], Qt::AlignCenter, visibleLiteral(item.text));
             continue;
         }
-        const bool current = item.column >= 0 && item.column == m_current;
+        if (item.type == Item::Type::Add) {
+            const bool hot = i == m_hover;
+            QPen pen(hot ? pal.color(QPalette::Highlight) : border);
+            pen.setStyle(Qt::DashLine);
+            p.setPen(pen);
+            p.setBrush(hot ? CardFrame::mixedColor(pal.color(QPalette::Window), pal.color(QPalette::Highlight), 0.12)
+                           : QBrush(Qt::NoBrush));
+            p.drawRoundedRect(r, 4, 4);
+            p.setFont(font());
+            p.setPen(hot ? pal.color(QPalette::Text) : muted);
+            p.drawText(m_rects[i], Qt::AlignCenter, QStringLiteral("+ ") + item.text);
+            continue;
+        }
+        const bool current = (item.column >= 0 && item.column == m_current)
+                             || (item.column < 0 && item.piece >= 0 && item.piece == m_currentPiece);
         const bool hover = i == m_hover;
         const QColor fill = fieldColor(item.column, pal);
         // Заливка — цвет поля; без колонки — нейтральная и пунктиром.
@@ -280,9 +349,17 @@ void SchemaFieldStrip::paintEvent(QPaintEvent*)
 
 void SchemaFieldStrip::activate(int index)
 {
-    if (index < 0 || index >= m_items.size() || m_items[index].type != Item::Type::Field)
+    if (index < 0 || index >= m_items.size())
         return;
     const Item& item = m_items[index];
+    if (item.type == Item::Type::Add) {
+        emit addRequested();
+        return;
+    }
+    if (item.type == Item::Type::Literal) {
+        emit literalActivated(item.piece);
+        return;
+    }
     if (item.column >= 0) {
         setCurrentColumn(item.column);
         emit columnActivated(item.column);
@@ -302,9 +379,7 @@ void SchemaFieldStrip::mousePressEvent(QMouseEvent* event)
 
 void SchemaFieldStrip::mouseMoveEvent(QMouseEvent* event)
 {
-    int hover = itemAt(event->pos());
-    if (hover >= 0 && m_items[hover].type != Item::Type::Field)
-        hover = -1;
+    const int hover = itemAt(event->pos());
     if (hover != m_hover) {
         m_hover = hover;
         setCursor(hover >= 0 ? Qt::PointingHandCursor : Qt::ArrowCursor);
@@ -356,6 +431,13 @@ void SchemaFieldStrip::keyPressEvent(QKeyEvent* event)
         else if (!columns.isEmpty())
             activate(columns.first());
         return;
+    case Qt::Key_Plus:
+    case Qt::Key_Insert:
+        if (addRect().isValid()) {
+            emit addRequested();
+            return;
+        }
+        break;
     case Qt::Key_Menu:
         if (at >= 0) {
             emit menuRequested(m_current, mapToGlobal(columnRect(m_current).bottomLeft()));

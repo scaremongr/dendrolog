@@ -820,6 +820,44 @@ static void checkOpenPanels(const QDir& dir)
                               30000);
             return window;
         });
+        // Страница «разбить поле на два» (U-28): пункты, поле своего
+        // разделителя, пример; и текст между полями.
+        checkRepaintsOnThemeChange("Schema editor: split", [schemas, tab]() -> std::unique_ptr<QWidget> {
+            auto window = std::make_unique<SchemaEditorWindow>(schemas.get());
+            SchemaFit::Budget noLimit;
+            noLimit.maxMs = 0;
+            window->setFitBudget(noLimit);
+            window->setView(tab.get());
+            window->newFromTemplate(QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {?- ?}{Message}"),
+                                    QStringLiteral("Fixture"));
+            SchemaEditorWindow* w = window.get();
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady(); }, 30000);
+            w->beginSplit(3);
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady() && w->splitOptionsReady(); },
+                              30000);
+            return window;
+        });
+        checkRepaintsOnThemeChange("Schema editor: text between fields", [schemas, tab]() -> std::unique_ptr<QWidget> {
+            auto window = std::make_unique<SchemaEditorWindow>(schemas.get());
+            SchemaFit::Budget noLimit;
+            noLimit.maxMs = 0;
+            window->setFitBudget(noLimit);
+            window->setView(tab.get());
+            window->newFromTemplate(QStringLiteral("{Timestamp:time} [{Thread}] {Level:level} {?- ?}{Message}"),
+                                    QStringLiteral("Fixture"));
+            SchemaEditorWindow* w = window.get();
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady(); }, 30000);
+            const QVector<SchemaEdit::Piece> pieces =
+                SchemaEdit::piecesOf(LineTemplate(w->templateText()));
+            for (int i = 0; i < pieces.size(); ++i) {
+                if (pieces[i].type == LineTemplateElement::Type::Literal) {
+                    w->selectLiteral(i);
+                    break;
+                }
+            }
+            testdocs::waitFor([w]() { return !w->isComputing() && w->fileFitReady(); }, 30000);
+            return window;
+        });
     }
 
     checkRepaintsOnThemeChange("Statistics placeholder", []() -> std::unique_ptr<QWidget> {

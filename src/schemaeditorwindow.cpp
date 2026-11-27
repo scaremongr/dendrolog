@@ -53,6 +53,7 @@ namespace {
 
 constexpr int kSampleLines = 200;
 constexpr int kCardMinWidth = 270;
+constexpr int kSplitTextMs = 200;   // пауза набора своего разделителя
 constexpr int kRecomputeMs = 300;
 
 enum Field { NameField = 1, DescriptionField = 2, TemplateField = 3, AllFields = 4 };
@@ -129,6 +130,13 @@ QString partOf(SchemaEdit::Piece piece)
 {
     piece.opt = -1;
     return SchemaEdit::render({piece});
+}
+
+// Панель карточки не уже её содержимого (и полосы прокрутки, когда карточка
+// выше панели): пункт с итогом не обрезается.
+int cardPaneWidth(const QScrollArea* scroll, const QWidget* card)
+{
+    return qMax(kCardMinWidth, card->minimumSizeHint().width() + scroll->verticalScrollBar()->sizeHint().width() + 6);
 }
 
 QString valuesText(int n)
@@ -305,12 +313,17 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     , m_recompute(new QTimer(this))
     , m_opWatcher(new QFutureWatcher<OpOutcome>(this))
     , m_endsWatcher(new QFutureWatcher<EndsOutcome>(this))
+    , m_splitWatcher(new QFutureWatcher<SplitOutcome>(this))
+    , m_splitTextWatcher(new QFutureWatcher<SplitTextOutcome>(this))
+    , m_splitTextTimer(new QTimer(this))
 {
     setObjectName(QStringLiteral("schemaEditorWindow"));
     setWindowTitle(tr("Field Schemas"));
     resize(1200, 760);
     m_recompute->setSingleShot(true);
     m_recompute->setInterval(kRecomputeMs);
+    m_splitTextTimer->setSingleShot(true);
+    m_splitTextTimer->setInterval(kSplitTextMs);
 
     auto* root = new QVBoxLayout(this);
     m_mainSplitter = new QSplitter(Qt::Horizontal, this);
@@ -703,6 +716,38 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
     connect(m_card, &SchemaFieldCard::mergeRequested, this, &SchemaEditorWindow::mergeWithNext);
     connect(m_card, &SchemaFieldCard::removeRequested, this, &SchemaEditorWindow::removeField);
     connect(m_card, &SchemaFieldCard::showRequested, this, &SchemaEditorWindow::showHiddenField);
+    connect(m_card, &SchemaFieldCard::neededWidthChanged, this, [this]() {
+        const int width = cardPaneWidth(m_cardScroll, m_card);
+        if (m_cardScroll->minimumWidth() != width)
+            m_cardScroll->setMinimumWidth(width);
+    });
+    // Создание и правка блоков: «+ Add field», разбиение, свой разделитель,
+    // текст между полями.
+    connect(m_strip, &SchemaFieldStrip::addRequested, this, [this]() {
+        beginSplit(int(columnsOf(m_state.templateText.trimmed()).size()) - 1);
+    });
+    connect(m_strip, &SchemaFieldStrip::literalActivated, this, &SchemaEditorWindow::selectLiteral);
+    connect(m_card, &SchemaFieldCard::splitRequested, this, &SchemaEditorWindow::beginSplit);
+    connect(m_card, &SchemaFieldCard::splitCancelled, this, &SchemaEditorWindow::cancelSplit);
+    connect(m_card, &SchemaFieldCard::splitConfirmed, this,
+            [this](const SchemaEdit::SplitOption& option, const QString& first, const QString& second) {
+                applySplit(option, first, second);
+            });
+    connect(m_card, &SchemaFieldCard::splitTextEdited, this, [this](const QString& text) {
+        m_splitTextWanted = text;
+        ++m_splitTextGeneration;   // прежний итог — не про этот текст
+        if (text.trimmed().isEmpty())
+            m_splitTextTimer->stop();
+        else
+            m_splitTextTimer->start();
+    });
+    connect(m_splitTextTimer, &QTimer::timeout, this, &SchemaEditorWindow::startSplitText);
+    connect(m_splitWatcher, &QFutureWatcher<SplitOutcome>::finished, this, &SchemaEditorWindow::onSplitFinished);
+    connect(m_splitTextWatcher, &QFutureWatcher<SplitTextOutcome>::finished, this,
+            &SchemaEditorWindow::onSplitTextFinished);
+    connect(m_card, &SchemaFieldCard::textEndEdited, this, &SchemaEditorWindow::updateTextEndHint);
+    connect(m_card, &SchemaFieldCard::textEndRequested, this, &SchemaEditorWindow::endFieldAtText);
+    connect(m_card, &SchemaFieldCard::literalChangeRequested, this, &SchemaEditorWindow::setLiteralText);
     connect(m_card, &SchemaFieldCard::addValueRequested, this, [this](int column) {
         const QStringList items = suggestedValues(column);
         const QString value = askText(tr("Add Value"), tr("Value:"), items.value(0), items);
@@ -783,6 +828,8 @@ SchemaEditorWindow::SchemaEditorWindow(FieldSchemaController* schemas, QWidget* 
         }
         m_fileSamples = out.samples;
         startEndOptions();
+        if (m_splitColumn >= 0)
+            startSplitOptions();   // образцы оценки — теперь выборка файла
         m_samples->setMissLines(m_fileFit.misses);
         updateChrome();
     });
@@ -922,8 +969,14 @@ SchemaEditorWindow::~SchemaEditorWindow()
         m_opCancel->store(true, std::memory_order_relaxed);
     if (m_endsCancel)
         m_endsCancel->store(true, std::memory_order_relaxed);
+    if (m_splitCancel)
+        m_splitCancel->store(true, std::memory_order_relaxed);
+    if (m_splitTextCancel)
+        m_splitTextCancel->store(true, std::memory_order_relaxed);
     m_opWatcher->waitForFinished();
     m_endsWatcher->waitForFinished();
+    m_splitWatcher->waitForFinished();
+    m_splitTextWatcher->waitForFinished();
 }
 
 // ---------------------------------------------------------------------------
@@ -966,7 +1019,8 @@ QString SchemaEditorWindow::savedName() const
 bool SchemaEditorWindow::isComputing() const
 {
     return m_recompute->isActive() || m_samples->isComputing() || m_fileJob->isRunning()
-        || m_catalogueJob->isRunning() || m_opPending || m_endsPending;
+        || m_catalogueJob->isRunning() || m_opPending || m_endsPending || m_splitPending || m_splitTextPending
+        || m_splitTextTimer->isActive();
 }
 
 SchemaEditorWindow::EditState SchemaEditorWindow::stateOf(const SchemaStore::SchemaEntry& entry)
@@ -1041,6 +1095,8 @@ void SchemaEditorWindow::loadEntry(const SchemaStore::SchemaEntry& entry, bool i
     resetMakeField();
     m_selectedColumn = -1;
     m_selectedPiece = -1;
+    m_selectedLiteral = -1;
+    m_splitColumn = -1;
     m_detectedTemplate.clear();
     m_detectFailure.clear();
     m_checkTabSchema.clear();
@@ -1272,6 +1328,12 @@ void SchemaEditorWindow::onTemplateChanged()
     if (text.isEmpty() || !tpl.isValid() || m_selectedColumn >= tpl.columns().size())
         m_selectedColumn = -1;
     m_selectedPiece = -1;
+    m_selectedLiteral = -1;
+    // Разбиение считалось для прежнего шаблона.
+    m_splitColumn = -1;
+    ++m_splitGeneration;
+    ++m_splitTextGeneration;
+    m_splitTextTimer->stop();
     m_detectFailure.clear();
     rebuildStrip();
     updateCard();
@@ -1300,9 +1362,10 @@ void SchemaEditorWindow::rebuildStrip()
                 item.text = p.text.trimmed();
                 if (item.text.isEmpty())
                     continue;
-                item.toolTip = item.optional
-                    ? tr("“%1” — text between the fields; some lines do not have it").arg(item.text)
-                    : tr("“%1” — text that stands between the fields in every line").arg(item.text);
+                item.toolTip = (item.optional
+                                    ? tr("“%1” — text between the fields; some lines do not have it").arg(item.text)
+                                    : tr("“%1” — text that stands between the fields in every line").arg(item.text))
+                               + QLatin1Char('\n') + tr("Click to change it.");
                 items.append(item);
             } else if (p.isField()) {
                 item.type = SchemaFieldStrip::Item::Type::Field;
@@ -1317,12 +1380,23 @@ void SchemaEditorWindow::rebuildStrip()
                 items.append(item);
             }
         }
+        if (column > 0) {
+            // Новому блоку нужно место: «+» разбивает последнее поле на два.
+            SchemaFieldStrip::Item add;
+            add.type = SchemaFieldStrip::Item::Type::Add;
+            add.text = tr("Add field");
+            add.toolTip = tr("Add a field: split the last field, “%1”, into two.\n"
+                             "To split another field, click it and press Split… in its card.")
+                              .arg(tpl.columns().last());
+            items.append(add);
+        }
     }
     m_strip->setPlaceholderText(m_state.templateText.trimmed().isEmpty()
                                     ? tr("The fields of the schema appear here as coloured blocks.")
                                     : tr("The template has an error — see Advanced below, or press Undo (Ctrl+Z)."));
     m_strip->setItems(items);
     m_strip->setCurrentColumn(m_selectedColumn);
+    m_strip->setCurrentPiece(m_selectedLiteral >= 0 ? m_selectedLiteral : m_selectedPiece);
 }
 
 void SchemaEditorWindow::rebuildPreview()
@@ -1361,9 +1435,17 @@ void SchemaEditorWindow::selectColumn(int column)
     const QStringList columns = columnsOf(m_state.templateText.trimmed());
     if (column < 0 || column >= columns.size())
         column = -1;
+    if (m_splitColumn >= 0 && m_splitColumn != column) {
+        m_splitColumn = -1;   // выбор другого поля закрывает страницу разбиения
+        ++m_splitGeneration;
+        ++m_splitTextGeneration;
+        m_splitTextTimer->stop();
+    }
     m_selectedColumn = column;
     m_selectedPiece = -1;
+    m_selectedLiteral = -1;
     m_strip->setCurrentColumn(column);
+    m_strip->setCurrentPiece(-1);
     m_preview->setCurrentColumn(column);
     if (column >= 0 && column < m_samples->columnCount() && m_samples->rowCount() > 0
         && m_table->currentIndex().column() != column) {
@@ -1378,7 +1460,26 @@ void SchemaEditorWindow::selectHiddenPiece(int piece)
 {
     m_selectedColumn = -1;
     m_selectedPiece = piece;
+    m_selectedLiteral = -1;
+    m_splitColumn = -1;
     m_strip->setCurrentColumn(-1);
+    m_strip->setCurrentPiece(piece);
+    m_preview->setCurrentColumn(-1);
+    updateCard();
+}
+
+void SchemaEditorWindow::selectLiteral(int piece)
+{
+    const LineTemplate tpl(m_state.templateText.trimmed());
+    const QVector<SchemaEdit::Piece> pieces = tpl.isValid() ? SchemaEdit::piecesOf(tpl) : QVector<SchemaEdit::Piece>();
+    if (piece < 0 || piece >= pieces.size() || pieces[piece].type != LineTemplateElement::Type::Literal)
+        piece = -1;
+    m_selectedColumn = -1;
+    m_selectedPiece = -1;
+    m_selectedLiteral = piece;
+    m_splitColumn = -1;
+    m_strip->setCurrentColumn(-1);
+    m_strip->setCurrentPiece(piece);
     m_preview->setCurrentColumn(-1);
     updateCard();
 }
@@ -1418,8 +1519,48 @@ void SchemaEditorWindow::updateCard()
         "<p>Select a piece of text in a line (drag over it or double-click a word) and press <b>Make Field</b> "
         "to split it out as a field of its own.</p>"
         "<p>Mistake? <b>Ctrl+Z</b> undoes every step.</p>"));
+    if (m_selectedLiteral >= 0 && tpl.isValid()) {
+        // Текст между полями: что стоит по сторонам, словами.
+        const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(tpl);
+        if (m_selectedLiteral < pieces.size()) {
+            QString before, after;
+            for (int i = m_selectedLiteral - 1; i >= 0 && before.isEmpty(); --i) {
+                if (pieces[i].isField())
+                    before = pieces[i].name.isEmpty() ? tr("a hidden part") : tr("“%1”").arg(pieces[i].name);
+            }
+            for (int i = m_selectedLiteral + 1; i < pieces.size() && after.isEmpty(); ++i) {
+                if (pieces[i].isField())
+                    after = pieces[i].name.isEmpty() ? tr("a hidden part") : tr("“%1”").arg(pieces[i].name);
+            }
+            const QString between = !before.isEmpty() && !after.isEmpty() ? tr("between %1 and %2").arg(before, after)
+                                    : !before.isEmpty()                    ? tr("after %1").arg(before)
+                                    : !after.isEmpty()                     ? tr("before %1").arg(after)
+                                                                           : tr("in the line");
+            m_card->showLiteral(m_selectedLiteral, pieces[m_selectedLiteral].text, between);
+            m_card->setBusy(m_opPending);
+            return;
+        }
+    }
+    if (m_splitColumn >= 0 && field.column == m_splitColumn) {
+        // Имя новой части — как у ядра: первый свободный FieldN.
+        const QStringList columns = tpl.columns();
+        QString fresh;
+        for (int n = 1; fresh.isEmpty(); ++n) {
+            const QString name = QStringLiteral("Field%1").arg(n);
+            if (!columns.contains(name, Qt::CaseInsensitive))
+                fresh = name;
+        }
+        m_card->showSplit(field, fresh);
+        if (!splitOptionsReady())
+            m_card->setSplitOptions({}, false);
+        m_card->setBusy(m_opPending);
+        if (m_cardScroll)
+            m_cardScroll->setMinimumWidth(cardPaneWidth(m_cardScroll, m_card));
+        return;
+    }
     m_card->setField(field);
     if (field.column >= 0) {
+        m_card->setTextEndSuggestions(endOptionsReady() ? m_ends.delimiters.value(field.column) : QStringList());
         const bool valuesReady = !m_recompute->isActive() && !m_samples->isComputing()
                                  && m_samples->columns() == tpl.columns();
         m_card->setValues(valuesReady ? m_samples->distinctCount(field.column) : 0,
@@ -1431,7 +1572,7 @@ void SchemaEditorWindow::updateCard()
     // Карточка не обрезается: панель не уже её содержимого (длинный пункт
     // «где кончается» с итогом).
     if (m_cardScroll)
-        m_cardScroll->setMinimumWidth(qMax(kCardMinWidth, m_card->minimumSizeHint().width() + 4));
+        m_cardScroll->setMinimumWidth(cardPaneWidth(m_cardScroll, m_card));
 }
 
 void SchemaEditorWindow::updateGuide()
@@ -1482,9 +1623,9 @@ void SchemaEditorWindow::updateGuide()
                    "When it looks right: Apply to Tab shows the fields in the log, Save keeps the schema for "
                    "the next time.").arg(fields);
     } else {
-        guide = tr("Every colour is a field. Click a field to rename it or to change where it ends; select "
-                   "text in a line to make one more field. Apply to Tab shows the fields in the log, Save "
-                   "keeps the schema for the next time.");
+        guide = tr("Every colour is a field. Click a field to rename it or to change where it ends. To add a "
+                   "field, press “+ Add field” after the blocks or select text in a line. Apply to Tab shows "
+                   "the fields in the log, Save keeps the schema for the next time.");
     }
     m_guideText = guide;
     m_guide->setText(guide);
@@ -2018,8 +2159,14 @@ void SchemaEditorWindow::onOperationFinished()
     }
     if (!out.make) {
         applyEdit(out.edit, out.label);
-        if (out.edit.ok() && out.deselect)
-            selectColumn(-1);
+        if (out.edit.ok()) {
+            if (out.deselect)
+                selectColumn(-1);
+            if (out.select >= 0)
+                selectColumn(out.select);
+            if (!out.note.isEmpty())
+                setEditMessage(out.note);
+        }
         return;
     }
     m_make = out.result;
@@ -2282,6 +2429,7 @@ void SchemaEditorWindow::startEndOptions()
         const int columns = int(t.columns().size());
         out.options.resize(columns);
         out.suggestions.resize(columns);
+        out.delimiters.resize(columns);
         const QVector<SchemaEdit::Piece> pieces = SchemaEdit::piecesOf(t);
         int column = 0;
         for (const auto& p : pieces) {
@@ -2290,6 +2438,7 @@ void SchemaEditorWindow::startEndOptions()
             if (cancel->load(std::memory_order_relaxed))
                 break;
             out.options[column] = SchemaEdit::endOptions(tpl, column, samples, options);
+            out.delimiters[column] = SchemaEdit::suggestDelimiters(tpl, column, samples, options);
             if (p.kind == LineTemplateElement::Kind::Of)
                 out.suggestions[column] = SchemaEdit::suggestValues(tpl, column, samples, options);
             ++column;
@@ -2464,6 +2613,10 @@ QMenu* SchemaEditorWindow::columnMenu(int column)
         if (!value.isEmpty())
             addValue(column, value);
     });
+    QAction* split = menu->addAction(tr("Split into Two Fields…"));
+    split->setObjectName(QStringLiteral("splitFieldAction"));
+    split->setToolTip(tr("Add a field: split this one into two"));
+    connect(split, &QAction::triggered, this, [this, column]() { beginSplit(column); });
     QAction* merge = menu->addAction(tr("Merge with Next") + keys("mergeFieldShortcut"));
     merge->setObjectName(QStringLiteral("mergeFieldAction"));
     connect(merge, &QAction::triggered, this, [this, column]() { mergeWithNext(column); });
@@ -2476,6 +2629,263 @@ QMenu* SchemaEditorWindow::columnMenu(int column)
     remove->setToolTip(tr("The text of the field goes to the field before it"));
     connect(remove, &QAction::triggered, this, [this, column]() { removeField(column); });
     return menu;
+}
+
+// ---------------------------------------------------------------------------
+// Создание и правка блоков (U-28): разбить поле, свой разделитель, текст
+// между полями
+// ---------------------------------------------------------------------------
+
+bool SchemaEditorWindow::beginSplit(int column)
+{
+    const QStringList columns = columnsOf(m_state.templateText.trimmed());
+    if (definition().isEmpty()) {
+        setEditMessage(tr("Fix the template first."));
+        return false;
+    }
+    if (column < 0 || column >= columns.size())
+        return false;
+    m_selectedColumn = column;
+    m_selectedPiece = -1;
+    m_selectedLiteral = -1;
+    m_splitColumn = column;
+    m_splitTextWanted.clear();
+    m_strip->setCurrentColumn(column);
+    m_strip->setCurrentPiece(-1);
+    m_preview->setCurrentColumn(column);
+    startSplitOptions();
+    updateCard();
+    setEditMessage(tr("Choose in the card where the first part of “%1” ends, then press Split.").arg(columns[column]));
+    return true;
+}
+
+void SchemaEditorWindow::cancelSplit()
+{
+    if (m_splitColumn < 0)
+        return;
+    m_splitColumn = -1;
+    ++m_splitGeneration;
+    ++m_splitTextGeneration;
+    m_splitTextTimer->stop();
+    if (m_splitCancel)
+        m_splitCancel->store(true, std::memory_order_relaxed);
+    updateCard();
+    setEditMessage(QString());
+}
+
+void SchemaEditorWindow::startSplitOptions()
+{
+    if (m_splitCancel)
+        m_splitCancel->store(true, std::memory_order_relaxed);
+    const int generation = ++m_splitGeneration;
+    const int column = m_splitColumn;
+    if (column < 0 || definition().isEmpty())
+        return;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_splitCancel = cancel;
+    const QString tpl = m_state.templateText.trimmed();
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    SchemaEdit::Options options;
+    options.budget = m_fitBudget;
+    options.budget.cancel = cancel.get();
+    options.cancel = cancel.get();
+    m_splitPending = true;
+    m_splitWatcher->setFuture(QtConcurrent::run([tpl, column, samples, options, cancel, generation]() {
+        SplitOutcome out;
+        out.generation = generation;
+        out.base = tpl;
+        out.column = column;
+        out.options = SchemaEdit::splitOptions(tpl, column, samples, options);
+        out.delimiters = SchemaEdit::suggestDelimiters(tpl, column, samples, options);
+        return out;
+    }));
+    m_card->setSplitOptions({}, false);
+    // Свой разделитель, если набран, — заново на тех же образцах.
+    if (!m_splitTextWanted.trimmed().isEmpty())
+        m_splitTextTimer->start();
+}
+
+void SchemaEditorWindow::onSplitFinished()
+{
+    const QFuture<SplitOutcome> future = m_splitWatcher->future();
+    m_splitPending = false;
+    if (future.resultCount() == 0)
+        return;
+    SplitOutcome out = future.result();
+    if (out.generation != m_splitGeneration || out.column != m_splitColumn)
+        return;
+    m_split = std::move(out);
+    if (m_card->isSplitShown()) {
+        m_card->setSplitDelimiters(m_split.delimiters);
+        m_card->setSplitOptions(m_split.options, true);
+        if (m_cardScroll)
+            m_cardScroll->setMinimumWidth(cardPaneWidth(m_cardScroll, m_card));
+    }
+}
+
+bool SchemaEditorWindow::splitOptionsReady() const
+{
+    return m_splitColumn >= 0 && !m_splitPending && m_split.column == m_splitColumn && !m_split.base.isEmpty()
+        && m_split.base == m_state.templateText.trimmed();
+}
+
+QVector<SchemaEdit::SplitOption> SchemaEditorWindow::splitOptions() const
+{
+    return splitOptionsReady() ? m_split.options : QVector<SchemaEdit::SplitOption>();
+}
+
+void SchemaEditorWindow::startSplitText()
+{
+    if (m_splitTextCancel)
+        m_splitTextCancel->store(true, std::memory_order_relaxed);
+    const int generation = ++m_splitTextGeneration;
+    const int column = m_splitColumn;
+    const QString text = m_splitTextWanted;
+    if (column < 0 || definition().isEmpty() || text.trimmed().isEmpty())
+        return;
+    auto cancel = std::make_shared<std::atomic_bool>(false);
+    m_splitTextCancel = cancel;
+    const QString tpl = m_state.templateText.trimmed();
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    SchemaEdit::Options options;
+    options.budget = m_fitBudget;
+    options.budget.cancel = cancel.get();
+    options.cancel = cancel.get();
+    m_splitTextPending = true;
+    m_splitTextWatcher->setFuture(QtConcurrent::run([tpl, column, text, samples, options, cancel, generation]() {
+        SplitTextOutcome out;
+        out.generation = generation;
+        out.base = tpl;
+        out.column = column;
+        out.text = text;
+        out.option = SchemaEdit::splitAtText(tpl, column, text, samples, options);
+        return out;
+    }));
+}
+
+void SchemaEditorWindow::onSplitTextFinished()
+{
+    const QFuture<SplitTextOutcome> future = m_splitTextWatcher->future();
+    m_splitTextPending = false;
+    if (future.resultCount() == 0)
+        return;
+    const SplitTextOutcome out = future.result();
+    if (out.generation != m_splitTextGeneration || out.column != m_splitColumn
+        || out.base != m_state.templateText.trimmed() || out.text != m_splitTextWanted)
+        return;
+    if (m_card->isSplitShown())
+        m_card->setSplitTextOption(out.option, true);
+}
+
+bool SchemaEditorWindow::applySplit(const SchemaEdit::SplitOption& option, const QString& first,
+                                    const QString& second)
+{
+    if (!option.available || option.templateText.isEmpty() || definition().isEmpty())
+        return false;
+    if (m_opPending) {
+        setEditMessage(tr("Another change is being applied — try again in a moment."));
+        return false;
+    }
+    QString text = option.templateText;
+    QStringList columns = columnsOf(text);
+    // Пункт посчитан для нынешнего шаблона: на одну колонку больше.
+    if (columns.size() != columnsOf(m_state.templateText.trimmed()).size() + 1 || option.column < 0
+        || option.column + 1 >= columns.size()) {
+        setEditMessage(tr("The schema changed meanwhile — open the split again."));
+        return false;
+    }
+    const QString a = first.trimmed().isEmpty() ? columns[option.column] : first.trimmed();
+    const QString b = second.trimmed().isEmpty() ? columns[option.column + 1] : second.trimmed();
+    if (a != columns[option.column] || b != columns[option.column + 1]) {
+        const SchemaEdit::Edit named = SchemaEdit::nameSplit(text, option.column, a, b);
+        if (!named.ok()) {
+            setEditMessage(named.error);
+            return false;
+        }
+        text = named.templateText;
+    }
+    const int column = option.column;
+    const QString result = SchemaFieldCard::resultText(option);
+    const QString label = option.label;
+    applyOperation(text, tr("Split Field"));
+    selectColumn(column);
+    setEditMessage(tr("Split into “%1” and “%2”: the first part ends %3 — %4. Ctrl+Z undoes it.")
+                       .arg(a, b, label, result));
+    return true;
+}
+
+bool SchemaEditorWindow::endFieldAtText(int column, const QString& text)
+{
+    const QStringList columns = columnsOf(m_state.templateText.trimmed());
+    if (definition().isEmpty() || column < 0 || column >= columns.size())
+        return false;
+    if (text.trimmed().isEmpty()) {
+        setEditMessage(tr("Type the text the field ends at first — any characters."));
+        return false;
+    }
+    const QString tpl = m_state.templateText.trimmed();
+    const QString name = columns[column];
+    const QVector<SchemaFit::Sample> samples = editSamples();
+    startOperation(tr("Ends at the text"), false, [tpl, column, text, name, samples](const SchemaEdit::Options& o) {
+        OpOutcome out;
+        const SchemaEdit::SplitOption split = SchemaEdit::splitAtText(tpl, column, text, samples, o);
+        if (!split.available) {
+            out.edit.error = split.reason;
+            return out;
+        }
+        // Поле сохраняет имя; то, что за разделителем, — новое поле.
+        const QString fresh = LineTemplate(split.templateText).columns().value(column);
+        out.edit = SchemaEdit::nameSplit(split.templateText, column, name, fresh);
+        if (out.edit.ok()) {
+            out.select = column + 1;
+            out.note = QObject::tr("“%1” now ends %2 — %3. What follows it is the new field “%4”: give it a "
+                                   "name in the card%5")
+                           .arg(name, split.label, SchemaFieldCard::resultText(split), fresh,
+                                split.optionalTail ? QObject::tr(" (lines without this text stay whole).")
+                                                   : QStringLiteral("."));
+        }
+        return out;
+    });
+    return true;
+}
+
+void SchemaEditorWindow::updateTextEndHint(int column, const QString& text)
+{
+    if (text.trimmed().isEmpty() || column < 0 || column >= m_samples->columnCount()
+        || m_samples->columns() != columnsOf(m_state.templateText.trimmed())) {
+        m_card->setTextEndHint(QString());
+        return;
+    }
+    // Быстрый счёт по образцам таблицы (строки уже разобраны; поиск подстроки).
+    int total = 0, with = 0;
+    for (int row = 0; row < m_samples->rowCount(); ++row) {
+        const int start = m_samples->cellStart(row, column);
+        const QString raw = m_samples->rawCell(row, column);
+        if (start < 0 || raw.isEmpty())
+            continue;
+        ++total;
+        const QString line = m_samples->rowText(row);
+        const int from = qMax(0, start - 1);
+        with += raw.contains(text) || line.mid(from, start + int(raw.size()) + 1 - from).contains(text) ? 1 : 0;
+    }
+    const QString label = SchemaEdit::delimiterLabel(text);
+    m_card->setTextEndHint(with == 0
+        ? tr("“%1” is not in the values of this field in the sample lines.").arg(text.trimmed())
+        : tr("%1: in %2 of %3 sample values. The field will end there; what follows becomes a new field.")
+              .arg(label).arg(with).arg(total));
+}
+
+bool SchemaEditorWindow::setLiteralText(int piece, const QString& text)
+{
+    const SchemaEdit::Edit e = SchemaEdit::setLiteral(m_state.templateText, piece, text);
+    applyEdit(e, text.trimmed().isEmpty() ? tr("Remove the Text") : tr("Change the Text"));
+    if (!e.ok()) {
+        updateCard();   // текст в карточке — назад
+        return false;
+    }
+    // Тот же элемент остался текстом — он и выбран; иначе выбор снят.
+    selectLiteral(piece);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

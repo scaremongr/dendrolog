@@ -24,6 +24,18 @@ All notable changes to DendroLog are documented here. The format follows
   - Select text in a line and a **Make Field** button appears at the
     selection; a selected date is named `Timestamp` and a level `Level` right
     away.
+  - **+ Add field** at the end of the row of blocks (and **Split…** in the
+    card of a field) adds a field by splitting one in two: choose where the
+    first part ends — at a separator found in the values, at the first space,
+    after N words, at one of the listed values, by its form — with the result
+    of each choice and an example on your lines, and name both parts.
+  - A field can end at **any text you type** (`~~`, `=>`, ` :: `…): the **or
+    at the text** row of the card and the **at the text** choice of the
+    split. Spaces around the text count; the editor says at once in how many
+    values the text occurs, and when the last field has the separator only
+    in some lines, the lines without it stay whole.
+  - The text between the blocks (`|`, `[`, `-`) is editable: click it to
+    change or remove it.
   - Lines the schema does not read are red in place (half-read ones pale
     red); their list with the reasons opens with a button under the lines.
   - The template text moved to a collapsed **Advanced** section (it opens by

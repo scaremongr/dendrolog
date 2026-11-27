@@ -4064,6 +4064,20 @@ void scenarioMakeField(MainWindow& win, const QDir& dir)
               && fieldName->text() == LineTemplate(editor->templateText()).columns().value(1),
           QStringLiteral("a click on a field in a line opens its card"));
 
+    // Новое поле — «+ Add field» в ряду блоков: страница разбиения с пунктами,
+    // Cancel возвращает карточку.
+    const QString beforeAdd = editor->templateText();
+    QTest::mouseClick(strip, Qt::LeftButton, Qt::NoModifier, strip->addRect().center());
+    auto* splitCard = card->findChild<QWidget*>(QStringLiteral("splitCard"));
+    check(editor->splitColumn() == LineTemplate(beforeAdd).columns().size() - 1 && splitCard && splitCard->isVisible(),
+          QStringLiteral("«+ Add field» opens the split of the last field"));
+    check(waitFor([&]() { return settled() && editor->splitOptionsReady(); }, 30000) && !editor->splitOptions().isEmpty(),
+          QStringLiteral("the split options are computed"));
+    if (auto* cancel = card->findChild<QPushButton*>(QStringLiteral("splitCancelBtn")))
+        cancel->click();
+    check(editor->splitColumn() == -1 && editor->templateText() == beforeAdd && (!splitCard || !splitCard->isVisible()),
+          QStringLiteral("Cancel leaves the schema as it was"));
+
     // Find a Schema — панелью редактора; вариант вывода структуры — в редактор.
     auto* findButton = editor->findChild<QPushButton*>(QStringLiteral("findSchemaBtn"));
     if (findButton && !findButton->isChecked())

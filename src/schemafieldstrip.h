@@ -21,7 +21,12 @@
 //   • щелчок по блоку — columnActivated (поле с колонкой) или pieceActivated
 //     (поле без колонки, «{_}»); правый щелчок и клавиша меню —
 //     menuRequested;
-//   • клавиатура: ← / → — по полям, Enter / Пробел — выбрать.
+//   • щелчок по тексту между блоками — literalActivated (окно даёт его
+//     поправить);
+//   • последним в ряду — «+ Add field» (addRequested): новому блоку нужно
+//     место, окно разбивает последнее поле на два;
+//   • клавиатура: ← / → — по полям, Enter / Пробел — выбрать, «+» и Insert —
+//     добавить поле.
 //
 // Только вид: что значит выбор, решает окно (SchemaEditorWindow).
 // ============================================================================
@@ -29,11 +34,11 @@ class SchemaFieldStrip : public QWidget {
     Q_OBJECT
 public:
     struct Item {
-        enum class Type { Field, Literal };
+        enum class Type { Field, Literal, Add };
         Type type = Type::Field;
         QString name;         ///< Field: имя колонки; пусто — поле без колонки
         QString caption;      ///< Field: где кончается, словами («until “]”»)
-        QString text;         ///< Literal: текст между полями, как в строке
+        QString text;         ///< Literal: текст между полями, как в строке; Add: подпись
         int column = -1;      ///< Field: колонка схемы; -1 — без колонки
         int piece = -1;       ///< номер элемента шаблона (SchemaEdit::piecesOf)
         bool optional = false;   ///< внутри участка {? … ?}
@@ -50,10 +55,17 @@ public:
     /// Выбранное поле (рамка); -1 — нет.
     void setCurrentColumn(int column);
     int currentColumn() const { return m_current; }
+    /// Выбранный элемент без колонки (текст между полями, скрытая часть); -1 — нет.
+    void setCurrentPiece(int piece);
+    int currentPiece() const { return m_currentPiece; }
 
     /// Прямоугольник блока (координаты виджета); пустой — нет такого.
     QRect itemRect(int index) const;
     QRect columnRect(int column) const;
+    /// Блок элемента шаблона piece (текст между полями, скрытая часть).
+    QRect pieceRect(int piece) const;
+    /// Блок «+ Add field»; пустой — его нет.
+    QRect addRect() const;
     int itemAt(const QPoint& pos) const;
 
     /// Цвет поля №column под эту палитру — один на блок, строки и карточку.
@@ -69,6 +81,8 @@ public:
 signals:
     void columnActivated(int column);
     void pieceActivated(int piece);
+    void literalActivated(int piece);
+    void addRequested();
     void menuRequested(int column, const QPoint& globalPos);
 
 protected:
@@ -91,6 +105,7 @@ private:
     QVector<QRect> m_rects;
     QString m_placeholder;
     int m_current = -1;
+    int m_currentPiece = -1;
     int m_hover = -1;
 };
 

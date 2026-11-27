@@ -62,6 +62,15 @@ class SchemaSampleModel;
 //     переключателями с итогом на строках (SchemaEdit::endOptions), значения,
 //     Hide / Merge with Next / Remove / Add Value…; у части строки без
 //     колонки — Show as a Column;
+//   • новое поле — «+ Add field» в конце ряда блоков (и Split… карточки, и
+//     меню поля): страница разбиения (beginSplit — пункты
+//     SchemaEdit::splitOptions в пуле: найденные разделители, первое слово, N
+//     слов, набор значений, форма; свой разделитель — любой текст,
+//     splitAtText; пример «первая ▏ вторая»; имена частей), applySplit;
+//   • свой разделитель у поля — строка «or at the text» карточки
+//     (endFieldAtText: поле кончается на тексте, остальное — новое поле);
+//     текст между блоками правится щелчком по нему (selectLiteral,
+//     setLiteralText);
 //   • покрытие файла (SchemaFit::summary) и, по кнопке, строки, которые схема
 //     не приняла, с причиной словами;
 //   • Advanced — текст шаблона: ошибка компиляции подчёркнута на месте и
@@ -210,6 +219,28 @@ public:
     /// Раздел Advanced (текст шаблона) раскрыт.
     bool isAdvancedShown() const;
     void setAdvancedShown(bool shown);
+
+    // ---- Создание и правка блоков (U-28) -----------------------------------------
+    /// Страница «разбить поле на два» карточки — так в схеме появляется новое
+    /// поле («+ Add field» ряда блоков — для последнего поля, Split… карточки и
+    /// меню поля — для выбранного). false — нечего разбивать.
+    bool beginSplit(int column);
+    void cancelSplit();
+    int splitColumn() const { return m_splitColumn; }
+    /// Пункты разбиения посчитаны для нынешнего шаблона.
+    bool splitOptionsReady() const;
+    QVector<SchemaEdit::SplitOption> splitOptions() const;
+    /// Разбить выбранным способом; имена частей: пустое — как у пункта.
+    bool applySplit(const SchemaEdit::SplitOption& option, const QString& first = QString(),
+                    const QString& second = QString());
+    /// Поле кончается на тексте text — любом; то, что за ним, становится новым
+    /// полем (в пуле; итог — шаг отмены). false — не начато (editMessage()).
+    bool endFieldAtText(int column, const QString& text);
+    /// Текст между полями (элемент шаблона piece) — другим; пустой — убрать.
+    bool setLiteralText(int piece, const QString& text);
+    /// Выбрать текст между полями (карточка даёт его поправить); -1 — нет.
+    void selectLiteral(int piece);
+    int selectedLiteral() const { return m_selectedLiteral; }
     /// Вопрос текста (Rename…, Add Value…). Тест: без диалога; пусто — отмена.
     using TextAsker = std::function<QString(const QString& title, const QString& label, const QString& text,
                                             const QStringList& items)>;
@@ -273,6 +304,8 @@ private:
         QString label;
         bool make = false;
         bool deselect = false;   ///< поле ушло (Remove): выбор снять
+        int select = -1;         ///< колонка, которую выбрать после (новое поле)
+        QString note;            ///< что получилось, словами (вместо общего «done»)
         SchemaEdit::MakeFieldResult result;
         SchemaEdit::Edit edit;
     };
@@ -281,7 +314,27 @@ private:
         QString base;
         QVector<QVector<SchemaEdit::EndOption>> options;   ///< по колонке
         QVector<QStringList> suggestions;                   ///< по колонке (только of)
+        QVector<QStringList> delimiters;                    ///< по колонке: разделители в значениях
     };
+    struct SplitOutcome {
+        int generation = 0;
+        QString base;
+        int column = -1;
+        QVector<SchemaEdit::SplitOption> options;
+        QStringList delimiters;
+    };
+    struct SplitTextOutcome {
+        int generation = 0;
+        QString base;
+        int column = -1;
+        QString text;
+        SchemaEdit::SplitOption option;
+    };
+    void startSplitOptions();
+    void onSplitFinished();
+    void startSplitText();
+    void onSplitTextFinished();
+    void updateTextEndHint(int column, const QString& text);
     using OpWork = std::function<OpOutcome(const SchemaEdit::Options&)>;
     void startOperation(const QString& label, bool make, OpWork work);
     void onOperationFinished();
@@ -388,6 +441,20 @@ private:
     bool m_selecting = false;      ///< выбор расходится по видам — без петли
     QString m_detectedTemplate;    ///< шаблон последнего Detect Fields
     QString m_detectFailure;       ///< почему Detect Fields не вышел (до правки)
+    // Разбиение поля и текст между полями.
+    int m_splitColumn = -1;        ///< поле, которое разбивается (страница карточки); -1 — нет
+    int m_selectedLiteral = -1;    ///< выбранный текст между полями (элемент шаблона)
+    QFutureWatcher<SplitOutcome>* m_splitWatcher = nullptr;
+    std::shared_ptr<std::atomic_bool> m_splitCancel;
+    int m_splitGeneration = 0;
+    bool m_splitPending = false;
+    SplitOutcome m_split;
+    QFutureWatcher<SplitTextOutcome>* m_splitTextWatcher = nullptr;
+    std::shared_ptr<std::atomic_bool> m_splitTextCancel;
+    int m_splitTextGeneration = 0;
+    bool m_splitTextPending = false;
+    QString m_splitTextWanted;     ///< свой разделитель, набранный на странице разбиения
+    QTimer* m_splitTextTimer = nullptr;
     QString m_checkTabSchema;      ///< схема вкладки, загруженная setView: не читает лог — разбить самому
     QString m_replacedSchema;      ///< имя схемы вкладки, вместо которой показано разбиение
     QString m_replacedPercent;     ///< её покрытие
