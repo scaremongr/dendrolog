@@ -27,6 +27,7 @@ struct FieldSchemaController::PickState {
     bool pick = false;           // решить, когда меры придут
     bool userRequested = false;  // «Detect for This Tab»
     int retries = 0;             // перезапуски после reset модели
+    int emptyRetries = 0;        // перезапуски после пустого итога (S-33)
     int catalogueCount = 0;
     int defaultIndex = -1;
     int nameIndex = -1;
@@ -963,10 +964,27 @@ void FieldSchemaController::onPickFinished(LogViewWidget* view)
     st.running = false;
     st.retries = 0;
     if (st.job->outcome().sampled == 0 && !st.userRequested) {
-        // Строк файла в снапшоте ещё нет: решить по следующей порции.
+        // Строк файла в снапшоте ещё не было: решить по следующей порции.
+        // Но порции, пришедшие, пока шло задание, подбор не запускали
+        // (вкладка уже «начала»): если строки текстового файла уже есть —
+        // заново сейчас, иначе вкладка, догрузившаяся за время задания,
+        // осталась бы без подбора (S-33: слитая индексная вкладка — строки
+        // файла в индексе раньше, чем в снапшоте). Предел — на случай, если
+        // снапшот так и не догоняет строки.
         st.started = false;
+        bool rowsNow = false;
+        for (const LogFilePtr& f : view->loadedFiles())
+            if (f && !view->lineFormat(f).isStructured() && view->fileHasRows(f)) {
+                rowsNow = true;
+                break;
+            }
+        if (rowsNow && st.emptyRetries < kPickRetries) {
+            ++st.emptyRetries;
+            onRowsArrived(view);
+        }
         return;
     }
+    st.emptyRetries = 0;
     st.results = st.job->outcome().results;
     st.hasResults = st.results.size() == st.definitions.size();
     if (st.hasResults && st.pick) {

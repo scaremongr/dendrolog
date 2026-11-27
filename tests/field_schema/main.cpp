@@ -40,6 +40,8 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThreadPool>
+#include <QSemaphore>
 
 #include <algorithm>
 #include <cstdio>
@@ -990,6 +992,79 @@ static int runBench(TimingApplication& app, const QString& file)
     return 0;
 }
 
+// Строки файла пришли, пока шло задание подбора (S-33). Задание снимает
+// снапшот на старте; если строк файла в нём ещё нет, итог пуст, а порции,
+// пришедшие за время задания, подбор не запускали (вкладка уже «начала»).
+// Так на слитой индексной вкладке под нагрузкой схема не подбиралась вовсе
+// (`logview_lifecycle`, «merged tab — the schema is picked»). Детерминированно:
+// глобальный пул занят «шлагбаумом» — задание стоит в очереди, а строки
+// текстового файла (рядом с JSON-файлом, у которого строки уже есть)
+// приходят дозаписью до того, как оно снимет итог.
+static void checkPickRowsDuringJob(const QDir& dir)
+{
+    const QString label = QStringLiteral("auto pick, rows during the job");
+    ConfigDir config;
+    AppSettings::instance().setIndexedThresholdMB(512);
+    AppSettings::instance().setAutoPickSchema(true);
+    std::unique_ptr<LogViewWidget> tab;
+    FieldSchemaController c;
+    c.setWindow({ [&]() { return tab ? QList<LogViewWidget*>{tab.get()} : QList<LogViewWidget*>{}; } });
+    SchemaFit::Budget unlimited;
+    unlimited.maxMs = 0;
+    c.setFitBudget(unlimited);
+    {
+        QSettings s(config.ini(), QSettings::IniFormat);
+        s.beginGroup(QStringLiteral("View"));
+        c.load(s);
+        s.endGroup();
+    }
+    QString logbackName;
+    const builtinsamples::SchemaCase logback = builtinsamples::cases().constFirst();
+    for (const auto& e : c.schemas())
+        if (e.fileName == logback.file)
+            logbackName = e.name;
+
+    const QString json = writeFile(dir, QStringLiteral("during-job.jsonl"), jsonBytes(40));
+    const QString plain = writeFile(dir, QStringLiteral("during-job.log"), QByteArray());
+
+    // Шлагбаум: все потоки глобального пула ждут, задание подбора — в очереди.
+    QThreadPool* pool = QThreadPool::globalInstance();
+    const int threads = pool->maxThreadCount();
+    QSemaphore gate;
+    QAtomicInt blocked = 0;
+    for (int i = 0; i < threads; ++i)
+        pool->start([&gate, &blocked]() { blocked.fetchAndAddOrdered(1); gate.acquire(); });
+    CHECK(waitFor([&] { return blocked.loadAcquire() == threads; }, 30000), label + ": the pool is blocked");
+
+    tab = std::make_unique<LogViewWidget>();
+    c.configureView(tab.get());
+    tab->addLogFile(json);
+    tab->addLogFile(plain);
+    CHECK(waitFor([&] { return !tab->isLoading() && c.isPicking(tab.get()); }, 30000),
+          label + ": the pick job waits in the pool");
+    const int jobsBefore = c.pickJobsStarted();
+    CHECK(testdocs::appendToFile(plain, corpusBytes(logback)), label + ": append the text lines");
+    tab->reloadChangedFiles(/*force=*/true);
+    CHECK(waitFor([&] {
+              for (const LogFilePtr& f : tab->loadedFiles())
+                  if (f->filePath == plain && tab->fileHasRows(f))
+                      return !tab->isLoading();
+              return false;
+          }, 30000),
+          label + ": the text lines arrive while the job waits");
+    CHECK(c.isPicking(tab.get()) && c.pickJobsStarted() == jobsBefore,
+          label + ": the rows did not start another job");
+
+    gate.release(threads);
+    waitFor([&] { return !c.isPicking(tab.get()) && c.coverageOf(tab.get()); }, 30000);
+    CHECK(tab->fieldSettings().schemaName == logbackName
+              && tab->fieldSettings().origin == FieldSettings::Origin::Auto,
+          QStringLiteral("%1: the schema is picked by the rows that came during the job: \"%2\"")
+              .arg(label, tab->fieldSettings().schemaName));
+    pool->waitForDone();
+    tab.reset();
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1016,6 +1091,7 @@ int main(int argc, char** argv)
     checkPickRules();
     checkAutoPick(dir, false);
     checkAutoPick(dir, true);
+    checkPickRowsDuringJob(dir);
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
